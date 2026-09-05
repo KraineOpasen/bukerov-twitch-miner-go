@@ -308,7 +308,10 @@ var (
 		"manualActionId",
 	}
 	observationPresenceKeys = []string{
-		"event", "outcomes", "result", "decision", "balance", "pool",
+		// "event" and "prediction" are the two envelope keys the two
+		// Prediction topics actually read; an unreadable frame names the one
+		// its own path inspected.
+		"event", "prediction", "outcomes", "result", "decision", "balance", "pool",
 		"correlationToken", "terminalVerdict", "channelIdentity",
 	}
 	// The closed presence vocabulary. It distinguishes what a frame actually
@@ -2490,8 +2493,12 @@ type observationCollector struct {
 	// real limit instead of asserting it by inspection: reaching 262,144 rows
 	// or a gigabyte of payload in a test is not feasible, and a ceiling whose
 	// enforcement has never been executed is a comment.
-	maxStoreRows, maxStoreBytes, maxStoreSessions int64
-	maxSessionRows, maxSessionBytes               int64
+	// Atomics, not plain fields: the collector's own maintenance goroutine
+	// reads them on every pass while a test may be adjusting them, and a
+	// plain int64 there is a data race the detector reports only when the
+	// tick lands in the window — that is, intermittently.
+	maxStoreRows, maxStoreBytes, maxStoreSessions atomic.Int64
+	maxSessionRows, maxSessionBytes               atomic.Int64
 
 	// erasedAt records, per fence key, the causal position this session had
 	// reached when that identity was last erased — and unlike the fence it is
@@ -2551,7 +2558,7 @@ type observationCollector struct {
 }
 
 func newObservationCollector(repo *SQLiteRepository, gate *txPriority, retentionDays int, now func() time.Time) *observationCollector {
-	return &observationCollector{
+	c := &observationCollector{
 		repo:                repo,
 		gate:                gate,
 		now:                 now,
@@ -2564,12 +2571,13 @@ func newObservationCollector(repo *SQLiteRepository, gate *txPriority, retention
 		fenced:              make(map[string]struct{}),
 		loginChannels:       make(map[string][]string),
 		erasedAt:            make(map[string]int64),
-		maxStoreRows:        MaxStoreRows,
-		maxStoreBytes:       MaxStoreBytes,
-		maxStoreSessions:    MaxStoreSessions,
-		maxSessionRows:      MaxSessionRows,
-		maxSessionBytes:     MaxSessionBytes,
 	}
+	c.maxStoreRows.Store(MaxStoreRows)
+	c.maxStoreBytes.Store(MaxStoreBytes)
+	c.maxStoreSessions.Store(MaxStoreSessions)
+	c.maxSessionRows.Store(MaxSessionRows)
+	c.maxSessionBytes.Store(MaxSessionBytes)
+	return c
 }
 
 // The collector's lifecycle phases, in the only order they may be entered.
@@ -2846,7 +2854,7 @@ func (c *observationCollector) maintain(ctx context.Context) {
 	if err != nil {
 		return
 	}
-	over := stats.Rows >= c.maxStoreRows || stats.Bytes >= c.maxStoreBytes || stats.Sessions >= c.maxStoreSessions
+	over := stats.Rows >= c.maxStoreRows.Load() || stats.Bytes >= c.maxStoreBytes.Load() || stats.Sessions >= c.maxStoreSessions.Load()
 	if over && c.phase.CompareAndSwap(phaseRunning, phasePaused) {
 		// STICKY until a restart. Capacity is released only by a new
 		// process's exact per-key and global recount, never by observing that
@@ -2890,7 +2898,7 @@ func (c *observationCollector) bootstrap(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("analytics: observation store recount: %w", err)
 	}
-	if stats.Sessions >= c.maxStoreSessions || stats.Rows >= c.maxStoreRows || stats.Bytes >= c.maxStoreBytes {
+	if stats.Sessions >= c.maxStoreSessions.Load() || stats.Rows >= c.maxStoreRows.Load() || stats.Bytes >= c.maxStoreBytes.Load() {
 		// Still at a hard cap after a full pruning pass: refuse to add more
 		// rather than growing past the bound.
 		return fmt.Errorf("%w (rows=%d bytes=%d sessions=%d)",
@@ -2913,7 +2921,7 @@ func (c *observationCollector) bootstrap(ctx context.Context) error {
 }
 
 func (c *observationCollector) recountQuotas(ctx context.Context) error {
-	c.repo.quotas.setStoreLimits(c.maxStoreRows, c.maxStoreBytes)
+	c.repo.quotas.setStoreLimits(c.maxStoreRows.Load(), c.maxStoreBytes.Load())
 	return c.leased(ctx, observationBootstrapBudget, func(lease context.Context) error {
 		return c.repo.RecountObservationQuotas(lease, c.repo.quotas)
 	})
@@ -3011,7 +3019,7 @@ func (c *observationCollector) write(ctx context.Context, raw PredictionObservat
 // check costs nothing on the write path — which is why they can be enforced
 // per fact rather than merely documented.
 func (c *observationCollector) withinSessionBounds() bool {
-	return c.committed.Load() < c.maxSessionRows && c.sessionBytes.Load() < c.maxSessionBytes
+	return c.committed.Load() < c.maxSessionRows.Load() && c.sessionBytes.Load() < c.maxSessionBytes.Load()
 }
 
 // payloadJSONOf renders a fact's payload for accounting. It is the same

@@ -114,7 +114,7 @@ func TestObservationSinkAbsentIsANoOp(t *testing.T) {
 	p.observeAutoSkip("e1", "chan-1", "streamer", "OK", nil)
 	p.observeManualPhase("e1", "chan-1", "streamer", "MANUAL_DIRECT_ROOT", "OK", nil)
 	p.observeRoundCleanup("e1", "chan-1", "streamer", "round:x:1", "CLEANUP_APPLIED", "OK")
-	p.observeUnclassifiedFrame(&PubSubMessage{Topic: NewTopic(TopicPredictionsChannel, "chan-1")}, s, "event")
+	p.observeUnclassifiedFrame(&PubSubMessage{Topic: NewTopic(TopicPredictionsChannel, "chan-1")}, s, "event", ObsNotObserved)
 
 	if _, err := p.PlaceManualBet("e1", "o1", 100); err != nil {
 		t.Fatalf("manual bet with no sink: %v", err)
@@ -1110,12 +1110,22 @@ func TestFireAndForgetTimersRegisterAProducerEpisode(t *testing.T) {
 		p, sink := observedPool(t, &fakePlacer{})
 		s := newTestStreamer(100000)
 		p.streamers = []*models.Streamer{s}
+		// A window short enough that the timer fires DURING this subtest. A
+		// long one would leave the producer sleeping after the test returned,
+		// free to place a bet against a fake placer belonging to some later
+		// test -- the episode would be registered and never settled, which is
+		// both the wrong assertion and contaminated state for everything after.
 		p.handlePredictionChannel(&PubSubMessage{
 			Topic: NewTopic(TopicPredictionsChannel, "chan-1"), Type: "event-created",
 			ChannelID: "chan-1",
 			Data: map[string]interface{}{"event": map[string]interface{}{
 				"id": "auto-episode", "status": "ACTIVE", "created_at": time.Now().Format(time.RFC3339),
-				"prediction_window_seconds": float64(600),
+				// The default bet delay is 6s from the end, so a 7s window
+				// makes the placement due at once (the remaining fraction of a
+				// second truncates to a zero sleep). Long enough to be
+				// scheduled at all, short enough that the timer settles inside
+				// this subtest instead of sleeping past it.
+				"prediction_window_seconds": float64(7),
 				"outcomes": []interface{}{
 					map[string]interface{}{"id": "o1", "color": "BLUE", "total_points": float64(10)},
 					map[string]interface{}{"id": "o2", "color": "PINK", "total_points": float64(20)},
@@ -1126,6 +1136,16 @@ func TestFireAndForgetTimersRegisterAProducerEpisode(t *testing.T) {
 		if begun, _ := sink.episodes(); begun != 1 {
 			t.Fatalf("an accepted schedule registered %d episodes, want 1 for its auto-bet timer", begun)
 		}
+
+		deadline := time.Now().Add(30 * time.Second)
+		for time.Now().Before(deadline) {
+			if _, settled := sink.episodes(); settled == 1 {
+				return
+			}
+			time.Sleep(time.Millisecond)
+		}
+		t.Fatal("the auto-bet timer never settled its episode; it is still sleeping, and it will " +
+			"place against whichever pool it wakes into")
 	})
 }
 
@@ -1185,6 +1205,66 @@ func TestPresenceDistinguishesWhatTheWireActuallyDid(t *testing.T) {
 			t.Fatalf("unobserved field = %q, want %q", got, ObsNotObserved)
 		}
 	})
+}
+
+// TestAnUnreadableFrameNamesTheFieldItsOwnPathInspected is a review finding:
+// the predictions-USER path reads msg.Data["prediction"], but reported "event"
+// as the unreadable key -- a field it never looks at -- and hardcoded
+// ABSENT_ON_WIRE regardless of what was actually there.
+//
+// Both halves matter for the same reason. A reader of the trail cannot tell
+// which field was unreadable if the fact names the wrong one, and cannot tell a
+// missing key from one sent with the wrong shape if every case reports the
+// same state. The widened vocabulary was pointless at exactly the call sites
+// that describe a frame nobody could read.
+func TestAnUnreadableFrameNamesTheFieldItsOwnPathInspected(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		topic TopicType
+		data  map[string]interface{}
+		key   string
+		want  string
+	}{
+		{"user path, key missing", TopicPredictionsUser,
+			map[string]interface{}{"other": 1}, "prediction", ObsAbsentOnWire},
+		{"user path, key null", TopicPredictionsUser,
+			map[string]interface{}{"prediction": nil}, "prediction", ObsNullOnWire},
+		{"user path, wrong shape", TopicPredictionsUser,
+			map[string]interface{}{"prediction": "not an object"}, "prediction", ObsInvalid},
+		{"user path, no envelope", TopicPredictionsUser, nil, "prediction", ObsNotObserved},
+		{"channel path, key missing", TopicPredictionsChannel,
+			map[string]interface{}{"other": 1}, "event", ObsAbsentOnWire},
+		{"channel path, wrong shape", TopicPredictionsChannel,
+			map[string]interface{}{"event": []interface{}{}}, "event", ObsInvalid},
+		{"channel path, no envelope", TopicPredictionsChannel, nil, "event", ObsNotObserved},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p, sink := observedPool(t, &fakePlacer{})
+			s := newTestStreamer(1000)
+			msg := &PubSubMessage{
+				Topic: NewTopic(tc.topic, "chan-1"), Type: "event-updated",
+				ChannelID: "chan-1", Data: tc.data,
+			}
+			if tc.topic == TopicPredictionsUser {
+				p.handlePredictionUser(msg, s)
+			} else {
+				p.handlePredictionChannel(msg, s)
+			}
+
+			got := sink.all()
+			if len(got) != 1 || got[0].Kind != ObsKindSourceUnknown {
+				t.Fatalf("facts = %+v, want one source_unknown", got)
+			}
+			state, named := got[0].Payload.Presence[tc.key]
+			if !named {
+				t.Fatalf("the fact names %v, not the %q this path actually inspects",
+					got[0].Payload.Presence, tc.key)
+			}
+			if state != tc.want {
+				t.Fatalf("%s presence = %q, want %q", tc.key, state, tc.want)
+			}
+		})
+	}
 }
 
 // TestPresenceStatesSurviveTheStore proves the store keeps the distinctions

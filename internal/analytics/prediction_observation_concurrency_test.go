@@ -713,7 +713,7 @@ func TestObservationCapacityStopsCaptureSTICKILY(t *testing.T) {
 		}
 		c := svc.observations
 		c.writeDeadline = 5 * time.Second
-		c.maxStoreRows = rowCap
+		c.maxStoreRows.Store(rowCap)
 		t.Cleanup(func() { _ = svc.Close() })
 		if err := svc.Start(); err != nil {
 			t.Fatal(err)
@@ -760,7 +760,12 @@ func TestObservationCapacityStopsCaptureSTICKILY(t *testing.T) {
 
 		// Space is freed and the store now measures far under the bound. It
 		// still must not resume: only a restart's exact recount may.
-		c.maxStoreRows = MaxStoreRows
+		//
+		// The ceiling is an atomic precisely so this can be raised while the
+		// collector's own maintenance goroutine is reading it; a plain field
+		// here was a data race the detector would report only when a tick
+		// landed in the window.
+		c.maxStoreRows.Store(MaxStoreRows)
 		c.maintain(context.Background())
 		if c.capturing() {
 			t.Fatal("capture resumed in-process after a capacity breach; only a restart's exact " +
@@ -806,7 +811,7 @@ func TestObservationCapacityStopsCaptureSTICKILY(t *testing.T) {
 			t.Fatal(err)
 		}
 		defer func() { _ = second.Close() }()
-		second.observations.maxStoreRows = 1
+		second.observations.maxStoreRows.Store(1)
 		if err := second.Start(); err != nil {
 			t.Fatalf("a store at its ceiling must not fail startup: %v", err)
 		}

@@ -423,15 +423,21 @@ func projectOutcomes(raw []interface{}) []ObservationOutcome {
 // observeUnclassifiedFrame records a Prediction-domain frame whose shape could
 // not be classified — an absent envelope, not an absent event. Recording it
 // keeps "we saw something we could not read" visible instead of silent.
-func (p *WebSocketPool) observeUnclassifiedFrame(msg *PubSubMessage, streamer streamerIdentity, missing string) {
+func (p *WebSocketPool) observeUnclassifiedFrame(msg *PubSubMessage, streamer streamerIdentity, field, state string) {
 	if !p.observing() {
 		return
 	}
 	obs := observationFromMessage(msg, streamer)
 	obs.Kind = ObsKindSourceUnknown
 	obs.Payload = ObservationPayload{
-		Phase:    "UNCLASSIFIED",
-		Presence: map[string]string{missing: ObsAbsentOnWire},
+		Phase: "UNCLASSIFIED",
+		// The field this path actually inspected, and what was really there.
+		// Naming a field the caller never looked at, or reporting every
+		// unreadable frame as ABSENT_ON_WIRE, describes a frame nobody
+		// received: "the key was missing" and "the key was there with the
+		// wrong shape" are different things Twitch did, and this is the one
+		// fact the observation carries.
+		Presence: map[string]string{field: state},
 	}
 	// An unreadable frame names no round, so it belongs to no retention group.
 	obs.RetentionGroupOwnerChannelID = ""

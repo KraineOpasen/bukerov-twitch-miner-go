@@ -1053,13 +1053,15 @@ func (p *WebSocketPool) handleMoment(msg *PubSubMessage, streamer *models.Stream
 
 func (p *WebSocketPool) handlePredictionChannel(msg *PubSubMessage, streamer *models.Streamer) {
 	if msg.Data == nil {
-		p.observeUnclassifiedFrame(msg, streamer, "event")
+		// No data envelope at all: the key was never looked at, which is not
+		// the same as being absent from one.
+		p.observeUnclassifiedFrame(msg, streamer, "event", ObsNotObserved)
 		return
 	}
 
 	eventData, ok := msg.Data["event"].(map[string]interface{})
 	if !ok {
-		p.observeUnclassifiedFrame(msg, streamer, "event")
+		p.observeUnclassifiedFrame(msg, streamer, "event", wirePresence(msg.Data, "event", isObject))
 		return
 	}
 
@@ -1214,7 +1216,7 @@ func chosenOutcomeOdds(event *models.EventPrediction) float64 {
 func (p *WebSocketPool) handlePredictionUser(msg *PubSubMessage, streamer *models.Streamer) MessageOutcome {
 	var outcome MessageOutcome
 	if msg.Data == nil {
-		p.observeUnclassifiedFrame(msg, streamer, "event")
+		p.observeUnclassifiedFrame(msg, streamer, "prediction", ObsNotObserved)
 		return outcome
 	}
 
@@ -1224,7 +1226,11 @@ func (p *WebSocketPool) handlePredictionUser(msg *PubSubMessage, streamer *model
 		// visible as a fact. Returning silently here would let a COMPLETE
 		// session license the inference that nothing arrived, when in truth
 		// something arrived and could not be read.
-		p.observeUnclassifiedFrame(msg, streamer, "event")
+		//
+		// The key is "prediction", which is what this path reads. It used to
+		// report "event" — a field this path never inspects — so the trail
+		// named the wrong thing as unreadable.
+		p.observeUnclassifiedFrame(msg, streamer, "prediction", wirePresence(msg.Data, "prediction", isObject))
 		return outcome
 	}
 

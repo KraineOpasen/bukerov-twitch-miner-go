@@ -3040,7 +3040,7 @@ func TestEveryFrozenCeilingIsCheckedAtItsLimit(t *testing.T) {
 func TestSessionCeilingsStopCommittingAtTheLimit(t *testing.T) {
 	t.Run("rows", func(t *testing.T) {
 		svc, repo := newObservationService(t)
-		svc.observations.maxSessionRows = 2
+		svc.observations.maxSessionRows.Store(2)
 
 		for i := 0; i < 3; i++ {
 			svc.RecordPredictionObservation(
@@ -3059,7 +3059,7 @@ func TestSessionCeilingsStopCommittingAtTheLimit(t *testing.T) {
 		svc, _ := newObservationService(t)
 		// One ordinary payload is ~47 bytes, so a ceiling of 1 admits the
 		// first fact (the tally starts empty) and refuses everything after.
-		svc.observations.maxSessionBytes = 1
+		svc.observations.maxSessionBytes.Store(1)
 
 		for i := 0; i < 3; i++ {
 			svc.RecordPredictionObservation(
@@ -3155,7 +3155,7 @@ func TestStartAndClosePublishTheirLifecycleStateTogether(t *testing.T) {
 	case lock < 0:
 		t.Fatal("Start does not take the lifecycle lock; a Close can land between its phase " +
 			"transition and the canceller it publishes, and skip a join it needed to perform")
-	case !(lock < swap && swap < store && store < launch):
+	case lock > swap || swap > store || store > launch:
 		t.Fatalf("Start's order is lock=%d swap=%d store=%d launch=%d; the transition, the "+
 			"canceller's publication and the launch must all follow the lock", lock, swap, store, launch)
 	}
@@ -3169,7 +3169,7 @@ func TestStartAndClosePublishTheirLifecycleStateTogether(t *testing.T) {
 	case cLock < 0:
 		t.Fatal("Close does not take the lifecycle lock, so the phase it observes and the " +
 			"canceller it reads can describe different instants")
-	case !(cLock < fence && fence < load && load < unlock):
+	case cLock > fence || fence > load || load > unlock:
 		t.Fatalf("Close's order is lock=%d fence=%d load=%d unlock=%d; it must fence and read the "+
 			"canceller under one hold", cLock, fence, load, unlock)
 	}
