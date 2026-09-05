@@ -1751,7 +1751,11 @@ func TestObservationUnfenceLiftsTheErasedChannelToo(t *testing.T) {
 		t.Fatal("the erased CHANNEL is not fenced")
 	}
 	repo.Reinstate("pair-login")
-	if svc.observations.isFenced(mustSanitize(t, channelObservation("pool-1", "chan-pair", "pair-login", "r", "ROUND_CREATED"))) {
+	// A fact captured AFTER the reinstate: its causal position is later than
+	// the erasure's, so nothing but the fence itself can refuse it.
+	fresh := mustSanitize(t, channelObservation("pool-1", "chan-pair", "pair-login", "r", "ROUND_CREATED"))
+	fresh.sequence = svc.observations.sequence.Load() + 1
+	if svc.observations.isFenced(fresh) {
 		t.Fatal("Reinstate did not lift the channel erased alongside the login")
 	}
 }
@@ -2441,4 +2445,85 @@ func TestSnapshotAndObservationContendInBothDirections(t *testing.T) {
 				"and never queue behind an observer")
 		}
 	})
+}
+
+// TestAFactCapturedBeforeAnErasureCannotSurviveTheReinstate is an independent
+// review's F6, stated as the interleaving it turns on.
+//
+// A producer captures a fact about a streamer. Before it reaches the
+// collector, the streamer is removed -- the erasure runs, the fence goes up --
+// and then the streamer is added again, which lifts the fence. The producer
+// resumes and hands its fact over. The fence is down, the generation it is
+// stamped with is the current one, and the fact is committed: an observation
+// of the life that was erased, filed under the life that replaced it.
+//
+// That is the one outcome an erasure exists to prevent, and neither the
+// generation bump nor the fence could see it: the bump only invalidates work
+// already queued, and the fence only covers the window it is armed for.
+//
+// The erasure's boundary is now the causal position it was reached at, and it
+// is never lifted. A fact whose position was reserved at or before that point
+// was captured during the erased life, however the fence has moved since.
+func TestAFactCapturedBeforeAnErasureCannotSurviveTheReinstate(t *testing.T) {
+	svc, repo := newObservationService(t)
+	ctx := context.Background()
+	c := svc.observations
+
+	if err := repo.RecordPoints("recycled", 100, "WATCH"); err != nil {
+		t.Fatal(err)
+	}
+
+	// The producer captures a fact and reserves its causal position -- and is
+	// then descheduled before the collector ever sees it.
+	inFlight := mustSanitize(t, channelObservation("pool-1", "chan-recycled", "recycled", "old-life", "ROUND_CREATED"))
+	inFlight.sequence = c.sequence.Add(1)
+	inFlight.generation = c.generation.Load()
+
+	// Meanwhile: the streamer is removed, erased, and added again.
+	if err := repo.db.WithTx(ctx, func(tx *sql.Tx) error {
+		if _, err := repo.EraseObservationsForIdentityTx(tx,
+			ObservationIdentity{ChannelID: "chan-recycled", Login: "recycled"}); err != nil {
+			return err
+		}
+		_, err := repo.DeleteStreamerTx(tx, "recycled")
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	repo.Tombstone("recycled")
+	repo.Reinstate("recycled")
+	if err := repo.RecordPoints("recycled", 200, "WATCH"); err != nil {
+		t.Fatal(err)
+	}
+
+	// The producer resumes. The fence is down and the generation it carries is
+	// no longer distinguishable from a fresh one -- the erasure bumped the
+	// generation, but this fact was stamped before that and the reinstate
+	// makes the identity acceptable again.
+	before := c.dropped.Load()
+	c.write(ctx, inFlight)
+	if c.dropped.Load() != before+1 {
+		t.Fatal("a fact captured during the erased life was accepted after the re-add")
+	}
+
+	got, err := repo.ObservationsBySession(ctx, c.sessionID, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, rec := range got {
+		if rec.EventID == "old-life" {
+			t.Fatalf("an observation of the erased life was filed under the re-added streamer: %+v", rec)
+		}
+	}
+
+	// The re-added streamer is still fully observable: only facts captured
+	// before the erasure are refused.
+	fresh := mustSanitize(t, channelObservation("pool-1", "chan-recycled", "recycled", "new-life", "ROUND_CREATED"))
+	fresh.sequence = c.sequence.Add(1)
+	fresh.generation = c.generation.Load()
+	committed := c.committed.Load()
+	c.write(ctx, fresh)
+	if c.committed.Load() != committed+1 {
+		t.Fatal("the re-added streamer is permanently unobservable; only the erased life is refused")
+	}
 }

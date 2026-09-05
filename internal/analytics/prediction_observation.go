@@ -2198,6 +2198,24 @@ type observationCollector struct {
 	fenced        map[string]struct{}
 	loginChannels map[string][]string
 
+	// erasedAt records, per fence key, the causal position this session had
+	// reached when that identity was last erased — and unlike the fence it is
+	// never lifted for the life of the session.
+	//
+	// The fence alone protects only the window it is armed for. A producer
+	// that had already captured a fact about the erased life, and had not yet
+	// handed it over, could be overtaken by the erasure AND by the reinstate,
+	// and then hand it over into a lifted fence: an observation of the life
+	// that was erased, attached to the life that replaced it. That is the one
+	// thing an erasure has to make impossible.
+	//
+	// The boundary is the reserved causal position, not a clock. A fact's
+	// position is reserved when the producer captures it, so a position no
+	// later than the erasure's is exactly "captured before the erasure" — with
+	// no dependence on wall time, which can jump, and none on comparing a
+	// producer's clock with the collector's.
+	erasedAt map[string]int64
+
 	// Session accounting. All are plain atomics touched by producers and the
 	// writer; none is read under a lock held by a business path.
 	sequence                  atomic.Int64
@@ -2242,6 +2260,7 @@ func newObservationCollector(repo *SQLiteRepository, gate *txPriority, retention
 		bootstrapped:        make(chan struct{}),
 		fenced:              make(map[string]struct{}),
 		loginChannels:       make(map[string][]string),
+		erasedAt:            make(map[string]int64),
 	}
 }
 
@@ -2328,13 +2347,27 @@ func (c *observationCollector) fence(channelID, login string) {
 	if login == "" && channelID == "" {
 		return
 	}
+	// Read the causal position BEFORE taking the lock: every fact already
+	// captured has a position no greater than this, and every fact captured
+	// afterwards has a greater one.
+	at := c.sequence.Load()
 	c.fenceMu.Lock()
 	defer c.fenceMu.Unlock()
+	// The erasure record is bounded like every other identity key. A store
+	// that has erased more identities than the bound allows cannot go on
+	// proving that a late fact belongs to an erased life, so capture stops
+	// rather than continuing without that proof.
+	if len(c.erasedAt) >= MaxDeletionIdentityRows {
+		c.disabled.Store(true)
+		return
+	}
 	if login != "" {
 		c.fenced["login:"+login] = struct{}{}
+		c.erasedAt["login:"+login] = at
 	}
 	if channelID != "" {
 		c.fenced["chan:"+channelID] = struct{}{}
+		c.erasedAt["chan:"+channelID] = at
 		if login != "" {
 			c.loginChannels[login] = append(c.loginChannels[login], channelID)
 		}
@@ -2368,6 +2401,12 @@ func (c *observationCollector) isFenced(o PredictionObservation) bool {
 	defer c.fenceMu.RUnlock()
 	for _, k := range keys {
 		if _, ok := c.fenced[k]; ok {
+			return true
+		}
+		// Captured no later than the erasure that removed this identity, so
+		// the fact is about the life that was erased — even if a re-add has
+		// since lifted the fence.
+		if at, ok := c.erasedAt[k]; ok && o.sequence <= at {
 			return true
 		}
 	}
