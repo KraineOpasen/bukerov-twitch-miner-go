@@ -2227,7 +2227,7 @@ CREATE TABLE prediction_observation_sessions (
     producer_revision                 TEXT NOT NULL,   -- producer contract the rows were written under
     started_at_ms                     INTEGER NOT NULL,
     closed_at_ms                      INTEGER,         -- NULL iff still OPEN
-    close_state                       TEXT NOT NULL,   -- OPEN | COMPLETE | INCOMPLETE
+    close_state                       TEXT NOT NULL,   -- OPEN | COMPLETE | INCOMPLETE | ABANDONED
     last_assigned_sequence            INTEGER,
     committed_count                   INTEGER NOT NULL,
     dropped_count                     INTEGER NOT NULL,
@@ -2378,14 +2378,32 @@ rows. Rolling back below v6 once observation data exists is therefore a policy
 decision requiring a separate scrub or forward-only choice, not a safe default.
 
 Readers must classify a session before drawing any conclusion from its facts:
-`UNFINALIZED` (still `OPEN` — live or crash-left, so no absence may be
-inferred), `INTEGRITY_ERROR` (the row contradicts itself or was written under
-a different producer contract), `ADMINISTRATIVELY_TRUNCATED` (finalized
-coherently, but facts were removed afterwards by retention or an erasure), or
-`AS_FINALIZED` (the facts present are exactly those the session committed —
-the only reading under which the absence of a fact is evidence). A session
-that dropped anything finalizes `INCOMPLETE`; its committed facts are still
-exact, but the SET of facts is not provably whole.
+`UNFINALIZED` (the session never wrote its accounting — `OPEN`, so live or
+crash-left, or `ABANDONED`, meaning a later startup reclaimed a crash-left
+row — so no absence may be inferred), `INTEGRITY_ERROR` (the row contradicts
+itself), `ADMINISTRATIVELY_TRUNCATED` (finalized coherently, but facts were
+removed afterwards by retention or an erasure), or `AS_FINALIZED` (the facts
+present are exactly those the session committed).
+
+`AS_FINALIZED` is a statement about the DATASET, not about completeness: an
+`INCOMPLETE` session reads `AS_FINALIZED` too, because the facts it did commit
+are still exactly present and exactly right. The absence of a fact is evidence
+only when the reading is `AS_FINALIZED` **and** `close_state` is `COMPLETE`.
+
+A session that dropped anything, left an obligation unsettled, or never opened
+intake at all finalizes `INCOMPLETE`; its committed facts are still exact, but
+the SET of facts is not provably whole. A session written under a different
+producer contract is **not** an integrity failure — its rows are exactly what
+that contract wrote, so the reading stands and the caller is told which
+contract produced them; classifying it as an error would make the whole trail
+unreadable the moment the revision is bumped.
+
+A crashed process leaves its counters at the zeros they were inserted with,
+because they are written only at finalization. Those zeros are not evidence,
+so the startup reconciliation records the run `ABANDONED` and neither presents
+them as the dead process's accounting nor reconstructs a replacement from the
+surviving facts: that run's facts are a LOWER BOUND on what it observed, and
+nothing about loss follows either way.
 
 #### Notifications Module Schema
 
