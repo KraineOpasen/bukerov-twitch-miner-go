@@ -352,8 +352,15 @@ func TestObservationSanitizationIsClosedAndPrivate(t *testing.T) {
 		t.Fatalf("message survived sanitization as %q, want %q",
 			out.SourceMessageType, PresenceUnknownPresent)
 	}
+	// An unrecognized TOPIC class becomes no claim at all rather than
+	// UNKNOWN: a topic class is how this process subscribed, not something
+	// Twitch varies inside a frame, so "an unknown class was proved" is a
+	// statement this build cannot make. The raw value is discarded either
+	// way, which is what this test is about.
+	if out.SourceTopicType != "" {
+		t.Fatalf("topic survived sanitization as %q, want no claim at all", out.SourceTopicType)
+	}
 	for name, got := range map[string]string{
-		"topic":      out.SourceTopicType,
 		"timeSource": out.ProducerTimeSource,
 		"phase":      out.Payload.Phase,
 		"roundState": out.Payload.RoundState,
@@ -994,6 +1001,169 @@ func TestObservationProducerRevisionIsPinned(t *testing.T) {
 
 // TestObservationKindsAreExactlyNine pins the closed kind set to the nine
 // families the contract defines, in schema order.
+// TestEditedFactFailsItsOwnWitness is the regression for a defect an
+// independent review found: observation_sha256 was written by AppendObservation
+// and recomputed by nobody, so a row edited in place after the write read back
+// as authentic. A witness nobody checks is a column, not a witness.
+//
+// The trail is INSERT-only by construction, so a changed row means the file was
+// edited outside this process — which is exactly the case the digest exists to
+// detect, and the strongest integrity failure the store can report.
+func TestEditedFactFailsItsOwnWitness(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		edit string
+	}{
+		{"the payload", `UPDATE prediction_observations SET payload_json = '{"phase":"CLEANUP_APPLIED"}'`},
+		{"a Twitch identifier", `UPDATE prediction_observations SET event_id = 'a-different-round'`},
+		{"a routed channel", `UPDATE prediction_observations SET routed_channel_id = 'chan-someone-else'`},
+		{"the witness itself", `UPDATE prediction_observations SET observation_sha256 = 'sha256:0'`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			svc, repo := newObservationService(t)
+			ctx := context.Background()
+			epoch := svc.observations.epoch.Load()
+			sessionID := svc.observations.sessionID
+
+			for i := 1; i <= 2; i++ {
+				fact := mustSanitize(t, channelObservation("pool-1", "chan-a", "streamer-a",
+					"event-"+strconv.Itoa(i), "ROUND_CREATED"))
+				if err := repo.AppendObservation(ctx, fact, sessionID, epoch, int64(i)); err != nil {
+					t.Fatalf("seed %d: %v", i, err)
+				}
+			}
+			if applied, err := repo.FinalizeObservationSession(ctx, epoch,
+				ObservationAccounting{Committed: 2, LastAssignedSequence: 2}, 900); err != nil || !applied {
+				t.Fatalf("finalize: applied=%v err=%v", applied, err)
+			}
+
+			// Intact, the session reads as finalized AND says how much of it
+			// was actually proved.
+			before, ok, err := repo.ReadObservationSession(ctx, epoch)
+			if err != nil || !ok {
+				t.Fatalf("read: ok=%v err=%v", ok, err)
+			}
+			if before.Reading != ReadingAsFinalized {
+				t.Fatalf("an intact session reads %q (%s), want %q",
+					before.Reading, before.Detail, ReadingAsFinalized)
+			}
+			if before.WitnessesVerified != 2 || before.WitnessesUnchecked != 0 {
+				t.Fatalf("reading verified %d witnesses and left %d unchecked, want 2 and 0: a "+
+					"reading that proves nothing must not claim to",
+					before.WitnessesVerified, before.WitnessesUnchecked)
+			}
+
+			// One row edited behind the store's back.
+			if _, err := repo.db.Exec(tc.edit + ` WHERE collector_sequence = 1`); err != nil {
+				t.Fatal(err)
+			}
+			after, ok, err := repo.ReadObservationSession(ctx, epoch)
+			if err != nil || !ok {
+				t.Fatalf("read after edit: ok=%v err=%v", ok, err)
+			}
+			if after.Reading != ReadingIntegrityError {
+				t.Fatalf("a session holding an edited fact reads %q (%s), want %q — the digest "+
+					"witnesses nothing if no reader recomputes it",
+					after.Reading, after.Detail, ReadingIntegrityError)
+			}
+		})
+	}
+}
+
+// TestWitnessVerificationIsBounded pins the reader's own bound: a reading
+// recomputes at most observationWitnessBudget digests and REPORTS the
+// remainder rather than either holding the shared connection for an unbounded
+// hash sweep or implying it checked the whole session.
+func TestWitnessVerificationIsBounded(t *testing.T) {
+	if observationWitnessBudget >= MaxSessionRows {
+		t.Fatalf("the witness budget (%d) does not bound a legal session (%d rows): the reading "+
+			"can hold the shared connection for a whole session's worth of hashing",
+			observationWitnessBudget, MaxSessionRows)
+	}
+}
+
+// TestClosedVocabulariesAreExact is the oracle every payload vocabulary was
+// missing. `closedValue` DEGRADES an unrecognized member to UNKNOWN instead of
+// dropping the fact, so a vocabulary regression is silent: the row still
+// commits and the session still finalizes COMPLETE. Nothing in the suite would
+// notice a phase being added back, removed, or renamed — including the three
+// HTTP_* phases this task removed, which is exactly the kind of change that
+// must not be able to reappear unremarked.
+//
+// The lists are written out rather than derived, because a test that reads the
+// same slice the code reads asserts nothing.
+func TestClosedVocabulariesAreExact(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		got  []string
+		want []string
+	}{
+		{"phases", observationPhases, []string{
+			"ROUND_CREATED", "ROUND_UPDATED",
+			"SCHEDULE_CONSIDERED", "SCHEDULE_ACCEPTED", "SCHEDULE_SKIPPED",
+			"AUTO_DUE", "AUTO_DECIDED", "AUTO_SKIPPED",
+			"MANUAL_MINER_ROOT", "MANUAL_DIRECT_ROOT", "MANUAL_POOL_LOOKUP",
+			"MANUAL_ELIGIBILITY", "MANUAL_ARGUMENTS", "MANUAL_RESERVATION",
+			"MANUAL_VALIDATION", "MANUAL_EXECUTION", "MANUAL_SKIPPED",
+			"CALL_STARTED", "CALL_RETURNED",
+			"PLACEMENT_CONFIRMED",
+			"TERMINAL_DELIVERED", "TERMINAL_ADMITTED", "TERMINAL_REJECTED",
+			"CLEANUP_SCHEDULED", "CLEANUP_APPLIED",
+			"UNCLASSIFIED",
+			ValueUnknown,
+		}},
+		{"round states", observationRoundStates, []string{
+			"ACTIVE", "LOCKED", "RESOLVED", "CANCELED", ValueUnknown,
+		}},
+		{"decisions", observationDecisions, []string{
+			"PLACE", "SKIP", "DEFER", "NONE", ValueUnknown,
+		}},
+		{"reason codes", observationReasonCodes, []string{
+			"OK", "TOGGLE_OFF", "ALREADY_TRACKED", "NOT_ACTIVE", "NOT_ELIGIBLE",
+			"WINDOW_ELAPSED", "BELOW_MINIMUM_POINTS", "NO_POOL", "NO_ROUND",
+			"NO_DECISION", "ALREADY_PLACED", "FILTER_REJECTED", "STRATEGY_NO_CHOICE",
+			"DUPLICATE", "CONFLICT", "ACCEPTED", "REJECTED", "REFUNDED", "WON", "LOST",
+			ValueUnknown,
+		}},
+		{"error classes", observationErrorClasses, []string{
+			"NONE", "TRANSPORT", "REJECTED_BY_TWITCH", "INVALID_ARGUMENT",
+			"NOT_ENOUGH_POINTS", "ROUND_CLOSED", "INTERNAL", ValueUnknown,
+		}},
+		{"outcome colours", observationOutcomeColors, []string{
+			"BLUE", "PINK", ValueUnknown,
+		}},
+		{"topic types", observationTopicTypes, []string{
+			TopicTypePredictionsChannel, TopicTypePredictionsUser,
+		}},
+		{"message types", observationMessageTypes, []string{
+			MessageTypeEventCreated, MessageTypeEventUpdated,
+			MessageTypePredictionMade, MessageTypePredictionResult,
+			PresenceUnknownPresent, PresenceAbsentOnWire, PresenceNullOnWire, PresenceInvalid,
+		}},
+		{"time sources", observationTimeSources, []string{
+			TimeSourceProducer, TimeSourceServer, TimeSourceReceiver, ValueUnknown,
+		}},
+		{"presence values", observationPresenceValues, []string{
+			PresencePresent, PresenceAbsentOnWire, PresenceNullOnWire, PresenceInvalid,
+			PresenceUnknownPresent, PresenceNotObserved, PresenceUnavailable, ValueUnknown,
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if !reflect.DeepEqual(tc.got, tc.want) {
+				t.Fatalf("%s = %v, want %v", tc.name, tc.got, tc.want)
+			}
+		})
+	}
+
+	// The three phases this task removed from manual_control, named so their
+	// return is a failure rather than a silent widening.
+	for _, gone := range []string{"HTTP_REQUEST_ROOT", "HTTP_HANDLER_DECISION", "HTTP_PROVIDER_RETURNED"} {
+		if got := closedValue(gone, observationPhases); got != ValueUnknown {
+			t.Fatalf("%s sanitizes to %q: the HTTP phases are back in the vocabulary", gone, got)
+		}
+	}
+}
+
 func TestObservationKindsAreExactlyNine(t *testing.T) {
 	want := []string{
 		"source_unknown", "channel_event", "schedule_decision", "auto_decision",
@@ -1853,7 +2023,14 @@ func TestObservationPayloadOverCapIsRefusedWhole(t *testing.T) {
 	if strings.Contains(sanitized, filler) {
 		t.Fatal("the raw filler survived sanitization")
 	}
-	if len(sanitized) > MaxObservationPayloadBytes/8 {
+	// A quarter of the ceiling. The margin is stated rather than tight
+	// because the number it bounds is the WORST case by construction: 64
+	// outcomes -- the maximum a fact may carry -- each rendering its two wire
+	// states in full. A real round has two. The margin moved from an eighth
+	// when the outcome projection began carrying those states, which is a
+	// deliberate cost: without them a legitimate zero and a key that never
+	// arrived render identically.
+	if len(sanitized) > MaxObservationPayloadBytes/4 {
 		t.Fatalf("sanitized payload is %d bytes; the closed vocabulary is supposed to keep it far "+
 			"below the %d ceiling", len(sanitized), MaxObservationPayloadBytes)
 	}
@@ -2864,28 +3041,54 @@ func TestObservationIndexContractIsPinned(t *testing.T) {
 	}
 
 	want := map[string]string{
-		// One session's facts in causal order.
-		"idx_predobs_session": "collector_session_id,collector_sequence",
-		// One epoch, and the EXACT (epoch, session id) pair the reader counts
-		// and range-checks on.
-		"idx_predobs_epoch":      "collector_epoch,id",
+		// The ADOPTED index contract, verbatim. Every role identity is
+		// indexed both by its resolved parent id and by its channel id, and
+		// each of those carries the round coordinates after the identity --
+		// so identity work is scoped to an epoch, a pool and a round rather
+		// than answered globally. That is the same correction the retention
+		// unit needed: a round is a LOCAL admission, and an index that keys
+		// one globally answers a different question than the one asked.
 		"idx_predobs_exact_pair": "collector_epoch,collector_session_id,collector_sequence",
-		// The four identity roles a privacy erasure selects on.
-		"idx_predobs_routed_identity":    "routed_channel_id,id",
-		"idx_predobs_retention_identity": "retention_group_owner_channel_id,id",
-		"idx_predobs_routed_parent":      "routed_streamer_id,id",
-		"idx_predobs_retention_parent":   "retention_group_owner_streamer_id,id",
-		// A round by incarnation (erasure expansion), and the compound local
-		// round retention deletes and ages out by.
-		"idx_predobs_round":      "round_incarnation_id,id",
-		"idx_predobs_round_unit": "collector_epoch,pool_instance_id,round_incarnation_id,received_at_ms",
-		// Bounded oldest-first retention of the facts that belong to no round.
+		"idx_predobs_routed_parent": "routed_streamer_id,event_id,pool_instance_id," +
+			"round_incarnation_id,collector_epoch,collector_sequence",
+		"idx_predobs_routed_identity": "routed_channel_id,collector_epoch,pool_instance_id," +
+			"round_incarnation_id",
+		"idx_predobs_round_owner_parent": "round_owner_streamer_id,event_id,pool_instance_id," +
+			"round_incarnation_id,collector_epoch,collector_sequence",
+		"idx_predobs_round_owner_identity": "round_owner_channel_id,collector_epoch," +
+			"pool_instance_id,round_incarnation_id",
+		"idx_predobs_retention_parent": "retention_group_owner_streamer_id,collector_epoch," +
+			"pool_instance_id,round_incarnation_id",
+		"idx_predobs_retention_identity": "retention_group_owner_channel_id,collector_epoch," +
+			"pool_instance_id,round_incarnation_id",
+		"idx_predobs_round_unit":       "collector_epoch,pool_instance_id,round_incarnation_id,received_at_ms",
+		"idx_predobs_null_round_epoch": "collector_epoch,received_at_ms,id",
+		"idx_predobs_received_at":      "received_at_ms",
+		"idx_predobs_fingerprint":      "source_fingerprint",
+
+		// Three indexes BEYOND the adopted list, each declared here with the
+		// reader that needs it rather than substituted for anything above.
+		//
+		//   session: ObservationsBySession looks a session up by its id
+		//     ALONE, and the exact-pair index leads with collector_epoch.
+		//   round: ObservationsByRound looks an incarnation up by its id
+		//     ALONE, across epochs and pools.
+		//   null_round_retention: the bounded NULL-round prune filters
+		//     collector_epoch with an INEQUALITY and then orders by
+		//     received_at_ms, which the epoch-leading partial index cannot
+		//     serve without sorting the whole partition.
+		"idx_predobs_session":              "collector_session_id,collector_sequence",
+		"idx_predobs_round":                "round_incarnation_id,id",
 		"idx_predobs_null_round_retention": "received_at_ms,id",
-		// Re-deliveries of one source event, found together.
-		"idx_predobs_fingerprint": "source_fingerprint",
+
+		// The two UNIQUE constraints SQLite materializes as indexes. They are
+		// part of the write cost of every INSERT and of the exact-pair and
+		// idempotency guarantees, so the contract names them too.
+		"sqlite_autoindex_prediction_observations_1": "observation_id",
+		"sqlite_autoindex_prediction_observations_2": "collector_epoch,collector_sequence",
 	}
 
-	rows, err := db.Query(`SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='prediction_observations' AND name LIKE 'idx_%'`)
+	rows, err := db.Query(`SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='prediction_observations'`)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2934,6 +3137,21 @@ func TestObservationIndexContractIsPinned(t *testing.T) {
 		if _, ok := want[name]; !ok {
 			t.Errorf("index %s exists but is not part of the pinned contract; add it here with the "+
 				"reader or deletion that needs it", name)
+		}
+	}
+
+	// Both NULL-round indexes are PARTIAL. Without the predicate each covers
+	// every row instead of the small minority that belongs to no round -- a
+	// different index, several orders of magnitude larger, on the hot INSERT
+	// path. pragma_index_info cannot see a partial predicate, so this reads
+	// the DDL.
+	for _, name := range []string{"idx_predobs_null_round_epoch", "idx_predobs_null_round_retention"} {
+		var ddl sql.NullString
+		if err := db.QueryRow(`SELECT sql FROM sqlite_master WHERE type='index' AND name=?`, name).Scan(&ddl); err != nil {
+			t.Fatalf("ddl for %s: %v", name, err)
+		}
+		if !strings.Contains(ddl.String, "WHERE round_incarnation_id IS NULL") {
+			t.Errorf("%s is not partial: %s", name, ddl.String)
 		}
 	}
 }

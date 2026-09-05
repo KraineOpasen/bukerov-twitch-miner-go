@@ -2276,7 +2276,10 @@ CREATE TABLE prediction_observations (
                                                        -- erasure can reach (routed or retention
                                                        -- group channel), never on one it cannot
     kind                              TEXT NOT NULL,   -- one of the nine closed kinds
-    source_topic_type                 TEXT,            -- topic TYPE only, closed enum
+    source_topic_type                 TEXT,            -- topic TYPE only; closed enum over the two
+                                                       -- proved Prediction classes, with no UNKNOWN
+                                                       -- member: an unrecognized class is stored as
+                                                       -- no claim at all
     source_message_type               TEXT,            -- closed enum: the four Prediction message
                                                        -- types, or the wire state that says why
                                                        -- none is there (ABSENT_ON_WIRE,
@@ -2304,15 +2307,27 @@ CREATE INDEX idx_chat_streamer_time ON chat_messages(streamer_id, timestamp);
 CREATE INDEX idx_predbets_streamer_time ON prediction_bets(streamer_id, timestamp);
 CREATE INDEX idx_point_events_streamer_time ON point_events(streamer_id, timestamp);
 CREATE INDEX idx_point_events_points_id ON point_events(points_id);
-CREATE INDEX idx_predobs_session ON prediction_observations(collector_session_id, collector_sequence);
-CREATE INDEX idx_predobs_epoch ON prediction_observations(collector_epoch, id);
+-- Every role identity is indexed BOTH by its resolved parent id and by its
+-- channel id, and each of those carries the round coordinates after the
+-- identity, so identity work is scoped to an epoch, a pool and a round rather
+-- than answered globally.
 CREATE INDEX idx_predobs_exact_pair ON prediction_observations(collector_epoch, collector_session_id, collector_sequence);
-CREATE INDEX idx_predobs_routed_identity ON prediction_observations(routed_channel_id, id);
-CREATE INDEX idx_predobs_retention_identity ON prediction_observations(retention_group_owner_channel_id, id);
-CREATE INDEX idx_predobs_routed_parent ON prediction_observations(routed_streamer_id, id);
-CREATE INDEX idx_predobs_retention_parent ON prediction_observations(retention_group_owner_streamer_id, id);
-CREATE INDEX idx_predobs_round ON prediction_observations(round_incarnation_id, id);
+CREATE INDEX idx_predobs_routed_parent ON prediction_observations(routed_streamer_id, event_id, pool_instance_id, round_incarnation_id, collector_epoch, collector_sequence);
+CREATE INDEX idx_predobs_routed_identity ON prediction_observations(routed_channel_id, collector_epoch, pool_instance_id, round_incarnation_id);
+CREATE INDEX idx_predobs_round_owner_parent ON prediction_observations(round_owner_streamer_id, event_id, pool_instance_id, round_incarnation_id, collector_epoch, collector_sequence);
+CREATE INDEX idx_predobs_round_owner_identity ON prediction_observations(round_owner_channel_id, collector_epoch, pool_instance_id, round_incarnation_id);
+CREATE INDEX idx_predobs_retention_parent ON prediction_observations(retention_group_owner_streamer_id, collector_epoch, pool_instance_id, round_incarnation_id);
+CREATE INDEX idx_predobs_retention_identity ON prediction_observations(retention_group_owner_channel_id, collector_epoch, pool_instance_id, round_incarnation_id);
 CREATE INDEX idx_predobs_round_unit ON prediction_observations(collector_epoch, pool_instance_id, round_incarnation_id, received_at_ms);
+CREATE INDEX idx_predobs_null_round_epoch ON prediction_observations(collector_epoch, received_at_ms, id)
+    WHERE round_incarnation_id IS NULL;
+CREATE INDEX idx_predobs_received_at ON prediction_observations(received_at_ms);
+-- Three indexes beyond that list, each for a reader this build ships:
+-- ObservationsBySession looks a session up by its id alone; ObservationsByRound
+-- looks an incarnation up by its id alone; and the bounded NULL-round prune
+-- filters collector_epoch with an INEQUALITY before ordering by received_at_ms.
+CREATE INDEX idx_predobs_session ON prediction_observations(collector_session_id, collector_sequence);
+CREATE INDEX idx_predobs_round ON prediction_observations(round_incarnation_id, id);
 CREATE INDEX idx_predobs_null_round_retention ON prediction_observations(received_at_ms, id)
     WHERE round_incarnation_id IS NULL;
 CREATE INDEX idx_predobs_fingerprint ON prediction_observations(source_fingerprint);

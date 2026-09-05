@@ -85,11 +85,20 @@ const (
 // ObservationOutcome is the sanitized aggregate projection of one round
 // outcome. No predictor identity and no display text is carried.
 type ObservationOutcome struct {
-	Slot                  int
-	Color                 string
-	TotalPoints           int64
-	TotalUsers            int64
+	Slot int
+	// Color is the outcome's colour, with ColorState saying what the key was
+	// on the wire — an empty string is a value, not an absence.
+	Color      string
+	ColorState string
+
+	TotalPoints int64
+	TotalUsers  int64
+
+	// TopPredictorsExamined counts the entries in top_predictors, with
+	// TopPredictors saying what that key was on the wire: an empty list and a
+	// missing key both count zero, and only the state tells them apart.
 	TopPredictorsExamined int
+	TopPredictors         string
 }
 
 // ObservationPayload is the closed typed projection. Every string field is a
@@ -444,10 +453,23 @@ func projectOutcomes(raw []interface{}) []ObservationOutcome {
 	for i := 0; i < n; i++ {
 		data, ok := raw[i].(map[string]interface{})
 		if !ok {
-			out = append(out, ObservationOutcome{Slot: i})
+			// The entry itself was not an object, so neither optional key was
+			// ever looked at here.
+			out = append(out, ObservationOutcome{
+				Slot: i, ColorState: ObsNotObserved, TopPredictors: ObsNotObserved,
+			})
 			continue
 		}
 		o := ObservationOutcome{Slot: i}
+		// The two optional parts of an outcome carry their WIRE STATE beside
+		// their value, because their values cannot carry it: an empty
+		// top_predictors list and a missing top_predictors key both count
+		// zero, and an empty colour string and a missing colour key are both
+		// the empty string. Without the state, a legitimate zero is
+		// indistinguishable from an absence — which is the one thing this
+		// trail exists to keep apart.
+		o.ColorState = wirePresence(data, "color", isString)
+		o.TopPredictors = wirePresence(data, "top_predictors", isList)
 		if color, ok := data["color"].(string); ok {
 			o.Color = color
 		}

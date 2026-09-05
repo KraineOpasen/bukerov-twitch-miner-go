@@ -129,7 +129,6 @@ const (
 var observationTopicTypes = []string{
 	TopicTypePredictionsChannel,
 	TopicTypePredictionsUser,
-	ValueUnknown,
 }
 
 // The closed wire-state vocabulary. It distinguishes what a frame actually did
@@ -305,18 +304,29 @@ var errObservationAtCapacity = errors.New("analytics: observation store at capac
 // ObservationOutcome is the sanitized projection of ONE round outcome. It
 // carries aggregate shape only: no predictor identity, no display text, no
 // raw Twitch identifier.
+//
+// Neither optional field uses `omitempty`, and both carry a wire state beside
+// the value. An empty colour and a missing colour key are both the empty
+// string; an empty top_predictors list and a missing key both count zero.
+// Omitting either from the JSON would encode an absence as a missing key, and
+// keeping it without the state would encode an absence as a zero — the two
+// exact mistakes a source-of-truth trail must not make.
 type ObservationOutcome struct {
 	// Slot is the outcome's positional index within the round.
 	Slot int `json:"slot"`
-	// Color is a closed enum (BLUE, PINK) or ValueUnknown.
-	Color string `json:"color,omitempty"`
+	// Color is a closed enum (BLUE, PINK) or ValueUnknown; ColorState is the
+	// closed presence state of the key it came from.
+	Color      string `json:"color"`
+	ColorState string `json:"colorState"`
 	// TotalPoints/TotalUsers are the aggregate pool figures.
 	TotalPoints int64 `json:"totalPoints"`
 	TotalUsers  int64 `json:"totalUsers"`
 	// TopPredictorsExamined counts how many top predictors the producer
 	// looked at while deriving the aggregates above (bounded by
 	// MaxTopPredictorsExamined). No identity of any of them is retained.
-	TopPredictorsExamined int `json:"topPredictorsExamined,omitempty"`
+	// TopPredictors is the closed presence state of the key it counted.
+	TopPredictorsExamined int    `json:"topPredictorsExamined"`
+	TopPredictors         string `json:"topPredictors"`
 }
 
 var observationOutcomeColors = []string{"BLUE", "PINK", ValueUnknown}
@@ -566,6 +576,13 @@ type ObservationSessionReading struct {
 	FactsPresent int64
 	// Detail explains a non-AS_FINALIZED reading in closed terms.
 	Detail string
+	// WitnessesVerified is how many of the session's surviving facts had their
+	// stored digest RECOMPUTED from the row and compared. A digest nobody ever
+	// recomputes witnesses nothing, so the reading reports the number instead
+	// of implying the whole session was checked; WitnessesUnchecked is the
+	// remainder, left when the session is larger than one bounded read.
+	WitnessesVerified  int64
+	WitnessesUnchecked int64
 }
 
 // ---------------------------------------------------------------------------
@@ -598,6 +615,20 @@ func closedValue(v string, allowed []string) string {
 // rather than the bare UNKNOWN the other closed fields fall back to, which the
 // reader could not tell apart from a key that never arrived at all. Either
 // way the unrecognized value itself is never stored.
+// closedTopicType projects the producer's topic class onto the stored
+// vocabulary. Anything outside the two proved classes becomes NO claim (NULL)
+// rather than the bare UNKNOWN: the column exists to say which proved topic a
+// fact came from, and "UNKNOWN" would be an assertion this build cannot make.
+func closedTopicType(v string) string {
+	v = strings.TrimSpace(v)
+	for _, a := range observationTopicTypes {
+		if v == a {
+			return v
+		}
+	}
+	return ""
+}
+
 func closedMessageType(v string) string {
 	v = strings.TrimSpace(v)
 	if v == "" {
@@ -695,9 +726,11 @@ func sanitizeObservationPayload(in ObservationPayload) (ObservationPayload, bool
 			out.Outcomes = append(out.Outcomes, ObservationOutcome{
 				Slot:                  i,
 				Color:                 closedOptional(o.Color, observationOutcomeColors),
+				ColorState:            closedValue(o.ColorState, observationPresenceValues),
 				TotalPoints:           o.TotalPoints,
 				TotalUsers:            o.TotalUsers,
 				TopPredictorsExamined: examined,
+				TopPredictors:         closedValue(o.TopPredictors, observationPresenceValues),
 			})
 		}
 	}
@@ -767,7 +800,7 @@ func sanitizeObservation(in PredictionObservation, now int64) (PredictionObserva
 		RoundIncarnationID:           bounded(in.RoundIncarnationID),
 		EventID:                      bounded(in.EventID),
 		Kind:                         closedValue(in.Kind, observationKinds),
-		SourceTopicType:              closedOptional(in.SourceTopicType, observationTopicTypes),
+		SourceTopicType:              closedTopicType(in.SourceTopicType),
 		SourceMessageType:            closedMessageType(in.SourceMessageType),
 		ProducerAtMS:                 in.ProducerAtMS,
 		ProducerTimeSource:           closedValue(in.ProducerTimeSource, observationTimeSources),
@@ -1151,9 +1184,15 @@ var predictionObservationSchemaSQL = `
 				'auto_decision', 'manual_control', 'placement',
 				'user_prediction_made', 'user_terminal', 'round_cleanup'
 			)),
+		-- The two Prediction topic classes this build proves it understands.
+		-- There is no UNKNOWN member: unlike a message type, a topic class is
+		-- not something Twitch varies inside a frame — it is how this process
+		-- subscribed — so a value outside the two would mean the producer
+		-- mislabelled the fact, and the honest record of that is no claim at
+		-- all rather than a claim that an unknown class was proved.
 		source_topic_type                 TEXT
 			CHECK (source_topic_type IS NULL OR source_topic_type IN (
-				'predictions-channel-v1', 'predictions-user-v1', 'UNKNOWN'
+				'predictions-channel-v1', 'predictions-user-v1'
 			)),
 		-- The four Prediction message types this build understands, plus the
 		-- wire states that say why none of them is there: a key that never
@@ -1187,29 +1226,63 @@ var predictionObservationSchemaSQL = `
 		)
 	);
 
-	CREATE INDEX IF NOT EXISTS idx_predobs_session
-		ON prediction_observations(collector_session_id, collector_sequence);
-	CREATE INDEX IF NOT EXISTS idx_predobs_epoch
-		ON prediction_observations(collector_epoch, id);
+	-- The adopted index contract. Every role identity is indexed BOTH by its
+	-- resolved parent id and by its channel id, and every one of those
+	-- indexes carries the round coordinates (pool_instance_id,
+	-- round_incarnation_id) after the identity, so identity work is
+	-- round-scoped and pool-scoped rather than global. That is the same
+	-- correction the retention unit needed: a round is a LOCAL admission, so
+	-- an index that keys one globally answers a different question than the
+	-- one being asked.
 	CREATE INDEX IF NOT EXISTS idx_predobs_exact_pair
 		ON prediction_observations(collector_epoch, collector_session_id, collector_sequence);
-	CREATE INDEX IF NOT EXISTS idx_predobs_routed_identity
-		ON prediction_observations(routed_channel_id, id);
-	CREATE INDEX IF NOT EXISTS idx_predobs_retention_identity
-		ON prediction_observations(retention_group_owner_channel_id, id);
 	CREATE INDEX IF NOT EXISTS idx_predobs_routed_parent
-		ON prediction_observations(routed_streamer_id, id);
+		ON prediction_observations(routed_streamer_id, event_id, pool_instance_id,
+			round_incarnation_id, collector_epoch, collector_sequence);
+	CREATE INDEX IF NOT EXISTS idx_predobs_routed_identity
+		ON prediction_observations(routed_channel_id, collector_epoch, pool_instance_id,
+			round_incarnation_id);
+	CREATE INDEX IF NOT EXISTS idx_predobs_round_owner_parent
+		ON prediction_observations(round_owner_streamer_id, event_id, pool_instance_id,
+			round_incarnation_id, collector_epoch, collector_sequence);
+	CREATE INDEX IF NOT EXISTS idx_predobs_round_owner_identity
+		ON prediction_observations(round_owner_channel_id, collector_epoch, pool_instance_id,
+			round_incarnation_id);
 	CREATE INDEX IF NOT EXISTS idx_predobs_retention_parent
-		ON prediction_observations(retention_group_owner_streamer_id, id);
-	CREATE INDEX IF NOT EXISTS idx_predobs_round
-		ON prediction_observations(round_incarnation_id, id);
+		ON prediction_observations(retention_group_owner_streamer_id, collector_epoch,
+			pool_instance_id, round_incarnation_id);
+	CREATE INDEX IF NOT EXISTS idx_predobs_retention_identity
+		ON prediction_observations(retention_group_owner_channel_id, collector_epoch,
+			pool_instance_id, round_incarnation_id);
 	CREATE INDEX IF NOT EXISTS idx_predobs_round_unit
 		ON prediction_observations(collector_epoch, pool_instance_id, round_incarnation_id, received_at_ms);
+	CREATE INDEX IF NOT EXISTS idx_predobs_null_round_epoch
+		ON prediction_observations(collector_epoch, received_at_ms, id)
+		WHERE round_incarnation_id IS NULL;
+	CREATE INDEX IF NOT EXISTS idx_predobs_received_at
+		ON prediction_observations(received_at_ms);
+	CREATE INDEX IF NOT EXISTS idx_predobs_fingerprint
+		ON prediction_observations(source_fingerprint);
+
+	-- Three indexes BEYOND the adopted list, each because a reader this build
+	-- actually ships asks a question the adopted list cannot answer. They are
+	-- additions, declared here rather than substituted for anything above.
+	--
+	--   session  : ObservationsBySession looks a session up by its id ALONE,
+	--              and the exact-pair index leads with collector_epoch.
+	--   round    : ObservationsByRound looks an incarnation up by its id
+	--              ALONE, across epochs and pools.
+	--   null_round_retention : the bounded NULL-round prune filters
+	--              collector_epoch with an INEQUALITY and then orders by
+	--              received_at_ms, which the epoch-leading partial index
+	--              above cannot serve without sorting the whole partition.
+	CREATE INDEX IF NOT EXISTS idx_predobs_session
+		ON prediction_observations(collector_session_id, collector_sequence);
+	CREATE INDEX IF NOT EXISTS idx_predobs_round
+		ON prediction_observations(round_incarnation_id, id);
 	CREATE INDEX IF NOT EXISTS idx_predobs_null_round_retention
 		ON prediction_observations(received_at_ms, id)
 		WHERE round_incarnation_id IS NULL;
-	CREATE INDEX IF NOT EXISTS idx_predobs_fingerprint
-		ON prediction_observations(source_fingerprint);
 `
 
 // ---------------------------------------------------------------------------
@@ -2012,10 +2085,131 @@ func (r *SQLiteRepository) ReadObservationSession(ctx context.Context, epoch int
 			epoch, s.CollectorSessionID, epoch, s.CollectorSessionID).Scan(&facts.HalfPair); e != nil {
 			return e
 		}
+		// Every surviving fact carries a digest of its own content, and until
+		// something RECOMPUTES it the column witnesses nothing: a row whose
+		// payload, identity or parent was edited in place after the write
+		// reads back as authentic. Recompute a bounded prefix here and let the
+		// reading carry both what was proved and what was not.
+		verified, mismatched, unchecked, e := verifyObservationWitnesses(ctx, tx, epoch, s.CollectorSessionID)
+		if e != nil {
+			return e
+		}
 		out = classifyObservationSession(s, facts)
+		out.WitnessesVerified, out.WitnessesUnchecked = verified, unchecked
+		if mismatched > 0 {
+			// A row that no longer matches the witness written with it is the
+			// strongest integrity failure this store can detect, and it
+			// overrides any other reading: the trail is INSERT-only by
+			// construction, so a changed row means the file was edited
+			// outside this process.
+			out.Reading = ReadingIntegrityError
+			out.Detail = "a stored fact no longer matches the witness written with it"
+		}
 		return nil
 	})
 	return out, found, err
+}
+
+// observationWitnessBudget bounds how many stored digests one reading
+// recomputes. A session may legitimately hold MaxSessionRows facts, and this
+// read shares the single connection with the miner's own writers, so the
+// reading verifies a bounded prefix and SAYS how much it verified rather than
+// holding the connection for an unbounded hash sweep.
+const observationWitnessBudget = 4096
+
+// verifyObservationWitnesses recomputes the stored digest of a bounded prefix
+// of one session's surviving facts and reports how many matched.
+//
+// This is what makes observation_sha256 an integrity witness rather than a
+// column. The digest deliberately separates a NULL parent id from parent 0 and
+// covers the payload's exact bytes, so the verification re-reads both with
+// their NULL-ness and their bytes intact — the reader-facing projection
+// COALESCEs and unmarshals, and could not reproduce the inputs.
+func verifyObservationWitnesses(ctx context.Context, tx *sql.Tx, epoch int64, sessionID string) (verified, mismatched, unchecked int64, err error) {
+	var total int64
+	if e := tx.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM prediction_observations
+		 WHERE collector_epoch = ? AND collector_session_id = ?`, epoch, sessionID).Scan(&total); e != nil {
+		return 0, 0, 0, e
+	}
+	rows, e := tx.QueryContext(ctx, `
+		SELECT observation_id, collector_sequence, pool_instance_id, round_incarnation_id,
+		       routed_streamer_id, routed_channel_id,
+		       round_owner_streamer_id, round_owner_channel_id,
+		       retention_group_owner_streamer_id, retention_group_owner_channel_id,
+		       event_id, kind, source_topic_type, source_message_type, source_fingerprint,
+		       producer_at_ms, producer_time_source, received_at_ms,
+		       connection_index, connection_generation, connection_sequence,
+		       payload_json, observation_sha256
+		  FROM prediction_observations
+		 WHERE collector_epoch = ? AND collector_session_id = ?
+		 ORDER BY collector_sequence ASC
+		 LIMIT ?`, epoch, sessionID, observationWitnessBudget)
+	if e != nil {
+		return 0, 0, 0, e
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var (
+			observationID, kind, timeSource, payloadJSON, stored string
+			seq, receivedAt                                      int64
+			pool                                                 string
+			incarnation, routedChan, ownerChan, retentionChan    sql.NullString
+			eventID, topic, message, fingerprint                 sql.NullString
+			routedID, ownerID, retentionID                       sql.NullInt64
+			producerAt                                           sql.NullInt64
+			connIndex, connGeneration, connSequence              sql.NullInt64
+		)
+		if e := rows.Scan(&observationID, &seq, &pool, &incarnation,
+			&routedID, &routedChan, &ownerID, &ownerChan, &retentionID, &retentionChan,
+			&eventID, &kind, &topic, &message, &fingerprint,
+			&producerAt, &timeSource, &receivedAt,
+			&connIndex, &connGeneration, &connSequence,
+			&payloadJSON, &stored); e != nil {
+			return 0, 0, 0, e
+		}
+		o := PredictionObservation{
+			PoolInstanceID:               pool,
+			RoutedChannelID:              routedChan.String,
+			RoundOwnerChannelID:          ownerChan.String,
+			RetentionGroupOwnerChannelID: retentionChan.String,
+			EventID:                      eventID.String,
+			Kind:                         kind,
+			SourceTopicType:              topic.String,
+			SourceMessageType:            message.String,
+			SourceFingerprint:            fingerprint.String,
+			ProducerAtMS:                 producerAt.Int64,
+			ProducerTimeSource:           timeSource,
+			ReceivedAtMS:                 receivedAt,
+			ConnectionIndex:              int(connIndex.Int64),
+			ConnectionGeneration:         uint64(connGeneration.Int64),
+			ConnectionSequence:           uint64(connSequence.Int64),
+			ConnectionKnown:              connIndex.Valid,
+		}
+		want := observationDigest(o, observationID, sessionID, epoch, seq,
+			incarnation.String, payloadJSON,
+			nullableID(routedID), nullableID(ownerID), nullableID(retentionID))
+		verified++
+		if want != stored {
+			mismatched++
+		}
+	}
+	if e := rows.Err(); e != nil {
+		return 0, 0, 0, e
+	}
+	if total > verified {
+		unchecked = total - verified
+	}
+	return verified, mismatched, unchecked, nil
+}
+
+// nullableID renders a scanned parent id back into the interface form the
+// digest was computed over, preserving the NULL the writer saw.
+func nullableID(v sql.NullInt64) interface{} {
+	if !v.Valid {
+		return nil
+	}
+	return v.Int64
 }
 
 // observationSessionFacts is what a reader measures about a session's

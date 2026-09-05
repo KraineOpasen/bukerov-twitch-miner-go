@@ -252,14 +252,25 @@ func TestMigrationV6SchemaContract(t *testing.T) {
 	})
 	t.Run("required indexes exist", func(t *testing.T) {
 		got := indexNames(t, db, "prediction_observations")
+		// A migration-level smoke check that the v6 body created its indexes
+		// at all. The CONTRACT -- the exact set and each index's exact column
+		// list -- is asserted by TestObservationIndexContractIsPinned; this
+		// one only proves the DDL ran.
 		for _, want := range []string{
-			"idx_predobs_session",
-			"idx_predobs_epoch",
+			"idx_predobs_exact_pair",
+			"idx_predobs_routed_parent",
 			"idx_predobs_routed_identity",
+			"idx_predobs_round_owner_parent",
+			"idx_predobs_round_owner_identity",
+			"idx_predobs_retention_parent",
 			"idx_predobs_retention_identity",
+			"idx_predobs_round_unit",
+			"idx_predobs_null_round_epoch",
+			"idx_predobs_received_at",
+			"idx_predobs_fingerprint",
+			"idx_predobs_session",
 			"idx_predobs_round",
 			"idx_predobs_null_round_retention",
-			"idx_predobs_fingerprint",
 		} {
 			found := false
 			for _, g := range got {

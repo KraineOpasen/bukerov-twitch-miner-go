@@ -1077,6 +1077,80 @@ func TestEveryTrackedRoundIsAdmittedWithAnIncarnation(t *testing.T) {
 // Twitch had stated a time for frames whose time this process had invented —
 // and the RECEIVER branch was unreachable for any parsed frame.
 //
+// TestOutcomeAbsenceIsNeverEncodedAsAZero is the regression for a defect an
+// independent review found: an outcome whose top_predictors was an EMPTY LIST
+// and one whose top_predictors key never arrived projected to byte-identical
+// facts — same zero count, same omitted JSON key, same digest. The same held
+// for a present empty colour against a missing colour key. A trail that
+// records "we looked and there were none" and "nobody told us" identically
+// cannot answer the question it exists for.
+func TestOutcomeAbsenceIsNeverEncodedAsAZero(t *testing.T) {
+	outcome := func(extra map[string]interface{}) []interface{} {
+		o := map[string]interface{}{"total_points": float64(300), "total_users": float64(3)}
+		for k, v := range extra {
+			o[k] = v
+		}
+		return []interface{}{o}
+	}
+	for _, tc := range []struct {
+		name       string
+		extra      map[string]interface{}
+		wantTP     string
+		wantColor  string
+		wantExamin int
+	}{
+		{"top_predictors present and empty",
+			map[string]interface{}{"color": "BLUE", "top_predictors": []interface{}{}},
+			ObsPresent, ObsPresent, 0},
+		{"top_predictors never arrived",
+			map[string]interface{}{"color": "BLUE"},
+			ObsAbsentOnWire, ObsPresent, 0},
+		{"top_predictors explicitly null",
+			map[string]interface{}{"color": "BLUE", "top_predictors": nil},
+			ObsNullOnWire, ObsPresent, 0},
+		{"top_predictors with the wrong shape",
+			map[string]interface{}{"color": "BLUE", "top_predictors": float64(7)},
+			ObsInvalid, ObsPresent, 0},
+		{"a colour present and empty",
+			map[string]interface{}{"color": "", "top_predictors": []interface{}{}},
+			ObsPresent, ObsPresent, 0},
+		{"no colour key at all",
+			map[string]interface{}{"top_predictors": []interface{}{}},
+			ObsPresent, ObsAbsentOnWire, 0},
+		{"two predictors examined",
+			map[string]interface{}{"color": "BLUE", "top_predictors": []interface{}{"a", "b"}},
+			ObsPresent, ObsPresent, 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := projectOutcomes(outcome(tc.extra))
+			if len(got) != 1 {
+				t.Fatalf("projected %d outcomes, want 1", len(got))
+			}
+			if got[0].TopPredictors != tc.wantTP {
+				t.Fatalf("top_predictors state = %q, want %q", got[0].TopPredictors, tc.wantTP)
+			}
+			if got[0].ColorState != tc.wantColor {
+				t.Fatalf("colour state = %q, want %q", got[0].ColorState, tc.wantColor)
+			}
+			if got[0].TopPredictorsExamined != tc.wantExamin {
+				t.Fatalf("examined = %d, want %d", got[0].TopPredictorsExamined, tc.wantExamin)
+			}
+		})
+	}
+
+	// The load-bearing pair, stated as the inequality it is.
+	empty := projectOutcomes(outcome(map[string]interface{}{"top_predictors": []interface{}{}}))
+	missing := projectOutcomes(outcome(nil))
+	if empty[0].TopPredictorsExamined != missing[0].TopPredictorsExamined {
+		t.Fatal("fixture error: both cohorts must count zero, or the states are not what " +
+			"separates them")
+	}
+	if empty[0] == missing[0] {
+		t.Fatalf("an empty top_predictors list and a key that never arrived project to the same "+
+			"fact (%+v) — no reader can tell them apart", empty[0])
+	}
+}
+
 // TestMessageTypeStatesAreDistinguishedOnTheWire is the regression for a
 // defect an independent review found: four different things Twitch can do with
 // the "type" key all reached the store as the same empty value.

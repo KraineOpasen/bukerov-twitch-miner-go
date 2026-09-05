@@ -98,9 +98,11 @@ func toAnalyticsObservationPayload(in pubsub.ObservationPayload) analytics.Obser
 			out.Outcomes = append(out.Outcomes, analytics.ObservationOutcome{
 				Slot:                  o.Slot,
 				Color:                 o.Color,
+				ColorState:            o.ColorState,
 				TotalPoints:           o.TotalPoints,
 				TotalUsers:            o.TotalUsers,
 				TopPredictorsExamined: o.TopPredictorsExamined,
+				TopPredictors:         o.TopPredictors,
 			})
 		}
 	}
