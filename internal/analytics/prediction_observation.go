@@ -406,6 +406,10 @@ type PredictionObservation struct {
 	RetentionGroupOwnerChannelID string
 	RetentionGroupOwnerLogin     string
 
+	// sequence is the causal position this fact was RESERVED at, on the
+	// producer's own call, before the queue. See offer.
+	sequence int64
+
 	// RoundIncarnationID names the producer's LOCAL admission of the round —
 	// the pool instance that admitted it plus that pool's admission counter.
 	// It is supplied by the producer and never re-derived here: only the
@@ -2167,9 +2171,9 @@ func (c *observationCollector) write(ctx context.Context, raw PredictionObservat
 		c.dropped.Add(1)
 		return
 	}
-	// The identity fence, checked BEFORE the sequence is spent. A fact naming
-	// an erased identity is refused outright — a live producer must not be
-	// able to re-persist what an operator has just erased.
+	// The identity fence. A fact naming an erased identity is refused
+	// outright — a live producer must not be able to re-persist what an
+	// operator has just erased.
 	if c.isFenced(obs) {
 		c.dropped.Add(1)
 		return
@@ -2182,7 +2186,10 @@ func (c *observationCollector) write(ctx context.Context, raw PredictionObservat
 		c.dropped.Add(1)
 		return
 	}
-	seq := c.sequence.Add(1)
+	// The causal position was reserved by offer, before this fact was queued.
+	// Every return above leaves that number unused, which is what makes a loss
+	// visible as a gap.
+	seq := raw.sequence
 
 	writeCtx, cancel := context.WithTimeout(ctx, c.writeDeadline)
 	defer cancel()
@@ -2301,6 +2308,21 @@ func (c *observationCollector) offer(obs PredictionObservation) {
 		return
 	}
 	obs.generation = c.generation.Load()
+	// The causal position is RESERVED HERE, on the producer's call, before the
+	// fact is queued — not later by the writer.
+	//
+	// Assigning it at the writer made the persisted sequence a record of what
+	// survived rather than of what happened: a fact lost to a full queue, a
+	// stale generation, an erasure fence or a session ceiling consumed no
+	// number, so the stored sequence was always dense and a reader could not
+	// tell "nothing happened here" from "we dropped it". Reserving first makes
+	// every loss leave a GAP, which is exactly the evidence the session's
+	// dropped count explains. It also fixes the position at the moment of
+	// capture, so the order the store holds is the order the producers reached,
+	// not the order the writer got to them.
+	//
+	// The reservation costs one atomic add on a path that already does two.
+	obs.sequence = c.sequence.Add(1)
 	select {
 	case c.queue <- obs:
 	default:

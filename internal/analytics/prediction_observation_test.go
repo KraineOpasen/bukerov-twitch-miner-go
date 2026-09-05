@@ -1756,3 +1756,68 @@ func TestObservationPayloadOverCapFallsBackToAMinimalProjection(t *testing.T) {
 		t.Fatal("the over-cap content survived into the fallback")
 	}
 }
+
+// awaitDropped waits until the collector has dropped n facts.
+func awaitDropped(t *testing.T, svc *Service, n int64) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if svc.observations.dropped.Load() >= n {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("only %d of %d facts dropped (committed=%d)",
+		svc.observations.dropped.Load(), n, svc.observations.committed.Load())
+}
+
+// TestALostFactLeavesACausalGap is the second half of an independent review's
+// F2: the causal position must be RESERVED when the fact is captured, not
+// handed out later by the writer to whatever survived.
+//
+// Assigning it at the writer made the stored sequence dense by construction.
+// Every fact lost on the way — a full queue, a stale generation, an erasure
+// fence, a session ceiling — consumed no number, so the trail read as a
+// complete, gapless history of a session that had in fact lost facts, and a
+// reader could not tell "nothing happened between these two" from "something
+// happened and we dropped it". The session's dropped counter said facts were
+// lost; the sequence said none were. Only one of those can be true.
+//
+// A reserved-then-unused number is the evidence, and the dropped counter is
+// its explanation.
+func TestALostFactLeavesACausalGap(t *testing.T) {
+	svc, repo := newObservationService(t)
+
+	// Arm the identity fence, then offer a fact naming the fenced identity.
+	// The writer refuses it — but its position was already reserved when the
+	// producer handed it over.
+	repo.Tombstone("fenced")
+	svc.RecordPredictionObservation(
+		channelObservation("pool-1", "chan-fenced", "fenced", "e-lost", "ROUND_CREATED"))
+	awaitDropped(t, svc, 1)
+
+	svc.RecordPredictionObservation(
+		channelObservation("pool-1", "chan-kept", "kept", "e-kept", "ROUND_CREATED"))
+	awaitCommitted(t, svc, 1)
+
+	got, err := repo.ObservationsBySession(context.Background(), svc.observations.sessionID, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].EventID != "e-kept" {
+		t.Fatalf("facts = %+v, want only the unfenced one", got)
+	}
+	if got[0].CollectorSequence != 2 {
+		t.Fatalf("the surviving fact is at causal position %d, want 2: the lost fact's position "+
+			"was reused, so the trail claims a completeness it does not have",
+			got[0].CollectorSequence)
+	}
+	if assigned := svc.observations.sequence.Load(); assigned != 2 {
+		t.Fatalf("last assigned sequence = %d, want 2 (one lost, one committed)", assigned)
+	}
+
+	// The session's accounting explains the gap rather than contradicting it.
+	if c, d := svc.observations.committed.Load(), svc.observations.dropped.Load(); c != 1 || d != 1 {
+		t.Fatalf("accounting = %d committed / %d dropped, want 1/1", c, d)
+	}
+}
