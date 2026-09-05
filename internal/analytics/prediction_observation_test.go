@@ -700,8 +700,7 @@ func TestObservationGenerationFenceDropsQueuedFacts(t *testing.T) {
 	c := svc.observations
 
 	// Stop the writer draining so a fact can sit in the queue across the fence.
-	c.running.Store(false)
-	c.running.Store(true)
+	c.phase.Store(phaseRunning)
 	stale := mustSanitize(t, channelObservation("pool-1", "chan-a", "streamer-a", "event-stale", "ROUND_CREATED"))
 	stale.generation = c.generation.Load()
 	svc.InvalidatePredictionObservationIdentity()
@@ -1773,7 +1772,7 @@ func TestObservationOfferStampsTheCurrentGeneration(t *testing.T) {
 		t.Fatal(err)
 	}
 	c := unstarted.observations
-	c.running.Store(true) // publish capture WITHOUT a writer
+	c.phase.Store(phaseRunning) // publish capture WITHOUT a writer
 	c.generation.Add(7)
 	want := c.generation.Load()
 
@@ -2261,4 +2260,185 @@ func TestSessionReadingCountsOnTheExactPair(t *testing.T) {
 		t.Fatalf("a session with a cross-pair fact reads %q (%s), want %q",
 			reading.Reading, reading.Detail, ReadingIntegrityError)
 	}
+}
+
+// TestCloseBeforeStartLeavesNoWorker proves the lifecycle is one state
+// machine rather than two independent guards.
+//
+// Close used to fence intake and return; Start's sync.Once was still unfired,
+// so a later Start spawned the bootstrap goroutine anyway -- with a context
+// nothing would ever cancel, because the Close that would have cancelled it
+// had already run. That goroutine holds the shared database through its
+// maintenance ticker, which is exactly what "no DB-capable P1 goroutine
+// survives Service.Close" forbids, and it would then fail every DB call once
+// App closed the database underneath it.
+func TestCloseBeforeStartLeavesNoWorker(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "miner.db")
+	db := openPrivateDB(t, path)
+	defer func() { _ = db.Close() }()
+	svc, err := NewService(db, filepath.Dir(path), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := svc.observations
+	c.maintenanceInterval = time.Millisecond
+
+	if err := svc.Close(); err != nil {
+		t.Fatalf("close before start: %v", err)
+	}
+	// A Start after Close must be inert.
+	if err := svc.Start(); err != nil {
+		t.Fatalf("start after close: %v", err)
+	}
+
+	select {
+	case <-c.bootstrapped:
+		t.Fatal("a bootstrap ran after Close; the collector spawned a worker it can never cancel")
+	case <-time.After(100 * time.Millisecond):
+	}
+	if c.capturing() {
+		t.Fatal("capture opened after Close")
+	}
+	if got := c.phase.Load(); got != phaseClosed {
+		t.Fatalf("phase = %d, want CLOSED", got)
+	}
+	if c.epoch.Load() != 0 {
+		t.Fatal("a session was allocated after Close")
+	}
+
+	// And an offer afterwards is accounted, not silently queued.
+	svc.RecordPredictionObservation(channelObservation("pool-1", "chan-a", "s", "e", "ROUND_CREATED"))
+	if c.postFenceProducers.Load() != 1 {
+		t.Fatalf("post-fence producers = %d, want 1", c.postFenceProducers.Load())
+	}
+	if len(c.queue) != 0 {
+		t.Fatalf("%d facts were queued to a collector with no writer", len(c.queue))
+	}
+}
+
+// TestPublishingRunningLosesToTheShutdownFence proves the bootstrap's
+// publication and the shutdown fence cannot interleave into a state neither
+// intended.
+//
+// With independent flags, a bootstrap could read "not closing", be overtaken
+// by Close (which set closing and cleared running), and then store running
+// itself -- leaving intake OPEN on a collector whose writer was already
+// cancelled and joined. Later facts were queued and lost without being
+// counted anywhere, and the session could still finalize COMPLETE. Both are
+// now one compare-and-swap out of STARTING, so one of them simply wins.
+func TestPublishingRunningLosesToTheShutdownFence(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "miner.db")
+	db := openPrivateDB(t, path)
+	defer func() { _ = db.Close() }()
+	svc, err := NewService(db, filepath.Dir(path), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := svc.observations
+
+	// Drive the exact interleaving directly rather than hoping to hit it: the
+	// bootstrap is mid-publication when the fence goes up.
+	c.phase.Store(phaseStarting)
+	if was := c.fencePhase(); was != phaseStarting {
+		t.Fatalf("fence saw phase %d, want STARTING", was)
+	}
+	// The bootstrap resumes and performs its publication — the real one.
+	c.publishRunning()
+
+	if c.capturing() {
+		t.Fatal("a bootstrap published RUNNING over the top of the shutdown fence")
+	}
+	if got := c.phase.Load(); got != phaseClosing {
+		t.Fatalf("phase = %d, want CLOSING", got)
+	}
+	// The other order is equally decisive: once RUNNING is published, the
+	// fence still closes intake.
+	c.phase.Store(phaseRunning)
+	if was := c.fencePhase(); was != phaseRunning {
+		t.Fatalf("fence saw phase %d, want RUNNING", was)
+	}
+	if c.capturing() {
+		t.Fatal("the fence did not close intake")
+	}
+}
+
+// TestSnapshotAndObservationContendInBothDirections is the behavioural proof
+// the acceptance item asks for. The existing coverage was a source scan
+// asserting PointsSnapshotBetween mentions neither the gate nor the mutex,
+// which says nothing about what either side does when they actually meet.
+//
+// The two directions have deliberately different outcomes, and that asymmetry
+// is the contract: the observer yields, the business reader does not.
+func TestSnapshotAndObservationContendInBothDirections(t *testing.T) {
+	svc, repo := newObservationService(t)
+	ctx := context.Background()
+	if err := repo.RecordPoints("streamer-a", 100, "WATCH"); err != nil {
+		t.Fatal(err)
+	}
+	from, to := time.Now().Add(-time.Hour), time.Now().Add(time.Hour)
+
+	t.Run("snapshot first: the observation yields", func(t *testing.T) {
+		// A reader holding the single shared connection. P1 must give up
+		// inside its own deadline rather than making this wait.
+		release := make(chan struct{})
+		held := make(chan struct{})
+		done := make(chan error, 1)
+		go func() {
+			done <- repo.db.WithTx(ctx, func(*sql.Tx) error {
+				close(held)
+				<-release
+				return nil
+			})
+		}()
+		<-held
+
+		svc.observations.writeDeadline = 20 * time.Millisecond
+		before := svc.observations.dropped.Load()
+		start := time.Now()
+		svc.RecordPredictionObservation(
+			channelObservation("pool-1", "chan-a", "streamer-a", "yielding", "ROUND_CREATED"))
+		awaitDropped(t, svc, before+1)
+		yielded := time.Since(start)
+
+		close(release)
+		if err := <-done; err != nil {
+			t.Fatalf("the reader's transaction was disturbed: %v", err)
+		}
+		if yielded > 2*time.Second {
+			t.Fatalf("the observation took %v to yield; it must give up inside its own deadline", yielded)
+		}
+		svc.observations.writeDeadline = 5 * time.Second
+	})
+
+	t.Run("observation first: the snapshot neither cancels nor waits for it", func(t *testing.T) {
+		// Hold a real observation lease, so there is unambiguously an
+		// observer in flight when the snapshot runs. Relying on a background
+		// write loop to be mid-lease at the right moment does not distinguish
+		// anything: the window is microseconds wide and is almost never open.
+		lease, settle, ok := svc.observations.gate.lease(context.Background())
+		if !ok {
+			t.Fatal("could not take an observation lease")
+		}
+		defer settle()
+
+		done := make(chan error, 1)
+		go func() {
+			_, err := repo.PointsSnapshotBetween(ctx, "streamer-a", from, to, 0, false)
+			done <- err
+		}()
+
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Fatalf("snapshot failed while an observation held its lease: %v", err)
+			}
+			if lease.Err() != nil {
+				t.Fatal("the snapshot cancelled the in-flight observation: it claimed the priority " +
+					"gate, and a business READ must not do that")
+			}
+		case <-time.After(3 * time.Second):
+			t.Fatal("the snapshot waited for the observation's lease to settle; it must stay ungated " +
+				"and never queue behind an observer")
+		}
+	})
 }

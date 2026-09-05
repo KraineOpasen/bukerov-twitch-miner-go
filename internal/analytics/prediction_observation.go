@@ -2128,9 +2128,6 @@ type observationCollector struct {
 	// overCapacity records that capture was paused by a hard store bound, so
 	// a later pass that frees space can resume it.
 	overCapacity atomic.Bool
-	// closing is set by Close BEFORE it fences intake, so a bootstrap still
-	// finishing cannot publish RUNNING over the top of a teardown.
-	closing atomic.Bool
 	// inFlight counts facts the writer has taken off the queue but not yet
 	// settled, so a drain can tell "queue empty" from "actually finished".
 	inFlight atomic.Int64
@@ -2162,10 +2159,18 @@ type observationCollector struct {
 	// nonblocking; a full queue drops.
 	queue chan PredictionObservation
 
-	// running gates capture. It flips true only after the bounded bootstrap
-	// (retention, recount, session allocation) has completed, and false again
-	// at the shutdown fence.
-	running atomic.Bool
+	// phase is the collector's lifecycle, as ONE linearizable value. Every
+	// transition is a compare-and-swap, so no two of them can interleave into
+	// a state neither intended.
+	//
+	// Independent flags could. A bootstrap finishing while Close ran could
+	// read "not closing", be overtaken by the fence, and then publish RUNNING
+	// on top of it — reopening intake on a collector being torn down, so later
+	// facts were queued to a writer that was already joined and lost without
+	// being counted. And a Close that arrived before the first Start left
+	// Start's guard unfired, so a later Start still spawned a DB-capable
+	// goroutine that nothing would ever cancel.
+	phase atomic.Int32
 	// disabled marks a collector whose bootstrap failed or whose identity was
 	// erased. Capture stays off for the rest of the process.
 	disabled atomic.Bool
@@ -2237,6 +2242,58 @@ func newObservationCollector(repo *SQLiteRepository, gate *txPriority, retention
 		bootstrapped:        make(chan struct{}),
 		fenced:              make(map[string]struct{}),
 		loginChannels:       make(map[string][]string),
+	}
+}
+
+// The collector's lifecycle phases, in the only order they may be entered.
+// Every transition is a compare-and-swap on collector.phase.
+const (
+	// phaseNew: constructed, nothing spawned, no session.
+	phaseNew int32 = iota
+	// phaseStarting: the bootstrap goroutine exists; intake is still closed.
+	phaseStarting
+	// phaseRunning: bootstrap succeeded and intake is open.
+	phaseRunning
+	// phasePaused: intake is closed by a hard store bound and may reopen.
+	phasePaused
+	// phaseClosing: the shutdown fence is up; intake never reopens.
+	phaseClosing
+	// phaseClosed: the writer is joined and the session finalized.
+	phaseClosed
+)
+
+// capturing reports whether intake is open.
+func (c *observationCollector) capturing() bool { return c.phase.Load() == phaseRunning }
+
+// tearingDown reports whether the shutdown fence is up. It is what separates a
+// producer that raced the fence — evidence the collector closed while a
+// producer was alive — from one that simply arrived before intake opened.
+func (c *observationCollector) tearingDown() bool { return c.phase.Load() >= phaseClosing }
+
+// publishRunning is the bootstrap's ONE transition into RUNNING: a move OUT of
+// STARTING, never a store.
+//
+// Close may have fenced intake while the bootstrap was still finishing. A
+// plain store would put RUNNING back on top of that fence and leave a
+// writer-less collector accepting facts nobody will ever write — queued,
+// uncounted, and still allowing the session to finalize COMPLETE. As a
+// compare-and-swap it simply loses.
+func (c *observationCollector) publishRunning() {
+	c.phase.CompareAndSwap(phaseStarting, phaseRunning)
+}
+
+// fence moves the collector to phaseClosing from wherever it is, and reports
+// the phase it came from. It is the ONLY way intake closes permanently, and a
+// concurrent bootstrap publishing RUNNING can only win or lose it outright.
+func (c *observationCollector) fencePhase() int32 {
+	for {
+		was := c.phase.Load()
+		if was >= phaseClosing {
+			return was
+		}
+		if c.phase.CompareAndSwap(was, phaseClosing) {
+			return was
+		}
 	}
 }
 
@@ -2322,11 +2379,18 @@ func (c *observationCollector) isFenced(o PredictionObservation) bool {
 // the session INSERT) and only then publishes RUNNING. A bootstrap failure
 // disables P1 alone — it never fails App or Miner startup.
 func (c *observationCollector) Start() {
-	c.startOnce.Do(func() {
-		ctx, cancel := context.WithCancel(context.Background())
-		c.stop.Store(&cancel)
-		go c.run(ctx)
-	})
+	// The CAS is the guard: it succeeds exactly once, and it FAILS for a
+	// collector already closed. A sync.Once could not do the second part —
+	// Close before the first Start left the Once unfired, so this call still
+	// spawned a goroutine, and nothing would ever cancel it. That goroutine
+	// holds the shared database open through its maintenance ticker, which is
+	// exactly what "no DB-capable P1 goroutine survives Close" forbids.
+	if !c.phase.CompareAndSwap(phaseNew, phaseStarting) {
+		return
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	c.stop.Store(&cancel)
+	go c.run(ctx)
 }
 
 func (c *observationCollector) run(ctx context.Context) {
@@ -2341,13 +2405,7 @@ func (c *observationCollector) run(ctx context.Context) {
 		c.drainUntil(ctx)
 		return
 	}
-	// Close may already have fenced intake while the bootstrap was still
-	// finishing. Publishing RUNNING unconditionally here would reopen a
-	// collector that is being torn down, leaving a writer-less RUNNING state
-	// and a session that finalizes COMPLETE despite having lost work.
-	if !c.closing.Load() {
-		c.running.Store(true)
-	}
+	c.publishRunning()
 	close(c.bootstrapped)
 
 	// Retention is WORKER-OWNED, so the worker has to own it continuously —
@@ -2404,15 +2462,15 @@ func (c *observationCollector) maintain(ctx context.Context) {
 		return
 	}
 	over := stats.Rows >= MaxStoreRows || stats.Bytes >= MaxStoreBytes || stats.Sessions >= MaxStoreSessions
-	if over && c.running.Load() {
-		c.running.Store(false)
+	if over && c.phase.CompareAndSwap(phaseRunning, phasePaused) {
 		c.overCapacity.Store(true)
 		observationLog("Prediction observation capture paused: store is at a hard capacity bound", errObservationAtCapacity)
 		return
 	}
-	if !over && c.overCapacity.Load() && !c.closing.Load() {
+	// Resuming is a swap out of PAUSED, so it can never reopen intake on a
+	// collector that has since been fenced.
+	if !over && c.overCapacity.Load() && c.phase.CompareAndSwap(phasePaused, phaseRunning) {
 		c.overCapacity.Store(false)
-		c.running.Store(true)
 	}
 }
 
@@ -2612,7 +2670,7 @@ func (c *observationCollector) leasedSession(ctx context.Context, sessionID stri
 // allocates on the shared connection, never waits and never returns an error
 // a producer could be tempted to act on.
 func (c *observationCollector) offer(obs PredictionObservation) {
-	if !c.running.Load() {
+	if !c.capturing() {
 		// Not yet bootstrapped, already fenced, or disabled: the fact is
 		// honestly lost, and the session says so at finalization.
 		//
@@ -2625,7 +2683,7 @@ func (c *observationCollector) offer(obs PredictionObservation) {
 		// prevented from finalizing COMPLETE, by the counters that exist for
 		// exactly this: post_fence_producer_count after the shutdown fence,
 		// and the pre-intake loss below before it.
-		if c.closing.Load() {
+		if c.tearingDown() {
 			// A producer STILL offering after the shutdown fence proves the
 			// collector closed while a producer was demonstrably alive.
 			c.postFenceProducers.Add(1)
@@ -2730,15 +2788,16 @@ func (c *observationCollector) drain(grace time.Duration) {
 // shared database immediately afterwards.
 func (c *observationCollector) Close() {
 	c.closeOnce.Do(func() {
-		// 0. Announce the teardown FIRST. A bootstrap still in flight checks
-		//    this before publishing RUNNING, so it cannot reopen intake over
-		//    the top of the fence below.
-		c.closing.Store(true)
-		// 1. Fence intake. Every later offer is a counted drop.
-		c.running.Store(false)
+		// 1. Fence intake, permanently, in ONE transition. A bootstrap still
+		//    in flight publishes RUNNING by swapping out of STARTING, so it
+		//    either wins before this or loses to it — it can never reopen
+		//    intake on top of the fence.
+		was := c.fencePhase()
 
-		// 2. Bounded drain.
-		if stop := c.stop.Load(); stop != nil {
+		// 2. Bounded drain. A collector that never started has no writer to
+		//    drain or join, and the fence above already stops a later Start
+		//    from creating one.
+		if stop := c.stop.Load(); stop != nil && was != phaseNew {
 			c.drain(observationDrainGrace)
 			// 3. Cancel and 4. JOIN the writer.
 			(*stop)()
@@ -2746,6 +2805,7 @@ func (c *observationCollector) Close() {
 		}
 
 		// 5. Finalize — after the join, so the accounting can no longer move.
+		defer c.phase.Store(phaseClosed)
 		if c.epoch.Load() == 0 {
 			return // bootstrap never allocated a session: nothing to finalize
 		}

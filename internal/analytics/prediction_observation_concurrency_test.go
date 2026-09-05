@@ -28,7 +28,7 @@ func TestObservationQueueOverflowDropsAndLeavesConnectionUsable(t *testing.T) {
 	// Hold the writer off entirely: capture is published RUNNING but nothing
 	// drains, so the queue fills and then overflows.
 	c := svc.observations
-	c.running.Store(true)
+	c.phase.Store(phaseRunning)
 
 	const offered = ObservationQueueCapacity * 3
 	done := make(chan struct{})
@@ -668,7 +668,7 @@ func TestObservationCapacityPausesAndResumesCapture(t *testing.T) {
 		t.Fatal(err)
 	}
 	<-c.bootstrapped
-	if !c.running.Load() {
+	if !c.capturing() {
 		t.Fatal("capture did not come up")
 	}
 
@@ -679,22 +679,22 @@ func TestObservationCapacityPausesAndResumesCapture(t *testing.T) {
 		t.Helper()
 		deadline := time.Now().Add(10 * time.Second)
 		for time.Now().Before(deadline) {
-			if c.running.Load() != want {
+			if c.capturing() != want {
 				return
 			}
 			time.Sleep(10 * time.Millisecond)
 		}
-		t.Fatalf("capture running=%v, want %v", c.running.Load(), !want)
+		t.Fatalf("capture running=%v, want %v", c.capturing(), !want)
 	}
 	_ = awaitPaused
 
 	// The store caps themselves are compile-time constants, so drive the
 	// same code path directly: an over-capacity verdict pauses, and a
 	// subsequent under-capacity verdict resumes.
-	c.running.Store(false)
+	c.phase.Store(phasePaused)
 	c.overCapacity.Store(true)
 	c.maintain(context.Background())
-	if !c.running.Load() {
+	if !c.capturing() {
 		t.Fatal("capture did not resume once the store was measured under its bounds")
 	}
 	if c.overCapacity.Load() {
@@ -719,7 +719,7 @@ func TestObservationCloseBeatsAFinishingBootstrap(t *testing.T) {
 		}
 		// Close immediately — racing the bootstrap goroutine.
 		_ = svc.Close()
-		if svc.observations.running.Load() {
+		if svc.observations.capturing() {
 			t.Fatal("a finishing bootstrap reopened intake over the shutdown fence")
 		}
 		_ = db.Close()
