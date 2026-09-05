@@ -137,6 +137,12 @@ type SQLiteRepository struct {
 	// happened at the top of the call that owns that transaction.
 	priority *txPriority
 
+	// quotas is the pre-insert ledger for the frozen per-round and
+	// per-deletion-key ceilings. It lives here rather than on the collector
+	// because the ceilings are properties of the STORE: they survive a
+	// restart, and the bootstrap seeds this from what the tables hold.
+	quotas *observationQuotaLedger
+
 	// observations is the collector an identity erasure must fence before it
 	// opens its transaction (see InvalidateIdentity). Set by NewService right
 	// after it constructs the collector; nil for a repository built directly.
@@ -328,6 +334,7 @@ func NewSQLiteRepository(db *database.DB, basePath string) (*SQLiteRepository, e
 		basePath: basePath,
 		deleted:  make(map[string]struct{}),
 		priority: priority,
+		quotas:   newObservationQuotaLedger(),
 	}
 
 	return repo, nil

@@ -47,6 +47,7 @@ import (
 	"fmt"
 	"hash"
 	"log/slog"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -243,6 +244,10 @@ const (
 	// identity (a single routed or retention-group-owner channel).
 	MaxDeletionIdentityRows  = 4096
 	MaxDeletionIdentityBytes = 16 << 20
+	// MaxStoreDeletionKeys bounds how many SEPARATELY ERASABLE identities the
+	// whole store may hold. One row can carry up to four deletion keys, so a
+	// row whose new keys would push the store past this is refused whole.
+	MaxStoreDeletionKeys = 262144
 	// MaxProvedIdentityUnionRows / MaxProvedIdentityUnionBytes bound the union
 	// of a proved parent and channel in one erasure.
 	MaxProvedIdentityUnionRows  = 8192
@@ -1261,6 +1266,13 @@ var (
 	// errObservationGroupConflict: a round group's immutable retention-group
 	// owner disagrees with this fact's.
 	errObservationGroupConflict = errors.New("analytics: round group owner conflict")
+	// errObservationRoundFull: this local round already holds its ceiling.
+	// Bounded, per-round, and not a reason to stop capturing anything else.
+	errObservationRoundFull = errors.New("analytics: round is at its retention ceiling")
+	// errObservationIdentityFull: a deletion identity key is at its ceiling.
+	// That ceiling is the advance promise about what one privacy erasure can
+	// ever have to delete, so capture stops rather than growing past it.
+	errObservationIdentityFull = errors.New("analytics: deletion identity is at its ceiling")
 )
 
 // observationCaptureColumns is the part of a fact the PRODUCER supplied. It is
@@ -1330,7 +1342,12 @@ func (r *SQLiteRepository) AppendObservation(ctx context.Context, o PredictionOb
 		payloadVersion: ObservationPayloadVersion, payloadJSON: payloadJSON,
 	}
 
-	return r.db.WithTx(ctx, func(tx *sql.Tx) error {
+	var (
+		chargedKeys  []string
+		chargedRound string
+		inserted     bool
+	)
+	err := r.db.WithTx(ctx, func(tx *sql.Tx) error {
 		// (1) the exact published OPEN session, by BOTH halves of the pair.
 		var closeState string
 		switch e := tx.QueryRowContext(ctx, `
@@ -1392,7 +1409,21 @@ func (r *SQLiteRepository) AppendObservation(ctx context.Context, o PredictionOb
 			return err
 		}
 
-		// (4) Computed HERE, after the parents are resolved, so the witness
+		// (4) The ceilings, checked against current usage PLUS this fact,
+		// BEFORE it is written. A deletion-key ceiling is an advance promise
+		// about the most one privacy erasure can ever have to delete; a
+		// ceiling only observed afterwards has already been broken and the
+		// promise with it.
+		chargedKeys = observationDeletionKeys(o, routedID, retentionID)
+		chargedRound = observationRoundKey(epoch, o.PoolInstanceID, incarnation)
+		if admitted, identity := r.quotas.admit(chargedKeys, chargedRound, int64(len(payloadJSON))); !admitted {
+			if identity {
+				return errObservationIdentityFull
+			}
+			return errObservationRoundFull
+		}
+
+		// (5) Computed HERE, after the parents are resolved, so the witness
 		// covers the ids actually stored rather than the ones the producer
 		// guessed.
 		digest := observationDigest(o, observationID, sessionID, epoch, seq, incarnation, payloadJSON,
@@ -1423,8 +1454,16 @@ func (r *SQLiteRepository) AppendObservation(ctx context.Context, o PredictionOb
 			observationConnectionValue(o.ConnectionKnown, int64(o.ConnectionSequence)),
 			ObservationPayloadVersion, payloadJSON, digest,
 		)
+		inserted = err == nil
 		return err
 	})
+	// Charged only once the row is really there. An INSERT that failed, and an
+	// identical retry that wrote nothing, must both cost nothing: a ceiling
+	// spent on a row that does not exist would refuse real facts later.
+	if err == nil && inserted {
+		r.quotas.charge(chargedKeys, chargedRound, int64(len(payloadJSON)))
+	}
+	return err
 }
 
 // readObservationCaptureColumns reads back the capture-supplied half of an
@@ -1520,6 +1559,200 @@ func observationConnectionValue(known bool, v int64) interface{} {
 		return nil
 	}
 	return v
+}
+
+// ---------------------------------------------------------------------------
+// Quota ledger
+// ---------------------------------------------------------------------------
+
+// observationUsage is what one quota bucket currently holds.
+type observationUsage struct {
+	Rows  int64
+	Bytes int64
+}
+
+// observationQuotaLedger enforces the frozen per-unit ceilings BEFORE a fact is
+// inserted, against current usage PLUS the incoming fact.
+//
+// Checking afterwards is not the same thing. The periodic pass measures a store
+// that has already grown past its bound, and the bound exists to make the cost
+// of an erasure knowable in advance: a pilot proving that erasing 8,192 rows and
+// 32 MiB completes inside its budget means nothing unless the insert path can
+// show an erasure will never meet more than that. That is what a deletion-key
+// ceiling is -- an advance promise about the worst case a purge can encounter --
+// and only a pre-insert check can keep it.
+//
+// The buckets mirror the units something is actually deleted by:
+//
+//   - one deletion identity key ("parent:<id>" or "chan:<id>"), which is what a
+//     privacy erasure selects on. A fact is charged ONCE per key across the
+//     union of its routed and retention-group-owner roles, because one erasure
+//     of that key deletes it once.
+//   - one local round, which is what retention removes whole.
+//   - the number of distinct deletion keys in the store, so a store cannot
+//     accumulate unboundedly many separately-erasable identities.
+//
+// round_owner is deliberately not charged: it never widens deletion, so it
+// cannot widen the worst case either.
+type observationQuotaLedger struct {
+	mu           sync.Mutex
+	deletionKeys map[string]observationUsage
+	rounds       map[string]observationUsage
+}
+
+func newObservationQuotaLedger() *observationQuotaLedger {
+	return &observationQuotaLedger{
+		deletionKeys: make(map[string]observationUsage),
+		rounds:       make(map[string]observationUsage),
+	}
+}
+
+// observationDeletionKeys returns the DEDUPLICATED deletion identity keys one
+// fact is charged against: the union of its routed and retention-group-owner
+// parent and channel roles. A fact naming the same channel in both roles is one
+// row against that key, because one erasure removes it once.
+func observationDeletionKeys(o PredictionObservation, routedID, retentionID interface{}) []string {
+	seen := make(map[string]struct{}, 4)
+	keys := make([]string, 0, 4)
+	add := func(k string) {
+		if _, dup := seen[k]; dup {
+			return
+		}
+		seen[k] = struct{}{}
+		keys = append(keys, k)
+	}
+	if o.RoutedChannelID != "" {
+		add("chan:" + o.RoutedChannelID)
+	}
+	if o.RetentionGroupOwnerChannelID != "" {
+		add("chan:" + o.RetentionGroupOwnerChannelID)
+	}
+	if id, ok := routedID.(int64); ok {
+		add("parent:" + strconv.FormatInt(id, 10))
+	}
+	if id, ok := retentionID.(int64); ok {
+		add("parent:" + strconv.FormatInt(id, 10))
+	}
+	return keys
+}
+
+// observationRoundKey is the retention unit's quota key: the same compound key
+// retention deletes by.
+func observationRoundKey(epoch int64, pool, incarnation string) string {
+	if incarnation == "" {
+		return ""
+	}
+	return strconv.FormatInt(epoch, 10) + "|" + pool + "|" + incarnation
+}
+
+// admit reserves room for one fact, or reports which ceiling refused it.
+// Reserving and committing are separate: a failed INSERT must cost no quota, so
+// nothing is charged until the row is actually there.
+func (l *observationQuotaLedger) admit(keys []string, roundKey string, bytes int64) (ok bool, identityBreach bool) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	if roundKey != "" {
+		u := l.rounds[roundKey]
+		if u.Rows+1 > MaxRoundRows || u.Bytes+bytes > MaxRoundBytes {
+			return false, false
+		}
+	}
+	for _, k := range keys {
+		u, known := l.deletionKeys[k]
+		if !known && int64(len(l.deletionKeys)) >= MaxStoreDeletionKeys {
+			// A new key would push the store past the number of separately
+			// erasable identities it may hold.
+			return false, true
+		}
+		if u.Rows+1 > MaxDeletionIdentityRows || u.Bytes+bytes > MaxDeletionIdentityBytes {
+			return false, true
+		}
+	}
+	return true, false
+}
+
+// charge records a committed fact against every bucket it belongs to.
+func (l *observationQuotaLedger) charge(keys []string, roundKey string, bytes int64) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if roundKey != "" {
+		u := l.rounds[roundKey]
+		u.Rows, u.Bytes = u.Rows+1, u.Bytes+bytes
+		l.rounds[roundKey] = u
+	}
+	for _, k := range keys {
+		u := l.deletionKeys[k]
+		u.Rows, u.Bytes = u.Rows+1, u.Bytes+bytes
+		l.deletionKeys[k] = u
+	}
+}
+
+// distinctDeletionKeys reports how many separately erasable identities the
+// store currently holds.
+func (l *observationQuotaLedger) distinctDeletionKeys() int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return len(l.deletionKeys)
+}
+
+// roundUsage reports one round's usage, for tests and for the recount.
+func (l *observationQuotaLedger) roundUsage(key string) observationUsage {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.rounds[key]
+}
+
+// deletionKeyUsage reports one deletion key's usage.
+func (l *observationQuotaLedger) deletionKeyUsage(key string) observationUsage {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.deletionKeys[key]
+}
+
+// RecountObservationQuotas rebuilds the quota ledger from what the store
+// actually holds. It runs once, in the bootstrap, before intake opens.
+//
+// The ceilings are properties of the STORE, not of one run, so a fresh process
+// that started counting from zero would let a store already at its bound accept
+// another full session's worth of facts -- and the erasure-cost promise the
+// bound exists for would be worth nothing after the first restart.
+//
+// The scan is bounded by the store's own row ceiling and reads only identity
+// columns and payload lengths -- never payload content.
+func (r *SQLiteRepository) RecountObservationQuotas(ctx context.Context, l *observationQuotaLedger) error {
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT collector_epoch, pool_instance_id, COALESCE(round_incarnation_id, ''),
+		       COALESCE(routed_channel_id, ''), COALESCE(retention_group_owner_channel_id, ''),
+		       COALESCE(routed_streamer_id, 0), COALESCE(retention_group_owner_streamer_id, 0),
+		       length(CAST(payload_json AS BLOB))
+		  FROM prediction_observations
+		 LIMIT ?`, MaxStoreRows)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = rows.Close() }()
+
+	for rows.Next() {
+		var epoch, routedID, retentionID, size int64
+		var pool, incarnation, routedChannel, retentionChannel string
+		if err := rows.Scan(&epoch, &pool, &incarnation, &routedChannel, &retentionChannel,
+			&routedID, &retentionID, &size); err != nil {
+			return err
+		}
+		var routed, retention interface{}
+		if routedID != 0 {
+			routed = routedID
+		}
+		if retentionID != 0 {
+			retention = retentionID
+		}
+		l.charge(observationDeletionKeys(PredictionObservation{
+			RoutedChannelID:              routedChannel,
+			RetentionGroupOwnerChannelID: retentionChannel,
+		}, routed, retention), observationRoundKey(epoch, pool, incarnation), size)
+	}
+	return rows.Err()
 }
 
 // ---------------------------------------------------------------------------
@@ -2198,6 +2431,10 @@ type observationCollector struct {
 	fenced        map[string]struct{}
 	loginChannels map[string][]string
 
+	// quotas is the pre-insert ledger for the per-round and per-deletion-key
+	// ceilings. It is seeded from the store at bootstrap, because the ceilings
+	// are properties of the STORE and a run that started counting from zero
+	// would let a store already at its bound accept another session's worth.
 	// erasedAt records, per fence key, the causal position this session had
 	// reached when that identity was last erased — and unlike the fence it is
 	// never lifted for the life of the session.
@@ -2549,12 +2786,25 @@ func (c *observationCollector) bootstrap(ctx context.Context) error {
 			errObservationAtCapacity, stats.Rows, stats.Bytes, stats.Sessions)
 	}
 
+	// Seed the quota ledger from what the store actually holds, before intake
+	// opens. A restart that started from zero would forget every ceiling the
+	// previous runs had already spent.
+	if err := c.recountQuotas(ctx); err != nil {
+		return fmt.Errorf("analytics: observation quota recount: %w", err)
+	}
+
 	epoch, err := c.leasedSession(ctx, sessionID)
 	if err != nil {
 		return fmt.Errorf("analytics: open observation session: %w", err)
 	}
 	c.epoch.Store(epoch)
 	return nil
+}
+
+func (c *observationCollector) recountQuotas(ctx context.Context) error {
+	return c.leased(ctx, observationMaintenanceBudget, func(lease context.Context) error {
+		return c.repo.RecountObservationQuotas(lease, c.repo.quotas)
+	})
 }
 
 // drainUntil empties the queue without writing, so a disabled collector never
@@ -2628,6 +2878,16 @@ func (c *observationCollector) write(ctx context.Context, raw PredictionObservat
 
 	if err := c.repo.AppendObservation(leaseCtx, obs, c.sessionID, c.epoch.Load(), seq); err != nil {
 		c.dropped.Add(1)
+		// A deletion identity at its ceiling is not a transient refusal. The
+		// ceiling is the advance promise about the most a single privacy
+		// erasure can ever have to delete, and there is no way to keep
+		// capturing for that identity without breaking it. Capture stops for
+		// the rest of the process rather than growing past a bound the erasure
+		// path is designed around.
+		if errors.Is(err, errObservationIdentityFull) {
+			c.disabled.Store(true)
+			observationLog("Prediction observation capture disabled: a deletion identity is at its ceiling", err)
+		}
 		return
 	}
 	c.sessionBytes.Add(int64(len(payloadJSONOf(obs))))

@@ -2527,3 +2527,194 @@ func TestAFactCapturedBeforeAnErasureCannotSurviveTheReinstate(t *testing.T) {
 		t.Fatal("the re-added streamer is permanently unobservable; only the erased life is refused")
 	}
 }
+
+// TestQuotasAreCheckedBeforeTheInsert is an independent review's F5.
+//
+// The declared ceilings were only ever observed afterwards, by a ten-minute
+// maintenance pass, and the per-deletion-key and per-round ones were not
+// enforced anywhere at all. That is not a smaller version of the same thing.
+// A deletion-key ceiling is an advance promise about the most a single privacy
+// erasure can ever have to delete -- it is the reason a purge pilot bounded at
+// 8,192 rows and 32 MiB proves anything -- and a ceiling first noticed after
+// the store has passed it has already broken that promise.
+func TestQuotasAreCheckedBeforeTheInsert(t *testing.T) {
+	t.Run("a round stops at its row ceiling", func(t *testing.T) {
+		svc, repo := newObservationService(t)
+		ctx := context.Background()
+		epoch := svc.observations.epoch.Load()
+		sessionID := svc.observations.sessionID
+
+		fact := func() PredictionObservation {
+			o := mustSanitize(t, channelObservation("pool-1", "chan-a", "s", "event-1", "ROUND_UPDATED"))
+			o.RoundIncarnationID = "round:pool-1:1"
+			return o
+		}
+		for i := int64(1); i <= MaxRoundRows; i++ {
+			if err := repo.AppendObservation(ctx, fact(), sessionID, epoch, i); err != nil {
+				t.Fatalf("fact %d of the round was refused: %v", i, err)
+			}
+		}
+		err := repo.AppendObservation(ctx, fact(), sessionID, epoch, MaxRoundRows+1)
+		if !errors.Is(err, errObservationRoundFull) {
+			t.Fatalf("fact %d returned %v, want the round ceiling", MaxRoundRows+1, err)
+		}
+		if n := countRows(t, repo, `SELECT COUNT(*) FROM prediction_observations`); n != MaxRoundRows {
+			t.Fatalf("the round holds %d rows, want exactly the %d ceiling", n, MaxRoundRows)
+		}
+		// The ceiling is per round: another round is unaffected.
+		other := mustSanitize(t, channelObservation("pool-1", "chan-a", "s", "event-2", "ROUND_CREATED"))
+		other.RoundIncarnationID = "round:pool-1:2"
+		if err := repo.AppendObservation(ctx, other, sessionID, epoch, MaxRoundRows+2); err != nil {
+			t.Fatalf("a different round was refused: %v", err)
+		}
+	})
+
+	t.Run("a failed insert and an identical retry cost no quota", func(t *testing.T) {
+		svc, repo := newObservationService(t)
+		ctx := context.Background()
+		epoch := svc.observations.epoch.Load()
+		sessionID := svc.observations.sessionID
+		key := "chan:chan-a"
+
+		fact := mustSanitize(t, channelObservation("pool-1", "chan-a", "s", "event-1", "ROUND_CREATED"))
+		if err := repo.AppendObservation(ctx, fact, sessionID, epoch, 1); err != nil {
+			t.Fatal(err)
+		}
+		after := repo.quotas.deletionKeyUsage(key)
+		if after.Rows != 1 {
+			t.Fatalf("one committed fact charged %d rows", after.Rows)
+		}
+
+		// An identical retry writes nothing, so it must charge nothing.
+		if err := repo.AppendObservation(ctx, fact, sessionID, epoch, 1); err != nil {
+			t.Fatal(err)
+		}
+		if got := repo.quotas.deletionKeyUsage(key); got != after {
+			t.Fatalf("an identical retry charged quota: %+v -> %+v", after, got)
+		}
+
+		// A write refused BEFORE the quota is even computed charges nothing.
+		if err := repo.AppendObservation(ctx, fact, "no-such-session", epoch, 2); err == nil {
+			t.Fatal("a write into an unknown session succeeded")
+		}
+		if got := repo.quotas.deletionKeyUsage(key); got != after {
+			t.Fatalf("a write refused before the insert charged quota: %+v -> %+v", after, got)
+		}
+
+		// And a write that gets all the way to a FAILING insert charges
+		// nothing either -- this is the ordering that matters, because the
+		// quota was already admitted by the time the insert ran. A ceiling
+		// spent on a row that does not exist refuses real facts later.
+		insertObservationRow(t, repo.db, epoch, 9, "squatter", "pool-1", "", "", 10)
+		later := mustSanitize(t, channelObservation("pool-1", "chan-a", "s", "event-9", "ROUND_CREATED"))
+		if err := repo.AppendObservation(ctx, later, sessionID, epoch, 9); err == nil {
+			t.Fatal("two facts took one causal position")
+		}
+		if got := repo.quotas.deletionKeyUsage(key); got != after {
+			t.Fatalf("a failed insert charged quota: %+v -> %+v", after, got)
+		}
+	})
+
+	t.Run("a fact is charged once per key across its roles", func(t *testing.T) {
+		svc, repo := newObservationService(t)
+		ctx := context.Background()
+		epoch := svc.observations.epoch.Load()
+
+		// The same channel is both the routed identity and the retention-group
+		// owner, which is the ordinary shape. One erasure of that channel
+		// deletes the row once, so it is charged once.
+		fact := mustSanitize(t, channelObservation("pool-1", "chan-a", "s", "event-1", "ROUND_CREATED"))
+		if fact.RoutedChannelID != fact.RetentionGroupOwnerChannelID {
+			t.Fatal("fixture must name one channel in both roles")
+		}
+		if err := repo.AppendObservation(ctx, fact, svc.observations.sessionID, epoch, 1); err != nil {
+			t.Fatal(err)
+		}
+		if got := repo.quotas.deletionKeyUsage("chan:chan-a"); got.Rows != 1 {
+			t.Fatalf("one fact charged %d rows against one key; the roles must be deduplicated", got.Rows)
+		}
+	})
+
+	t.Run("an identity at its ceiling stops capture for good", func(t *testing.T) {
+		svc, repo := newObservationService(t)
+		ctx := context.Background()
+		c := svc.observations
+
+		// Put the identity at its ceiling without writing four thousand rows.
+		repo.quotas.mu.Lock()
+		repo.quotas.deletionKeys["chan:chan-full"] = observationUsage{Rows: MaxDeletionIdentityRows}
+		repo.quotas.mu.Unlock()
+
+		fact := mustSanitize(t, channelObservation("pool-1", "chan-full", "s", "event-1", "ROUND_CREATED"))
+		fact.sequence = c.sequence.Add(1)
+		fact.generation = c.generation.Load()
+		before := c.dropped.Load()
+		c.write(ctx, fact)
+		if c.dropped.Load() != before+1 {
+			t.Fatal("a fact over the identity ceiling was accepted")
+		}
+		if !c.disabled.Load() {
+			t.Fatal("an identity at its ceiling did not stop capture; the erasure-cost promise the " +
+				"ceiling exists for cannot be kept while capture continues")
+		}
+	})
+}
+
+// TestQuotaRecountSurvivesARestart proves the ceilings are properties of the
+// STORE, not of one run.
+//
+// A fresh process that started counting from zero would let a store already at
+// a deletion-key ceiling accept another whole session's worth of rows under
+// that same key -- and the bound on what one erasure can meet, which is the
+// only reason a bounded purge pilot proves anything, would be worth nothing
+// after the first restart.
+func TestQuotaRecountSurvivesARestart(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "miner.db")
+	db := openPrivateDB(t, path)
+	svc, err := NewService(db, filepath.Dir(path), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc.observations.writeDeadline = 5 * time.Second
+	if err := svc.Start(); err != nil {
+		t.Fatal(err)
+	}
+	<-svc.observations.bootstrapped
+
+	const facts = 5
+	for i := 0; i < facts; i++ {
+		svc.RecordPredictionObservation(
+			channelObservation("pool-1", "chan-a", "s", "event-"+itoa(int64(i)), "ROUND_CREATED"))
+	}
+	awaitCommitted(t, svc, facts)
+	firstRun := svc.repo.(*SQLiteRepository).quotas.deletionKeyUsage("chan:chan-a")
+	if firstRun.Rows != facts {
+		t.Fatalf("first run charged %d rows, want %d", firstRun.Rows, facts)
+	}
+	if err := svc.Close(); err != nil {
+		t.Fatal(err)
+	}
+	_ = db.Close()
+
+	// A second process over the same store.
+	db2 := openPrivateDB(t, path)
+	defer func() { _ = db2.Close() }()
+	svc2, err := NewService(db2, filepath.Dir(path), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = svc2.Close() }()
+	if err := svc2.Start(); err != nil {
+		t.Fatal(err)
+	}
+	<-svc2.observations.bootstrapped
+
+	got := svc2.repo.(*SQLiteRepository).quotas.deletionKeyUsage("chan:chan-a")
+	if got.Rows != firstRun.Rows {
+		t.Fatalf("after a restart the identity's usage is %d rows, want the %d already in the store",
+			got.Rows, firstRun.Rows)
+	}
+	if got.Bytes != firstRun.Bytes {
+		t.Fatalf("after a restart the identity's usage is %d bytes, want %d", got.Bytes, firstRun.Bytes)
+	}
+}
