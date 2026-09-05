@@ -27,6 +27,7 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"strconv"
 	"time"
 )
 
@@ -97,6 +98,12 @@ type PredictionObservation struct {
 	RetentionGroupOwnerChannelID string
 	RetentionGroupOwnerLogin     string
 
+	// RoundIncarnationID names the LOCAL admission of the round this fact is
+	// about. It is carried from the pool's roundControl, never recomputed from
+	// the channel and event id, so two separate admissions of one Twitch event
+	// are two rounds. Empty when the fact is about no admitted round.
+	RoundIncarnationID string
+
 	EventID string
 
 	Kind              string
@@ -141,6 +148,34 @@ func newPoolInstanceID() string {
 	return "pool-" + hex.EncodeToString(b[:])
 }
 
+// newRoundIncarnation mints the identity of ONE local round admission: this
+// pool instance plus a pool-local admission counter. It is called exactly where
+// a new event/control pair is published into the pool's maps, so concurrent
+// successful admissions of the same event id necessarily receive different
+// ids — which a value derived from the channel and event id could not do.
+func (p *WebSocketPool) newRoundIncarnation() string {
+	return "round:" + p.instanceID + ":" + strconv.FormatUint(p.roundAdmissions.Add(1), 10)
+}
+
+// roundIncarnation reads the local round identity of a currently tracked round,
+// or "" when no round is tracked under that event id.
+//
+// It takes p.mu for reading, so it must NEVER be called from a path that
+// already holds p.mu. The two paths that do — removePrediction and
+// sweepStaleLocked — capture the incarnation themselves before deleting the
+// entry, which they must do anyway: after the delete there is nothing to read.
+func (p *WebSocketPool) roundIncarnation(eventID string) string {
+	if eventID == "" {
+		return ""
+	}
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	if rc := p.control[eventID]; rc != nil {
+		return rc.incarnation
+	}
+	return ""
+}
+
 // SetPredictionObservationSink installs the observation sink. It is wired once
 // at construction time, before Start; the atomic store means every later read
 // on a hot path is lock-free.
@@ -160,6 +195,19 @@ func (p *WebSocketPool) observe(obs PredictionObservation) {
 		return
 	}
 	obs.PoolInstanceID = p.instanceID
+	// The store's schema makes a round incarnation and a retention-group owner
+	// channel exist together or not at all: the incarnation is what makes
+	// whole-round retention and whole-round erasure well defined, and a
+	// retention group with no round is not a group. Enforcing it HERE, on the
+	// one path every fact leaves by, means no call site can produce a fact the
+	// store would have to reject — and a fact about a round this pool never
+	// admitted is honestly an individual fact about a channel, not a member of
+	// a retention group. It keeps its routed identity either way, so a privacy
+	// erasure still reaches it.
+	if obs.RoundIncarnationID == "" {
+		obs.RetentionGroupOwnerChannelID = ""
+		obs.RetentionGroupOwnerLogin = ""
+	}
 	if obs.ReceivedAtMS == 0 {
 		obs.ReceivedAtMS = time.Now().UnixMilli()
 	}
@@ -220,8 +268,9 @@ type streamerIdentity interface {
 
 // observationRoundIdentity fills in the round identity of a fact that is about
 // a specific tracked round on a specific channel.
-func observationRoundIdentity(obs *PredictionObservation, eventID, channelID, login string) {
+func observationRoundIdentity(obs *PredictionObservation, eventID, channelID, login, incarnation string) {
 	obs.EventID = eventID
+	obs.RoundIncarnationID = incarnation
 	obs.RetentionGroupOwnerChannelID = channelID
 	obs.RetentionGroupOwnerLogin = login
 	obs.RoutedChannelID = channelID
@@ -317,6 +366,10 @@ func (p *WebSocketPool) observeChannelEvent(msg *PubSubMessage, streamer streame
 	obs := observationFromMessage(msg, streamer)
 	obs.Kind = ObsKindChannelEvent
 	obs.EventID = eventID
+	// An event-created frame is observed BEFORE any admission decision, so it
+	// usually names no local round; an event-updated frame for a tracked round
+	// names the admission that is tracking it.
+	obs.RoundIncarnationID = p.roundIncarnation(eventID)
 
 	phase := "ROUND_UPDATED"
 	if msg.Type == "event-created" {
@@ -349,12 +402,22 @@ func (p *WebSocketPool) observeChannelEvent(msg *PubSubMessage, streamer streame
 // an auto-bet, and why not when it was not. It is emitted AFTER the decision
 // the existing code already made — it never participates in making it.
 func (p *WebSocketPool) observeScheduleDecision(msg *PubSubMessage, streamer streamerIdentity, eventID, status, phase, decision, reason string, counters map[string]int64) {
+	p.observeScheduleDecisionOfRound(msg, streamer, eventID, p.roundIncarnation(eventID),
+		status, phase, decision, reason, counters)
+}
+
+// observeScheduleDecisionOfRound is observeScheduleDecision for the one caller
+// that has just admitted the round and therefore holds its incarnation
+// directly. Reading it back through the map would be a second lookup that a
+// concurrent cleanup could lose.
+func (p *WebSocketPool) observeScheduleDecisionOfRound(msg *PubSubMessage, streamer streamerIdentity, eventID, incarnation, status, phase, decision, reason string, counters map[string]int64) {
 	if !p.observing() {
 		return
 	}
 	obs := observationFromMessage(msg, streamer)
 	obs.Kind = ObsKindScheduleDecision
 	obs.EventID = eventID
+	obs.RoundIncarnationID = incarnation
 	obs.Payload = ObservationPayload{
 		Phase:      phase,
 		RoundState: status,
@@ -370,12 +433,21 @@ func (p *WebSocketPool) observeScheduleDecision(msg *PubSubMessage, streamer str
 // that a placement was accepted, or a terminal result and the admission
 // verdict the existing code already reached for it.
 func (p *WebSocketPool) observeUserFrame(msg *PubSubMessage, streamer streamerIdentity, eventID, kind, phase, reason string, counters map[string]int64, present map[string]string) {
+	p.observeUserFrameOfRound(msg, streamer, eventID, p.roundIncarnation(eventID), kind, phase, reason, counters, present)
+}
+
+// observeUserFrameOfRound is observeUserFrame for the admitted terminal
+// delivery, which captured the round's incarnation inside the SAME critical
+// section that reached the admission verdict. Looking it up again afterwards
+// could miss it: cleanup may already have removed the round.
+func (p *WebSocketPool) observeUserFrameOfRound(msg *PubSubMessage, streamer streamerIdentity, eventID, incarnation, kind, phase, reason string, counters map[string]int64, present map[string]string) {
 	if !p.observing() {
 		return
 	}
 	obs := observationFromMessage(msg, streamer)
 	obs.Kind = kind
 	obs.EventID = eventID
+	obs.RoundIncarnationID = incarnation
 	obs.Payload = ObservationPayload{
 		Phase:      phase,
 		ReasonCode: reason,
@@ -489,8 +561,8 @@ func (p *WebSocketPool) observeManualSkip(eventID, channelID, login, reason, rou
 }
 
 // observeRoundCleanup records a tracked round's state being dropped.
-func (p *WebSocketPool) observeRoundCleanup(eventID, channelID, login, phase, reason string) {
-	p.observeRoundFact(eventID, channelID, login, ObsKindRoundCleanup, ObservationPayload{
+func (p *WebSocketPool) observeRoundCleanup(eventID, channelID, login, incarnation, phase, reason string) {
+	p.observeRoundFactOf(eventID, channelID, login, incarnation, ObsKindRoundCleanup, ObservationPayload{
 		Phase:      phase,
 		ReasonCode: reason,
 	})
@@ -500,11 +572,19 @@ func (p *WebSocketPool) observeRoundCleanup(eventID, channelID, login, phase, re
 // a frame — an auto decision, a placement call, a manual control phase, a
 // cleanup. The round identity is taken from the tracked round itself.
 func (p *WebSocketPool) observeRoundFact(eventID, channelID, login, kind string, payload ObservationPayload) {
+	p.observeRoundFactOf(eventID, channelID, login, p.roundIncarnation(eventID), kind, payload)
+}
+
+// observeRoundFactOf is observeRoundFact for the cleanup paths, which must pass
+// the incarnation they captured before deleting the round's control entry:
+// after the delete there is nothing left to look up, and two of them run under
+// the pool write lock that a lookup would try to read-acquire.
+func (p *WebSocketPool) observeRoundFactOf(eventID, channelID, login, incarnation, kind string, payload ObservationPayload) {
 	if !p.observing() {
 		return
 	}
 	var obs PredictionObservation
-	observationRoundIdentity(&obs, eventID, channelID, login)
+	observationRoundIdentity(&obs, eventID, channelID, login, incarnation)
 	obs.Kind = kind
 	obs.ProducerTimeSource = ObsTimeReceiver
 	obs.ReceivedAtMS = time.Now().UnixMilli()

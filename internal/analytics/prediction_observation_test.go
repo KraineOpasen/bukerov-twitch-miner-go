@@ -77,18 +77,21 @@ func channelObservation(pool, channel, login, event string, phase string) Predic
 		RoutedLogin:                  login,
 		RetentionGroupOwnerChannelID: channel,
 		RetentionGroupOwnerLogin:     login,
-		EventID:                      event,
-		Kind:                         KindChannelEvent,
-		SourceTopicType:              TopicTypePredictionsChannel,
-		SourceMessageType:            MessageTypeEventCreated,
-		ProducerAtMS:                 1_700_000_000_000,
-		ProducerTimeSource:           TimeSourceProducer,
-		ReceivedAtMS:                 1_700_000_000_001,
-		ConnectionIndex:              2,
-		ConnectionGeneration:         7,
-		ConnectionSequence:           11,
-		ConnectionKnown:              true,
-		Payload:                      ObservationPayload{Phase: phase, RoundState: "ACTIVE"},
+		// The producer supplies the local admission identity; the store never
+		// derives one, so a fixture that wants a round has to name it.
+		RoundIncarnationID:   "round:" + pool + ":" + event,
+		EventID:              event,
+		Kind:                 KindChannelEvent,
+		SourceTopicType:      TopicTypePredictionsChannel,
+		SourceMessageType:    MessageTypeEventCreated,
+		ProducerAtMS:         1_700_000_000_000,
+		ProducerTimeSource:   TimeSourceProducer,
+		ReceivedAtMS:         1_700_000_000_001,
+		ConnectionIndex:      2,
+		ConnectionGeneration: 7,
+		ConnectionSequence:   11,
+		ConnectionKnown:      true,
+		Payload:              ObservationPayload{Phase: phase, RoundState: "ACTIVE"},
 	}
 }
 
@@ -242,7 +245,7 @@ func mustSanitize(t *testing.T, in PredictionObservation) PredictionObservation 
 func TestObservationDigestIsStableAndCoversContent(t *testing.T) {
 	base := mustSanitize(t, channelObservation("pool-1", "chan-a", "streamer-a", "event-1", "ROUND_CREATED"))
 	payload, _ := marshalObservationPayload(base.Payload)
-	inc := roundIncarnationID(base)
+	inc := base.RoundIncarnationID
 
 	digest := func(o PredictionObservation, seq int64, inc, pl string, routed, owner, retention interface{}) string {
 		return observationDigest(o, "o:1", "s", 1, seq, inc, pl, routed, owner, retention)
@@ -727,28 +730,60 @@ func TestObservationNeverCreatesAStreamerRow(t *testing.T) {
 	}
 }
 
-// TestObservationRoundGrouping proves every fact of one round shares a round
-// incarnation, including across collector sessions, which is what makes
-// whole-round retention and whole-round erasure well defined.
-func TestObservationRoundGrouping(t *testing.T) {
-	a := mustSanitize(t, channelObservation("pool-1", "chan-a", "s", "event-1", "ROUND_CREATED"))
-	b := mustSanitize(t, channelObservation("pool-2", "chan-a", "s", "event-1", "ROUND_UPDATED"))
-	other := mustSanitize(t, channelObservation("pool-1", "chan-a", "s", "event-2", "ROUND_CREATED"))
-	otherChannel := mustSanitize(t, channelObservation("pool-1", "chan-b", "s", "event-1", "ROUND_CREATED"))
+// TestObservationRoundIdentityIsTheProducersLocalAdmission proves the store
+// CARRIES the producer's round identity and never derives one of its own.
+//
+// This replaces an assertion that a round incarnation is a hash of the channel
+// and event id, and therefore identical for every fact of one Twitch event
+// across every pool and every collector session. That is the wrong unit: two
+// separate local admissions of one event — a re-admission after cleanup, a
+// rebuilt pool, or two admissions racing — are two local rounds, and only the
+// producer that admitted them can tell them apart. Deriving the id collapsed
+// them into one retention unit and one erasure group.
+//
+// The store's remaining job is the schema invariant: a round incarnation and a
+// retention-group owner exist together or not at all, in BOTH directions.
+func TestObservationRoundIdentityIsTheProducersLocalAdmission(t *testing.T) {
+	first := channelObservation("pool-1", "chan-a", "s", "event-1", "ROUND_CREATED")
+	first.RoundIncarnationID = "round:pool-1:1"
+	// The SAME Twitch event, admitted a second time by the same pool.
+	second := channelObservation("pool-1", "chan-a", "s", "event-1", "ROUND_UPDATED")
+	second.RoundIncarnationID = "round:pool-1:2"
 
-	if roundIncarnationID(a) != roundIncarnationID(b) {
-		t.Fatal("two facts of one round disagree on their round incarnation")
+	a := mustSanitize(t, first)
+	b := mustSanitize(t, second)
+	if a.RoundIncarnationID != "round:pool-1:1" || b.RoundIncarnationID != "round:pool-1:2" {
+		t.Fatalf("the store rewrote the producer's round identity: %q, %q",
+			a.RoundIncarnationID, b.RoundIncarnationID)
 	}
-	if roundIncarnationID(a) == roundIncarnationID(other) {
-		t.Fatal("two different rounds share a round incarnation")
+	if a.RoundIncarnationID == b.RoundIncarnationID {
+		t.Fatal("two local admissions of one event collapsed into one round")
 	}
-	if roundIncarnationID(a) == roundIncarnationID(otherChannel) {
-		t.Fatal("two channels' rounds share a round incarnation")
+	// Companions of ONE admission agree because the producer gives them the
+	// same id, not because anything here recomputes it.
+	companion := channelObservation("pool-1", "chan-a", "s", "event-1", "ROUND_UPDATED")
+	companion.RoundIncarnationID = "round:pool-1:1"
+	if got := mustSanitize(t, companion).RoundIncarnationID; got != a.RoundIncarnationID {
+		t.Fatalf("two facts of one admission disagree: %q vs %q", got, a.RoundIncarnationID)
 	}
-	noOwner := a
+
+	// The biconditional, both ways.
+	noOwner := first
 	noOwner.RetentionGroupOwnerChannelID = ""
-	if roundIncarnationID(noOwner) != "" {
-		t.Fatal("a fact with no retention-group owner must have no round incarnation")
+	noOwner.RetentionGroupOwnerLogin = ""
+	if got := mustSanitize(t, noOwner); got.RoundIncarnationID != "" {
+		t.Fatalf("a fact with no retention-group owner kept round incarnation %q", got.RoundIncarnationID)
+	}
+	noRound := first
+	noRound.RoundIncarnationID = ""
+	got := mustSanitize(t, noRound)
+	if got.RetentionGroupOwnerChannelID != "" || got.RetentionGroupOwnerLogin != "" {
+		t.Fatalf("a fact with no round kept retention-group owner %q/%q",
+			got.RetentionGroupOwnerChannelID, got.RetentionGroupOwnerLogin)
+	}
+	if got.RoutedChannelID == "" {
+		t.Fatal("dropping the retention group also dropped the routed identity; " +
+			"a privacy erasure would no longer reach this fact")
 	}
 }
 

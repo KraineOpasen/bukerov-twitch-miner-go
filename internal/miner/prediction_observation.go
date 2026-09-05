@@ -48,6 +48,8 @@ func toAnalyticsObservation(in pubsub.PredictionObservation) analytics.Predictio
 		RetentionGroupOwnerChannelID: in.RetentionGroupOwnerChannelID,
 		RetentionGroupOwnerLogin:     in.RetentionGroupOwnerLogin,
 
+		RoundIncarnationID: in.RoundIncarnationID,
+
 		EventID: in.EventID,
 
 		Kind:              in.Kind,

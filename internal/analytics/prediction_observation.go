@@ -406,6 +406,14 @@ type PredictionObservation struct {
 	RetentionGroupOwnerChannelID string
 	RetentionGroupOwnerLogin     string
 
+	// RoundIncarnationID names the producer's LOCAL admission of the round —
+	// the pool instance that admitted it plus that pool's admission counter.
+	// It is supplied by the producer and never re-derived here: only the
+	// producer knows which of several admissions of one Twitch event a fact
+	// belongs to. Empty when the fact is about no admitted round, in which
+	// case the fact is its own retention unit.
+	RoundIncarnationID string
+
 	// EventID is the Twitch prediction event identity, when the frame carried
 	// one. Deliberately NOT unique in the store: many facts describe one
 	// round.
@@ -638,6 +646,7 @@ func sanitizeObservation(in PredictionObservation, now int64) (PredictionObserva
 		RoundOwnerLogin:              canonicalObservationLogin(in.RoundOwnerLogin),
 		RetentionGroupOwnerChannelID: boundedIdentifier(in.RetentionGroupOwnerChannelID),
 		RetentionGroupOwnerLogin:     canonicalObservationLogin(in.RetentionGroupOwnerLogin),
+		RoundIncarnationID:           boundedIdentifier(in.RoundIncarnationID),
 		EventID:                      boundedIdentifier(in.EventID),
 		Kind:                         closedValue(in.Kind, observationKinds),
 		SourceTopicType:              closedOptional(in.SourceTopicType, observationTopicTypes),
@@ -669,6 +678,18 @@ func sanitizeObservation(in PredictionObservation, now int64) (PredictionObserva
 	}
 	if out.RetentionGroupOwnerChannelID == "" {
 		out.RetentionGroupOwnerLogin = ""
+	}
+	// A round incarnation and a retention-group owner exist together or not at
+	// all: the incarnation is what makes whole-round retention and whole-round
+	// erasure well defined, and a retention group with no round is not a group.
+	// The producer already enforces this on its own emit path; enforcing it
+	// again here is what makes the invariant hold for EVERY caller of this
+	// store, not just the one producer that exists today.
+	if out.RoundIncarnationID == "" {
+		out.RetentionGroupOwnerChannelID = ""
+		out.RetentionGroupOwnerLogin = ""
+	} else if out.RetentionGroupOwnerChannelID == "" {
+		out.RoundIncarnationID = ""
 	}
 	if out.ProducerAtMS <= 0 {
 		out.ProducerAtMS = 0
@@ -718,29 +739,6 @@ func writeDigestPart(h hash.Hash, part string) {
 	binary.BigEndian.PutUint64(lenBuf[:], uint64(len(part)))
 	_, _ = h.Write(lenBuf[:])
 	_, _ = h.Write([]byte(part))
-}
-
-// roundIncarnationID identifies ONE round as a retention unit. It exists
-// exactly when a retention-group owner channel does, which is the schema
-// invariant whole-round retention depends on. It is derived (not random) so
-// every fact of a round agrees on it even across a collector restart.
-func roundIncarnationID(o PredictionObservation) string {
-	// A round needs BOTH an owner and an event identity. Without the event id
-	// every identity-less fact of a channel would hash to the same value and
-	// collapse into ONE permanent retention unit — a unit that keeps growing
-	// and can never age out, because its newest fact is always recent.
-	if o.RetentionGroupOwnerChannelID == "" || o.EventID == "" {
-		return ""
-	}
-	h := sha256.New()
-	for _, part := range []string{
-		"prediction-observation-round-v1",
-		o.RetentionGroupOwnerChannelID,
-		o.EventID,
-	} {
-		writeDigestPart(h, part)
-	}
-	return "round:" + hex.EncodeToString(h.Sum(nil)[:16])
 }
 
 // marshalObservationPayload renders the sanitized projection as canonical
@@ -1200,7 +1198,7 @@ func (r *SQLiteRepository) AppendObservation(ctx context.Context, o PredictionOb
 	if !ok {
 		return fmt.Errorf("analytics: observation payload is not renderable")
 	}
-	incarnation := roundIncarnationID(o)
+	incarnation := o.RoundIncarnationID
 	observationID := fmt.Sprintf("%s:%d", sessionID, seq)
 
 	return r.db.WithTx(ctx, func(tx *sql.Tx) error {

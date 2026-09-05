@@ -59,6 +59,20 @@ func observedPool(t *testing.T, placer predictionPlacer) (*WebSocketPool, *recor
 	return p, sink
 }
 
+// admitRound installs a tracked round the way the pool's OWN admission path
+// does: with a local admission incarnation allocated from this pool instance
+// and its admission counter. addRound (in manual_bet_test.go, which predates
+// P1 and is not this task's to change) installs the round without one, which
+// is right for the betting tests that use it and wrong for every observation
+// test — a round nobody admitted has no round identity to observe.
+func admitRound(p *WebSocketPool, s *models.Streamer, eventID string) *models.EventPrediction {
+	ep := addRound(p, s, eventID)
+	p.mu.Lock()
+	p.control[eventID].incarnation = p.newRoundIncarnation()
+	p.mu.Unlock()
+	return ep
+}
+
 // TestObservationSinkAbsentIsANoOp is the most important producer property:
 // with no sink wired, observing costs nothing and changes nothing. Every
 // pre-existing test in this package runs in exactly this configuration.
@@ -66,7 +80,7 @@ func TestObservationSinkAbsentIsANoOp(t *testing.T) {
 	placer := &fakePlacer{}
 	p := newTestPool(placer)
 	s := newTestStreamer(1000)
-	addRound(p, s, "e1")
+	admitRound(p, s, "e1")
 
 	if p.observing() {
 		t.Fatal("a pool with no sink reports itself as observing")
@@ -75,7 +89,7 @@ func TestObservationSinkAbsentIsANoOp(t *testing.T) {
 	p.observeRoundFact("e1", "chan-1", "streamer", ObsKindAutoDecision, ObservationPayload{Phase: "AUTO_DUE"})
 	p.observeAutoSkip("e1", "chan-1", "streamer", "OK", nil)
 	p.observeManualPhase("e1", "chan-1", "streamer", "MANUAL_DIRECT_ROOT", "OK", nil)
-	p.observeRoundCleanup("e1", "chan-1", "streamer", "CLEANUP_APPLIED", "OK")
+	p.observeRoundCleanup("e1", "chan-1", "streamer", "round:x:1", "CLEANUP_APPLIED", "OK")
 	p.observeUnclassifiedFrame(&PubSubMessage{Topic: NewTopic(TopicPredictionsChannel, "chan-1")}, s, "event")
 
 	if _, err := p.PlaceManualBet("e1", "o1", 100); err != nil {
@@ -99,7 +113,7 @@ func TestObservationDoesNotChangeManualBetBehaviour(t *testing.T) {
 			p = newTestPool(placer)
 		}
 		s := newTestStreamer(1000)
-		addRound(p, s, "e1")
+		admitRound(p, s, "e1")
 		title, err := p.PlaceManualBet("e1", "o2", 250)
 		return title, placer.callCount(), placer.lastID, placer.lastAmt, err
 	}
@@ -120,7 +134,7 @@ func TestObservationDoesNotChangeManualBetBehaviour(t *testing.T) {
 			p = newTestPool(placer)
 		}
 		s := newTestStreamer(1000)
-		addRound(p, s, "e1")
+		admitRound(p, s, "e1")
 		title, err := p.PlaceManualBet("e1", "o1", 100)
 		return title, placer.callCount(), err
 	}
@@ -156,7 +170,7 @@ func TestManualRootsAreMutuallyExclusive(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			p, sink := observedPool(t, &fakePlacer{})
-			addRound(p, newTestStreamer(1000), "e1")
+			admitRound(p, newTestStreamer(1000), "e1")
 			if _, err := tc.call(p); err != nil {
 				t.Fatal(err)
 			}
@@ -179,7 +193,7 @@ func TestManualRootsAreMutuallyExclusive(t *testing.T) {
 // validation, the single placement call's two sides, and execution.
 func TestManualPlacementEmitsEveryPhase(t *testing.T) {
 	p, sink := observedPool(t, &fakePlacer{})
-	addRound(p, newTestStreamer(1000), "e1")
+	admitRound(p, newTestStreamer(1000), "e1")
 	if _, err := p.PlaceManualBet("e1", "o1", 100); err != nil {
 		t.Fatal(err)
 	}
@@ -205,7 +219,7 @@ func TestManualPlacementEmitsEveryPhase(t *testing.T) {
 func TestPlacementCallIsBracketedExactlyOnce(t *testing.T) {
 	placer := &fakePlacer{}
 	p, sink := observedPool(t, placer)
-	addRound(p, newTestStreamer(1000), "e1")
+	admitRound(p, newTestStreamer(1000), "e1")
 
 	var atCall []string
 	sink.hook = func(obs PredictionObservation) {
@@ -244,7 +258,7 @@ func itoaTest(n int) string {
 func TestPlacementFailureClassIsClosed(t *testing.T) {
 	secret := "Post \"https://gql.twitch.tv/gql\": x-device-id=SECRET123 rejected"
 	p, sink := observedPool(t, &fakePlacer{err: errors.New(secret)})
-	addRound(p, newTestStreamer(1000), "e1")
+	admitRound(p, newTestStreamer(1000), "e1")
 	if _, err := p.PlaceManualBet("e1", "o1", 100); err == nil {
 		t.Fatal("expected the placement to fail")
 	}
@@ -340,8 +354,14 @@ func TestChannelFrameObservationIsSanitized(t *testing.T) {
 	if o.SourceTopicType != string(TopicPredictionsChannel) || o.SourceMessageType != "event-updated" {
 		t.Fatalf("source = %s/%s", o.SourceTopicType, o.SourceMessageType)
 	}
-	if o.RoutedChannelID != "chan-1" || o.RoutedLogin != "streamer" || o.RetentionGroupOwnerChannelID != "chan-1" {
+	// This frame is about a round THIS pool never admitted, so it names no
+	// local round and belongs to no retention group — but it keeps its routed
+	// identity, which is what a privacy erasure reaches it by.
+	if o.RoutedChannelID != "chan-1" || o.RoutedLogin != "streamer" {
 		t.Fatalf("identity = %+v", o)
+	}
+	if o.RoundIncarnationID != "" || o.RetentionGroupOwnerChannelID != "" {
+		t.Fatalf("an untracked round claimed a retention group: %+v", o)
 	}
 	if o.ProducerTimeSource != ObsTimeProducer || o.ProducerAtMS != time.Unix(1700000000, 0).UnixMilli() {
 		t.Fatalf("producer time = %d/%s", o.ProducerAtMS, o.ProducerTimeSource)
@@ -421,7 +441,7 @@ func TestUnreadableFrameIsObservedAsSourceUnknown(t *testing.T) {
 // still names the round it was about.
 func TestRoundCleanupIsObserved(t *testing.T) {
 	p, sink := observedPool(t, &fakePlacer{})
-	addRound(p, newTestStreamer(1000), "e1")
+	admitRound(p, newTestStreamer(1000), "e1")
 	p.removePrediction("e1")
 
 	got := sink.all()
@@ -437,7 +457,7 @@ func TestRoundCleanupIsObserved(t *testing.T) {
 // produced it, which the store requires as NOT NULL.
 func TestObservationsCarryPoolProvenance(t *testing.T) {
 	p, sink := observedPool(t, &fakePlacer{})
-	addRound(p, newTestStreamer(1000), "e1")
+	admitRound(p, newTestStreamer(1000), "e1")
 	if _, err := p.PlaceManualBet("e1", "o1", 100); err != nil {
 		t.Fatal(err)
 	}
@@ -459,7 +479,7 @@ func TestObservationsCarryPoolProvenance(t *testing.T) {
 func TestManualBetUnderConcurrencyEmitsOneRootPerAction(t *testing.T) {
 	placer := &fakePlacer{delay: time.Millisecond}
 	p, sink := observedPool(t, placer)
-	addRound(p, newTestStreamer(100000), "e1")
+	admitRound(p, newTestStreamer(100000), "e1")
 
 	const attempts = 12
 	var wg sync.WaitGroup
@@ -494,7 +514,7 @@ func TestManualBetUnderConcurrencyEmitsOneRootPerAction(t *testing.T) {
 // against a producer silently gaining, losing or reordering a fact.
 func TestObservationGoldenSequence(t *testing.T) {
 	p, sink := observedPool(t, &fakePlacer{})
-	addRound(p, newTestStreamer(1000), "e1")
+	admitRound(p, newTestStreamer(1000), "e1")
 	if _, err := p.PlaceManualBetRelayed("e1", "o2", 250); err != nil {
 		t.Fatal(err)
 	}
@@ -510,6 +530,7 @@ func TestObservationGoldenSequence(t *testing.T) {
 		EventID    string `json:"eventId"`
 		Channel    string `json:"routedChannelId"`
 		Retention  string `json:"retentionGroupOwnerChannelId,omitempty"`
+		Round      string `json:"roundIncarnationId,omitempty"`
 	}
 	var got []goldenFact
 	for _, o := range sink.all() {
@@ -517,6 +538,7 @@ func TestObservationGoldenSequence(t *testing.T) {
 			Kind: o.Kind, Phase: o.Payload.Phase, Reason: o.Payload.ReasonCode,
 			Decision: o.Payload.Decision, ErrorClass: o.Payload.ErrorClass, Manual: o.Payload.Manual,
 			EventID: o.EventID, Channel: o.RoutedChannelID, Retention: o.RetentionGroupOwnerChannelID,
+			Round: o.RoundIncarnationID,
 		})
 	}
 	actual, err := json.MarshalIndent(got, "", "  ")
@@ -669,7 +691,7 @@ func TestAutoDecisionIsObserved(t *testing.T) {
 	placer := &fakePlacer{}
 	p, sink := observedPool(t, placer)
 	s := newTestStreamer(100000)
-	addRound(p, s, "auto-1")
+	admitRound(p, s, "auto-1")
 
 	p.placeAutoBet("auto-1")
 
@@ -710,7 +732,7 @@ func TestAutoDecisionSkipIsObserved(t *testing.T) {
 	placer := &fakePlacer{}
 	p, sink := observedPool(t, placer)
 	s := newTestStreamer(100000)
-	addRound(p, s, "auto-2")
+	admitRound(p, s, "auto-2")
 	// Suppress this round: the existing per-round auto-bet skip.
 	if err := p.SetAutoBetSkip("auto-2", true); err != nil {
 		t.Fatal(err)
@@ -746,7 +768,7 @@ func TestUserFrameObservationsAreRecorded(t *testing.T) {
 	p, sink := observedPool(t, &fakePlacer{})
 	s := newTestStreamer(100000)
 	p.streamers = []*models.Streamer{s}
-	event := addRound(p, s, "user-1")
+	event := admitRound(p, s, "user-1")
 	event.Bet.Decision = models.Decision{Choice: 0, Amount: 250, ID: "o1"}
 
 	made := &PubSubMessage{
@@ -801,5 +823,107 @@ func TestUserFrameObservationsAreRecorded(t *testing.T) {
 	}
 	if !terminal {
 		t.Fatalf("no user_terminal fact; got %v", sink.phases())
+	}
+}
+
+// TestReAdmittedRoundIsANewLocalRound is the producer half of an independent
+// review's F2: a round incarnation must identify one LOCAL ADMISSION, not a
+// Twitch event.
+//
+// The store used to derive it by hashing the channel and the event id, which
+// made it identical for every admission of that event, in every pool, for the
+// whole life of the database. Two admissions of one event id — the ordinary
+// consequence of a round being cleaned up and created again — then shared a
+// retention unit and an erasure group, and nothing downstream could tell which
+// admission a fact belonged to.
+//
+// It is now allocated where the admission actually happens: the pool instance
+// that admitted the round, plus that pool's admission counter.
+func TestReAdmittedRoundIsANewLocalRound(t *testing.T) {
+	frame := func(eventID string) *PubSubMessage {
+		return &PubSubMessage{
+			Topic: NewTopic(TopicPredictionsChannel, "chan-1"), Type: "event-created",
+			ChannelID: "chan-1",
+			Data: map[string]interface{}{"event": map[string]interface{}{
+				"id": eventID, "status": "ACTIVE", "created_at": time.Now().Format(time.RFC3339),
+				"prediction_window_seconds": float64(600),
+				"outcomes": []interface{}{
+					map[string]interface{}{"id": "o1", "color": "BLUE", "total_points": float64(10)},
+					map[string]interface{}{"id": "o2", "color": "PINK", "total_points": float64(20)},
+				},
+			}},
+		}
+	}
+
+	p, sink := observedPool(t, &fakePlacer{})
+	s := newTestStreamer(100000)
+	p.streamers = []*models.Streamer{s}
+
+	// The SAME Twitch event id, admitted, cleaned up, and admitted again.
+	p.handlePredictionChannel(frame("same-event"), s)
+	p.removePrediction("same-event")
+	p.handlePredictionChannel(frame("same-event"), s)
+
+	var rounds []string
+	for _, o := range sink.all() {
+		if o.RoundIncarnationID != "" {
+			rounds = append(rounds, o.RoundIncarnationID)
+		}
+	}
+	if len(rounds) < 2 {
+		t.Fatalf("facts naming a local round = %v, want at least the two admissions (all: %v)", rounds, sink.phases())
+	}
+	distinct := map[string]bool{}
+	for _, r := range rounds {
+		distinct[r] = true
+	}
+	if len(distinct) != 2 {
+		t.Fatalf("two admissions of one event produced %d local rounds (%v); each admission is its own round",
+			len(distinct), rounds)
+	}
+	// Every incarnation names the pool that admitted it, so facts from two
+	// pool generations can never be mistaken for one round either.
+	for r := range distinct {
+		if !strings.HasPrefix(r, "round:pool-test:") {
+			t.Fatalf("round incarnation %q does not name its pool instance", r)
+		}
+	}
+
+	// A second pool never reuses the first pool's identities, even though its
+	// admission counter starts over.
+	q, qsink := observedPool(t, &fakePlacer{})
+	q.instanceID = "pool-other"
+	q.streamers = []*models.Streamer{s}
+	q.handlePredictionChannel(frame("same-event"), s)
+	for _, o := range qsink.all() {
+		if o.RoundIncarnationID != "" && distinct[o.RoundIncarnationID] {
+			t.Fatalf("a second pool reused round incarnation %q", o.RoundIncarnationID)
+		}
+	}
+}
+
+// TestEveryTrackedRoundIsAdmittedWithAnIncarnation is a STRUCTURAL guard. A
+// roundControl published without an incarnation would silently produce facts
+// with no round identity: they would still be stored, still be erasable by
+// their routed identity, and simply stop belonging to their round. That is a
+// quiet failure no behavioural test on today's single admission site would
+// catch, so the source is asserted directly.
+func TestEveryTrackedRoundIsAdmittedWithAnIncarnation(t *testing.T) {
+	src, err := os.ReadFile("pool.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The one production construction site, and the only accepted form.
+	const admission = "&roundControl{incarnation: p.newRoundIncarnation()}"
+	if n := strings.Count(string(src), admission); n != 1 {
+		t.Fatalf("pool.go has %d admissions of the form %q, want exactly 1", n, admission)
+	}
+	for _, line := range strings.Split(string(src), "\n") {
+		if !strings.Contains(line, "&roundControl{") {
+			continue
+		}
+		if !strings.Contains(line, admission) {
+			t.Fatalf("a round control is published without a local admission incarnation:\n\t%s", strings.TrimSpace(line))
+		}
 	}
 }

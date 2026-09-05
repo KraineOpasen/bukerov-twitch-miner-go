@@ -201,6 +201,18 @@ type channelActor interface {
 // prediction in the pool and is removed together with it, so the state can
 // never outlive its round.
 type roundControl struct {
+	// incarnation is THIS local admission's round identity: the pool instance
+	// that admitted the round plus a pool-local admission counter. It is set
+	// once, before this struct is published into p.control, and never mutated,
+	// so any goroutine holding the pointer may read it lock-free.
+	//
+	// It is deliberately NOT derived from the channel and event id. Two
+	// separate local admissions of the same Twitch event — a re-admission
+	// after cleanup, a rebuilt pool, or a race between two successful
+	// admissions — are different local rounds, and a derived id would collapse
+	// them into one. Observation only: nothing in the betting path reads it.
+	incarnation string
+
 	// placeMu serializes the *entire* place-a-bet operation for this one round
 	// (revalidation + the Twitch call + local bookkeeping). It is what makes a
 	// manual bet and the scheduled auto-bet mutually exclusive so Twitch can
@@ -273,6 +285,11 @@ type WebSocketPool struct {
 	// must not dial a fresh connection — whose read loop would outlive the
 	// shutdown drain — once Close has run. Guarded by p.mu.
 	closed bool
+
+	// roundAdmissions counts the rounds THIS pool instance has admitted. It is
+	// the second half of a round incarnation and is never reset, so a counter
+	// value is used once per pool instance.
+	roundAdmissions atomic.Uint64
 
 	// instanceID identifies THIS pool instance in the immutable Prediction
 	// observation trail. Immutable after construction.
@@ -1123,7 +1140,8 @@ func (p *WebSocketPool) handlePredictionChannel(msg *PubSubMessage, streamer *mo
 		p.mu.Lock()
 		p.sweepStaleLocked()
 		p.predictions[eventID] = event
-		p.control[eventID] = &roundControl{}
+		control := &roundControl{incarnation: p.newRoundIncarnation()}
+		p.control[eventID] = control
 		p.mu.Unlock()
 
 		slog.Info("Prediction event scheduled",
@@ -1131,7 +1149,8 @@ func (p *WebSocketPool) handlePredictionChannel(msg *PubSubMessage, streamer *mo
 			"event", title,
 			"placeIn", closingBetAfter,
 		)
-		p.observeScheduleDecision(msg, streamer, eventID, eventStatus, "SCHEDULE_ACCEPTED", "PLACE", "OK",
+		p.observeScheduleDecisionOfRound(msg, streamer, eventID, control.incarnation, eventStatus,
+			"SCHEDULE_ACCEPTED", "PLACE", "OK",
 			map[string]int64{"closingBetAfterSeconds": int64(closingBetAfter)})
 
 		go func() {
@@ -1277,8 +1296,10 @@ func (p *WebSocketPool) handlePredictionUser(msg *PubSubMessage, streamer *model
 		strategy := string(event.Bet.Settings.Strategy)
 		odds := chosenOutcomeOdds(event)
 		manual := false
+		incarnation := ""
 		if rc := p.control[eventID]; rc != nil {
 			manual = rc.manualBet
+			incarnation = rc.incarnation
 		}
 		title := event.Title
 		placed, won, gained := event.ParseResult(result)
@@ -1304,7 +1325,7 @@ func (p *WebSocketPool) handlePredictionUser(msg *PubSubMessage, streamer *model
 		case models.ResultRefund:
 			terminalReason = "REFUNDED"
 		}
-		p.observeUserFrame(msg, streamer, eventID, ObsKindUserTerminal, "TERMINAL_ADMITTED", terminalReason,
+		p.observeUserFrameOfRound(msg, streamer, eventID, incarnation, ObsKindUserTerminal, "TERMINAL_ADMITTED", terminalReason,
 			map[string]int64{"stake": int64(stake), "payout": int64(won), "odds1e4": int64(odds * 10000)},
 			map[string]string{"terminalVerdict": ObsPresent, "result": ObsPresent})
 
@@ -1729,8 +1750,12 @@ func (p *WebSocketPool) scheduleCleanup(eventID string, after time.Duration) {
 	if e := p.predictions[eventID]; e != nil && e.Streamer != nil {
 		login, channelID = e.Streamer.GetUsername(), e.Streamer.ChannelID
 	}
+	incarnation := ""
+	if rc := p.control[eventID]; rc != nil {
+		incarnation = rc.incarnation
+	}
 	p.mu.RUnlock()
-	p.observeRoundCleanup(eventID, channelID, login, "CLEANUP_SCHEDULED", "OK")
+	p.observeRoundCleanup(eventID, channelID, login, incarnation, "CLEANUP_SCHEDULED", "OK")
 
 	go func() {
 		time.Sleep(after)
@@ -1749,11 +1774,15 @@ func (p *WebSocketPool) removePrediction(eventID string) {
 	if e := p.predictions[eventID]; e != nil && e.Streamer != nil {
 		login, channelID = e.Streamer.GetUsername(), e.Streamer.ChannelID
 	}
+	incarnation := ""
+	if rc := p.control[eventID]; rc != nil {
+		incarnation = rc.incarnation
+	}
 	delete(p.predictions, eventID)
 	delete(p.control, eventID)
 	p.mu.Unlock()
 
-	p.observeRoundCleanup(eventID, channelID, login, "CLEANUP_APPLIED", "OK")
+	p.observeRoundCleanup(eventID, channelID, login, incarnation, "CLEANUP_APPLIED", "OK")
 }
 
 // sweepStaleLocked drops any tracked round older than maxPredictionAge. The
@@ -1762,7 +1791,7 @@ func (p *WebSocketPool) removePrediction(eventID string) {
 // scheduleCleanup on resolve/cancel.
 func (p *WebSocketPool) sweepStaleLocked() {
 	now := time.Now()
-	type swept struct{ id, channelID, login string }
+	type swept struct{ id, channelID, login, incarnation string }
 	var reaped []swept
 	for id, e := range p.predictions {
 		if now.Sub(e.CreatedAt) > maxPredictionAge {
@@ -1770,7 +1799,11 @@ func (p *WebSocketPool) sweepStaleLocked() {
 			if e.Streamer != nil {
 				login, channelID = e.Streamer.GetUsername(), e.Streamer.ChannelID
 			}
-			reaped = append(reaped, swept{id: id, channelID: channelID, login: login})
+			incarnation := ""
+			if rc := p.control[id]; rc != nil {
+				incarnation = rc.incarnation
+			}
+			reaped = append(reaped, swept{id: id, channelID: channelID, login: login, incarnation: incarnation})
 			delete(p.predictions, id)
 			delete(p.control, id)
 		}
@@ -1779,7 +1812,7 @@ func (p *WebSocketPool) sweepStaleLocked() {
 	// under: each call is a bounded copy plus one nonblocking hand-off, and
 	// the common case reaps nothing at all.
 	for _, r := range reaped {
-		p.observeRoundCleanup(r.id, r.channelID, r.login, "CLEANUP_APPLIED", "WINDOW_ELAPSED")
+		p.observeRoundCleanup(r.id, r.channelID, r.login, r.incarnation, "CLEANUP_APPLIED", "WINDOW_ELAPSED")
 	}
 }
 
