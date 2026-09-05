@@ -106,12 +106,14 @@ func (s *Service) RecordPredictionObservation(obs PredictionObservation) {
 	if s == nil || s.observations == nil {
 		return
 	}
-	sanitized, ok := sanitizeObservation(obs, s.now().UnixMilli())
-	if !ok {
-		s.observations.dropped.Add(1)
-		return
+	if obs.ReceivedAtMS == 0 {
+		obs.ReceivedAtMS = s.now().UnixMilli()
 	}
-	s.observations.offer(sanitized)
+	// Sanitization, canonical rendering and hashing all happen on the
+	// collector goroutine, never here: a producer may be holding a WebSocket,
+	// pool or placement lock, so its entire cost must be the bounded copy it
+	// already made plus one nonblocking send.
+	s.observations.offer(obs)
 }
 
 // InvalidatePredictionObservationIdentity is called BEFORE a privacy-erasure

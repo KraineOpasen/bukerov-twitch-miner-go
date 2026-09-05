@@ -33,7 +33,24 @@ type PubSubMessage struct {
 	// the topic and canonical complete inner JSON message. It is used for
 	// transport replay suppression and Stream-owned WATCH_STREAK idempotency,
 	// never as broadcast attribution. Derived/fallback Timestamp is excluded.
+	//
+	// It hashes the RAW inner frame together with an account-scoped topic, so
+	// it is transport state only: it must never be persisted or re-hashed into
+	// a durable record. The Prediction observation trail derives its own
+	// fingerprint from a sanitized projection instead.
 	EventFingerprint string
+
+	// Connection provenance: which pooled connection delivered this frame, on
+	// which connection generation, and its position in that connection's
+	// delivery order. Stamped by the connection immediately before dispatch
+	// (see WebSocketClient's TEXT/MESSAGE handling) and read only by
+	// observers — nothing in the message-handling path branches on it.
+	// ConnectionKnown is false for a message built by a caller that has no
+	// connection (a test fixture, a synthesized frame).
+	ConnectionIndex      int
+	ConnectionGeneration uint64
+	ConnectionSequence   uint64
+	ConnectionKnown      bool
 }
 
 func ParsePubSubMessage(data *WSData) (*PubSubMessage, error) {

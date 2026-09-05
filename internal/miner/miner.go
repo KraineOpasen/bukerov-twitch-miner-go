@@ -465,9 +465,16 @@ func (m *Miner) SetDashboardConfig(d runtimeconfig.Dashboard) {
 	m.dashboard = d
 }
 
+// SetAnalyticsService injects an externally owned analytics service. Passing
+// nil explicitly CLEARS external ownership rather than asserting it: with
+// externalAnalytics unconditionally true, a nil injection would leave the
+// miner believing someone else owns a service it then builds for itself in
+// setupComponents — and that self-owned service (which now runs a Prediction
+// observation collector goroutine) would never be closed by the miner's own
+// teardown. Ownership therefore follows the argument.
 func (m *Miner) SetAnalyticsService(svc *analytics.Service) {
 	m.analyticsSvc = svc
-	m.externalAnalytics = true
+	m.externalAnalytics = svc != nil
 }
 
 // SetDatabase injects an externally-owned database handle (cmd/miner opens
@@ -824,6 +831,10 @@ func (m *Miner) setupComponents(ctx context.Context) {
 	if m.analyticsSvc != nil {
 		m.wsPool.SetBetResultHandler(m.recordBetResult)
 	}
+	// Wire the immutable Prediction observation sink. A no-op when analytics
+	// is disabled, in which case every observation call site in pubsub stays
+	// a no-op too.
+	m.attachPredictionObservations()
 
 	// Registered AFTER m.wsPool is assigned (SetRotationCallback's mutex
 	// gives the flight goroutines a happens-before edge to that write, so the
@@ -2077,7 +2088,16 @@ func (m *Miner) teardown() error {
 		drainErrs = append(drainErrs, m.chatManager.Close())
 	}
 	if m.wsPool != nil {
-		drainErrs = append(drainErrs, m.wsPool.Close())
+		// The pool's own Close result is unchanged and still aggregated
+		// exactly as before. It ALSO settles the Prediction observation
+		// producer obligation exactly once: a non-nil result means the pool
+		// could not prove it had stopped producing, so the collector session
+		// is forced INCOMPLETE. This never alters the shutdown result.
+		poolErr := m.wsPool.Close()
+		if poolErr != nil && m.analyticsSvc != nil {
+			m.analyticsSvc.NotePredictionProducerShutdownUncertain()
+		}
+		drainErrs = append(drainErrs, poolErr)
 	}
 	if m.watcher != nil {
 		// A dirty watcher teardown (ErrStopJoinTimeout) means the watch loop is

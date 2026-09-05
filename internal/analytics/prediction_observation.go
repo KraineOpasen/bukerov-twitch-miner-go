@@ -1785,8 +1785,15 @@ func (c *observationCollector) drainUntil(ctx context.Context) {
 // stale generation, a refused lease, a cancelled statement, a constraint
 // violation — is a DROP. There is no retry: retrying would let an observer
 // compete with a business writer for the shared connection.
-func (c *observationCollector) write(ctx context.Context, obs PredictionObservation) {
-	if c.disabled.Load() || obs.generation != c.generation.Load() {
+func (c *observationCollector) write(ctx context.Context, raw PredictionObservation) {
+	if c.disabled.Load() || raw.generation != c.generation.Load() {
+		c.dropped.Add(1)
+		return
+	}
+	// Sanitize HERE, on the collector goroutine — never on the producer's.
+	// A fact that cannot be projected onto the closed contract is dropped.
+	obs, ok := sanitizeObservation(raw, c.now().UnixMilli())
+	if !ok {
 		c.dropped.Add(1)
 		return
 	}

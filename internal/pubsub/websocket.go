@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	mathrand "math/rand"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/constants"
@@ -42,6 +43,12 @@ type listenAttempt struct {
 type WebSocketClient struct {
 	index int
 	conn  *websocket.Conn
+
+	// deliverySeq numbers the frames this connection dispatches, so an
+	// observer can reconstruct one connection's delivery order across
+	// generations. Observation-only: nothing in the transport reads it, and
+	// it is a plain atomic so stamping it takes no lock.
+	deliverySeq atomic.Uint64
 
 	// Per-topic wire ledger. The three buckets are disjoint per topic:
 	//   - topics: the LISTEN frame was successfully written on the CURRENT
@@ -1073,6 +1080,16 @@ func (ws *WebSocketClient) handleMessageForGen(msg WSMessage, readerGen uint64) 
 			ws.recentMsgFingerprints[pubsubMsg.EventFingerprint] = now
 		}
 		ws.mu.Unlock()
+
+		// Stamp the connection provenance of this delivery. Purely additive
+		// observation metadata: three field writes on a message this
+		// goroutine exclusively owns, taking no lock and changing nothing
+		// about admission, fencing or dispatch. readerGen is the generation
+		// the fence above already proved current for this frame.
+		pubsubMsg.ConnectionIndex = ws.index
+		pubsubMsg.ConnectionGeneration = readerGen
+		pubsubMsg.ConnectionSequence = ws.deliverySeq.Add(1)
+		pubsubMsg.ConnectionKnown = true
 
 		if ws.onMessage != nil {
 			ws.onMessage(pubsubMsg)
