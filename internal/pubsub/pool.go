@@ -1310,7 +1310,7 @@ func (p *WebSocketPool) handlePredictionUser(msg *PubSubMessage, streamer *model
 			// decided it; nothing is re-decided below.
 			alreadyAccepted := exists && event.ResultAccepted
 			unconfirmed := exists && !event.BetConfirmed
-			p.mu.Unlock()
+			rc := p.control[eventID]
 			reason := "NO_ROUND"
 			switch {
 			case alreadyAccepted:
@@ -1321,8 +1321,15 @@ func (p *WebSocketPool) handlePredictionUser(msg *PubSubMessage, streamer *model
 				// to be about.
 				reason = "NOT_CONFIRMED"
 			}
-			p.observeUserFrame(msg, streamer, eventID, ObsKindUserTerminal, "TERMINAL_DELIVERED", reason,
+			// Emitted INSIDE the critical section that reached this verdict.
+			// After the unlock, the goroutine that WON admission is still
+			// parsing its result, so a duplicate refused here would routinely
+			// be recorded before the admission it duplicates — a replay
+			// showing the duplicate first.
+			p.observeUserFrameOfRound(msg, streamer, eventID, incarnationOf(rc),
+				ObsKindUserTerminal, "TERMINAL_DELIVERED", reason,
 				nil, map[string]string{"terminalVerdict": ObsPresent})
+			p.mu.Unlock()
 			return outcome
 		}
 		// The raw stake must be read before ParseResult, which zeroes `placed`
@@ -1340,6 +1347,13 @@ func (p *WebSocketPool) handlePredictionUser(msg *PubSubMessage, streamer *model
 		placed, won, gained := event.ParseResult(result)
 		event.ResultAccepted = true
 		resultType := event.Result.Type
+		// The ADMISSION is what this lock decided, and it is recorded here, at
+		// that instant — so a duplicate refused by a later holder of the lock
+		// can never be recorded before it. The parsed verdict below is a
+		// different event, and it is honestly later.
+		p.observeUserFrameOfRound(msg, streamer, eventID, incarnation,
+			ObsKindUserTerminal, "TERMINAL_DELIVERED", "ACCEPTED",
+			nil, map[string]string{"terminalVerdict": ObsPresent})
 		p.mu.Unlock()
 
 		outcome.PredictionResultAccepted = true

@@ -1129,10 +1129,19 @@ func TestEveryTerminalExitIsObservedWithItsOwnVerdict(t *testing.T) {
 			if !p.handlePredictionUser(frame("round-1", tc.result), s).PredictionResultAccepted {
 				t.Fatal("the terminal was refused; the fixture is wrong")
 			}
-			got := terminalOf(t, sink)
-			if got.Payload.Phase != "TERMINAL_ADMITTED" {
-				t.Fatalf("terminal fact = %+v", got.Payload)
+			// Two facts, in this order: the ADMISSION the lock decided, then
+			// the parsed verdict. A duplicate refused by a later holder of
+			// that lock is recorded after the admission, never before it.
+			var phases []string
+			for _, o := range sink.all() {
+				if o.Kind == ObsKindUserTerminal {
+					phases = append(phases, o.Payload.Phase+"/"+o.Payload.ReasonCode)
+				}
 			}
+			if len(phases) != 2 || phases[0] != "TERMINAL_DELIVERED/ACCEPTED" {
+				t.Fatalf("admitted terminal produced %v, want the admission recorded first", phases)
+			}
+			got := factWithPhase(t, sink, "TERMINAL_ADMITTED")
 			if got.Payload.ReasonCode != tc.want {
 				t.Fatalf("verdict = %q, want %q: the trail must not record one outcome as another",
 					got.Payload.ReasonCode, tc.want)
@@ -1444,6 +1453,40 @@ func TestReservationFactsAreOrderedByTheLockThatDecidedThem(t *testing.T) {
 	}
 	if n := strings.Count(guard, `"MANUAL_RESERVATION"`); n != 4 {
 		t.Fatalf("the guard emits %d reservation facts, want 4", n)
+	}
+
+	// The terminal admission has the same shape: after the unlock the winner
+	// is still parsing its result, so a duplicate refused by a later holder of
+	// the lock would routinely be recorded before the admission it duplicates.
+	terminal := sliceBetween(t, src,
+		"// Authoritative terminal admission:",
+		"outcome.PredictionResultAccepted = true")
+	// Stated per release, because the two branches are alternatives: whichever
+	// one runs, its TERMINAL_DELIVERED fact is emitted before that branch lets
+	// the lock go.
+	tLines := strings.Split(terminal, "\n")
+	tReleases := 0
+	for i, line := range tLines {
+		if strings.TrimSpace(line) != "p.mu.Unlock()" {
+			continue
+		}
+		tReleases++
+		emitted := false
+		for j := i - 1; j >= 0 && j > i-8; j-- {
+			if strings.Contains(tLines[j], `"TERMINAL_DELIVERED"`) {
+				emitted = true
+				break
+			}
+		}
+		if !emitted {
+			t.Fatalf("the admission lock is released at terminal line %d without that branch "+
+				"having recorded its delivery; a duplicate can then be recorded before the "+
+				"admission it duplicates:\n%s", i, strings.Join(tLines[max(0, i-6):i+1], "\n"))
+		}
+	}
+	if tReleases != 2 {
+		t.Fatalf("the terminal admission releases the lock %d times, want 2 (refused and "+
+			"admitted); this test has stopped matching the code it asserts about", tReleases)
 	}
 
 	// The cleanup fact has the same shape against a re-admission.

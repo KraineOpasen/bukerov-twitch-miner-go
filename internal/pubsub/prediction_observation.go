@@ -457,6 +457,15 @@ func sourceMessageType(msg *PubSubMessage) string {
 	}
 }
 
+// incarnationOf reads a round control's incarnation, tolerating a nil control
+// (the round is not tracked, so there is no local round to name).
+func incarnationOf(rc *roundControl) string {
+	if rc == nil {
+		return ""
+	}
+	return rc.incarnation
+}
+
 // isList / isObject / isString are the shapes the Prediction frames use.
 func isList(v interface{}) bool   { _, ok := v.([]interface{}); return ok }
 func isObject(v interface{}) bool { _, ok := v.(map[string]interface{}); return ok }
