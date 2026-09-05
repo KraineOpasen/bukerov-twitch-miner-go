@@ -121,9 +121,22 @@ func (m *Miner) PlaceManualBet(eventID, outcomeID string, amount int) (string, e
 	pool := m.wsPool
 	m.mu.RUnlock()
 	if pool == nil {
+		// No pool: this action never reached the Prediction subsystem, so no
+		// manual root is opened. Absence of a fact is not evidence that no
+		// attempt was made — pre-provider failures are outside the trail.
 		return "", errPredictionsUnavailable
 	}
-	return pool.PlaceManualBet(eventID, outcomeID, amount)
+	// The pool is resolved, so THIS is where the operator action enters the
+	// Prediction subsystem: the relayed entry point opens MANUAL_MINER_ROOT
+	// and the pool does not open a second, direct root for the same action.
+	//
+	// One sealed correlation token is minted here, before delegating, and
+	// carried by every fact the action produces. It is what ties the root to
+	// its descendants when the round they name does not exist — a manual bet
+	// on an event this pool never admitted stores no event id, because that
+	// identifier reached no local state, so without the token its root and its
+	// NO_ROUND descendant would have nothing in common at all.
+	return pool.PlaceManualBetRelayed(eventID, outcomeID, amount, pool.NextManualActionToken())
 }
 
 // SetAutoBetSkip implements web.PredictionControlProvider by delegating to the

@@ -162,6 +162,12 @@ type Miner struct {
 
 	deviceID          string
 	externalAnalytics bool
+	// settlePredictionProducer settles this miner's pool as a Prediction
+	// observation producer, exactly once, with the pool's own Close result as
+	// the evidence. Nil when nothing is observing. Written only by
+	// attachPredictionObservations, which runs during setup, and read only by
+	// stop(); the handle itself is one-shot and safe to call more than once.
+	settlePredictionProducer func(error)
 	// externalWebServer is true when the web server was injected via
 	// SetWebServer (the cmd/app composition root owns its Stop). When the miner
 	// builds its own web server (the library-use fallback in setupComponents),
@@ -465,9 +471,16 @@ func (m *Miner) SetDashboardConfig(d runtimeconfig.Dashboard) {
 	m.dashboard = d
 }
 
+// SetAnalyticsService injects an externally owned analytics service. Passing
+// nil explicitly CLEARS external ownership rather than asserting it: with
+// externalAnalytics unconditionally true, a nil injection would leave the
+// miner believing someone else owns a service it then builds for itself in
+// setupComponents — and that self-owned service (which now runs a Prediction
+// observation collector goroutine) would never be closed by the miner's own
+// teardown. Ownership therefore follows the argument.
 func (m *Miner) SetAnalyticsService(svc *analytics.Service) {
 	m.analyticsSvc = svc
-	m.externalAnalytics = true
+	m.externalAnalytics = svc != nil
 }
 
 // SetDatabase injects an externally-owned database handle (cmd/miner opens
@@ -855,6 +868,14 @@ func (m *Miner) setupComponents(ctx context.Context) {
 				slog.Error("Failed to create analytics service", "error", err)
 			} else {
 				m.analyticsSvc = svc
+				// A self-owned service has no App lifecycle step to start it,
+				// so the miner starts it here. Start is nonblocking and never
+				// fails runtime startup; without it the immutable Prediction
+				// observation collector never bootstraps and every observation
+				// is silently dropped.
+				if serr := svc.Start(); serr != nil {
+					slog.Error("Failed to start analytics service", "error", serr)
+				}
 			}
 
 			m.webServer = web.NewServer(
@@ -875,6 +896,13 @@ func (m *Miner) setupComponents(ctx context.Context) {
 			}
 		}
 	}
+
+	// Wire the immutable Prediction observation sink AFTER the analytics
+	// service exists. Attaching before it is built leaves capture silently
+	// inert on the self-owned path — the pool keeps a nil sink and every
+	// observation call site stays a no-op for the life of the process. A
+	// no-op is still the correct outcome when analytics is disabled.
+	m.attachPredictionObservations()
 
 	m.initNotificationManager(ctx)
 
@@ -1385,6 +1413,24 @@ var errLoopJoinTimeout = errors.New("miner: background loop join timed out")
 // spawned, returning the explicit errLoopJoinTimeout on timeout (it never
 // hangs). A miner whose startMining never ran has an empty loopWG and
 // returns nil immediately.
+// closePredictionTransport closes the pubsub pool and settles the Prediction
+// observation producer with the pool's OWN Close result, returning that result
+// unchanged for the caller to aggregate.
+//
+// The two are one step on purpose. A non-nil result means the pool could not
+// prove it had stopped producing, so the collector session must be forced
+// INCOMPLETE — and that evidence is exactly the value being aggregated away on
+// the next line. Separating them is how the settle gets dropped, or settled
+// with something other than the pool's own verdict; keeping them together also
+// makes the ordering assertable without standing up a whole miner.
+//
+// It never alters the shutdown result.
+func (m *Miner) closePredictionTransport() error {
+	poolErr := m.wsPool.Close()
+	m.settlePredictionObservations(poolErr)
+	return poolErr
+}
+
 func (m *Miner) joinLoops() error {
 	done := make(chan struct{})
 	go func() {
@@ -2077,7 +2123,7 @@ func (m *Miner) teardown() error {
 		drainErrs = append(drainErrs, m.chatManager.Close())
 	}
 	if m.wsPool != nil {
-		drainErrs = append(drainErrs, m.wsPool.Close())
+		drainErrs = append(drainErrs, m.closePredictionTransport())
 	}
 	if m.watcher != nil {
 		// A dirty watcher teardown (ErrStopJoinTimeout) means the watch loop is

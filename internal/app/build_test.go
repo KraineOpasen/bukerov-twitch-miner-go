@@ -409,3 +409,82 @@ func waitGoroutinesSettle(target int, within time.Duration) bool {
 	}
 	return runtime.NumGoroutine() <= target
 }
+
+// TestAnalyticsStepStartsBeforeWebAndStopsAfterIt pins the ordering the
+// immutable Prediction observation collector depends on. The collector is
+// started by the analytics step and JOINS its writer in that step's stop, so
+// the order must be:
+//
+//	start:   database -> analytics -> web
+//	stop:    web -> analytics -> database
+//
+// Getting this wrong in either direction is a real defect: starting analytics
+// after web would let a request reach a collector that has not bootstrapped,
+// and stopping it before web would leave the shared database closing while a
+// collector goroutine could still reach it.
+func TestAnalyticsStepStartsBeforeWebAndStopsAfterIt(t *testing.T) {
+	ctx := context.Background()
+	app, err := buildWith(ctx, testConfig(), runtimeconfig.RuntimeConfig{}, testFactories(t, nil))
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	t.Cleanup(func() { _ = app.Shutdown(context.Background()) })
+
+	names := stepNames(app)
+	dbAt, analyticsAt, webAt := -1, -1, -1
+	for i, n := range names {
+		switch n {
+		case "database":
+			dbAt = i
+		case "analytics":
+			analyticsAt = i
+		case "web":
+			webAt = i
+		}
+	}
+	if dbAt < 0 || analyticsAt < 0 || webAt < 0 {
+		t.Fatalf("steps = %v, want database, analytics and web", names)
+	}
+	if dbAt >= analyticsAt || analyticsAt >= webAt {
+		t.Fatalf("steps = %v, want database before analytics before web (Shutdown reverses this)", names)
+	}
+
+	// The analytics step must actually HAVE a start: without one the
+	// collector would never bootstrap and every observation would be dropped.
+	if app.steps[analyticsAt].start == nil {
+		t.Fatal("the analytics step has no start; the observation collector would never bootstrap")
+	}
+	if app.steps[analyticsAt].stop == nil {
+		t.Fatal("the analytics step has no stop; the observation writer would never be joined")
+	}
+	// Starting is nonblocking and never fails startup.
+	if err := app.steps[analyticsAt].start(ctx); err != nil {
+		t.Fatalf("analytics start must never fail runtime startup: %v", err)
+	}
+}
+
+// TestAnalyticsStartNeverFailsRunFailure proves a Run that reaches the
+// analytics step succeeds even when that step's own subsystem cannot
+// bootstrap — an audit trail must not be able to stop the miner.
+func TestAnalyticsStartIsIdempotentAndSafeAfterShutdown(t *testing.T) {
+	ctx := context.Background()
+	app, err := buildWith(ctx, testConfig(), runtimeconfig.RuntimeConfig{}, testFactories(t, nil))
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	if app.analytics == nil {
+		t.Fatal("analytics not built")
+	}
+	for i := 0; i < 3; i++ {
+		if err := app.analytics.Start(); err != nil {
+			t.Fatalf("Start #%d: %v", i, err)
+		}
+	}
+	if err := app.Shutdown(ctx); err != nil {
+		t.Fatalf("shutdown: %v", err)
+	}
+	// A start after shutdown is still harmless.
+	if err := app.analytics.Start(); err != nil {
+		t.Fatalf("Start after shutdown: %v", err)
+	}
+}

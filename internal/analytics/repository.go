@@ -127,6 +127,26 @@ type SQLiteRepository struct {
 	// logins.
 	mu      sync.Mutex
 	deleted map[string]struct{}
+
+	// priority is the low-priority admission gate the immutable Prediction
+	// observation writer runs behind (see prediction_observation.go). Every
+	// business write path below claims it BEFORE taking mu, so the lock order
+	// is always gate -> mu -> database and an observation can only ever cost a
+	// business writer a bounded cancellation. It is never claimed from a Tx
+	// helper that runs inside a caller-owned *sql.Tx: the claim already
+	// happened at the top of the call that owns that transaction.
+	priority *txPriority
+
+	// quotas is the pre-insert ledger for the frozen per-round and
+	// per-deletion-key ceilings. It lives here rather than on the collector
+	// because the ceilings are properties of the STORE: they survive a
+	// restart, and the bootstrap seeds this from what the tables hold.
+	quotas *observationQuotaLedger
+
+	// observations is the collector an identity erasure must fence before it
+	// opens its transaction (see InvalidateIdentity). Set by NewService right
+	// after it constructs the collector; nil for a repository built directly.
+	observations *observationCollector
 }
 
 type AnalyticsModule struct{}
@@ -271,12 +291,41 @@ func (m *AnalyticsModule) Migrations() []database.Migration {
 				CREATE INDEX IF NOT EXISTS idx_point_events_points_id ON point_events(points_id);
 			`,
 		},
+		{
+			Version:     6,
+			Description: "Create the immutable Prediction observation trail",
+			// Additive only: two new tables plus their indexes, no ALTER of
+			// any v1..v5 table and no backfill — every historical row stays
+			// exactly as it is, and the point_events constraints, indexes and
+			// UNIQUE(event_id) added by v5 are untouched. Safe on a populated
+			// database. The full column/CHECK/index contract, and why
+			// event_id and source_fingerprint are deliberately NOT unique,
+			// live with the schema in prediction_observation.go.
+			//
+			// Downgrade is NOT symmetric with v5's. A pre-v6 binary skips
+			// this version and never references either table, so it reads and
+			// writes a v6 database correctly — but its streamer purge and
+			// retention sweep do not know these tables, so it CANNOT complete
+			// a privacy erasure of observations already recorded. Rolling
+			// back below v6 once P1 data exists therefore needs a separate
+			// scrub or forward-only decision; it is not a safe default.
+			SQL: predictionObservationSchemaSQL,
+		},
 	}
 }
 
 func NewSQLiteRepository(db *database.DB, basePath string) (*SQLiteRepository, error) {
+	// The gate exists before the migration runs so the constructor's own
+	// RegisterModule is covered by the SAME outside-transaction priority hook
+	// as every later write. Nothing can be leasing it yet (the collector is
+	// started later, by Service.Start), so this claim is free — it is here so
+	// there is exactly one hook, with no unhooked schema path beside it.
+	priority := newTxPriority()
+	release := priority.Claim()
 	module := &AnalyticsModule{}
-	if err := db.RegisterModule(module); err != nil {
+	err := db.RegisterModule(module)
+	release()
+	if err != nil {
 		return nil, fmt.Errorf("failed to register analytics module: %w", err)
 	}
 
@@ -284,6 +333,8 @@ func NewSQLiteRepository(db *database.DB, basePath string) (*SQLiteRepository, e
 		db:       db,
 		basePath: basePath,
 		deleted:  make(map[string]struct{}),
+		priority: priority,
+		quotas:   newObservationQuotaLedger(),
 	}
 
 	return repo, nil
@@ -298,6 +349,16 @@ func NewSQLiteRepository(db *database.DB, basePath string) (*SQLiteRepository, e
 // with no window for a late event to slip a row past the delete. Idempotent.
 func (r *SQLiteRepository) Tombstone(login string) {
 	login = strings.ToLower(login)
+	defer r.priority.Claim()()
+	// The immutable Prediction observation trail is fenced by the SAME
+	// barrier. Without this a late event could be refused by the write paths
+	// below and still leave an observation behind for the login being purged.
+	// Armed outside the repository mutex: the collector may consult its fence
+	// while holding a priority lease, so it must never have to wait on a lock
+	// a claimer already holds.
+	if r.observations != nil {
+		r.observations.fence("", login)
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.deleted[login] = struct{}{}
@@ -307,6 +368,13 @@ func (r *SQLiteRepository) Tombstone(login string) {
 // can record fresh history again. Idempotent.
 func (r *SQLiteRepository) Reinstate(login string) {
 	login = strings.ToLower(login)
+	defer r.priority.Claim()()
+	// Lift the observation fence with the tombstone, including every channel
+	// erased alongside this login, so a re-added streamer records fresh
+	// observations again.
+	if r.observations != nil {
+		r.observations.unfence(login)
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	delete(r.deleted, login)
@@ -362,6 +430,7 @@ func (r *SQLiteRepository) getOrCreateStreamerTx(tx *sql.Tx, name string) (int64
 // and newName already have their own independent row: two histories are
 // never silently combined, the caller decides.
 func (r *SQLiteRepository) RenameStreamer(oldName, newName string) error {
+	defer r.priority.Claim()()
 	if oldName == newName {
 		return nil
 	}
@@ -443,10 +512,40 @@ func (r *SQLiteRepository) DeleteStreamerTx(tx *sql.Tx, login string) (bool, err
 // handle. Convenience for standalone callers/tests; the miner's lifecycle
 // coordinator uses DeleteStreamerTx to purge several stores in one transaction.
 func (r *SQLiteRepository) DeleteStreamer(ctx context.Context, login string) (bool, error) {
+	login = strings.ToLower(login)
+	// Neither the empty login nor the drops bucket is a deletable identity,
+	// and this call is documented to be a no-op for them — so the barrier
+	// below must not be armed against them either. Checked here rather than
+	// relying on DeleteStreamerTx's own guard, because by then the barrier
+	// would already be up.
+	if login == "" || login == DropsBucket {
+		return false, nil
+	}
+	// Arm the SAME identity barrier the lifecycle deletion path arms, OUTSIDE
+	// and strictly before the purge transaction.
+	//
+	// The priority claim below is not that barrier. It preempts the
+	// observation lease currently IN FLIGHT and nothing else: a fact already
+	// sitting in the collector's queue, or the next one a live producer
+	// offers, is untouched by it and would be written after this call had
+	// erased everything it could see. InvalidateIdentity is what refuses those
+	// — it bumps the capture generation and arms the fence — and the tombstone
+	// is what stops a later point or annotation write from recreating the
+	// streamers row this is about to delete.
+	r.InvalidateIdentity("", login)
+	r.Tombstone(login)
+
+	defer r.priority.Claim()()
 	var existed bool
 	err := r.db.WithTx(ctx, func(tx *sql.Tx) error {
+		// Route through the identity-aware purge so this convenience path
+		// leaves nothing behind either. It has no channel id — only the
+		// login — so the observation erasure falls back to the PROVED parent,
+		// exactly as it does for a ledger record with an empty channel. A
+		// caller that knows the channel gets a complete erasure through
+		// DeleteStreamerIdentityTx.
 		var e error
-		existed, e = r.DeleteStreamerTx(tx, login)
+		existed, e = r.DeleteStreamerIdentityTx(ctx, tx, "", login)
 		return e
 	})
 	return existed, err
@@ -458,6 +557,7 @@ func (r *SQLiteRepository) DeleteStreamer(ctx context.Context, login string) (bo
 // late sample after shutdown is refused typed (database.ErrClosed) instead of
 // reaching a closed driver handle.
 func (r *SQLiteRepository) RecordPoints(streamer string, points int, eventType string) error {
+	defer r.priority.Claim()()
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.tombstonedLocked(streamer) {
@@ -494,6 +594,7 @@ func (r *SQLiteRepository) RecordPoints(streamer string, points int, eventType s
 // under mu, like every other write path, so a purge in progress can never be
 // resurrected by a late event.
 func (r *SQLiteRepository) RecordPointEvent(streamer string, ev PointEvent, timelineBalance int, ann *PointEventAnnotation) (bool, error) {
+	defer r.priority.Claim()()
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.tombstonedLocked(streamer) {
@@ -567,6 +668,7 @@ func (r *SQLiteRepository) RecordPointEvent(streamer string, ev PointEvent, time
 // a closed driver handle. Ledger events never use it — their marker is written
 // inside RecordPointEvent's transaction.
 func (r *SQLiteRepository) RecordPointMarker(streamer string, at int64, ann PointEventAnnotation) error {
+	defer r.priority.Claim()()
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.tombstonedLocked(streamer) {
@@ -681,6 +783,7 @@ func exactEarningsBetween(ctx context.Context, q querier, streamerID int64, star
 }
 
 func (r *SQLiteRepository) RecordAnnotation(streamer string, eventType, text, color string) error {
+	defer r.priority.Claim()()
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.tombstonedLocked(streamer) {
@@ -934,6 +1037,7 @@ func annotationRecordsBetween(ctx context.Context, q querier, streamerID int64, 
 // sweep, which runs at most once per pruneInterval), and database.WithTx
 // refuses it after shutdown. It takes no mu, so it never blocks Tombstone.
 func (r *SQLiteRepository) PruneBefore(cutoff time.Time) (int64, error) {
+	defer r.priority.Claim()()
 	c := cutoff.UnixMilli()
 	var total int64
 	err := r.db.WithTx(context.Background(), func(tx *sql.Tx) error {
@@ -1003,6 +1107,7 @@ func (r *SQLiteRepository) ListStreamers() ([]StreamerInfo, error) {
 }
 
 func (r *SQLiteRepository) RecordChatMessage(streamer string, msg ChatMessage) error {
+	defer r.priority.Claim()()
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.tombstonedLocked(streamer) {
@@ -1139,6 +1244,7 @@ func (r *SQLiteRepository) SearchChatMessages(streamer string, query string, lim
 // that is logged, not silently swallowed. streamer_id integrity is guaranteed by
 // resolving/creating the parent streamer row first.
 func (r *SQLiteRepository) RecordBet(b BetRecord) error {
+	defer r.priority.Claim()()
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.tombstonedLocked(b.Streamer) {

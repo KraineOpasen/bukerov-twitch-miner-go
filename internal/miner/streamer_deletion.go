@@ -65,7 +65,18 @@ func (m *Miner) buildStreamerLifecycle() {
 		m.streamerLifecycle = nil
 		return
 	}
-	coord, err := streamerlifecycle.New(m.db, purgers, fencers, renamers)
+	// Wire the analytics low-priority gate as the coordinator's
+	// outside-transaction hook, so the immutable Prediction observation writer
+	// yields the shared connection to every lifecycle transaction instead of
+	// making one wait behind it. nil when analytics is disabled, which is
+	// exactly the behaviour this package had before the hook existed.
+	var priority streamerlifecycle.TxPriority
+	if m.analyticsSvc != nil {
+		if hook := m.analyticsSvc.TxPriority(); hook != nil {
+			priority = hook
+		}
+	}
+	coord, err := streamerlifecycle.NewWithPriority(m.db, purgers, fencers, renamers, priority)
 	if err != nil {
 		slog.Error("Failed to build streamer-deletion coordinator; removals will not purge persisted history until this is fixed", "error", err)
 		m.streamerLifecycle = nil

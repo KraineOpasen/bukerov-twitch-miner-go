@@ -30,6 +30,61 @@ func (preLedgerModule) Migrations() []database.Migration {
 	return pre
 }
 
+// ledgerV5Module is the analytics module exactly as the release that SHIPPED
+// the exact point-event ledger (#303) had it: the same module name with
+// migrations v1..v5 and nothing after. It exists so the assertions below keep
+// testing the v5 schema itself at version 5, unchanged, now that the module
+// has migrations beyond it.
+type ledgerV5Module struct{}
+
+func (ledgerV5Module) Name() string { return (&AnalyticsModule{}).Name() }
+
+func (ledgerV5Module) Migrations() []database.Migration {
+	all := (&AnalyticsModule{}).Migrations()
+	var upToV5 []database.Migration
+	for _, m := range all {
+		if m.Version <= 5 {
+			upToV5 = append(upToV5, m)
+		}
+	}
+	return upToV5
+}
+
+// newV5Repository builds a repository over a database pinned at analytics v5 —
+// the exact schema #303 shipped — so the rollback harness keeps exercising a
+// genuine v5 database rather than whatever the current head happens to be.
+// It registers only the v5-capped module and then constructs the repository
+// directly, which is why it does not go through NewSQLiteRepository (that
+// always migrates to head).
+func newV5Repository(t *testing.T, db *database.DB, basePath string) *SQLiteRepository {
+	t.Helper()
+	if err := db.RegisterModule(ledgerV5Module{}); err != nil {
+		t.Fatalf("register v5 module: %v", err)
+	}
+	if v := moduleVersion(t, db); v != 5 {
+		t.Fatalf("pinned module version = %d, want 5", v)
+	}
+	return &SQLiteRepository{
+		db:       db,
+		basePath: basePath,
+		deleted:  make(map[string]struct{}),
+		priority: newTxPriority(),
+	}
+}
+
+// currentAnalyticsVersion is the module's current migration head, read from
+// the module itself rather than hard-coded, so adding a migration never turns
+// an unrelated assertion red.
+func currentAnalyticsVersion() int {
+	head := 0
+	for _, m := range (&AnalyticsModule{}).Migrations() {
+		if m.Version > head {
+			head = m.Version
+		}
+	}
+	return head
+}
+
 func openPrivateDB(t *testing.T, path string) *database.DB {
 	t.Helper()
 	sqlDB, err := sql.Open("sqlite", path)
@@ -145,10 +200,8 @@ func TestMigrationV5AdditiveOnPopulatedV4Database(t *testing.T) {
 
 	db := openPrivateDB(t, path)
 	defer func() { _ = db.Close() }()
-	repo, err := NewSQLiteRepository(db, filepath.Dir(path))
-	if err != nil {
-		t.Fatalf("upgrade: %v", err)
-	}
+	// The v5 step itself, at exactly v5, on the populated v4 database.
+	repo := newV5Repository(t, db, filepath.Dir(path))
 	if v := moduleVersion(t, db); v != 5 {
 		t.Fatalf("version after upgrade = %d, want 5", v)
 	}
@@ -158,6 +211,24 @@ func TestMigrationV5AdditiveOnPopulatedV4Database(t *testing.T) {
 	for table, rows := range before {
 		if after := dumpTable(t, db, table); !reflect.DeepEqual(after, rows) {
 			t.Fatalf("%s rows changed by migration:\nbefore=%v\nafter=%v", table, rows, after)
+		}
+	}
+	if n := countRows(t, repo, `SELECT COUNT(*) FROM point_events`); n != 0 {
+		t.Fatalf("point_events has %d rows after migration, want 0 (no historical backfill)", n)
+	}
+
+	// The current module then carries the same database to its head, and the
+	// v4 rows are STILL byte-for-byte what they were.
+	repo, err := NewSQLiteRepository(db, filepath.Dir(path))
+	if err != nil {
+		t.Fatalf("upgrade: %v", err)
+	}
+	if v := moduleVersion(t, db); v != currentAnalyticsVersion() {
+		t.Fatalf("version after upgrade = %d, want %d", v, currentAnalyticsVersion())
+	}
+	for table, rows := range before {
+		if after := dumpTable(t, db, table); !reflect.DeepEqual(after, rows) {
+			t.Fatalf("%s rows changed by a later migration:\nbefore=%v\nafter=%v", table, rows, after)
 		}
 	}
 	if n := countRows(t, repo, `SELECT COUNT(*) FROM point_events`); n != 0 {
@@ -186,8 +257,8 @@ func TestMigrationV5AdditiveOnPopulatedV4Database(t *testing.T) {
 	if err := db.RegisterModule(&AnalyticsModule{}); err != nil {
 		t.Fatalf("second registration: %v", err)
 	}
-	if v := moduleVersion(t, db); v != 5 {
-		t.Fatalf("version after re-registration = %d, want 5", v)
+	if v := moduleVersion(t, db); v != currentAnalyticsVersion() {
+		t.Fatalf("version after re-registration = %d, want %d", v, currentAnalyticsVersion())
 	}
 }
 
@@ -217,8 +288,8 @@ func TestMigrationV5RestartPreservesLedgerAndUniqueness(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reopen: %v", err)
 	}
-	if v := moduleVersion(t, db2); v != 5 {
-		t.Fatalf("version after reopen = %d, want 5", v)
+	if v := moduleVersion(t, db2); v != currentAnalyticsVersion() {
+		t.Fatalf("version after reopen = %d, want %d", v, currentAnalyticsVersion())
 	}
 	exact, err := repo2.ExactEarningsBetween("restart-streamer", time.Time{}, time.Time{})
 	if err != nil {
@@ -251,10 +322,7 @@ func TestPreLedgerBinaryOpensV5DatabaseSafely(t *testing.T) {
 	ts := time.Now().Add(-time.Hour)
 
 	db := openPrivateDB(t, path)
-	repo, err := NewSQLiteRepository(db, filepath.Dir(path))
-	if err != nil {
-		t.Fatal(err)
-	}
+	repo := newV5Repository(t, db, filepath.Dir(path))
 	if rec, err := repo.RecordPointEvent("rollback-streamer", streakEvent("sha256:rollback-1", ts, 1450), 1450, streakAnnotation(450)); err != nil || !rec {
 		t.Fatalf("recorded=%v err=%v", rec, err)
 	}
