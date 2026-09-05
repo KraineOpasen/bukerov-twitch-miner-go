@@ -830,6 +830,14 @@ func TestObservationEraseByIdentity(t *testing.T) {
 	// A round owned by chan-victim, with two facts.
 	svc.RecordPredictionObservation(channelObservation("pool-1", "chan-victim", "victim", "round-1", "ROUND_CREATED"))
 	svc.RecordPredictionObservation(channelObservation("pool-1", "chan-victim", "victim", "round-1", "ROUND_UPDATED"))
+	// A THIRD fact of that same round, routed through a DIFFERENT channel.
+	// Only whole-round expansion can reach it: the routed selector never
+	// names chan-victim for this row. Without it the test cannot tell
+	// whole-round erasure from routed-only erasure.
+	roundMemberRoutedElsewhere := channelObservation("pool-1", "chan-bystander", "bystander", "round-1", "ROUND_UPDATED")
+	roundMemberRoutedElsewhere.RetentionGroupOwnerChannelID = "chan-victim"
+	roundMemberRoutedElsewhere.RetentionGroupOwnerLogin = "victim"
+	svc.RecordPredictionObservation(roundMemberRoutedElsewhere)
 	// A fact merely ROUTED through chan-victim, belonging to another channel's round.
 	crossRouted := channelObservation("pool-1", "chan-victim", "victim", "round-2", "ROUND_CREATED")
 	crossRouted.RetentionGroupOwnerChannelID = "chan-other"
@@ -842,7 +850,7 @@ func TestObservationEraseByIdentity(t *testing.T) {
 	provenance.RetentionGroupOwnerChannelID = "chan-third"
 	provenance.RetentionGroupOwnerLogin = "third"
 	svc.RecordPredictionObservation(provenance)
-	awaitCommitted(t, svc, 4)
+	awaitCommitted(t, svc, 5)
 
 	var removed int64
 	if err := repo.db.WithTx(ctx, func(tx *sql.Tx) error {
@@ -852,10 +860,12 @@ func TestObservationEraseByIdentity(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	// Two whole-round facts + the one routed-only fact = 3. The provenance
-	// fact survives: round_owner never expands deletion.
-	if removed != 3 {
-		t.Fatalf("erased %d facts, want 3", removed)
+	// Three whole-round facts (including the one routed through a different
+	// channel, reachable ONLY by whole-round expansion) plus the one
+	// routed-only fact = 4. The provenance fact survives: round_owner never
+	// expands deletion.
+	if removed != 4 {
+		t.Fatalf("erased %d facts, want 4", removed)
 	}
 	left, err := repo.ObservationsBySession(ctx, svc.observations.sessionID, 0)
 	if err != nil {
