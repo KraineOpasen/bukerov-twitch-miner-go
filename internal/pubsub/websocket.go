@@ -1082,7 +1082,7 @@ func (ws *WebSocketClient) handleMessageForGen(msg WSMessage, readerGen uint64) 
 		ws.mu.Unlock()
 
 		// Stamp the connection provenance of this delivery. Purely additive
-		// observation metadata: three field writes on a message this
+		// observation metadata: four field writes on a message this
 		// goroutine exclusively owns, taking no lock and changing nothing
 		// about admission, fencing or dispatch. readerGen is the generation
 		// the fence above already proved current for this frame.

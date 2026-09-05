@@ -233,16 +233,25 @@ const (
 // Where each is ENFORCED, so none of them is merely decorative:
 //   - queue capacity: the channel's own size; a full queue drops.
 //   - outcomes, top predictors, string, payload: by the producer's bounded
-//     projection and by sanitizeObservation/marshalObservationPayload.
+//     projection and by sanitizeObservation/marshalObservationPayload, each
+//     of which REFUSES the whole fact rather than shortening it.
 //   - session rows/bytes: per fact, from atomics, in the collector's write
-//     path (withinSessionBounds).
-//   - store rows/bytes/sessions: by the collector's maintenance pass, which
-//     pauses capture when a bound is reached and resumes when retention frees
-//     space.
-//   - round rows/bytes: by the retention unit — one whole round is the
-//     largest thing a single pruning transaction removes.
-//   - deletion identity and proved-union rows/bytes: the erasure's cost
-//     envelope, exercised by the identity-purge pilot.
+//     path (withinSessionBounds), tested against current usage PLUS the
+//     incoming fact.
+//   - round rows/bytes, deletion-identity rows/bytes, distinct deletion keys,
+//     and store rows/bytes: by observationQuotaLedger.admit, BEFORE the
+//     INSERT and inside its transaction, charged only after the row commits
+//     and re-established across restarts by the bootstrap recount. A ceiling
+//     first observed afterwards has already been broken.
+//   - store rows/bytes/sessions, again: by the collector's maintenance pass,
+//     as a backstop against a store that grew by some path the ledger did not
+//     charge. Reaching a bound there pauses capture STICKILY — only a new
+//     process's exact recount re-establishes the ceilings, never the
+//     observation that a later pass measured less.
+//   - proved-union rows/bytes: not a separate check. One erasure selects on
+//     exactly two deletion keys, so the union is twice the per-key ceiling by
+//     construction, and the identity-purge pilot measures that worst case
+//     rather than assuming a smaller one.
 const (
 	// ObservationQueueCapacity is the collector's private queue depth. A full
 	// queue drops rather than blocking a producer.
@@ -393,7 +402,8 @@ var (
 	observationReasonCodes = []string{
 		"OK", "TOGGLE_OFF", "ALREADY_TRACKED", "NOT_ACTIVE", "NOT_ELIGIBLE",
 		"WINDOW_ELAPSED", "BELOW_MINIMUM_POINTS", "NO_POOL", "NO_ROUND",
-		"NO_DECISION", "ALREADY_PLACED", "FILTER_REJECTED", "STRATEGY_NO_CHOICE",
+		"NOT_CONFIRMED", "NO_DECISION", "ALREADY_PLACED", "FILTER_REJECTED",
+		"STRATEGY_NO_CHOICE",
 		"DUPLICATE", "CONFLICT", "ACCEPTED", "REJECTED", "REFUNDED", "WON", "LOST",
 		ValueUnknown,
 	}
@@ -1356,6 +1366,64 @@ func (r *SQLiteRepository) FinalizeObservationSession(ctx context.Context, epoch
 		return nil
 	})
 	return applied, err
+}
+
+// ReconcileAbandonedObservationSessions finalizes every session row left OPEN
+// by a PREVIOUS process as INCOMPLETE, and reports how many it closed.
+//
+// A session row is opened by a live collector and closed by that same
+// collector. An unclean shutdown leaves it OPEN forever: retention refuses to
+// touch an OPEN session's rows or the row itself — deliberately, because the
+// live session is OPEN for its whole life and nothing may prune it — so the
+// abandoned rows accumulate with no in-product remedy, and at MaxStoreSessions
+// the next bootstrap refuses to open a session at all and P1 is disabled for
+// the rest of every subsequent process.
+//
+// The counters are left EXACTLY as the dead process last wrote them. This
+// function knows nothing about what that process observed and does not
+// pretend to: it records only that the session ended without being closed,
+// which is what INCOMPLETE means. After that the existing factless-session
+// sweep can reclaim the row like any other.
+//
+// closed_at_ms is set to the session's OWN started_at_ms, not to now. The
+// dead process left no later timestamp, and — load-bearing — the sweep ages a
+// finalized session out by its close time: stamping the reconciliation's own
+// clock would restart the retention clock on every startup, so a row would
+// become reclaimable only if the process then stayed up for the whole
+// retention window, and a store that keeps crashing could never drain. Ageing
+// them from the last moment we can attest the session was alive is both the
+// honest reading and the one that actually reclaims.
+//
+// It is scoped by `collector_session_id <> ?` so the CALLER's own live session
+// is never touched, and bounded so one pass cannot hold the shared connection
+// on a store full of them.
+func (r *SQLiteRepository) ReconcileAbandonedObservationSessions(ctx context.Context, liveSessionID string, limit int) (int64, error) {
+	if limit <= 0 {
+		limit = observationPruneUnit
+	}
+	var closed int64
+	err := r.db.WithTx(ctx, func(tx *sql.Tx) error {
+		res, e := tx.ExecContext(ctx, `
+			UPDATE prediction_observation_sessions
+			   SET close_state  = ?,
+			       closed_at_ms = started_at_ms
+			 WHERE collector_epoch IN (
+			     SELECT collector_epoch FROM prediction_observation_sessions
+			      WHERE close_state = 'OPEN'
+			        AND collector_session_id <> ?
+			      ORDER BY collector_epoch
+			      LIMIT ?)`, SessionIncomplete, liveSessionID, limit)
+		if e != nil {
+			return e
+		}
+		n, e := res.RowsAffected()
+		if e != nil {
+			return e
+		}
+		closed = n
+		return nil
+	})
+	return closed, err
 }
 
 // ObservationAccounting is the collector's in-memory tally, written once at
@@ -2551,15 +2619,27 @@ func (r *SQLiteRepository) eraseObservationsForIdentityTx(ctx context.Context, t
 	}
 
 	// (1) whole rounds owned by the identity, by channel and by proved parent.
+	// The round expansion selects on the LOCAL round — the pool instance
+	// together with its admission id — not on the admission id alone.
+	//
+	// An incarnation string already embeds the pool instance that minted it,
+	// so in practice the two are equivalent; naming the pool explicitly is
+	// what makes that a property of the QUERY rather than of the id format.
+	// It also bounds the blast radius structurally: the cost envelope this
+	// erasure is measured against assumes one incarnation names one local
+	// round owned by one channel, and with the pair in the predicate that
+	// holds however the id was constructed.
 	const roundsByChannel = `
 		DELETE FROM prediction_observations
-		 WHERE round_incarnation_id IN (
-		     SELECT DISTINCT round_incarnation_id FROM prediction_observations
+		 WHERE (pool_instance_id, round_incarnation_id) IN (
+		     SELECT DISTINCT pool_instance_id, round_incarnation_id
+		       FROM prediction_observations
 		      WHERE retention_group_owner_channel_id = ?)`
 	const roundsByParent = `
 		DELETE FROM prediction_observations
-		 WHERE round_incarnation_id IN (
-		     SELECT DISTINCT round_incarnation_id FROM prediction_observations
+		 WHERE (pool_instance_id, round_incarnation_id) IN (
+		     SELECT DISTINCT pool_instance_id, round_incarnation_id
+		       FROM prediction_observations
 		      WHERE retention_group_owner_streamer_id = ?)`
 	if channel != "" {
 		if err := exec("erase observation rounds by channel", roundsByChannel, channel); err != nil {
@@ -2749,6 +2829,12 @@ type observationCollector struct {
 	// tick lands in the window — that is, intermittently.
 	maxStoreRows, maxStoreBytes, maxStoreSessions atomic.Int64
 	maxSessionRows, maxSessionBytes               atomic.Int64
+
+	// storeStatsCalls counts the store-wide aggregates a runtime pass has
+	// actually paid for. It exists so a test can prove the ledger gate keeps
+	// that scan off a healthy store's maintenance path — the cost is invisible
+	// otherwise, and invisible costs are how it got there.
+	storeStatsCalls atomic.Int64
 
 	// erasedAt records, per fence key, the causal position this session had
 	// reached when that identity was last erased — and unlike the fence it is
@@ -3095,14 +3181,41 @@ func (c *observationCollector) maintain(ctx context.Context) {
 		}
 	}
 
-	// The hard store caps are enforced HERE, against a fresh measurement —
-	// not once at startup against a stale one. A store that has grown past a
-	// bound with nothing left to prune stops accepting new facts rather than
-	// growing without limit; capture resumes on the next pass if retention
-	// later frees space.
+	// The hard store caps are enforced HERE, and the cheap check comes first.
+	//
+	// The exact measurement is a full-table COUNT and SUM(LENGTH(payload)),
+	// and it runs inside a transaction on the single shared connection. The
+	// points snapshot is deliberately ungated — it cannot claim priority and
+	// cancel this the way a business writer can, it can only wait — so paying
+	// for that scan on every tick would make a dashboard read wait behind a
+	// whole-table aggregate on exactly the stores where it is slowest, for a
+	// question that is almost always "no".
+	//
+	// The quota ledger already holds an exact charged tally, seeded from the
+	// store before intake opened, and it is never discharged in-process, so it
+	// is an OVER-estimate of what the store holds. That direction is what
+	// makes it usable as a gate: if the ledger says we are under a bound, we
+	// are under it, and no scan is needed. Only a store the ledger cannot
+	// clear pays for the exact figure — and the pause is sticky, so it pays at
+	// most until it latches.
+	usage := c.repo.quotas.storeUsage()
+	if usage.Rows < c.maxStoreRows.Load() && usage.Bytes < c.maxStoreBytes.Load() {
+		return
+	}
+	c.storeStatsCalls.Add(1)
 	stats, err := c.storeStats(ctx)
 	if err != nil {
-		return
+		// The one thing we may not do is carry on as if the answer were "no".
+		// The ledger says this store cannot be shown to be under a bound and
+		// the measurement that could contradict it did not complete, so the
+		// bound is treated as reached. Fail closed: capture pauses, and a
+		// restart's exact recount is what re-establishes the ceilings.
+		observationLog("Prediction observation capacity could not be measured; pausing capture", err)
+		stats = ObservationStoreStats{
+			Rows:     c.maxStoreRows.Load(),
+			Bytes:    c.maxStoreBytes.Load(),
+			Sessions: 0,
+		}
 	}
 	over := stats.Rows >= c.maxStoreRows.Load() || stats.Bytes >= c.maxStoreBytes.Load() || stats.Sessions >= c.maxStoreSessions.Load()
 	if over && c.phase.CompareAndSwap(phaseRunning, phasePaused) {
@@ -3128,6 +3241,25 @@ func (c *observationCollector) bootstrap(ctx context.Context) error {
 		return err
 	}
 	c.sessionID = sessionID
+
+	// Reconcile before pruning, and prune before measuring. A session left
+	// OPEN by an unclean shutdown is untouchable by retention BY DESIGN — the
+	// live session is OPEN for its whole life and nothing may prune it — so
+	// without this pass those rows accumulate until MaxStoreSessions refuses
+	// the bootstrap and P1 is disabled permanently, with no in-product
+	// remedy. Closing them here as INCOMPLETE, with their dead process's
+	// counters untouched, makes them ordinary finalized sessions the existing
+	// sweep can reclaim in the very same pass.
+	if err := c.leased(ctx, observationBootstrapBudget, func(lease context.Context) error {
+		n, e := c.repo.ReconcileAbandonedObservationSessions(lease, sessionID, observationPruneUnit)
+		if e == nil && n > 0 {
+			observationLog("Closed observation sessions left open by an earlier process",
+				fmt.Errorf("sessions=%d", n))
+		}
+		return e
+	}); err != nil {
+		return fmt.Errorf("analytics: reconcile abandoned observation sessions: %w", err)
+	}
 
 	// Prune BEFORE measuring. Measuring first and pruning second compares the
 	// caps against a figure the prune is about to invalidate, which can leave
@@ -3213,11 +3345,18 @@ func (c *observationCollector) write(ctx context.Context, raw PredictionObservat
 		c.dropped.Add(1)
 		return
 	}
-	// The per-session bounds are ceilings, not advice: a session that has
-	// reached either one stops committing rather than growing past it. The
-	// facts it already wrote stay exact; the session finalizes INCOMPLETE
-	// because the drops below say so.
-	if !c.withinSessionBounds() {
+	// The per-session bounds are ceilings, not advice: a session that WOULD
+	// pass either one stops committing rather than growing past it. The facts
+	// it already wrote stay exact; the session finalizes INCOMPLETE because
+	// the drops below say so.
+	//
+	// The payload is rendered ONCE, here, and its size is what the bound is
+	// tested against and what is charged after the commit. Testing "has the
+	// session already exceeded the ceiling" instead of "would this fact take
+	// it past" let one whole payload — up to MaxObservationPayloadBytes —
+	// land beyond a bound that is supposed to be a promise.
+	rendered := payloadJSONOf(obs)
+	if !c.withinSessionBounds(int64(len(rendered))) {
 		c.dropped.Add(1)
 		return
 	}
@@ -3258,18 +3397,36 @@ func (c *observationCollector) write(ctx context.Context, raw PredictionObservat
 			c.disabled.Store(true)
 			observationLog("Prediction observation capture disabled: a deletion identity is at its ceiling", err)
 		}
+		// A collision is not a refusal of THIS fact — it is proof that the
+		// causal position this collector believes it owns is already occupied
+		// by different content. The allocator's invariant is that a position
+		// is minted once and written once; a store that contradicts it cannot
+		// be captured into safely, because every later position rests on the
+		// same assumption. Capture stops rather than filing more facts under
+		// coordinates that have been shown not to mean what they say.
+		if errors.Is(err, errObservationCollision) {
+			c.disabled.Store(true)
+			observationLog("Prediction observation capture disabled: a causal position was already occupied", err)
+		}
 		return
 	}
-	c.sessionBytes.Add(int64(len(payloadJSONOf(obs))))
+	c.sessionBytes.Add(int64(len(rendered)))
 	c.committed.Add(1)
 }
 
-// withinSessionBounds reports whether this session may commit another fact.
-// Both bounds are read from atomics the writer already maintains, so the
-// check costs nothing on the write path — which is why they can be enforced
-// per fact rather than merely documented.
-func (c *observationCollector) withinSessionBounds() bool {
-	return c.committed.Load() < c.maxSessionRows.Load() && c.sessionBytes.Load() < c.maxSessionBytes.Load()
+// withinSessionBounds reports whether this session may commit ONE MORE fact of
+// the given size. Both bounds are read from atomics the writer already
+// maintains, so the check costs nothing on the write path — which is why they
+// can be enforced per fact rather than merely documented.
+//
+// The incoming size is part of the question, not an afterthought. A row is
+// always one row, so the row bound is the same either way; a payload is
+// variable, and a session sitting one byte under its byte ceiling could admit
+// a whole further payload if the check only asked whether it had already
+// exceeded it.
+func (c *observationCollector) withinSessionBounds(incoming int64) bool {
+	return c.committed.Load()+1 <= c.maxSessionRows.Load() &&
+		c.sessionBytes.Load()+incoming <= c.maxSessionBytes.Load()
 }
 
 // payloadJSONOf renders a fact's payload for accounting. It is the same
@@ -3424,11 +3581,29 @@ func (c *observationCollector) noteProducerShutdownUncertain() {
 }
 
 // accounting snapshots the tally for finalization.
+// accounting is the session's final arithmetic, and it must SETTLE, not merely
+// report. A position is reserved at capture and only later either committed or
+// dropped, so a producer preempted between its reservation and its enqueue
+// leaves a position that reached neither counter. Reporting that verbatim
+// finalizes a session whose own numbers do not add up — close_state COMPLETE
+// beside a reading of INTEGRITY_ERROR, which is not a stricter claim but a
+// self-contradictory one.
+//
+// A position that never reached the writer is a fact that was captured and
+// never stored, which is exactly what dropped counts. Settling it there keeps
+// the counter form true and makes the session honestly INCOMPLETE.
 func (c *observationCollector) accounting() ObservationAccounting {
+	// One read of the sequence, so the shortfall is computed against the same
+	// value that is persisted.
+	last := c.sequence.Load()
+	committed, dropped := c.committed.Load(), c.dropped.Load()
+	if gap := last - committed - dropped; gap > 0 {
+		dropped += gap
+	}
 	return ObservationAccounting{
-		LastAssignedSequence:      c.sequence.Load(),
-		Committed:                 c.committed.Load(),
-		Dropped:                   c.dropped.Load(),
+		LastAssignedSequence:      last,
+		Committed:                 committed,
+		Dropped:                   dropped,
 		UnsettledObligations:      c.unsettledObligations.Load(),
 		PostFenceProducers:        c.postFenceProducers.Load(),
 		ProducerShutdownUncertain: c.producerShutdownUncertain.Load(),

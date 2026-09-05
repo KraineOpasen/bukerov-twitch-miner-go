@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -63,6 +64,14 @@ func (r *recordingSink) all() []PredictionObservation {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return append([]PredictionObservation(nil), r.got...)
+}
+
+// reset forgets the facts recorded so far, so a test can set a fixture up and
+// then assert only on what the step under test produced.
+func (r *recordingSink) reset() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.got = nil
 }
 
 func (r *recordingSink) phases() []string {
@@ -965,6 +974,163 @@ func TestUserFrameObservationsAreRecorded(t *testing.T) {
 	}
 }
 
+// TestEveryTerminalExitIsObservedWithItsOwnVerdict closes a coverage gap an
+// independent review found, and repairs a misstatement inside it.
+//
+// The gap: of the five exits from the terminal path only ONE was exercised, so
+// deleting the other four emissions — or collapsing every admitted verdict to
+// REJECTED, so a won bet recorded as a loss — left the suite green.
+//
+// The misstatement: three distinct causes refuse admission (round not tracked,
+// no confirmed bet on it, terminal already accepted) and only two reason codes
+// existed, so a TRACKED but unconfirmed round was recorded as NO_ROUND on a row
+// that names that very round's incarnation and event id — the record
+// contradicting itself.
+func TestEveryTerminalExitIsObservedWithItsOwnVerdict(t *testing.T) {
+	frame := func(eventID string, result interface{}) *PubSubMessage {
+		prediction := map[string]interface{}{"event_id": eventID}
+		if result != nil {
+			prediction["result"] = result
+		}
+		return &PubSubMessage{
+			Topic: NewTopic(TopicPredictionsUser, "user-id"), Type: "prediction-result",
+			ChannelID: "chan-1",
+			Data:      map[string]interface{}{"prediction": prediction},
+		}
+	}
+	win := map[string]interface{}{"type": "WIN", "points_won": float64(500)}
+
+	// tracked prepares a pool holding one admitted round, optionally with a
+	// confirmed bet on it.
+	tracked := func(t *testing.T, confirm bool) (*WebSocketPool, *recordingSink, *models.Streamer) {
+		t.Helper()
+		p, sink := observedPool(t, &fakePlacer{})
+		s := newTestStreamer(100000)
+		p.streamers = []*models.Streamer{s}
+		event := admitRound(p, s, "round-1")
+		event.Bet.Decision = models.Decision{Choice: 0, Amount: 250, ID: "o1"}
+		if confirm {
+			p.handlePredictionUser(&PubSubMessage{
+				Topic: NewTopic(TopicPredictionsUser, "user-id"), Type: "prediction-made",
+				ChannelID: "chan-1",
+				Data: map[string]interface{}{"prediction": map[string]interface{}{
+					"event_id": "round-1"}},
+			}, s)
+		}
+		sink.reset()
+		return p, sink, s
+	}
+
+	terminalOf := func(t *testing.T, sink *recordingSink) PredictionObservation {
+		t.Helper()
+		var found []PredictionObservation
+		for _, o := range sink.all() {
+			if o.Kind == ObsKindUserTerminal {
+				found = append(found, o)
+			}
+		}
+		if len(found) != 1 {
+			t.Fatalf("want exactly one user_terminal fact, got %d (%v)", len(found), sink.phases())
+		}
+		return found[0]
+	}
+
+	t.Run("no event id on the wire", func(t *testing.T) {
+		p, sink, s := tracked(t, true)
+		p.handlePredictionUser(frame("", win), s)
+		got := terminalOf(t, sink)
+		if got.Payload.Phase != "TERMINAL_REJECTED" || got.Payload.ReasonCode != "NO_ROUND" {
+			t.Fatalf("terminal fact = %+v", got.Payload)
+		}
+	})
+
+	t.Run("no result object", func(t *testing.T) {
+		p, sink, s := tracked(t, true)
+		p.handlePredictionUser(frame("round-1", nil), s)
+		got := terminalOf(t, sink)
+		if got.Payload.Phase != "TERMINAL_REJECTED" || got.Payload.ReasonCode != "REJECTED" {
+			t.Fatalf("terminal fact = %+v", got.Payload)
+		}
+		if got.Payload.Presence["result"] != ObsAbsentOnWire {
+			t.Fatalf("result presence = %q, want %q", got.Payload.Presence["result"], ObsAbsentOnWire)
+		}
+	})
+
+	t.Run("a result the validator refuses", func(t *testing.T) {
+		p, sink, s := tracked(t, true)
+		p.handlePredictionUser(frame("round-1", map[string]interface{}{"type": "TELEPORTED"}), s)
+		got := terminalOf(t, sink)
+		if got.Payload.Phase != "TERMINAL_REJECTED" || got.Payload.ReasonCode != "REJECTED" {
+			t.Fatalf("terminal fact = %+v", got.Payload)
+		}
+	})
+
+	// The repaired misstatement: a tracked round with no confirmed bet is not
+	// "no round", and the fact names the round it is about.
+	t.Run("a tracked round with no confirmed bet", func(t *testing.T) {
+		p, sink, s := tracked(t, false)
+		p.handlePredictionUser(frame("round-1", win), s)
+		got := terminalOf(t, sink)
+		if got.Payload.Phase != "TERMINAL_DELIVERED" {
+			t.Fatalf("terminal fact = %+v", got.Payload)
+		}
+		if got.Payload.ReasonCode != "NOT_CONFIRMED" {
+			t.Fatalf("a tracked round with no confirmed bet was recorded as %q; the same row "+
+				"carries its event id, so NO_ROUND would contradict itself: %+v",
+				got.Payload.ReasonCode, got)
+		}
+	})
+
+	t.Run("a second terminal for one round", func(t *testing.T) {
+		p, sink, s := tracked(t, true)
+		if !p.handlePredictionUser(frame("round-1", win), s).PredictionResultAccepted {
+			t.Fatal("the first terminal was not admitted; the fixture is wrong")
+		}
+		sink.reset()
+		if p.handlePredictionUser(frame("round-1", win), s).PredictionResultAccepted {
+			t.Fatal("a duplicate terminal was admitted twice")
+		}
+		got := terminalOf(t, sink)
+		if got.Payload.Phase != "TERMINAL_DELIVERED" || got.Payload.ReasonCode != "DUPLICATE" {
+			t.Fatalf("terminal fact = %+v", got.Payload)
+		}
+	})
+
+	// The admitted verdicts, each distinct: a won bet recorded as a loss is
+	// the failure this pins.
+	for _, tc := range []struct {
+		name   string
+		result map[string]interface{}
+		want   string
+		payout int64
+	}{
+		{"a win", map[string]interface{}{"type": "WIN", "points_won": float64(500)}, "WON", 500},
+		{"a loss", map[string]interface{}{"type": "LOSE", "points_won": float64(0)}, "LOST", 0},
+		{"a refund", map[string]interface{}{"type": "REFUND", "points_won": float64(0)}, "REFUNDED", 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p, sink, s := tracked(t, true)
+			if !p.handlePredictionUser(frame("round-1", tc.result), s).PredictionResultAccepted {
+				t.Fatal("the terminal was refused; the fixture is wrong")
+			}
+			got := terminalOf(t, sink)
+			if got.Payload.Phase != "TERMINAL_ADMITTED" {
+				t.Fatalf("terminal fact = %+v", got.Payload)
+			}
+			if got.Payload.ReasonCode != tc.want {
+				t.Fatalf("verdict = %q, want %q: the trail must not record one outcome as another",
+					got.Payload.ReasonCode, tc.want)
+			}
+			if got.Payload.Counters["payout"] != tc.payout {
+				t.Fatalf("payout = %d, want %d", got.Payload.Counters["payout"], tc.payout)
+			}
+			if got.RoundIncarnationID == "" {
+				t.Fatal("an admitted terminal names no local round")
+			}
+		})
+	}
+}
+
 // TestReAdmittedRoundIsANewLocalRound is the producer half of an independent
 // review's F2: a round incarnation must identify one LOCAL ADMISSION, not a
 // Twitch event.
@@ -1077,6 +1243,57 @@ func TestEveryTrackedRoundIsAdmittedWithAnIncarnation(t *testing.T) {
 // Twitch had stated a time for frames whose time this process had invented —
 // and the RECEIVER branch was unreachable for any parsed frame.
 //
+// TestConnectionSequenceNumbersOnlyDispatchedDeliveries pins the ordering
+// contract this task's connection-provenance stamp depends on, which nothing
+// asserted: the stamp sits AFTER the replay-dedup fence and after the
+// generation fence, so a suppressed frame consumes no delivery number.
+//
+// The axis is meant to be dense — consecutive numbers on the frames a
+// connection actually delivered — unlike the collector sequence, which is
+// deliberately gap-carrying because a gap there IS a loss. Moving the stamp
+// above either fence, or into the parser, would silently make the connection
+// axis gap-carrying too, and every reading of it would then be wrong about
+// how many deliveries a connection made.
+func TestConnectionSequenceNumbersOnlyDispatchedDeliveries(t *testing.T) {
+	var got []*PubSubMessage
+	ws := NewWebSocketClient(0, nil, 3600, 0, func(m *PubSubMessage) {
+		got = append(got, m)
+	}, nil)
+	ws.mu.Lock()
+	ws.connGen = 1
+	ws.mu.Unlock()
+
+	frame := func(n int) WSMessage {
+		return WSMessage{Type: "MESSAGE", Data: &WSData{
+			Topic: "community-points-user-v1.123",
+			Message: fmt.Sprintf(
+				`{"type":"points-earned","data":{"channel_id":"123","point_gain":{"reason_code":"WATCH","total_points":%d}}}`, n),
+		}}
+	}
+
+	ws.handleMessage(frame(1))
+	// The same frame again, inside the one-second replay window: suppressed.
+	ws.handleMessage(frame(1))
+	// A frame attributed to a retired generation: fenced out.
+	ws.handleMessageForGen(frame(2), 0)
+	ws.handleMessage(frame(3))
+
+	if len(got) != 2 {
+		t.Fatalf("dispatched %d frames, want 2 (a replay and a stale-generation frame are both "+
+			"suppressed)", len(got))
+	}
+	for i, m := range got {
+		if !m.ConnectionKnown {
+			t.Fatalf("delivery %d carries no connection provenance", i)
+		}
+		if m.ConnectionSequence != uint64(i+1) {
+			t.Fatalf("delivery %d carries connection sequence %d, want %d: a frame nobody "+
+				"received must not consume a delivery number",
+				i, m.ConnectionSequence, i+1)
+		}
+	}
+}
+
 // TestOutcomeAbsenceIsNeverEncodedAsAZero is the regression for a defect an
 // independent review found: an outcome whose top_predictors was an EMPTY LIST
 // and one whose top_predictors key never arrived projected to byte-identical

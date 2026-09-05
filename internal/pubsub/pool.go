@@ -1295,13 +1295,24 @@ func (p *WebSocketPool) handlePredictionUser(msg *PubSubMessage, streamer *model
 		p.mu.Lock()
 		event, exists := p.predictions[eventID]
 		if !exists || !event.BetConfirmed || event.ResultAccepted {
+			// Three DISTINCT causes refuse here, and the trail has to say
+			// which. Reporting a tracked-but-unconfirmed round as NO_ROUND
+			// put a false statement on a row that names that very round's
+			// incarnation and event id — the record contradicting itself.
+			// Each cause is read inside the same critical section that
+			// decided it; nothing is re-decided below.
 			alreadyAccepted := exists && event.ResultAccepted
+			unconfirmed := exists && !event.BetConfirmed
 			p.mu.Unlock()
-			// Observe the delivery and the verdict the admission logic just
-			// reached. The verdict is READ here, never re-decided.
 			reason := "NO_ROUND"
-			if alreadyAccepted {
+			switch {
+			case alreadyAccepted:
 				reason = "DUPLICATE"
+			case unconfirmed:
+				// The round is ours and it is live; no bet of ours was ever
+				// confirmed on it, so there is no placement for this terminal
+				// to be about.
+				reason = "NOT_CONFIRMED"
 			}
 			p.observeUserFrame(msg, streamer, eventID, ObsKindUserTerminal, "TERMINAL_DELIVERED", reason,
 				nil, map[string]string{"terminalVerdict": ObsPresent})
@@ -1573,6 +1584,17 @@ func (p *WebSocketPool) PlaceManualBetRelayed(eventID, outcomeID string, amount 
 // placeManualBet is the shared body. `root` names the manual-control root
 // phase this action is recorded under; it affects nothing else.
 func (p *WebSocketPool) placeManualBet(eventID, outcomeID string, amount int, root string, token uint64) (string, error) {
+	// A manual bet is a PRODUCER EPISODE like the two fire-and-forget timers,
+	// and for the same reason: it emits observations from a goroutine the
+	// pool's Close does not join. Close joins the WebSocket clients, so a
+	// nil result proves no CONNECTION is still delivering — it proves nothing
+	// about an operator's bet still in flight on someone else's goroutine.
+	// Without the episode, that bet could emit its first fact after the
+	// collector had already finalized the session as COMPLETE, and the
+	// session's claim to have observed everything would be false.
+	settle := p.beginEpisode()
+	defer settle()
+
 	act := manualAction{pool: p, id: token}
 	p.mu.RLock()
 	event := p.predictions[eventID]

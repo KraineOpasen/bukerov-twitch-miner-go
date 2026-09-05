@@ -1001,6 +1001,315 @@ func TestObservationProducerRevisionIsPinned(t *testing.T) {
 
 // TestObservationKindsAreExactlyNine pins the closed kind set to the nine
 // families the contract defines, in schema order.
+// TestErasureMatchesAnIdentityExactlyNotByPrefix pins the one thing the
+// erasure selector must never do. Every STORED identifier is capped, but the
+// SELECTOR deliberately is not — capping it would turn an exact match into a
+// prefix match, and an erasure asked to remove one channel would take every
+// channel whose id begins with the same bytes.
+func TestErasureMatchesAnIdentityExactlyNotByPrefix(t *testing.T) {
+	svc, repo := newObservationService(t)
+	ctx := context.Background()
+
+	// A stored channel id exactly at the ceiling, and a selector one byte
+	// longer that shares the whole of it as a prefix.
+	stored := strings.Repeat("c", MaxObservationString)
+	selector := stored + "x"
+
+	svc.RecordPredictionObservation(channelObservation("pool-1", stored, "s", "e0", "ROUND_CREATED"))
+	awaitCommitted(t, svc, 1)
+
+	var removed int64
+	if err := repo.db.WithTx(ctx, func(tx *sql.Tx) error {
+		n, e := repo.EraseObservationsForIdentityTx(tx, ObservationIdentity{ChannelID: selector})
+		removed = n
+		return e
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if removed != 0 {
+		t.Fatalf("an erasure for a DIFFERENT channel removed %d facts; a selector shortened to "+
+			"the storage ceiling matches by prefix, and one channel's erasure would take "+
+			"every channel sharing that prefix", removed)
+	}
+	if n := countRows(t, repo, `SELECT COUNT(*) FROM prediction_observations`); n != 1 {
+		t.Fatalf("the store holds %d facts, want the 1 that belongs to another channel", n)
+	}
+
+	// And the exact selector does reach it, so the test is not passing merely
+	// because nothing is ever erased.
+	if err := repo.db.WithTx(ctx, func(tx *sql.Tx) error {
+		n, e := repo.EraseObservationsForIdentityTx(tx, ObservationIdentity{ChannelID: stored})
+		removed = n
+		return e
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if removed != 1 {
+		t.Fatalf("the exact selector removed %d facts, want 1", removed)
+	}
+}
+
+// TestAFactCommitsInsideTheProductionDeadline closes the gap an independent
+// review named: every functional test raises the per-fact deadline from the
+// production 5 ms to 5 s, so nothing anywhere proved a fact can commit inside
+// the budget the miner actually runs with. A regression that made a one-row
+// observation take 8 ms would turn every production write into a drop and
+// leave the whole suite green.
+//
+// This measures rather than compares constants, so it is written to be robust
+// on a loaded machine: it takes the BEST of several attempts on an idle store.
+// One success is the claim — that the budget is achievable — not that every
+// write on every machine will make it.
+func TestAFactCommitsInsideTheProductionDeadline(t *testing.T) {
+	if testing.Short() {
+		t.Skip("timing measurement")
+	}
+	svc, _ := newObservationService(t)
+	// The production deadline, restored: newObservationService raises it so
+	// the functional tests are not timing-dependent.
+	svc.observations.writeDeadline = ObservationWriteDeadline
+
+	const attempts = 20
+	var committed int64
+	for i := 0; i < attempts; i++ {
+		svc.RecordPredictionObservation(
+			channelObservation("pool-1", "chan-a", "s", "e"+itoa(int64(i)), "ROUND_CREATED"))
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		committed = svc.observations.committed.Load()
+		if committed+svc.observations.dropped.Load() >= attempts {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if committed == 0 {
+		t.Fatalf("not one of %d facts committed inside the production %v budget (dropped=%d); "+
+			"in production every write would be a drop and the trail would be empty",
+			attempts, ObservationWriteDeadline, svc.observations.dropped.Load())
+	}
+	t.Logf("%d/%d facts committed inside the production %v budget",
+		committed, attempts, ObservationWriteDeadline)
+}
+
+// TestMaintenanceDoesNotScanAHealthyStore is the regression for a defect an
+// independent review found: every maintenance tick ran a full-table COUNT and
+// SUM(LENGTH(payload_json)) inside a transaction on the single shared
+// connection. The points snapshot is ungated by design — it cannot claim
+// priority and cancel a P1 transaction, it can only wait — so a dashboard read
+// arriving during that tick waited behind a whole-table aggregate, on exactly
+// the stores where the aggregate is slowest, to answer a question that is
+// almost always "no".
+//
+// The quota ledger is an over-estimate of what the store holds (seeded exactly
+// at startup, never discharged in-process), and that direction is what makes
+// it a sound gate: if it says the store is under a bound, it is.
+func TestMaintenanceDoesNotScanAHealthyStore(t *testing.T) {
+	svc, _ := newObservationService(t)
+	ctx := context.Background()
+
+	svc.RecordPredictionObservation(channelObservation("pool-1", "chan-a", "s", "e0", "ROUND_CREATED"))
+	awaitCommitted(t, svc, 1)
+
+	// A healthy store: the ledger is far below every ceiling.
+	before := svc.observations.storeStatsCalls.Load()
+	svc.observations.maintain(ctx)
+	if got := svc.observations.storeStatsCalls.Load(); got != before {
+		t.Fatalf("a maintenance pass over a healthy store ran %d store-wide aggregates; the "+
+			"ungated points snapshot waits behind every one of them", got-before)
+	}
+	if !svc.observations.capturing() {
+		t.Fatal("a healthy store was paused")
+	}
+
+	// Lower the ceiling under what the ledger already holds: now the exact
+	// figure is worth paying for, and it must be paid.
+	svc.observations.maxStoreRows.Store(1)
+	svc.observations.maintain(ctx)
+	if got := svc.observations.storeStatsCalls.Load(); got != before+1 {
+		t.Fatalf("a store the ledger cannot clear ran %d aggregates, want exactly 1: the gate "+
+			"must not swallow the measurement it exists to defer", got-before)
+	}
+	if svc.observations.capturing() {
+		t.Fatal("a store at its row ceiling kept capturing")
+	}
+}
+
+// TestUnmeasurableCapacityFailsClosed pins the other half: when the ledger
+// cannot clear the store AND the exact measurement does not complete, capture
+// pauses. Carrying on would mean capturing past a bound because the check that
+// would have caught it timed out — which is precisely the case a hard bound
+// exists for.
+func TestUnmeasurableCapacityFailsClosed(t *testing.T) {
+	svc, _ := newObservationService(t)
+
+	svc.RecordPredictionObservation(channelObservation("pool-1", "chan-a", "s", "e0", "ROUND_CREATED"))
+	awaitCommitted(t, svc, 1)
+	svc.observations.maxStoreRows.Store(1)
+
+	// A context that is already done: the measurement cannot complete.
+	dead, cancel := context.WithCancel(context.Background())
+	cancel()
+	svc.observations.maintain(dead)
+
+	if svc.observations.capturing() {
+		t.Fatal("capacity could not be measured and capture continued anyway; an unmeasurable " +
+			"store is not a store proven to be under its bound")
+	}
+	if !svc.observations.overCapacity.Load() {
+		t.Fatal("the capacity latch was not set")
+	}
+}
+
+// TestAbandonedSessionsAreReclaimedAtStartup is the regression for a defect an
+// independent review found, and it is a slow one: retention refuses to touch an
+// OPEN session's row or its facts BY DESIGN, because the live session is OPEN
+// for its whole life. A session left OPEN by an unclean shutdown therefore had
+// no in-product remedy at all — N unclean shutdowns left N permanent rows, and
+// at MaxStoreSessions the next bootstrap refused to open a session and P1 was
+// disabled for the rest of every subsequent process.
+func TestAbandonedSessionsAreReclaimedAtStartup(t *testing.T) {
+	svc, repo := newObservationService(t)
+	ctx := context.Background()
+
+	// Three sessions a dead process left behind, plus this process's own live
+	// one, which must survive untouched.
+	for i := 0; i < 3; i++ {
+		if _, err := repo.db.Exec(`INSERT INTO prediction_observation_sessions
+			(collector_session_id, producer_revision, started_at_ms, close_state,
+			 committed_count, dropped_count, unsettled_obligation_count,
+			 post_fence_producer_count, producer_shutdown_uncertain_count)
+			VALUES (?, ?, ?, 'OPEN', 7, 0, 0, 0, 0)`,
+			"dead-"+strconv.Itoa(i), ObservationProducerRevision, int64(1000+i)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	live := svc.observations.sessionID
+
+	closed, err := repo.ReconcileAbandonedObservationSessions(ctx, live, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if closed != 3 {
+		t.Fatalf("reclaimed %d abandoned sessions, want 3", closed)
+	}
+
+	// Read everything in ONE query and finish with it before asserting: the
+	// database has a single connection, so a second query issued while these
+	// rows are open would deadlock rather than fail.
+	type row struct {
+		id, state string
+		closedAt  sql.NullInt64
+		started   int64
+		committed int64
+	}
+	var got []row
+	rows, err := repo.db.Query(`SELECT collector_session_id, close_state, closed_at_ms,
+		started_at_ms, committed_count FROM prediction_observation_sessions
+		ORDER BY collector_session_id`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for rows.Next() {
+		var r row
+		if err := rows.Scan(&r.id, &r.state, &r.closedAt, &r.started, &r.committed); err != nil {
+			_ = rows.Close()
+			t.Fatal(err)
+		}
+		got = append(got, r)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		t.Fatal(err)
+	}
+	_ = rows.Close()
+
+	sawLive := false
+	for _, r := range got {
+		id, state, closedAt, committed := r.id, r.state, r.closedAt, r.committed
+		if id == live {
+			sawLive = true
+			if state != SessionOpen {
+				t.Fatalf("the LIVE session was reclaimed as %q; a collector must never close its "+
+					"own session out from under itself", state)
+			}
+			continue
+		}
+		if state != SessionIncomplete {
+			t.Fatalf("abandoned session %s is %q, want %q: nothing knows what that process "+
+				"observed, so it cannot be called complete", id, state, SessionIncomplete)
+		}
+		// Aged from the session's OWN start, so a store that keeps crashing
+		// can still drain: stamping the reconciliation's clock would restart
+		// the retention window on every startup.
+		started := r.started
+		if !closedAt.Valid || closedAt.Int64 != started {
+			t.Fatalf("abandoned session %s carries close time %v, want its own start %d: a "+
+				"reconciliation clock would restart the retention window every startup",
+				id, closedAt, started)
+		}
+		// The dead process's own numbers are evidence and are left alone.
+		if committed != 7 {
+			t.Fatalf("abandoned session %s had its committed count rewritten to %d; the "+
+				"reconciliation knows nothing about what it observed", id, committed)
+		}
+	}
+	if !sawLive {
+		t.Fatal("the live session row disappeared")
+	}
+
+	// And it is idempotent: a second pass finds nothing left to reclaim.
+	if again, err := repo.ReconcileAbandonedObservationSessions(ctx, live, 100); err != nil || again != 0 {
+		t.Fatalf("second pass reclaimed %d sessions (err=%v), want 0", again, err)
+	}
+}
+
+// TestStartupReclaimsAbandonedSessionsBeforeTheSessionCap is the end-to-end
+// half: a store already at the session ceiling with abandoned rows must come
+// back, not stay disabled forever.
+func TestStartupReclaimsAbandonedSessionsBeforeTheSessionCap(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "miner.db")
+	db := openPrivateDB(t, path)
+	repo, err := NewSQLiteRepository(db, filepath.Dir(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Four sessions an earlier process left OPEN. Retention cannot touch them.
+	for i := 0; i < 4; i++ {
+		if _, err := repo.db.Exec(`INSERT INTO prediction_observation_sessions
+			(collector_session_id, producer_revision, started_at_ms, close_state,
+			 committed_count, dropped_count, unsettled_obligation_count,
+			 post_fence_producer_count, producer_shutdown_uncertain_count)
+			VALUES (?, ?, ?, 'OPEN', 0, 0, 0, 0, 0)`,
+			"dead-"+strconv.Itoa(i), ObservationProducerRevision, int64(1000+i)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_ = db.Close()
+
+	// A fresh process on the same file, with the session ceiling set so those
+	// four rows would refuse the bootstrap outright.
+	db2 := openPrivateDB(t, path)
+	svc, err := NewService(db2, filepath.Dir(path), 30)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = svc.Close() })
+	svc.observations.writeDeadline = 5 * time.Second
+	svc.observations.maxStoreSessions.Store(4)
+	if err := svc.Start(); err != nil {
+		t.Fatal(err)
+	}
+	<-svc.observations.bootstrapped
+	if svc.observations.disabled.Load() {
+		t.Fatal("capture stayed disabled: sessions an earlier process abandoned are not a reason " +
+			"to refuse capture forever, and nothing else can ever reclaim them")
+	}
+	if svc.observations.epoch.Load() == 0 {
+		t.Fatal("no session was opened")
+	}
+}
+
 // TestEditedFactFailsItsOwnWitness is the regression for a defect an
 // independent review found: observation_sha256 was written by AppendObservation
 // and recomputed by nobody, so a row edited in place after the write read back
@@ -1121,7 +1430,8 @@ func TestClosedVocabulariesAreExact(t *testing.T) {
 		{"reason codes", observationReasonCodes, []string{
 			"OK", "TOGGLE_OFF", "ALREADY_TRACKED", "NOT_ACTIVE", "NOT_ELIGIBLE",
 			"WINDOW_ELAPSED", "BELOW_MINIMUM_POINTS", "NO_POOL", "NO_ROUND",
-			"NO_DECISION", "ALREADY_PLACED", "FILTER_REJECTED", "STRATEGY_NO_CHOICE",
+			"NOT_CONFIRMED", "NO_DECISION", "ALREADY_PLACED", "FILTER_REJECTED",
+			"STRATEGY_NO_CHOICE",
 			"DUPLICATE", "CONFLICT", "ACCEPTED", "REJECTED", "REFUNDED", "WON", "LOST",
 			ValueUnknown,
 		}},
@@ -3328,19 +3638,44 @@ func TestSessionCeilingsStopCommittingAtTheLimit(t *testing.T) {
 		}
 	})
 
+	// The byte ceiling is the one that used to be overshot: it asked whether
+	// the session had ALREADY exceeded the bound, so a session one byte under
+	// it still admitted a whole further payload. The two cases below are a
+	// genuine limit pair — a ceiling of exactly two payloads takes two, and
+	// one byte less takes one — which the old form could not distinguish.
 	t.Run("bytes", func(t *testing.T) {
-		svc, _ := newObservationService(t)
-		// One ordinary payload is ~47 bytes, so a ceiling of 1 admits the
-		// first fact (the tally starts empty) and refuses everything after.
-		svc.observations.maxSessionBytes.Store(1)
+		for _, tc := range []struct {
+			name    string
+			slack   int64
+			want    int64
+			dropped int64
+		}{
+			{"exactly two payloads", 0, 2, 1},
+			{"one byte short of two", -1, 1, 2},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				svc, _ := newObservationService(t)
+				payload := int64(len(payloadJSONOf(mustSanitize(t,
+					channelObservation("pool-1", "chan-a", "s", "sizer", "ROUND_CREATED")))))
+				if payload <= 0 {
+					t.Fatal("the fixture renders no payload")
+				}
+				svc.observations.maxSessionBytes.Store(2*payload + tc.slack)
 
-		for i := 0; i < 3; i++ {
-			svc.RecordPredictionObservation(
-				channelObservation("pool-1", "chan-a", "s", "e"+itoa(int64(i)), "ROUND_CREATED"))
-		}
-		awaitDropped(t, svc, 2)
-		if got := svc.observations.committed.Load(); got != 1 {
-			t.Fatalf("committed %d facts past the byte ceiling, want 1", got)
+				for i := 0; i < 3; i++ {
+					svc.RecordPredictionObservation(
+						channelObservation("pool-1", "chan-a", "s", "e"+itoa(int64(i)), "ROUND_CREATED"))
+				}
+				awaitDropped(t, svc, tc.dropped)
+				if got := svc.observations.committed.Load(); got != tc.want {
+					t.Fatalf("committed %d facts, want %d: the ceiling is a promise about the "+
+						"session's size, not about the size it had before the last fact", got, tc.want)
+				}
+				if got := svc.observations.sessionBytes.Load(); got > svc.observations.maxSessionBytes.Load() {
+					t.Fatalf("the session holds %d bytes, past its own ceiling of %d",
+						got, svc.observations.maxSessionBytes.Load())
+				}
+			})
 		}
 	})
 }
@@ -3375,11 +3710,51 @@ func TestAnUngatedReaderNeverWaitsLongerThanTheReleaseWatchdog(t *testing.T) {
 		t.Fatal("the bootstrap budget is tighter than the runtime one; the split exists to let the " +
 			"one-time recount take longer, not less")
 	}
-	src := readPackageFile(t, "prediction_observation.go")
-	if strings.Count(src, "observationBootstrapBudget") != 3 {
-		t.Fatal("the bootstrap budget must be used by exactly one call site (its declaration, its " +
-			"doc reference and that site); a runtime path must not borrow it")
+	// The budget's justification is WHERE it runs, not how often, so the
+	// assertion is about the enclosing function rather than an occurrence
+	// count: every use has to sit in a startup path. A count would break the
+	// moment startup grew a second bounded step, and would still pass a
+	// runtime path that borrowed the budget while another use was deleted.
+	for _, fn := range enclosingFuncs(t, "prediction_observation.go", "observationBootstrapBudget") {
+		switch fn {
+		case "", "bootstrap", "recountQuotas":
+			// "" is the declaration and its doc comment, at file scope.
+		default:
+			t.Fatalf("%s borrows the one-time startup budget; only a path that runs before intake "+
+				"opens may hold the shared connection that long", fn)
+		}
 	}
+}
+
+// enclosingFuncs reports, for every line of a package file mentioning needle,
+// the name of the function it sits in ("" for file scope).
+func enclosingFuncs(t *testing.T, file, needle string) []string {
+	t.Helper()
+	var out []string
+	current := ""
+	for _, line := range strings.Split(readPackageFile(t, file), "\n") {
+		if strings.HasPrefix(line, "func ") {
+			name := strings.TrimPrefix(line, "func ")
+			if strings.HasPrefix(name, "(") {
+				if i := strings.Index(name, ") "); i >= 0 {
+					name = name[i+2:]
+				}
+			}
+			if i := strings.Index(name, "("); i >= 0 {
+				name = name[:i]
+			}
+			current = name
+		} else if line == "}" {
+			current = ""
+		}
+		if strings.Contains(line, needle) {
+			out = append(out, current)
+		}
+	}
+	if len(out) == 0 {
+		t.Fatalf("%s mentions %s nowhere; the assertion has stopped asserting anything", file, needle)
+	}
+	return out
 }
 
 // TestStartAndClosePublishTheirLifecycleStateTogether is CodeRabbit's finding

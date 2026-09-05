@@ -823,6 +823,68 @@ func TestObservationCapacityStopsCaptureSTICKILY(t *testing.T) {
 			t.Fatal("bootstrap allocated a session on a store already at its ceiling")
 		}
 	})
+
+	// The SESSION ceiling is the third term of the same check and the only one
+	// that had no oracle: deleting it from both the bootstrap refusal and the
+	// runtime latch left the whole package green. It is also the term that
+	// bounds how many rows a store may accumulate that nothing else can
+	// reclaim, so it is the one a store hits after a run of unclean shutdowns.
+	t.Run("bootstrap refuses to open a session over the SESSION ceiling", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "miner.db")
+		db := openPrivateDB(t, path)
+		defer func() { _ = db.Close() }()
+
+		first, err := NewService(db, filepath.Dir(path), 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		first.observations.writeDeadline = 5 * time.Second
+		if err := first.Start(); err != nil {
+			t.Fatal(err)
+		}
+		<-first.observations.bootstrapped
+		first.RecordPredictionObservation(channelObservation("pool-1", "chan-a", "s", "e0", "ROUND_CREATED"))
+		awaitCommitted(t, first, 1)
+		if err := first.Close(); err != nil {
+			t.Fatal(err)
+		}
+
+		// One session row exists, and its facts keep it from being swept.
+		// One below the ceiling still opens; at the ceiling refuses.
+		under, err := NewService(db, filepath.Dir(path), 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		under.observations.writeDeadline = 5 * time.Second
+		under.observations.maxStoreSessions.Store(2)
+		if err := under.Start(); err != nil {
+			t.Fatal(err)
+		}
+		<-under.observations.bootstrapped
+		if under.observations.disabled.Load() || under.observations.epoch.Load() == 0 {
+			t.Fatal("a store one session under its ceiling refused to open a session")
+		}
+		if err := under.Close(); err != nil {
+			t.Fatal(err)
+		}
+
+		at, err := NewService(db, filepath.Dir(path), 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = at.Close() }()
+		at.observations.maxStoreSessions.Store(2)
+		if err := at.Start(); err != nil {
+			t.Fatalf("a store at its session ceiling must not fail startup: %v", err)
+		}
+		<-at.observations.bootstrapped
+		if !at.observations.disabled.Load() {
+			t.Fatal("bootstrap opened capture on a store already at its SESSION ceiling")
+		}
+		if at.observations.epoch.Load() != 0 {
+			t.Fatal("bootstrap allocated a session on a store already at its SESSION ceiling")
+		}
+	})
 }
 
 // TestObservationCloseBeatsAFinishingBootstrap proves Close's intake fence
@@ -858,9 +920,21 @@ func TestObservationSessionBoundsAreEnforced(t *testing.T) {
 	svc, repo := newObservationService(t)
 	c := svc.observations
 
-	// Row ceiling: pretend the session has already committed its maximum.
+	// One payload's worth of bytes, the unit both ceilings are tested at.
+	payload := int64(len(payloadJSONOf(mustSanitize(t,
+		channelObservation("pool-1", "chan-a", "s", "sizer", "ROUND_CREATED")))))
+	if payload <= 0 {
+		t.Fatal("the fixture renders no payload; the byte cases below would prove nothing")
+	}
+
+	// Row ceiling: one below admits, at the ceiling refuses. A row is always
+	// one row, so the pair is exact.
+	c.committed.Store(MaxSessionRows - 1)
+	if !c.withinSessionBounds(payload) {
+		t.Fatal("a session one row under MaxSessionRows refuses the fact that would reach it")
+	}
 	c.committed.Store(MaxSessionRows)
-	if c.withinSessionBounds() {
+	if c.withinSessionBounds(payload) {
 		t.Fatal("a session at MaxSessionRows still reports itself within bounds")
 	}
 	before := c.dropped.Load()
@@ -876,16 +950,29 @@ func TestObservationSessionBoundsAreEnforced(t *testing.T) {
 		t.Fatalf("%d facts were committed past the session row ceiling", n)
 	}
 
-	// Byte ceiling behaves the same way.
+	// Byte ceiling, as a would-exceed pair. The fact that lands EXACTLY on
+	// the ceiling is admitted; the one that would take the session a single
+	// byte past it is refused. Asking only whether the session had already
+	// exceeded the ceiling let a whole further payload land beyond a bound
+	// that is supposed to be a promise.
 	c.committed.Store(0)
+	c.sessionBytes.Store(MaxSessionBytes - payload)
+	if !c.withinSessionBounds(payload) {
+		t.Fatal("the fact that lands exactly on MaxSessionBytes was refused")
+	}
+	c.sessionBytes.Store(MaxSessionBytes - payload + 1)
+	if c.withinSessionBounds(payload) {
+		t.Fatalf("a fact that would take the session one byte past MaxSessionBytes was admitted; "+
+			"the ceiling may be overshot by a whole payload (%d bytes)", payload)
+	}
 	c.sessionBytes.Store(MaxSessionBytes)
-	if c.withinSessionBounds() {
+	if c.withinSessionBounds(payload) {
 		t.Fatal("a session at MaxSessionBytes still reports itself within bounds")
 	}
 
 	// Back under both ceilings, capture resumes.
 	c.sessionBytes.Store(0)
-	if !c.withinSessionBounds() {
+	if !c.withinSessionBounds(payload) {
 		t.Fatal("a session under both ceilings is refused")
 	}
 	svc.RecordPredictionObservation(channelObservation("pool-1", "chan-a", "s", "under", "ROUND_CREATED"))

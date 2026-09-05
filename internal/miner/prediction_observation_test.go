@@ -4,6 +4,7 @@ import (
 	"os"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/analytics"
@@ -167,6 +168,77 @@ func TestAttachPredictionObservationsIsSafeWithoutAnalytics(t *testing.T) {
 	m.attachPredictionObservations() // pool but no analytics
 	if m.wsPool.PoolInstanceID() == "" {
 		t.Fatal("a production pool must mint an instance identity")
+	}
+}
+
+// recordingProducerSink captures what a real pool emits, so a miner-level test
+// can assert on the trail rather than on the call it believes it made.
+type recordingProducerSink struct {
+	mu  sync.Mutex
+	got []pubsub.PredictionObservation
+}
+
+func (r *recordingProducerSink) RecordPredictionObservation(o pubsub.PredictionObservation) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.got = append(r.got, o)
+}
+
+func (r *recordingProducerSink) BeginPredictionProducerEpisode() func() { return func() {} }
+
+func (r *recordingProducerSink) all() []pubsub.PredictionObservation {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]pubsub.PredictionObservation(nil), r.got...)
+}
+
+// TestAnOperatorActionOpensExactlyOneMinerRoot closes a coverage gap an
+// independent review found: the miner's choice of entry point had no oracle at
+// all. Reverting overview.go to the pool's DIRECT entry point left the whole
+// module green while every dashboard action was recorded as if it had been
+// initiated at the pool — destroying the operator-origin distinction the trail
+// exists to carry — and dropped the sealed correlation token with it.
+func TestAnOperatorActionOpensExactlyOneMinerRoot(t *testing.T) {
+	m := &Miner{}
+	m.wsPool = pubsub.NewWebSocketPool(nil, nil, nil, config.RateLimitSettings{})
+	sink := &recordingProducerSink{}
+	m.wsPool.SetPredictionObservationSink(sink)
+
+	// An untracked round: the action is refused, which is the point — the
+	// trail must still show where it entered and tie its facts together.
+	if _, err := m.PlaceManualBet("no-such-round", "o1", 100); err == nil {
+		t.Fatal("a manual bet on an untracked round was accepted")
+	}
+
+	var roots []pubsub.PredictionObservation
+	for _, o := range sink.all() {
+		switch o.Payload.Phase {
+		case "MANUAL_MINER_ROOT", "MANUAL_DIRECT_ROOT":
+			roots = append(roots, o)
+		}
+	}
+	if len(roots) != 1 {
+		t.Fatalf("an operator action opened %d manual roots, want exactly 1", len(roots))
+	}
+	if roots[0].Payload.Phase != "MANUAL_MINER_ROOT" {
+		t.Fatalf("the action was recorded as %q; a dashboard bet that opens the pool's DIRECT "+
+			"root is indistinguishable from one initiated at the pool itself",
+			roots[0].Payload.Phase)
+	}
+	token := roots[0].Payload.Counters["manualActionId"]
+	if token == 0 {
+		t.Fatal("the manual root carries no correlation token")
+	}
+	// Every fact of the action shares it — that is what ties the root to a
+	// descendant naming a round this pool never admitted.
+	for _, o := range sink.all() {
+		if o.Kind != "manual_control" {
+			continue
+		}
+		if got := o.Payload.Counters["manualActionId"]; got != token {
+			t.Fatalf("fact %q carries token %d, want the action's %d: %+v",
+				o.Payload.Phase, got, token, o.Payload)
+		}
 	}
 }
 
