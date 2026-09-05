@@ -1064,7 +1064,38 @@ func TestAFactCommitsInsideTheProductionDeadline(t *testing.T) {
 	if testing.Short() {
 		t.Skip("timing measurement")
 	}
-	svc, _ := newObservationService(t)
+	svc, repo := newObservationService(t)
+
+	// The FLOOR first: the SAME one-row write the collector performs, called
+	// directly, with no deadline and no priority lease. That is the irreducible
+	// cost of storing a fact on this machine, so if it does not fit in the
+	// budget then nothing the collector does could, and the measurement below
+	// would be about the machine rather than the code. Under the race detector
+	// the pure-Go SQLite engine is instrumented too, which makes it exactly
+	// such a machine — the deadline this test is about is a PRODUCTION number,
+	// and production does not run under the race detector.
+	ctx := context.Background()
+	epoch := svc.observations.epoch.Load()
+	sessionID := svc.observations.sessionID
+	floor := time.Duration(1<<62 - 1)
+	for i := 0; i < 5; i++ {
+		fact := mustSanitize(t, channelObservation("pool-floor", "chan-floor", "floor",
+			"floor-"+strconv.Itoa(i), "ROUND_CREATED"))
+		start := time.Now()
+		if err := repo.AppendObservation(ctx, fact, sessionID, epoch, int64(1_000_000+i)); err != nil {
+			t.Fatalf("floor write %d: %v", i, err)
+		}
+		if d := time.Since(start); d < floor {
+			floor = d
+		}
+	}
+	if floor >= ObservationWriteDeadline {
+		t.Skipf("the bare one-row write this machine performs takes %v, at or past the %v budget; "+
+			"the measurement would be about the machine, not the collector (the race detector "+
+			"instruments the SQLite engine itself, and production does not run under it)",
+			floor, ObservationWriteDeadline)
+	}
+
 	// The production deadline, restored: newObservationService raises it so
 	// the functional tests are not timing-dependent.
 	svc.observations.writeDeadline = ObservationWriteDeadline
@@ -1084,12 +1115,13 @@ func TestAFactCommitsInsideTheProductionDeadline(t *testing.T) {
 		time.Sleep(time.Millisecond)
 	}
 	if committed == 0 {
-		t.Fatalf("not one of %d facts committed inside the production %v budget (dropped=%d); "+
-			"in production every write would be a drop and the trail would be empty",
-			attempts, ObservationWriteDeadline, svc.observations.dropped.Load())
+		t.Fatalf("not one of %d facts committed inside the production %v budget (dropped=%d), on "+
+			"a machine that completes an empty transaction in %v; in production every write "+
+			"would be a drop and the trail would be empty",
+			attempts, ObservationWriteDeadline, svc.observations.dropped.Load(), floor)
 	}
-	t.Logf("%d/%d facts committed inside the production %v budget",
-		committed, attempts, ObservationWriteDeadline)
+	t.Logf("%d/%d facts committed inside the production %v budget (bare one-row write floor %v)",
+		committed, attempts, ObservationWriteDeadline, floor)
 }
 
 // TestMaintenanceDoesNotScanAHealthyStore is the regression for a defect an

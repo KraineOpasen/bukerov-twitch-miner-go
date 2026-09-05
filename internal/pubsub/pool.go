@@ -1165,10 +1165,17 @@ func (p *WebSocketPool) handlePredictionChannel(msg *PubSubMessage, streamer *mo
 		// still alive; settling after placeAutoBet returns is what lets an
 		// undisturbed run finalize as complete.
 		settleEpisode := p.beginEpisode()
+		scheduled := control.incarnation
 		go func() {
 			defer settleEpisode()
 			time.Sleep(time.Duration(closingBetAfter) * time.Second)
-			p.placeAutoBet(eventID)
+			// The incarnation this timer was SCHEDULED for travels with it.
+			// A round can be cleaned up and the same Twitch event admitted
+			// again while this goroutine sleeps, and the lookup below would
+			// then find the NEW round — so without the scheduled coordinate
+			// the trail would show an auto decision on an incarnation nothing
+			// ever scheduled, and nothing could tell.
+			p.placeAutoBetScheduled(eventID, scheduled)
 		}()
 
 	case "event-updated":
@@ -1404,12 +1411,33 @@ func (p *WebSocketPool) handlePredictionUser(msg *PubSubMessage, streamer *model
 // honours the per-round suppression set by a manual bet or the manual skip
 // toggle. The betting *strategy* is unchanged from before: Calculate + Skip
 // from models, the same 10-point minimum, the same logs.
+// placeAutoBet is the entry point for a caller with no scheduled coordinate to
+// carry — it makes no claim about which admission the decision was scheduled
+// for.
 func (p *WebSocketPool) placeAutoBet(eventID string) {
+	p.placeAutoBetScheduled(eventID, "")
+}
+
+// placeAutoBetScheduled is placeAutoBet for the timer, which knows the round
+// incarnation it was scheduled for. `scheduled` is observation-only: nothing
+// below branches on it, and the lookup is exactly the one it always was.
+func (p *WebSocketPool) placeAutoBetScheduled(eventID, scheduled string) {
 	p.mu.RLock()
 	event := p.predictions[eventID]
 	rc := p.control[eventID]
 	p.mu.RUnlock()
 	if event == nil || rc == nil {
+		// The round this timer was scheduled for is gone. Recording that is
+		// the point: a scheduled auto decision that never happened was
+		// otherwise indistinguishable from one that was never scheduled, and
+		// the fact can still name the round it was about because the timer
+		// carried its incarnation.
+		if scheduled != "" {
+			p.observeRoundFactOf(eventID, "", "", scheduled, ObsKindAutoDecision, ObservationPayload{
+				Phase: "AUTO_SKIPPED", Decision: "SKIP", ReasonCode: "NO_ROUND",
+				Manual: boolPtr(false),
+			})
+		}
 		return
 	}
 
@@ -1425,8 +1453,23 @@ func (p *WebSocketPool) placeAutoBet(eventID string) {
 	if event.Streamer != nil {
 		obsLogin, obsChannel = event.Streamer.GetUsername(), event.Streamer.ChannelID
 	}
+	// The AUTO_DUE fact is filed under the incarnation the LOOKUP resolved,
+	// and says whether that is the one this decision was scheduled for. A
+	// mismatch means the round was cleaned up and the same Twitch event
+	// admitted again while the timer slept, so the decision is about a round
+	// nobody scheduled — a reader has to be able to see that rather than
+	// infer it. A caller that carried no scheduled coordinate makes no claim
+	// either way.
+	dueReason := ""
+	switch {
+	case scheduled == "":
+	case scheduled == rc.incarnation:
+		dueReason = "OK"
+	default:
+		dueReason = "CONFLICT"
+	}
 	p.observeRoundFact(eventID, obsChannel, obsLogin, ObsKindAutoDecision, ObservationPayload{
-		Phase: "AUTO_DUE", Manual: boolPtr(false),
+		Phase: "AUTO_DUE", ReasonCode: dueReason, Manual: boolPtr(false),
 	})
 
 	// Placement-time gate: re-evaluate the CURRENT user settings and eligibility
@@ -1656,24 +1699,37 @@ func (p *WebSocketPool) placeManualBet(eventID, outcomeID string, amount int, ro
 		map[string]int64{"stake": int64(amount)})
 
 	// Fast pre-check + double-submit guard, holding no lock across the network.
+	//
+	// Every reservation fact is emitted INSIDE this critical section, using
+	// the incarnation already in hand. Emitting after the unlock would let two
+	// callers whose decisions this lock serialized reach the collector in the
+	// opposite order — the loser's CONFLICT recorded before the winner's
+	// reservation, so a replay by causal position shows the conflict before
+	// the thing it conflicted with. The emit is a bounded copy and one
+	// nonblocking hand-off, which the sink contract requires to be safe under
+	// exactly this lock.
 	p.mu.Lock()
+	incarnation := ""
+	if rc != nil {
+		incarnation = rc.incarnation
+	}
 	switch {
 	case event.BetPlaced && rc.manualBet:
+		act.phaseOf(eventID, obsChannel, obsLogin, incarnation, "MANUAL_RESERVATION", "ALREADY_PLACED", nil)
 		p.mu.Unlock()
-		act.phase(eventID, obsChannel, obsLogin, "MANUAL_RESERVATION", "ALREADY_PLACED", nil)
 		return "", ErrAlreadyBet
 	case event.BetPlaced:
+		act.phaseOf(eventID, obsChannel, obsLogin, incarnation, "MANUAL_RESERVATION", "ALREADY_PLACED", nil)
 		p.mu.Unlock()
-		act.phase(eventID, obsChannel, obsLogin, "MANUAL_RESERVATION", "ALREADY_PLACED", nil)
 		return "", ErrAutoBetPlaced
 	case rc.manualPending:
+		act.phaseOf(eventID, obsChannel, obsLogin, incarnation, "MANUAL_RESERVATION", "CONFLICT", nil)
 		p.mu.Unlock()
-		act.phase(eventID, obsChannel, obsLogin, "MANUAL_RESERVATION", "CONFLICT", nil)
 		return "", ErrManualBetInFlight
 	}
 	rc.manualPending = true
+	act.phaseOf(eventID, obsChannel, obsLogin, incarnation, "MANUAL_RESERVATION", "OK", nil)
 	p.mu.Unlock()
-	act.phase(eventID, obsChannel, obsLogin, "MANUAL_RESERVATION", "OK", nil)
 	defer func() {
 		p.mu.Lock()
 		rc.manualPending = false
@@ -1833,9 +1889,16 @@ func (p *WebSocketPool) removePrediction(eventID string) {
 	}
 	delete(p.predictions, eventID)
 	delete(p.control, eventID)
-	p.mu.Unlock()
-
+	// Emitted INSIDE the lock that performed the removal, with the incarnation
+	// captured above. After the unlock, a re-admission of the same Twitch
+	// event could take the lock, mint a new incarnation and emit its
+	// SCHEDULE_ACCEPTED first — so a replay by causal position would show the
+	// new round beginning before the old one ended. It is a bounded copy and
+	// one nonblocking hand-off, which is what the sink contract requires to be
+	// safe under this lock; sweepStaleLocked already emits the same fact from
+	// inside it.
 	p.observeRoundCleanup(eventID, channelID, login, incarnation, "CLEANUP_APPLIED", "OK")
+	p.mu.Unlock()
 }
 
 // sweepStaleLocked drops any tracked round older than maxPredictionAge. The

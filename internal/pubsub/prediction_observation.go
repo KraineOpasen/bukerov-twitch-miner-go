@@ -761,6 +761,26 @@ func (a manualAction) phase(eventID, channelID, login, phase, reason string, cou
 	})
 }
 
+// phaseOf is phase for a caller that ALREADY holds the pool lock and already
+// has the round's incarnation in hand.
+//
+// It exists for ordering, not convenience. phase resolves the incarnation with
+// a read lock, so a caller holding the write lock cannot use it and has to
+// emit after unlocking — and two goroutines whose decisions the lock
+// serialized can then emit in the opposite order, so a replay by causal
+// position shows a CONFLICT before the reservation that caused it. Emitting
+// under the lock that made the decision makes the causal order the decision
+// order, which is what the trail is for.
+func (a manualAction) phaseOf(eventID, channelID, login, incarnation, phase, reason string, counters map[string]int64) {
+	a.pool.observeRoundFactOf(eventID, channelID, login, incarnation, ObsKindManualControl, ObservationPayload{
+		Phase:      phase,
+		ReasonCode: reason,
+		Manual:     boolPtr(true),
+		Counters:   a.counters(counters),
+		Presence:   a.presence(),
+	})
+}
+
 func (a manualAction) skip(eventID, channelID, login, reason, roundState string) {
 	a.pool.observeRoundFact(eventID, channelID, login, ObsKindManualControl, ObservationPayload{
 		Phase:      "MANUAL_SKIPPED",

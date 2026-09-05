@@ -1243,6 +1243,188 @@ func TestEveryTrackedRoundIsAdmittedWithAnIncarnation(t *testing.T) {
 // Twitch had stated a time for frames whose time this process had invented —
 // and the RECEIVER branch was unreachable for any parsed frame.
 //
+// TestATimerRecordsWhichAdmissionItWasScheduledFor is the regression for a
+// defect an independent review found: the auto-bet timer captured only the
+// Twitch event id, and re-looked-up the round when it fired. A round that was
+// cleaned up and admitted again while the timer slept left the timer filing
+// AUTO_DUE and everything after it under the NEW incarnation — an auto
+// decision on a round nothing ever scheduled, with nothing in the trail saying
+// so. A timer whose round vanished emitted nothing at all, so a decision that
+// never happened was indistinguishable from one never scheduled.
+func TestATimerRecordsWhichAdmissionItWasScheduledFor(t *testing.T) {
+	t.Run("the round it was scheduled for", func(t *testing.T) {
+		p, sink := observedPool(t, &fakePlacer{})
+		s := newTestStreamer(100000)
+		p.streamers = []*models.Streamer{s}
+		admitRound(p, s, "auto-1")
+		scheduled := p.roundIncarnation("auto-1")
+
+		p.placeAutoBetScheduled("auto-1", scheduled)
+
+		due := factWithPhase(t, sink, "AUTO_DUE")
+		if due.Payload.ReasonCode != "OK" {
+			t.Fatalf("AUTO_DUE on the scheduled round reads %q, want OK", due.Payload.ReasonCode)
+		}
+		if due.RoundIncarnationID != scheduled {
+			t.Fatalf("AUTO_DUE names %q, want the scheduled %q", due.RoundIncarnationID, scheduled)
+		}
+	})
+
+	t.Run("a different admission of the same event", func(t *testing.T) {
+		p, sink := observedPool(t, &fakePlacer{})
+		s := newTestStreamer(100000)
+		p.streamers = []*models.Streamer{s}
+		admitRound(p, s, "auto-1")
+		scheduled := p.roundIncarnation("auto-1")
+
+		// The round is cleaned up and the SAME Twitch event admitted again —
+		// exactly what happens while a timer sleeps.
+		p.removePrediction("auto-1")
+		admitRound(p, s, "auto-1")
+		current := p.roundIncarnation("auto-1")
+		if current == scheduled {
+			t.Fatal("the fixture did not produce a second admission")
+		}
+		sink.reset()
+
+		p.placeAutoBetScheduled("auto-1", scheduled)
+
+		due := factWithPhase(t, sink, "AUTO_DUE")
+		if due.Payload.ReasonCode != "CONFLICT" {
+			t.Fatalf("an auto decision on an admission nobody scheduled reads %q, want CONFLICT: "+
+				"the trail would otherwise show it as an ordinary scheduled decision",
+				due.Payload.ReasonCode)
+		}
+	})
+
+	t.Run("a round that is gone", func(t *testing.T) {
+		p, sink := observedPool(t, &fakePlacer{})
+		s := newTestStreamer(100000)
+		p.streamers = []*models.Streamer{s}
+		admitRound(p, s, "auto-1")
+		scheduled := p.roundIncarnation("auto-1")
+		p.removePrediction("auto-1")
+		sink.reset()
+
+		p.placeAutoBetScheduled("auto-1", scheduled)
+
+		skipped := factWithPhase(t, sink, "AUTO_SKIPPED")
+		if skipped.Payload.ReasonCode != "NO_ROUND" {
+			t.Fatalf("a timer whose round vanished reads %q, want NO_ROUND", skipped.Payload.ReasonCode)
+		}
+		if skipped.RoundIncarnationID != scheduled {
+			t.Fatalf("the fact names %q, want the round it was scheduled for (%q)",
+				skipped.RoundIncarnationID, scheduled)
+		}
+	})
+}
+
+// TestReservationFactsAreOrderedByTheLockThatDecidedThem is the regression for
+// an ordering inversion an independent review found. The double-submit guard
+// decides under the pool lock and used to emit AFTER unlocking, so two callers
+// the lock had serialized could reach the collector in the opposite order: the
+// loser's CONFLICT recorded at a causal position BEFORE the winner's
+// reservation — a replay showing the conflict before the thing it conflicted
+// with.
+//
+// This is asserted structurally. The interleaving is a two-instruction window,
+// so a concurrency test would reach it rarely, would not fail when the fix was
+// removed, and would be worse than no test at all.
+func TestReservationFactsAreOrderedByTheLockThatDecidedThem(t *testing.T) {
+	src := readSourceFile(t, "pool.go")
+	guard := sliceBetween(t, src,
+		"// Fast pre-check + double-submit guard, holding no lock across the network.",
+		"rc.manualPending = false")
+
+	// Every release of the lock inside the guard has to come AFTER that
+	// branch's reservation fact. The branches are alternatives, so this is
+	// stated per release rather than by counting depth.
+	lines := strings.Split(guard, "\n")
+	releases := 0
+	for i, line := range lines {
+		if strings.TrimSpace(line) != "p.mu.Unlock()" {
+			continue
+		}
+		releases++
+		emitted := false
+		for j := i - 1; j >= 0; j-- {
+			prev := strings.TrimSpace(lines[j])
+			if prev == "" || strings.HasPrefix(prev, "//") {
+				continue
+			}
+			emitted = strings.Contains(prev, `"MANUAL_RESERVATION"`)
+			break
+		}
+		if !emitted {
+			t.Fatalf("the lock is released at guard line %d without this branch having emitted "+
+				"its reservation fact first; a caller the lock serialized can then be recorded "+
+				"out of order:\n%s", i, strings.Join(lines[max(0, i-4):i+1], "\n"))
+		}
+	}
+	if releases != 4 {
+		t.Fatalf("the guard releases the lock %d times, want 4 (three refusals and the "+
+			"reservation); this test has stopped matching the code it asserts about", releases)
+	}
+	if n := strings.Count(guard, `"MANUAL_RESERVATION"`); n != 4 {
+		t.Fatalf("the guard emits %d reservation facts, want 4", n)
+	}
+
+	// The cleanup fact has the same shape against a re-admission.
+	remove := sliceBetween(t, src, "func (p *WebSocketPool) removePrediction(", "\n}")
+	obs := strings.Index(remove, "observeRoundCleanup")
+	unlock := strings.Index(remove, "p.mu.Unlock()")
+	if obs < 0 || unlock < 0 {
+		t.Fatal("removePrediction no longer emits a cleanup fact or no longer takes the lock")
+	}
+	if obs > unlock {
+		t.Fatal("the cleanup fact is emitted after the lock is released; a re-admission of the " +
+			"same event can then be recorded as beginning before the old round ended")
+	}
+}
+
+// factWithPhase returns the single recorded fact carrying phase, failing if
+// there is not exactly one.
+func factWithPhase(t *testing.T, sink *recordingSink, phase string) PredictionObservation {
+	t.Helper()
+	var found []PredictionObservation
+	for _, o := range sink.all() {
+		if o.Payload.Phase == phase {
+			found = append(found, o)
+		}
+	}
+	if len(found) != 1 {
+		t.Fatalf("want exactly one %s fact, got %d (%v)", phase, len(found), sink.phases())
+	}
+	return found[0]
+}
+
+// readSourceFile reads one of this package's own source files, so a structural
+// assertion reads the code rather than a copy of it.
+func readSourceFile(t *testing.T, name string) string {
+	t.Helper()
+	b, err := os.ReadFile(name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
+}
+
+// sliceBetween returns the source between the first occurrence of from and the
+// first occurrence of to after it.
+func sliceBetween(t *testing.T, src, from, to string) string {
+	t.Helper()
+	i := strings.Index(src, from)
+	if i < 0 {
+		t.Fatalf("anchor %q is gone; this test no longer asserts anything", from)
+	}
+	rest := src[i:]
+	j := strings.Index(rest, to)
+	if j < 0 {
+		t.Fatalf("anchor %q is gone; this test no longer asserts anything", to)
+	}
+	return rest[:j]
+}
+
 // TestConnectionSequenceNumbersOnlyDispatchedDeliveries pins the ordering
 // contract this task's connection-provenance stamp depends on, which nothing
 // asserted: the stamp sits AFTER the replay-dedup fence and after the
