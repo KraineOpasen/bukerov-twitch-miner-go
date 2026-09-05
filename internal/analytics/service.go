@@ -30,6 +30,12 @@ type Service struct {
 
 	mu          sync.Mutex
 	lastPruneAt time.Time
+
+	// observations is the immutable Prediction observation collector (P1, see
+	// prediction_observation.go). NewService only CONSTRUCTS it — no queue is
+	// served and no session exists until Start runs. It is nil only for a
+	// Service built without a SQLite repository (tests with a stub).
+	observations *observationCollector
 }
 
 func NewService(db *database.DB, basePath string, retentionDays int) (*Service, error) {
@@ -37,12 +43,99 @@ func NewService(db *database.DB, basePath string, retentionDays int) (*Service, 
 	if err != nil {
 		return nil, err
 	}
+	// Constructed, not started: NewService constructs and migrates only.
+	collector := newObservationCollector(repo, repo.priority, retentionDays, time.Now)
+	// The repository needs the collector back so an identity erasure can fence
+	// capture before its transaction opens (SQLiteRepository.InvalidateIdentity).
+	repo.observations = collector
 	return &Service{
 		repo:          repo,
 		basePath:      basePath,
 		retentionDays: retentionDays,
 		now:           time.Now,
+		observations:  collector,
 	}, nil
+}
+
+// TxPriorityHook is the outside-transaction priority hook a caller wraps its
+// own shared-connection transactions in, so the immutable Prediction
+// observation writer yields to them. Claim returns the release function the
+// caller must invoke when its work on the connection is done.
+type TxPriorityHook interface {
+	Claim() func()
+}
+
+// TxPriority exposes the analytics low-priority gate so the streamer-lifecycle
+// coordinator can wrap its own transactions in the SAME hook the repository's
+// write paths already use. It is never nil for a Service built by NewService.
+func (s *Service) TxPriority() TxPriorityHook {
+	if s == nil {
+		return nil
+	}
+	if repo, ok := s.repo.(*SQLiteRepository); ok && repo.priority != nil {
+		return repo.priority
+	}
+	return nil
+}
+
+// Start brings the Prediction observation collector up. It is NONBLOCKING:
+// the bounded bootstrap (a retention unit, a store recount and the collector
+// session INSERT) runs on the collector's own goroutine, and capture is
+// published RUNNING only once that has completed. A bootstrap failure
+// disables P1 capture alone and is never propagated — runtime startup still
+// succeeds, because an audit trail must not be able to stop the miner.
+//
+// Start is idempotent and returns nil. It exists as a lifecycle step so App
+// can start analytics BEFORE the web server and stop it AFTER, keeping the
+// shutdown order web -> analytics -> shared database.
+func (s *Service) Start() error {
+	if s.observations != nil {
+		s.observations.Start()
+	}
+	return nil
+}
+
+// RecordPredictionObservation is the producer-facing sink. It performs a
+// bounded sanitization of the offered fact and ONE nonblocking send onto the
+// collector's private queue — no SQLite, no I/O, no wait, no callback — so it
+// is safe to call while a producer holds a WebSocket, pool or placement lock.
+// A fact that cannot be admitted (capture not running, queue full, unusable
+// identity) is dropped and counted; nothing is ever returned that a producer
+// could mistake for a reason to change its behaviour.
+func (s *Service) RecordPredictionObservation(obs PredictionObservation) {
+	if s == nil || s.observations == nil {
+		return
+	}
+	sanitized, ok := sanitizeObservation(obs, s.now().UnixMilli())
+	if !ok {
+		s.observations.dropped.Add(1)
+		return
+	}
+	s.observations.offer(sanitized)
+}
+
+// InvalidatePredictionObservationIdentity is called BEFORE a privacy-erasure
+// transaction opens. It bumps the capture generation so every fact already
+// queued is dropped instead of committed, and permanently marks the session
+// incomplete: a queued observation can never resurrect an identity the
+// operator has just erased.
+func (s *Service) InvalidatePredictionObservationIdentity() {
+	if s == nil || s.observations == nil {
+		return
+	}
+	s.observations.invalidateGeneration()
+}
+
+// NotePredictionProducerShutdownUncertain records that a producer could not
+// prove it had stopped offering facts (the PubSub pool's Close returned a
+// non-nil result, so a late producer may still exist). It forces the
+// collector session INCOMPLETE without altering the caller's own shutdown
+// result in any way.
+func (s *Service) NotePredictionProducerShutdownUncertain() {
+	if s == nil || s.observations == nil {
+		return
+	}
+	s.observations.noteProducerShutdownUncertain()
 }
 
 func (s *Service) Repository() Repository {
@@ -271,7 +364,17 @@ func (s *Service) RecordChatMessage(streamer string, username, displayName, mess
 	return s.repo.RecordChatMessage(streamer, msg)
 }
 
+// Close tears the service down in the one order that leaves nothing behind:
+// the observation collector first (fence intake -> bounded drain -> cancel ->
+// JOIN the writer -> finalize the session), then the repository. No
+// DB-capable P1 goroutine survives this call, so App may close the shared
+// database immediately afterwards. An observation-side failure never changes
+// the error this returns — the pre-existing shutdown result is exactly the
+// repository's, as it has always been.
 func (s *Service) Close() error {
+	if s.observations != nil {
+		s.observations.Close()
+	}
 	if s.repo != nil {
 		return s.repo.Close()
 	}
