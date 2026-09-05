@@ -27,6 +27,9 @@ type recordingSink struct {
 	begun     int64
 	settled   int64
 	uncertain int64
+	// gapCause is what PredictionCaptureState reports; "" means capture is
+	// fully active, which is what every test wants unless it says otherwise.
+	gapCause string
 }
 
 func (r *recordingSink) RecordPredictionObservation(obs PredictionObservation) {
@@ -51,6 +54,14 @@ func (r *recordingSink) BeginPredictionProducerEpisode() func() {
 			r.mu.Unlock()
 		})
 	}
+}
+
+// PredictionCaptureState answers whatever the test set, so a test can admit a
+// round while capture is not fully active.
+func (r *recordingSink) PredictionCaptureState(string, string) string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.gapCause
 }
 
 // NotePredictionProducerShutdownUncertain records a shutdown whose evidence was
@@ -1268,6 +1279,120 @@ func TestEveryTrackedRoundIsAdmittedWithAnIncarnation(t *testing.T) {
 // Twitch had stated a time for frames whose time this process had invented —
 // and the RECEIVER branch was unreachable for any parsed frame.
 //
+// TestARoundFreezesWhatCouldBeObservedWhenItWasAdmitted closes a requirement
+// nothing implemented: a round admitted while capture was not fully active has
+// a prefix this process never saw, and every fact about it has to say so.
+//
+// Without it a round whose ROUND_CREATED and SCHEDULE_ACCEPTED were refused —
+// because the collector was still starting, or an identity fence was armed —
+// looks in the trail exactly like a round that simply had no such facts, and a
+// replay would invent the missing prefix rather than reject it. The
+// session-level INCOMPLETE flag cannot help: it never says WHICH round is
+// short.
+func TestARoundFreezesWhatCouldBeObservedWhenItWasAdmitted(t *testing.T) {
+	admit := func(t *testing.T, gapCause string) (*WebSocketPool, *recordingSink) {
+		t.Helper()
+		p, sink := observedPool(t, &fakePlacer{})
+		sink.mu.Lock()
+		sink.gapCause = gapCause
+		sink.mu.Unlock()
+		s := newTestStreamer(100000)
+		p.streamers = []*models.Streamer{s}
+		p.handlePredictionChannel(&PubSubMessage{
+			Topic: NewTopic(TopicPredictionsChannel, "chan-1"), Type: "event-created",
+			ChannelID: "chan-1",
+			Data: map[string]interface{}{"event": map[string]interface{}{
+				"id": "prov-1", "status": "ACTIVE", "created_at": time.Now().Format(time.RFC3339),
+				"prediction_window_seconds": float64(600),
+				"outcomes": []interface{}{
+					map[string]interface{}{"id": "o1", "color": "BLUE", "total_points": float64(10)},
+					map[string]interface{}{"id": "o2", "color": "PINK", "total_points": float64(20)},
+				},
+			}},
+		}, s)
+		return p, sink
+	}
+
+	t.Run("capture was fully active", func(t *testing.T) {
+		p, sink := admit(t, "")
+		if p.roundIncarnation("prov-1") == "" {
+			t.Fatal("the fixture did not admit a round")
+		}
+		for _, o := range sink.all() {
+			if o.RoundIncarnationID == "" {
+				continue
+			}
+			if o.RoundCaptureOrigin != ObsOriginActive {
+				t.Fatalf("a round admitted under full capture is marked %q: %+v",
+					o.RoundCaptureOrigin, o.Payload)
+			}
+			if o.RoundCaptureGapCause != "" {
+				t.Fatalf("a fully observed round names a gap cause %q", o.RoundCaptureGapCause)
+			}
+		}
+	})
+
+	for _, cause := range []string{ObsGapStarting, ObsGapDisabled, ObsGapIdentityFence, ObsGapClosing, ObsGapClosed} {
+		t.Run("prefix unobserved: "+cause, func(t *testing.T) {
+			p, sink := admit(t, cause)
+			incarnation := p.roundIncarnation("prov-1")
+			if incarnation == "" {
+				t.Fatal("the fixture did not admit a round")
+			}
+			marked := 0
+			for _, o := range sink.all() {
+				if o.RoundIncarnationID == "" {
+					continue
+				}
+				marked++
+				if o.RoundCaptureOrigin != ObsOriginPrefixUnobserved {
+					t.Fatalf("a round admitted with an unobserved prefix is marked %q", o.RoundCaptureOrigin)
+				}
+				if o.RoundCaptureGapCause != cause {
+					t.Fatalf("gap cause = %q, want %q", o.RoundCaptureGapCause, cause)
+				}
+			}
+			if marked == 0 {
+				t.Fatalf("no round-linked fact was produced at all: %v", sink.phases())
+			}
+
+			// FROZEN: capture becoming active later does not retroactively
+			// give the round a prefix it never had.
+			sink.mu.Lock()
+			sink.gapCause = ""
+			sink.mu.Unlock()
+			sink.reset()
+			p.removePrediction("prov-1")
+
+			later := sink.all()
+			if len(later) == 0 {
+				t.Fatal("the cleanup produced no fact")
+			}
+			for _, o := range later {
+				if o.RoundIncarnationID != incarnation {
+					continue
+				}
+				if o.RoundCaptureGapCause != cause {
+					t.Fatalf("a later fact about the round reports gap cause %q, want the frozen "+
+						"%q: capture becoming active afterwards does not give the round a prefix "+
+						"it never had", o.RoundCaptureGapCause, cause)
+				}
+			}
+		})
+	}
+
+	t.Run("no sink at all", func(t *testing.T) {
+		p := newTestPool(&fakePlacer{})
+		p.instanceID = "pool-test"
+		// Nothing is observing, so nothing is recorded — but the pool's own
+		// answer for a round admitted now is NO_SINK, which is what a sink
+		// wired later would be told about this round.
+		if got := p.captureGapCause("chan-1", "streamer"); got != ObsGapNoSink {
+			t.Fatalf("a pool with no sink reports %q, want %q", got, ObsGapNoSink)
+		}
+	})
+}
+
 // TestAWiredPoolIsAProducerUntilItIsSettled is the regression for a defect an
 // independent review found: nothing tied the POOL's lifetime to the
 // collector's. The only link was a nil-check on the pool's Close result inside

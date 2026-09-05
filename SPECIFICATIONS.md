@@ -2271,6 +2271,13 @@ CREATE TABLE prediction_observations (
     round_owner_channel_id            TEXT,
     retention_group_owner_streamer_id INTEGER,
     retention_group_owner_channel_id  TEXT,
+    round_capture_origin              TEXT,            -- ACTIVE_AT_ADMISSION or
+                                                       -- PREFIX_UNOBSERVED_AT_ADMISSION, FROZEN when
+                                                       -- the round was admitted and repeated on
+                                                       -- every fact about it
+    round_capture_gap_cause           TEXT,            -- closed enum, set exactly when the prefix
+                                                       -- went unobserved: STARTING, DISABLED,
+                                                       -- NO_SINK, IDENTITY_FENCE, CLOSING, CLOSED
     event_id                          TEXT,            -- NOT unique: many facts per round; only
                                                        -- ever set on a fact a channel-scoped
                                                        -- erasure can reach (routed or retention

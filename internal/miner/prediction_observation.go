@@ -40,6 +40,15 @@ func (s predictionObservationSink) BeginPredictionProducerEpisode() func() {
 	return s.svc.BeginPredictionProducerEpisode()
 }
 
+// PredictionCaptureState forwards the collector's capture state. Like the
+// other calls it is a pure hand-off: one atomic and one read lock, no I/O.
+func (s predictionObservationSink) PredictionCaptureState(channelID, login string) string {
+	if s.svc == nil {
+		return "NO_SINK"
+	}
+	return s.svc.PredictionCaptureState(channelID, login)
+}
+
 // NotePredictionProducerShutdownUncertain forwards a shutdown whose evidence
 // was inconclusive. Like the other two calls it is a pure hand-off.
 func (s predictionObservationSink) NotePredictionProducerShutdownUncertain() {
@@ -67,7 +76,9 @@ func toAnalyticsObservation(in pubsub.PredictionObservation) analytics.Predictio
 		RetentionGroupOwnerChannelID: in.RetentionGroupOwnerChannelID,
 		RetentionGroupOwnerLogin:     in.RetentionGroupOwnerLogin,
 
-		RoundIncarnationID: in.RoundIncarnationID,
+		RoundIncarnationID:   in.RoundIncarnationID,
+		RoundCaptureOrigin:   in.RoundCaptureOrigin,
+		RoundCaptureGapCause: in.RoundCaptureGapCause,
 
 		EventID: in.EventID,
 

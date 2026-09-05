@@ -47,6 +47,27 @@ const (
 	ObsKindRoundCleanup       = "round_cleanup"
 )
 
+// Round capture origin: whether the round was admitted while this process was
+// capturing everything about it, or while some part of its prefix could not be
+// observed at all. A round with an unobserved prefix is NOT a round with a
+// short history — it is a round whose history this build cannot claim to know,
+// and a replay must not mistake the two.
+const (
+	ObsOriginActive           = "ACTIVE_AT_ADMISSION"
+	ObsOriginPrefixUnobserved = "PREFIX_UNOBSERVED_AT_ADMISSION"
+)
+
+// Closed reasons a round's admission prefix went unobserved. Each names a
+// state of the capture path at the instant the round was admitted.
+const (
+	ObsGapStarting      = "STARTING"
+	ObsGapDisabled      = "DISABLED"
+	ObsGapNoSink        = "NO_SINK"
+	ObsGapIdentityFence = "IDENTITY_FENCE"
+	ObsGapClosing       = "CLOSING"
+	ObsGapClosed        = "CLOSED"
+)
+
 // Producer time sources.
 const (
 	ObsTimeProducer = "PRODUCER"
@@ -133,6 +154,13 @@ type PredictionObservation struct {
 	RetentionGroupOwnerChannelID string
 	RetentionGroupOwnerLogin     string
 
+	// RoundCaptureOrigin and RoundCaptureGapCause are the round's FROZEN
+	// admission provenance, repeated on every fact about it: whether this
+	// process was capturing everything about the round when it was admitted,
+	// and if not, why not. Empty on a fact about no admitted round.
+	RoundCaptureOrigin   string
+	RoundCaptureGapCause string
+
 	// RoundIncarnationID names the LOCAL admission of the round this fact is
 	// about. It is carried from the pool's roundControl, never recomputed from
 	// the channel and event id, so two separate admissions of one Twitch event
@@ -183,6 +211,18 @@ type PredictionObservationSink interface {
 	// shared connection, or do I/O. Register before the goroutine starts and
 	// settle only after its last capture attempt returns.
 	BeginPredictionProducerEpisode() func()
+
+	// PredictionCaptureState reports whether capture is fully active FOR THIS
+	// IDENTITY right now, and if not, which closed reason applies. It returns
+	// "" when capture is active.
+	//
+	// It exists so a round can freeze, at the instant it is admitted, whether
+	// its own prefix could be observed. Asking later would answer a different
+	// question: capture may have started, or stopped, in between.
+	//
+	// CONTRACT, as for the other calls: lock-free, no I/O, no blocking. It is
+	// invoked while the pool's write lock is held.
+	PredictionCaptureState(channelID, login string) string
 
 	// NotePredictionProducerShutdownUncertain records that a producer could
 	// not be PROVEN to have stopped. It is not an error channel and not a
@@ -317,6 +357,17 @@ func (p *WebSocketPool) observe(obs PredictionObservation) {
 		obs.RoundOwnerChannelID = ""
 		obs.RoundOwnerLogin = ""
 	}
+	// The round's FROZEN admission provenance, repeated here on every fact
+	// about it. Stamped in the one funnel rather than threaded through thirty
+	// call sites: it is a property of the ROUND, not of the fact, so no call
+	// site should be able to state it differently. The lookup is lock-free,
+	// which is what lets it run under the pool's write lock.
+	if obs.RoundIncarnationID != "" {
+		if v, ok := p.roundProvenances.Load(obs.RoundIncarnationID); ok {
+			prov := v.(roundProvenance)
+			obs.RoundCaptureOrigin, obs.RoundCaptureGapCause = prov.origin, prov.gapCause
+		}
+	}
 	if obs.ReceivedAtMS == 0 {
 		obs.ReceivedAtMS = time.Now().UnixMilli()
 	}
@@ -324,6 +375,51 @@ func (p *WebSocketPool) observe(obs PredictionObservation) {
 		obs.ProducerTimeSource = ObsTimeReceiver
 	}
 	(*sinkPtr).RecordPredictionObservation(obs)
+}
+
+// captureGapCause reports why a round admitted right now would have an
+// unobserved prefix, or "" when capture is fully active for this identity.
+// A pool with no sink observes nothing at all, which is its own reason.
+//
+// Safe under the pool's write lock: one atomic load plus one lock-free query
+// the sink contract requires to be exactly that.
+func (p *WebSocketPool) captureGapCause(channelID, login string) string {
+	sinkPtr := p.observationSink.Load()
+	if sinkPtr == nil || *sinkPtr == nil {
+		return ObsGapNoSink
+	}
+	return (*sinkPtr).PredictionCaptureState(channelID, login)
+}
+
+// roundProvenance is a round's frozen admission provenance.
+type roundProvenance struct {
+	origin   string
+	gapCause string
+}
+
+// freezeRoundProvenance records, ONCE, what this process could observe about a
+// round at the instant it was admitted. It is keyed by the incarnation, which
+// names exactly one local admission, so a re-admission of the same Twitch event
+// freezes its own answer.
+func (p *WebSocketPool) freezeRoundProvenance(incarnation, channelID, login string) {
+	if incarnation == "" {
+		return
+	}
+	prov := roundProvenance{origin: ObsOriginActive}
+	if cause := p.captureGapCause(channelID, login); cause != "" {
+		prov.origin, prov.gapCause = ObsOriginPrefixUnobserved, cause
+	}
+	p.roundProvenances.Store(incarnation, prov)
+}
+
+// releaseRoundProvenance drops a round's frozen provenance. Called only after
+// the round's own cleanup fact has been emitted, so that fact still carries it;
+// a fact produced later still names the round but makes no provenance claim,
+// which is honest — the pool no longer holds the round.
+func (p *WebSocketPool) releaseRoundProvenance(incarnation string) {
+	if incarnation != "" {
+		p.roundProvenances.Delete(incarnation)
+	}
 }
 
 // beginEpisode registers a producer episode with the sink, if one is wired.

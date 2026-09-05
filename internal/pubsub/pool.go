@@ -295,6 +295,13 @@ type WebSocketPool struct {
 	// value is used once per pool instance.
 	roundAdmissions atomic.Uint64
 
+	// roundProvenances holds each live round's FROZEN admission provenance,
+	// keyed by its incarnation. Read on the emit path — which sometimes runs
+	// under this pool's write lock — so it must be lock-free; written once at
+	// admission and dropped once the round's cleanup fact has been emitted, so
+	// it is bounded by the tracked rounds.
+	roundProvenances sync.Map
+
 	// instanceID identifies THIS pool instance in the immutable Prediction
 	// observation trail. Immutable after construction.
 	instanceID string
@@ -1148,6 +1155,11 @@ func (p *WebSocketPool) handlePredictionChannel(msg *PubSubMessage, streamer *mo
 		p.predictions[eventID] = event
 		control := &roundControl{incarnation: p.newRoundIncarnation()}
 		p.control[eventID] = control
+		// Frozen HERE, at the admission itself, because that is the only
+		// instant the answer is about: capture may start, or stop, a moment
+		// later, and a round admitted with an unobserved prefix does not
+		// acquire one retroactively.
+		p.freezeRoundProvenance(control.incarnation, streamer.ChannelID, streamer.GetUsername())
 		p.mu.Unlock()
 
 		slog.Info("Prediction event scheduled",
@@ -1913,6 +1925,8 @@ func (p *WebSocketPool) removePrediction(eventID string) {
 	// safe under this lock; sweepStaleLocked already emits the same fact from
 	// inside it.
 	p.observeRoundCleanup(eventID, channelID, login, incarnation, "CLEANUP_APPLIED", "OK")
+	// After the fact, so the cleanup still carries the round's provenance.
+	p.releaseRoundProvenance(incarnation)
 	p.mu.Unlock()
 }
 
@@ -1944,6 +1958,7 @@ func (p *WebSocketPool) sweepStaleLocked() {
 	// the common case reaps nothing at all.
 	for _, r := range reaped {
 		p.observeRoundCleanup(r.id, r.channelID, r.login, r.incarnation, "CLEANUP_APPLIED", "WINDOW_ELAPSED")
+		p.releaseRoundProvenance(r.incarnation)
 	}
 }
 

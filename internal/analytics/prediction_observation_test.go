@@ -1365,6 +1365,68 @@ func TestStartupReclaimsAbandonedSessionsBeforeTheSessionCap(t *testing.T) {
 	}
 }
 
+// TestRoundCaptureProvenanceSurvivesTheStore is the store half of the
+// requirement: a round whose admission prefix went unobserved must reach the
+// database saying so, on every fact about it, and the schema must reject the
+// two states that would make it meaningless — a gap cause without the origin
+// that has one, and that origin without a cause.
+func TestRoundCaptureProvenanceSurvivesTheStore(t *testing.T) {
+	svc, repo := newObservationService(t)
+	ctx := context.Background()
+	epoch := svc.observations.epoch.Load()
+	sessionID := svc.observations.sessionID
+
+	for i, cause := range []string{"STARTING", "DISABLED", "NO_SINK", "IDENTITY_FENCE", "CLOSING", "CLOSED"} {
+		in := channelObservation("pool-1", "chan-a", "streamer-a", "event-"+strconv.Itoa(i), "ROUND_CREATED")
+		in.RoundCaptureOrigin = RoundOriginPrefixUnobserved
+		in.RoundCaptureGapCause = cause
+		fact := mustSanitize(t, in)
+		if fact.RoundCaptureGapCause != cause {
+			t.Fatalf("%q did not survive sanitization: got %q", cause, fact.RoundCaptureGapCause)
+		}
+		if err := repo.AppendObservation(ctx, fact, sessionID, epoch, int64(i+1)); err != nil {
+			t.Fatalf("the store refused gap cause %q: %v", cause, err)
+		}
+	}
+
+	got, err := repo.ObservationsBySession(ctx, sessionID, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seen := map[string]bool{}
+	for _, o := range got {
+		if o.RoundCaptureOrigin != RoundOriginPrefixUnobserved {
+			t.Fatalf("stored origin = %q, want %q", o.RoundCaptureOrigin, RoundOriginPrefixUnobserved)
+		}
+		seen[o.RoundCaptureGapCause] = true
+	}
+	if len(seen) != 6 {
+		t.Fatalf("the six gap causes round-tripped as %v", seen)
+	}
+
+	// The pairing is a schema CHECK, not a convention.
+	base := `INSERT INTO prediction_observations
+		(observation_id, collector_session_id, collector_epoch, collector_sequence,
+		 pool_instance_id, round_incarnation_id, round_capture_origin, round_capture_gap_cause,
+		 retention_group_owner_channel_id, kind, producer_time_source, received_at_ms,
+		 payload_version, payload_json, observation_sha256)
+		VALUES (?, 's', 9, ?, 'pool', 'round:pool:1', ?, ?, 'chan', 'channel_event', 'RECEIVER', 1, 1, '{}', 'sha256:x')`
+	for _, tc := range []struct {
+		name          string
+		origin, cause interface{}
+	}{
+		{"a gap cause with no unobserved prefix", RoundOriginActive, "STARTING"},
+		{"a gap cause with no origin at all", nil, "STARTING"},
+		{"an unobserved prefix with no cause", RoundOriginPrefixUnobserved, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := repo.db.Exec(base, "bad-"+tc.name, 900, tc.origin, tc.cause); err == nil {
+				t.Fatal("the schema accepted a provenance pairing that says nothing coherent")
+			}
+		})
+	}
+}
+
 // TestEditedFactFailsItsOwnWitness is the regression for a defect an
 // independent review found: observation_sha256 was written by AppendObservation
 // and recomputed by nobody, so a row edited in place after the write read back
@@ -1493,6 +1555,12 @@ func TestClosedVocabulariesAreExact(t *testing.T) {
 		{"error classes", observationErrorClasses, []string{
 			"NONE", "TRANSPORT", "REJECTED_BY_TWITCH", "INVALID_ARGUMENT",
 			"NOT_ENOUGH_POINTS", "ROUND_CLOSED", "INTERNAL", ValueUnknown,
+		}},
+		{"round capture origins", observationRoundOrigins, []string{
+			RoundOriginActive, RoundOriginPrefixUnobserved, ValueUnknown,
+		}},
+		{"round capture gap causes", observationRoundGapCauses, []string{
+			"STARTING", "DISABLED", "NO_SINK", "IDENTITY_FENCE", "CLOSING", "CLOSED", ValueUnknown,
 		}},
 		{"outcome colours", observationOutcomeColors, []string{
 			"BLUE", "PINK", ValueUnknown,

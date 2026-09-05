@@ -27,6 +27,8 @@ func TestObservationAdapterIsFieldComplete(t *testing.T) {
 		RetentionGroupOwnerChannelID: "chan-retention",
 		RetentionGroupOwnerLogin:     "retention-login",
 		RoundIncarnationID:           "round:pool-9:7",
+		RoundCaptureOrigin:           pubsub.ObsOriginPrefixUnobserved,
+		RoundCaptureGapCause:         pubsub.ObsGapIdentityFence,
 		EventID:                      "event-42",
 		Kind:                         pubsub.ObsKindPlacement,
 		SourceTopicType:              "predictions-channel-v1",
@@ -47,8 +49,10 @@ func TestObservationAdapterIsFieldComplete(t *testing.T) {
 			Manual:      boolValue(true),
 			OutcomeSlot: intValue(1),
 			Outcomes: []pubsub.ObservationOutcome{
-				{Slot: 0, Color: "BLUE", TotalPoints: 300, TotalUsers: 3, TopPredictorsExamined: 2},
-				{Slot: 1, Color: "PINK", TotalPoints: 200, TotalUsers: 2},
+				{Slot: 0, Color: "BLUE", ColorState: "PRESENT", TotalPoints: 300,
+					TotalUsers: 3, TopPredictorsExamined: 2, TopPredictors: "PRESENT"},
+				{Slot: 1, Color: "PINK", ColorState: "PRESENT", TotalPoints: 200,
+					TotalUsers: 2, TopPredictorsExamined: 1, TopPredictors: "PRESENT"},
 			},
 			Counters: map[string]int64{"stake": 250},
 			Presence: map[string]string{"event": pubsub.ObsPresent},
@@ -69,6 +73,8 @@ func TestObservationAdapterIsFieldComplete(t *testing.T) {
 		RetentionGroupOwnerChannelID: "chan-retention",
 		RetentionGroupOwnerLogin:     "retention-login",
 		RoundIncarnationID:           "round:pool-9:7",
+		RoundCaptureOrigin:           analytics.RoundOriginPrefixUnobserved,
+		RoundCaptureGapCause:         "IDENTITY_FENCE",
 		EventID:                      "event-42",
 		Kind:                         analytics.KindPlacement,
 		SourceTopicType:              analytics.TopicTypePredictionsChannel,
@@ -89,8 +95,10 @@ func TestObservationAdapterIsFieldComplete(t *testing.T) {
 			Manual:      boolValue(true),
 			OutcomeSlot: intValue(1),
 			Outcomes: []analytics.ObservationOutcome{
-				{Slot: 0, Color: "BLUE", TotalPoints: 300, TotalUsers: 3, TopPredictorsExamined: 2},
-				{Slot: 1, Color: "PINK", TotalPoints: 200, TotalUsers: 2},
+				{Slot: 0, Color: "BLUE", ColorState: "PRESENT", TotalPoints: 300,
+					TotalUsers: 3, TopPredictorsExamined: 2, TopPredictors: "PRESENT"},
+				{Slot: 1, Color: "PINK", ColorState: "PRESENT", TotalPoints: 200,
+					TotalUsers: 2, TopPredictorsExamined: 1, TopPredictors: "PRESENT"},
 			},
 			Counters: map[string]int64{"stake": 250},
 			Presence: map[string]string{"event": "PRESENT"},
@@ -187,6 +195,8 @@ func (r *recordingProducerSink) RecordPredictionObservation(o pubsub.PredictionO
 }
 
 func (r *recordingProducerSink) BeginPredictionProducerEpisode() func() { return func() {} }
+
+func (r *recordingProducerSink) PredictionCaptureState(string, string) string { return "" }
 
 func (r *recordingProducerSink) NotePredictionProducerShutdownUncertain() {
 	r.mu.Lock()

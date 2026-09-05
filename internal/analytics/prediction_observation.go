@@ -146,6 +146,21 @@ const (
 	PresenceUnavailable    = "UNAVAILABLE"
 )
 
+// Round capture origin, and the closed reasons a round's admission prefix went
+// unobserved.
+const (
+	RoundOriginActive           = "ACTIVE_AT_ADMISSION"
+	RoundOriginPrefixUnobserved = "PREFIX_UNOBSERVED_AT_ADMISSION"
+)
+
+var observationRoundOrigins = []string{
+	RoundOriginActive, RoundOriginPrefixUnobserved, ValueUnknown,
+}
+
+var observationRoundGapCauses = []string{
+	"STARTING", "DISABLED", "NO_SINK", "IDENTITY_FENCE", "CLOSING", "CLOSED", ValueUnknown,
+}
+
 // Source message types — the closed projection of the Prediction-relevant
 // PubSub message types.
 const (
@@ -484,6 +499,18 @@ type PredictionObservation struct {
 	// case the fact is its own retention unit.
 	RoundIncarnationID string
 
+	// RoundCaptureOrigin / RoundCaptureGapCause are the round's FROZEN
+	// admission provenance, repeated on every fact about it: whether this
+	// process was capturing everything about the round when it was admitted,
+	// and if not, the closed reason why not.
+	//
+	// A round whose prefix went unobserved is NOT a round with a short
+	// history — it is a round whose history this build cannot claim to know,
+	// and a replay must never invent the missing schedule or decision prefix
+	// for one. Closed vocabularies; empty on a fact about no admitted round.
+	RoundCaptureOrigin   string
+	RoundCaptureGapCause string
+
 	// EventID is the Twitch prediction event identity, when the frame carried
 	// one. Deliberately NOT unique in the store: many facts describe one
 	// round.
@@ -550,6 +577,8 @@ type ObservationRecord struct {
 	CollectorSequence             int64
 	PoolInstanceID                string
 	RoundIncarnationID            string
+	RoundCaptureOrigin            string
+	RoundCaptureGapCause          string
 	RoutedStreamerID              int64
 	RoutedChannelID               string
 	RoundOwnerStreamerID          int64
@@ -808,6 +837,8 @@ func sanitizeObservation(in PredictionObservation, now int64) (PredictionObserva
 		RetentionGroupOwnerChannelID: bounded(in.RetentionGroupOwnerChannelID),
 		RetentionGroupOwnerLogin:     login(in.RetentionGroupOwnerLogin),
 		RoundIncarnationID:           bounded(in.RoundIncarnationID),
+		RoundCaptureOrigin:           closedOptional(in.RoundCaptureOrigin, observationRoundOrigins),
+		RoundCaptureGapCause:         closedOptional(in.RoundCaptureGapCause, observationRoundGapCauses),
 		EventID:                      bounded(in.EventID),
 		Kind:                         closedValue(in.Kind, observationKinds),
 		SourceTopicType:              closedTopicType(in.SourceTopicType),
@@ -949,6 +980,8 @@ func observationDigest(o PredictionObservation, observationID, sessionID string,
 		fmt.Sprintf("%d", seq),
 		o.PoolInstanceID,
 		incarnation,
+		o.RoundCaptureOrigin,
+		o.RoundCaptureGapCause,
 		o.RoutedChannelID,
 		o.RoundOwnerChannelID,
 		o.RetentionGroupOwnerChannelID,
@@ -1181,6 +1214,19 @@ var predictionObservationSchemaSQL = `
 		collector_sequence                INTEGER NOT NULL,
 		pool_instance_id                  TEXT NOT NULL,
 		round_incarnation_id              TEXT,
+		-- The round's FROZEN admission provenance, repeated on every fact
+		-- about it. A round whose prefix went unobserved is not a round with
+		-- a short history: it is one whose history this build cannot claim to
+		-- know, and a replay must reject it rather than invent the missing
+		-- schedule or decision prefix.
+		round_capture_origin              TEXT
+			CHECK (round_capture_origin IS NULL OR round_capture_origin IN (
+				'ACTIVE_AT_ADMISSION', 'PREFIX_UNOBSERVED_AT_ADMISSION', 'UNKNOWN'
+			)),
+		round_capture_gap_cause           TEXT
+			CHECK (round_capture_gap_cause IS NULL OR round_capture_gap_cause IN (
+				'STARTING', 'DISABLED', 'NO_SINK', 'IDENTITY_FENCE', 'CLOSING', 'CLOSED', 'UNKNOWN'
+			)),
 		routed_streamer_id                INTEGER,
 		routed_channel_id                 TEXT,
 		round_owner_streamer_id           INTEGER,
@@ -1233,6 +1279,12 @@ var predictionObservationSchemaSQL = `
 		CHECK (
 			(round_incarnation_id IS NULL     AND retention_group_owner_channel_id IS NULL) OR
 			(round_incarnation_id IS NOT NULL AND retention_group_owner_channel_id IS NOT NULL)
+		),
+		-- A gap cause exists only for a prefix that went unobserved, and that
+		-- origin always has one: the two are a matched pair, or neither is set.
+		CHECK (
+			(round_capture_gap_cause IS NULL) =
+			(round_capture_origin IS NULL OR round_capture_origin <> 'PREFIX_UNOBSERVED_AT_ADMISSION')
 		)
 	);
 
@@ -1646,6 +1698,7 @@ func (r *SQLiteRepository) AppendObservation(ctx context.Context, o PredictionOb
 			INSERT INTO prediction_observations
 				(observation_id, collector_session_id, collector_epoch, collector_sequence,
 				 pool_instance_id, round_incarnation_id,
+				 round_capture_origin, round_capture_gap_cause,
 				 routed_streamer_id, routed_channel_id,
 				 round_owner_streamer_id, round_owner_channel_id,
 				 retention_group_owner_streamer_id, retention_group_owner_channel_id,
@@ -1653,9 +1706,10 @@ func (r *SQLiteRepository) AppendObservation(ctx context.Context, o PredictionOb
 				 producer_at_ms, producer_time_source, received_at_ms,
 				 connection_index, connection_generation, connection_sequence,
 				 payload_version, payload_json, observation_sha256)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			observationID, sessionID, epoch, seq,
 			o.PoolInstanceID, nullableText(incarnation),
+			nullableText(o.RoundCaptureOrigin), nullableText(o.RoundCaptureGapCause),
 			routedID, nullableText(o.RoutedChannelID),
 			ownerID, nullableText(o.RoundOwnerChannelID),
 			retentionID, nullableText(o.RetentionGroupOwnerChannelID),
@@ -2004,6 +2058,7 @@ func (r *SQLiteRepository) RecountObservationQuotas(ctx context.Context, l *obse
 const observationSelectColumns = `
 	id, observation_id, collector_session_id, collector_epoch, collector_sequence,
 	pool_instance_id, COALESCE(round_incarnation_id, ''),
+	COALESCE(round_capture_origin, ''), COALESCE(round_capture_gap_cause, ''),
 	COALESCE(routed_streamer_id, 0), COALESCE(routed_channel_id, ''),
 	COALESCE(round_owner_streamer_id, 0), COALESCE(round_owner_channel_id, ''),
 	COALESCE(retention_group_owner_streamer_id, 0), COALESCE(retention_group_owner_channel_id, ''),
@@ -2022,6 +2077,7 @@ func scanObservationRows(rows *sql.Rows) ([]ObservationRecord, error) {
 		if err := rows.Scan(
 			&rec.ID, &rec.ObservationID, &rec.CollectorSessionID, &rec.CollectorEpoch, &rec.CollectorSequence,
 			&rec.PoolInstanceID, &rec.RoundIncarnationID,
+			&rec.RoundCaptureOrigin, &rec.RoundCaptureGapCause,
 			&rec.RoutedStreamerID, &rec.RoutedChannelID,
 			&rec.RoundOwnerStreamerID, &rec.RoundOwnerChannelID,
 			&rec.RetentionGroupOwnerStreamerID, &rec.RetentionGroupOwnerChannelID,
@@ -2937,6 +2993,40 @@ func (c *observationCollector) capturing() bool { return c.phase.Load() == phase
 // producer that raced the fence — evidence the collector closed while a
 // producer was alive — from one that simply arrived before intake opened.
 func (c *observationCollector) tearingDown() bool { return c.phase.Load() >= phaseClosing }
+
+// captureState reports why capture is not fully active for one identity, from
+// the closed gap-cause vocabulary, or "" when it is fully active.
+//
+// It answers about NOW, and the caller freezes that answer onto the round it is
+// admitting — asking later would answer a different question. The phase is one
+// atomic load and the fence is the same read lock the emit path already takes,
+// so this is safe to call from a producer holding its own lock.
+func (c *observationCollector) captureState(channelID, login string) string {
+	if c == nil {
+		return "NO_SINK"
+	}
+	if c.disabled.Load() {
+		return "DISABLED"
+	}
+	switch c.phase.Load() {
+	case phaseNew, phaseStarting:
+		return "STARTING"
+	case phasePaused:
+		// Capacity-paused is sticky and also sets disabled, which the check
+		// above normally catches; this is the honest answer if it does not.
+		return "DISABLED"
+	case phaseClosing:
+		return "CLOSING"
+	case phaseClosed:
+		return "CLOSED"
+	}
+	// Running. The remaining reason a round's prefix would go unobserved is an
+	// identity fence armed for the channel the round belongs to.
+	if c.isFenced(PredictionObservation{RoutedChannelID: channelID, RoutedLogin: login}) {
+		return "IDENTITY_FENCE"
+	}
+	return ""
+}
 
 // beginEpisode registers one producer episode. The settle function is
 // idempotent: a producer that settles twice must not make the collector

@@ -147,6 +147,17 @@ func (s *Service) BeginPredictionProducerEpisode() func() {
 	return s.observations.beginEpisode()
 }
 
+// PredictionCaptureState reports why capture is not fully active for this
+// identity right now, or "" when it is. It is lock-free by construction — one
+// phase load plus the fence's read lock — because a producer calls it while
+// holding its own lock, at the instant a round is admitted.
+func (s *Service) PredictionCaptureState(channelID, login string) string {
+	if s == nil || s.observations == nil {
+		return "NO_SINK"
+	}
+	return s.observations.captureState(channelID, login)
+}
+
 // NotePredictionProducerShutdownUncertain records that a producer could not
 // prove it had stopped offering facts (the PubSub pool's Close returned a
 // non-nil result, so a late producer may still exist). It forces the
