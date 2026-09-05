@@ -716,3 +716,49 @@ func TestObservationCloseBeatsAFinishingBootstrap(t *testing.T) {
 		_ = db.Close()
 	}
 }
+
+// TestObservationSessionBoundsAreEnforced proves the per-session ceilings are
+// real rather than documentation. An independent review found eight declared
+// "frozen" bounds enforced nowhere; these two are checked per fact, from
+// atomics the writer already maintains, so a session that reaches either one
+// stops committing instead of growing past it.
+func TestObservationSessionBoundsAreEnforced(t *testing.T) {
+	svc, repo := newObservationService(t)
+	c := svc.observations
+
+	// Row ceiling: pretend the session has already committed its maximum.
+	c.committed.Store(MaxSessionRows)
+	if c.withinSessionBounds() {
+		t.Fatal("a session at MaxSessionRows still reports itself within bounds")
+	}
+	before := c.dropped.Load()
+	svc.RecordPredictionObservation(channelObservation("pool-1", "chan-a", "s", "over-rows", "ROUND_CREATED"))
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) && c.dropped.Load() == before {
+		time.Sleep(time.Millisecond)
+	}
+	if c.dropped.Load() == before {
+		t.Fatal("a fact past the session row ceiling was neither refused nor counted")
+	}
+	if n := countRows(t, repo, `SELECT COUNT(*) FROM prediction_observations`); n != 0 {
+		t.Fatalf("%d facts were committed past the session row ceiling", n)
+	}
+
+	// Byte ceiling behaves the same way.
+	c.committed.Store(0)
+	c.sessionBytes.Store(MaxSessionBytes)
+	if c.withinSessionBounds() {
+		t.Fatal("a session at MaxSessionBytes still reports itself within bounds")
+	}
+
+	// Back under both ceilings, capture resumes.
+	c.sessionBytes.Store(0)
+	if !c.withinSessionBounds() {
+		t.Fatal("a session under both ceilings is refused")
+	}
+	svc.RecordPredictionObservation(channelObservation("pool-1", "chan-a", "s", "under", "ROUND_CREATED"))
+	awaitCommitted(t, svc, 1)
+	if c.sessionBytes.Load() <= 0 {
+		t.Fatal("committed payload bytes were not accounted, so the byte ceiling could never be reached")
+	}
+}

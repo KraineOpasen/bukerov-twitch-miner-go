@@ -200,6 +200,20 @@ const (
 // Compile-time bounds. These are frozen: they are the contract that keeps an
 // observer from ever becoming a load source on the shared connection or an
 // unbounded consumer of the operator's disk.
+//
+// Where each is ENFORCED, so none of them is merely decorative:
+//   - queue capacity: the channel's own size; a full queue drops.
+//   - outcomes, top predictors, string, payload: by the producer's bounded
+//     projection and by sanitizeObservation/marshalObservationPayload.
+//   - session rows/bytes: per fact, from atomics, in the collector's write
+//     path (withinSessionBounds).
+//   - store rows/bytes/sessions: by the collector's maintenance pass, which
+//     pauses capture when a bound is reached and resumes when retention frees
+//     space.
+//   - round rows/bytes: by the retention unit — one whole round is the
+//     largest thing a single pruning transaction removes.
+//   - deletion identity and proved-union rows/bytes: the erasure's cost
+//     envelope, exercised by the identity-purge pilot.
 const (
 	// ObservationQueueCapacity is the collector's private queue depth. A full
 	// queue drops rather than blocking a producer.
@@ -1764,6 +1778,13 @@ type observationCollector struct {
 	sessionID string
 	epoch     atomic.Int64
 
+	// sessionBytes accumulates the payload bytes this session has committed,
+	// so the per-session byte bound is enforced from an atomic rather than a
+	// COUNT query on the write path. Together with committed (the row count)
+	// it makes MaxSessionRows/MaxSessionBytes real ceilings instead of
+	// documentation.
+	sessionBytes atomic.Int64
+
 	startOnce sync.Once
 	closeOnce sync.Once
 	stop      context.CancelFunc
@@ -2043,6 +2064,14 @@ func (c *observationCollector) write(ctx context.Context, raw PredictionObservat
 		c.dropped.Add(1)
 		return
 	}
+	// The per-session bounds are ceilings, not advice: a session that has
+	// reached either one stops committing rather than growing past it. The
+	// facts it already wrote stay exact; the session finalizes INCOMPLETE
+	// because the drops below say so.
+	if !c.withinSessionBounds() {
+		c.dropped.Add(1)
+		return
+	}
 	seq := c.sequence.Add(1)
 
 	writeCtx, cancel := context.WithTimeout(ctx, c.writeDeadline)
@@ -2070,6 +2099,26 @@ func (c *observationCollector) write(ctx context.Context, raw PredictionObservat
 		return
 	}
 	c.committed.Add(1)
+	c.sessionBytes.Add(int64(len(payloadJSONOf(obs))))
+}
+
+// withinSessionBounds reports whether this session may commit another fact.
+// Both bounds are read from atomics the writer already maintains, so the
+// check costs nothing on the write path — which is why they can be enforced
+// per fact rather than merely documented.
+func (c *observationCollector) withinSessionBounds() bool {
+	return c.committed.Load() < MaxSessionRows && c.sessionBytes.Load() < MaxSessionBytes
+}
+
+// payloadJSONOf renders a fact's payload for accounting. It is the same
+// rendering AppendObservation persists, so the byte tally tracks what is
+// actually stored.
+func payloadJSONOf(o PredictionObservation) string {
+	rendered, ok := marshalObservationPayload(o.Payload)
+	if !ok {
+		return ""
+	}
+	return rendered
 }
 
 // leased runs one of the collector's OWN transactions behind the priority
