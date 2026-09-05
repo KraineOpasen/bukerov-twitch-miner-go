@@ -1052,6 +1052,49 @@ func TestUserFrameObservationsAreRecorded(t *testing.T) {
 	}
 }
 
+// TestAnUntrackedPlacementSaysWhatWasActuallyAbsent is the regression for a
+// mislabel an independent acceptance review found: a prediction-made frame for
+// a round this pool does not track recorded the event key as ABSENT_ON_WIRE.
+// The key was there and was read — what is absent is the ROUND — so the fact
+// made a false statement about what Twitch sent, in the one column that exists
+// to say what Twitch sent.
+func TestAnUntrackedPlacementSaysWhatWasActuallyAbsent(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		eventID interface{}
+		want    string
+	}{
+		{"the event id was on the wire", "not-a-tracked-round", ObsPresent},
+		{"the event key never arrived", nil, ObsAbsentOnWire},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p, sink := observedPool(t, &fakePlacer{})
+			s := newTestStreamer(100000)
+			p.streamers = []*models.Streamer{s}
+
+			prediction := map[string]interface{}{}
+			if tc.eventID != nil {
+				prediction["event_id"] = tc.eventID
+			}
+			p.handlePredictionUser(&PubSubMessage{
+				Topic: NewTopic(TopicPredictionsUser, "user-id"), Type: "prediction-made",
+				ChannelID: "chan-1",
+				Data:      map[string]interface{}{"prediction": prediction},
+			}, s)
+
+			got := factWithPhase(t, sink, "PLACEMENT_CONFIRMED")
+			if got.Payload.ReasonCode != "NO_ROUND" {
+				t.Fatalf("reason = %q, want NO_ROUND", got.Payload.ReasonCode)
+			}
+			if got.Payload.Presence["event"] != tc.want {
+				t.Fatalf("event presence = %q, want %q: the presence column says what the WIRE "+
+					"carried, not whether we happened to be tracking the round",
+					got.Payload.Presence["event"], tc.want)
+			}
+		})
+	}
+}
+
 // TestEveryTerminalExitIsObservedWithItsOwnVerdict closes a coverage gap an
 // independent review found, and repairs a misstatement inside it.
 //

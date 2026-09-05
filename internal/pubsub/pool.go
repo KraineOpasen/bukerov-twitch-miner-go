@@ -1262,8 +1262,12 @@ func (p *WebSocketPool) handlePredictionUser(msg *PubSubMessage, streamer *model
 		p.mu.RUnlock()
 
 		if !exists {
+			// The event key WAS on the wire and was read; what is absent is a
+			// round this pool tracks. Recording it as ABSENT_ON_WIRE said the
+			// frame had not carried an event id, which is a statement about
+			// Twitch rather than about us, and it is false.
 			p.observeUserFrame(msg, streamer, eventID, ObsKindUserPredictionMade, "PLACEMENT_CONFIRMED", "NO_ROUND",
-				nil, map[string]string{"event": ObsAbsentOnWire})
+				nil, map[string]string{"event": wirePresence(prediction, "event_id", isString)})
 			return outcome
 		}
 		p.mu.Lock()
