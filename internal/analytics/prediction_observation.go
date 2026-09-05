@@ -3105,12 +3105,20 @@ func (c *observationCollector) fence(channelID, login string) {
 	if login == "" && channelID == "" {
 		return
 	}
-	// Read the causal position BEFORE taking the lock: every fact already
-	// captured has a position no greater than this, and every fact captured
-	// afterwards has a greater one.
-	at := c.sequence.Load()
 	c.fenceMu.Lock()
 	defer c.fenceMu.Unlock()
+	// The causal position is read UNDER this lock, not before it. Read
+	// outside, a producer could reserve a later position in the gap between
+	// the read and the lock — a fact of the erased life whose position is
+	// nonetheless above the watermark. Reading it here makes the watermark as
+	// high as this erasure can honestly claim.
+	//
+	// That alone still would not be a proof: a producer can always reserve a
+	// position after ANY watermark. What makes the boundary total is that
+	// lifting this fence advances the capture generation (see unfence), so a
+	// fact reserved before the re-add carries the older generation and is
+	// refused at the write regardless of its position.
+	at := c.sequence.Load()
 	// The erasure record is bounded like every other identity key. A store
 	// that has erased more identities than the bound allows cannot go on
 	// proving that a late fact belongs to an erased life, so capture stops
@@ -3140,13 +3148,42 @@ func (c *observationCollector) unfence(login string) {
 	if login == "" {
 		return
 	}
+	lifted := false
 	c.fenceMu.Lock()
-	defer c.fenceMu.Unlock()
+	if _, ok := c.fenced["login:"+login]; ok {
+		lifted = true
+	}
 	delete(c.fenced, "login:"+login)
 	for _, ch := range c.loginChannels[login] {
+		if _, ok := c.fenced["chan:"+ch]; ok {
+			lifted = true
+		}
 		delete(c.fenced, "chan:"+ch)
 	}
 	delete(c.loginChannels, login)
+	c.fenceMu.Unlock()
+
+	// Lifting a fence is a LIFE BOUNDARY, and the capture generation is what
+	// records one. Without this, a fact reserved while the erasure was in
+	// flight carries the same generation as one reserved after the re-add:
+	// the write-side generation check cannot separate them, the live fence is
+	// gone, and its causal position is above the erasure watermark because a
+	// producer can always reserve a position after any watermark. That fact
+	// would then be persisted and bound to the RE-ADDED streamer's row — the
+	// resurrection the fence exists to prevent, reached through the one door
+	// the watermark cannot close.
+	//
+	// Advancing the generation closes it totally: every position reserved
+	// before this instant belongs to the previous life and is refused at the
+	// write, whatever its number.
+	//
+	// Gated on having actually lifted something, because Reinstate runs for
+	// EVERY added streamer and an unrelated re-add must not invalidate the
+	// facts of a live session. And it advances the generation ALONE — an
+	// erasure already counted itself, and a re-add is not a second erasure.
+	if lifted {
+		c.generation.Add(1)
+	}
 }
 
 // isFenced reports whether any identity this fact names has been erased.

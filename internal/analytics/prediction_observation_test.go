@@ -3194,6 +3194,129 @@ func TestAFactCapturedBeforeAnErasureCannotSurviveTheReinstate(t *testing.T) {
 	}
 }
 
+// TestAFactReservedInsideTheErasureCannotSurviveTheReinstate is the regression
+// for a defect CodeRabbit found in the full review at this candidate's head,
+// and it is the one door the erasure watermark cannot close.
+//
+// The watermark is a causal position, and a producer can always reserve a
+// LATER one — including in the instants while the erasure is being armed. Such
+// a fact carries the post-erasure generation, so the write-side generation
+// check cannot separate it from a fact captured after the streamer was added
+// back; it sits above the watermark, so the causal check passes it; and once
+// Reinstate lifts the live fence, nothing is left to refuse it. It would then
+// be persisted and bound to the RE-ADDED streamer's row — a fact of the erased
+// life resurrected under the new one.
+//
+// This test constructs exactly that fact: reserved AFTER the erasure has armed
+// its fence and taken its watermark, so neither of those mechanisms can be
+// what refuses it.
+func TestAFactReservedInsideTheErasureCannotSurviveTheReinstate(t *testing.T) {
+	svc, repo := newObservationService(t)
+	ctx := context.Background()
+	c := svc.observations
+
+	if err := repo.RecordPoints("recycled", 100, "WATCH"); err != nil {
+		t.Fatal(err)
+	}
+
+	// The WHOLE erasure runs first — the generation advance, the purge, every
+	// fence it arms and every watermark it takes.
+	c.invalidateGeneration()
+	c.fence("chan-recycled", "recycled")
+	if err := repo.db.WithTx(ctx, func(tx *sql.Tx) error {
+		if _, err := repo.EraseObservationsForIdentityTx(ctx, tx,
+			ObservationIdentity{ChannelID: "chan-recycled", Login: "recycled"}); err != nil {
+			return err
+		}
+		_, err := repo.DeleteStreamerTx(tx, "recycled")
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	repo.Tombstone("recycled")
+
+	// Only NOW does the producer reserve its position: after every watermark
+	// this erasure will ever take, and with the generation the erasure itself
+	// left behind. Neither the causal check nor the generation check can
+	// refuse this fact — a producer can always reserve a position after any
+	// watermark, and no later watermark is coming.
+	inFlight := mustSanitize(t, channelObservation("pool-1", "chan-recycled", "recycled", "old-life", "ROUND_CREATED"))
+	inFlight.sequence = c.sequence.Add(1)
+	inFlight.generation = c.generation.Load()
+	c.fenceMu.RLock()
+	highest := int64(0)
+	for _, k := range []string{"chan:chan-recycled", "login:recycled"} {
+		if at, ok := c.erasedAt[k]; ok && at > highest {
+			highest = at
+		}
+	}
+	c.fenceMu.RUnlock()
+	if inFlight.sequence <= highest {
+		t.Fatalf("the fixture reserved position %d at or below the highest watermark %d; the "+
+			"causal check would refuse it and this test would prove nothing",
+			inFlight.sequence, highest)
+	}
+
+	// The streamer is added back, which lifts the live fence.
+	repo.Reinstate("recycled")
+	if err := repo.RecordPoints("recycled", 200, "WATCH"); err != nil {
+		t.Fatal(err)
+	}
+
+	// The producer resumes, with the live fence gone.
+	before := c.dropped.Load()
+	c.write(ctx, inFlight)
+	if c.dropped.Load() != before+1 {
+		t.Fatal("a fact reserved inside the erasure was accepted after the re-add: it is above " +
+			"the watermark and carries the erasure's own generation, so only advancing the " +
+			"generation when the fence is LIFTED can refuse it")
+	}
+	got, err := repo.ObservationsBySession(ctx, c.sessionID, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, rec := range got {
+		if rec.EventID == "old-life" {
+			t.Fatalf("an observation of the erased life was filed under the re-added streamer: %+v", rec)
+		}
+	}
+
+	// And the re-added streamer is still fully observable.
+	fresh := mustSanitize(t, channelObservation("pool-1", "chan-recycled", "recycled", "new-life", "ROUND_CREATED"))
+	fresh.sequence = c.sequence.Add(1)
+	fresh.generation = c.generation.Load()
+	committed := c.committed.Load()
+	c.write(ctx, fresh)
+	if c.committed.Load() != committed+1 {
+		t.Fatal("the re-added streamer is permanently unobservable")
+	}
+}
+
+// TestAnUnrelatedReAddDoesNotInvalidateALiveSession is the other half: the
+// generation advance above must be gated on having actually lifted a fence.
+// Reinstate runs for EVERY streamer added, and if each one advanced the
+// generation, every fact a producer had in flight anywhere would be refused
+// whenever an unrelated streamer was added.
+func TestAnUnrelatedReAddDoesNotInvalidateALiveSession(t *testing.T) {
+	svc, repo := newObservationService(t)
+	ctx := context.Background()
+	c := svc.observations
+
+	inFlight := mustSanitize(t, channelObservation("pool-1", "chan-a", "streamer-a", "live", "ROUND_CREATED"))
+	inFlight.sequence = c.sequence.Add(1)
+	inFlight.generation = c.generation.Load()
+
+	// A DIFFERENT streamer is added; nothing was ever fenced for it.
+	repo.Reinstate("someone-else")
+
+	committed := c.committed.Load()
+	c.write(ctx, inFlight)
+	if c.committed.Load() != committed+1 {
+		t.Fatal("adding an unrelated streamer invalidated a fact already in flight; the " +
+			"generation advance must be gated on having actually lifted a fence")
+	}
+}
+
 // TestQuotasAreCheckedBeforeTheInsert is an independent review's F5.
 //
 // The declared ceilings were only ever observed afterwards, by a ten-minute
