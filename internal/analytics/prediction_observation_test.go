@@ -325,7 +325,11 @@ func TestObservationSanitizationIsClosedAndPrivate(t *testing.T) {
 			ReasonCode: secret,
 			ErrorClass: "graphql: " + secret,
 			Outcomes: []ObservationOutcome{
-				{Color: secret, TotalPoints: 5, TotalUsers: 2, TopPredictorsExamined: 9999},
+				// Within every ceiling: this test is about the closed
+				// vocabulary, and a ceiling breach would refuse the fact
+				// before any of it could be examined (see
+				// TestObservationPayloadCapsRefuseRatherThanShorten).
+				{Color: secret, TotalPoints: 5, TotalUsers: 2, TopPredictorsExamined: 9},
 			},
 			Counters: map[string]int64{"stake": 10, "authToken": 42},
 			Presence: map[string]string{"event": secret, "cookie": "PRESENT"},
@@ -353,8 +357,9 @@ func TestObservationSanitizationIsClosedAndPrivate(t *testing.T) {
 			t.Fatalf("%s survived sanitization as %q, want %q", name, got, ValueUnknown)
 		}
 	}
-	if out.Payload.Outcomes[0].TopPredictorsExamined != MaxTopPredictorsExamined {
-		t.Fatalf("examined predictors = %d, want the %d cap", out.Payload.Outcomes[0].TopPredictorsExamined, MaxTopPredictorsExamined)
+	if out.Payload.Outcomes[0].TopPredictorsExamined != 9 {
+		t.Fatalf("examined predictors = %d, want the count the producer reported",
+			out.Payload.Outcomes[0].TopPredictorsExamined)
 	}
 	if _, ok := out.Payload.Counters["authToken"]; ok {
 		t.Fatal("a counter outside the closed key set survived")
@@ -400,13 +405,17 @@ func TestObservationPrivacyDeniedInputs(t *testing.T) {
 		"top_predictor_login",                                  // predictor identity
 	}
 	for _, raw := range forbidden {
-		out := sanitizeObservationPayload(ObservationPayload{
+		out, ok := sanitizeObservationPayload(ObservationPayload{
 			Phase:      raw,
 			RoundState: raw,
 			Decision:   raw,
 			ReasonCode: raw,
 			ErrorClass: raw,
 		})
+		if !ok {
+			t.Fatalf("a closed-vocabulary projection refused input %q; an unrecognized value "+
+				"becomes UNKNOWN, it is not a ceiling breach", raw)
+		}
 		rendered, _ := marshalObservationPayload(out)
 		if strings.Contains(rendered, raw) {
 			t.Fatalf("forbidden input %q reached the persisted payload %s", raw, rendered)
@@ -414,39 +423,85 @@ func TestObservationPrivacyDeniedInputs(t *testing.T) {
 	}
 }
 
-// TestObservationPayloadCaps proves the bounded projection: outcomes are
-// capped at 64 and a payload that would exceed 64 KiB is replaced by a
-// minimal, still-valid projection rather than a truncated one.
-func TestObservationPayloadCaps(t *testing.T) {
-	many := make([]ObservationOutcome, MaxObservationOutcomes+50)
-	for i := range many {
-		many[i] = ObservationOutcome{Color: "BLUE", TotalPoints: int64(i)}
-	}
-	out := sanitizeObservationPayload(ObservationPayload{Phase: "ROUND_UPDATED", Outcomes: many})
-	if len(out.Outcomes) != MaxObservationOutcomes {
-		t.Fatalf("outcomes = %d, want the %d cap", len(out.Outcomes), MaxObservationOutcomes)
-	}
-	for i, o := range out.Outcomes {
-		if o.Slot != i {
-			t.Fatalf("outcome %d has slot %d — slots must be positional", i, o.Slot)
+// TestObservationPayloadCapsRefuseRatherThanShorten proves each payload
+// ceiling AT the limit and at limit+1.
+//
+// The previous behaviour kept the first 64 of 70 outcomes and clamped an
+// oversized predictor cohort, then committed the result as a successful fact.
+// That fact is not a shortened truth, it is a falsehood: a reader sees a round
+// whose aggregate cohort looks complete, and nothing distinguishes it from one
+// that really had 64 outcomes. At the ceiling the fact is stored whole; past
+// it, it is refused whole and counted as a loss.
+func TestObservationPayloadCapsRefuseRatherThanShorten(t *testing.T) {
+	outcomes := func(n int) []ObservationOutcome {
+		out := make([]ObservationOutcome, n)
+		for i := range out {
+			out[i] = ObservationOutcome{Color: "BLUE", TotalPoints: int64(i)}
 		}
+		return out
 	}
 
-	// A payload that cannot fit falls back to a minimal projection that still
-	// parses as the same type.
-	huge := ObservationPayload{Phase: "ROUND_UPDATED", ReasonCode: "OK"}
-	huge.Counters = map[string]int64{}
-	rendered, ok := marshalObservationPayload(huge)
-	if !ok {
-		t.Fatal("an ordinary payload was rejected")
-	}
-	if len(rendered) > MaxObservationPayloadBytes {
-		t.Fatalf("rendered payload is %d bytes, over the %d cap", len(rendered), MaxObservationPayloadBytes)
-	}
-	var back ObservationPayload
-	if err := json.Unmarshal([]byte(rendered), &back); err != nil {
-		t.Fatalf("rendered payload does not round-trip: %v", err)
-	}
+	t.Run("outcomes at the limit are kept whole", func(t *testing.T) {
+		out, ok := sanitizeObservationPayload(ObservationPayload{
+			Phase: "ROUND_UPDATED", Outcomes: outcomes(MaxObservationOutcomes)})
+		if !ok {
+			t.Fatalf("a round with exactly %d outcomes was refused", MaxObservationOutcomes)
+		}
+		if len(out.Outcomes) != MaxObservationOutcomes {
+			t.Fatalf("outcomes = %d, want %d", len(out.Outcomes), MaxObservationOutcomes)
+		}
+		for i, o := range out.Outcomes {
+			if o.Slot != i {
+				t.Fatalf("outcome %d has slot %d — slots must be positional", i, o.Slot)
+			}
+		}
+	})
+
+	t.Run("one outcome past the limit refuses the fact", func(t *testing.T) {
+		if _, ok := sanitizeObservationPayload(ObservationPayload{
+			Phase: "ROUND_UPDATED", Outcomes: outcomes(MaxObservationOutcomes + 1)}); ok {
+			t.Fatalf("a round with %d outcomes was accepted; the first %d would be stored as if "+
+				"they were the whole cohort", MaxObservationOutcomes+1, MaxObservationOutcomes)
+		}
+	})
+
+	t.Run("predictor cohort at the limit is kept", func(t *testing.T) {
+		out, ok := sanitizeObservationPayload(ObservationPayload{Phase: "ROUND_UPDATED",
+			Outcomes: []ObservationOutcome{{TopPredictorsExamined: MaxTopPredictorsExamined}}})
+		if !ok {
+			t.Fatalf("a cohort of exactly %d was refused", MaxTopPredictorsExamined)
+		}
+		if out.Outcomes[0].TopPredictorsExamined != MaxTopPredictorsExamined {
+			t.Fatalf("cohort = %d, want %d", out.Outcomes[0].TopPredictorsExamined, MaxTopPredictorsExamined)
+		}
+	})
+
+	t.Run("predictor cohort past the limit refuses the fact", func(t *testing.T) {
+		if _, ok := sanitizeObservationPayload(ObservationPayload{Phase: "ROUND_UPDATED",
+			Outcomes: []ObservationOutcome{{TopPredictorsExamined: MaxTopPredictorsExamined + 1}}}); ok {
+			t.Fatalf("a cohort of %d was accepted and would be reported as %d",
+				MaxTopPredictorsExamined+1, MaxTopPredictorsExamined)
+		}
+	})
+
+	t.Run("an outcome slot past the ceiling refuses the fact", func(t *testing.T) {
+		over := MaxObservationOutcomes
+		if _, ok := sanitizeObservationPayload(ObservationPayload{
+			Phase: "CALL_STARTED", OutcomeSlot: &over}); ok {
+			t.Fatal("a slot past the outcome ceiling was accepted; it names an outcome that could " +
+				"never have been stored")
+		}
+		// A negative slot is the ABSENCE of a chosen outcome, not a breach.
+		absent := -1
+		out, ok := sanitizeObservationPayload(ObservationPayload{
+			Phase: "CALL_STARTED", OutcomeSlot: &absent})
+		if !ok {
+			t.Fatal("an absent outcome slot was treated as a ceiling breach")
+		}
+		if out.OutcomeSlot != nil {
+			t.Fatalf("absent slot became %d", *out.OutcomeSlot)
+		}
+	})
 }
 
 // TestObservationStringCapIsEnforced proves an over-long enum candidate is
@@ -457,8 +512,19 @@ func TestObservationStringCapIsEnforced(t *testing.T) {
 	if got := closedValue(long, observationPhases); got != ValueUnknown {
 		t.Fatalf("over-long value became %q, want %q", got, ValueUnknown)
 	}
-	if got := boundedIdentifier(long); len(got) != MaxObservationString {
-		t.Fatalf("identifier length = %d, want the %d cap", len(got), MaxObservationString)
+	// An identifier is not shortened to fit. A truncated channel id, event id
+	// or pool id names something else, and would then be stored, hashed and
+	// erased as if it were the real one.
+	if _, ok := boundedIdentifier(strings.Repeat("A", MaxObservationString)); !ok {
+		t.Fatal("an identifier of exactly the cap was refused")
+	}
+	if got, ok := boundedIdentifier(long); ok {
+		t.Fatalf("an over-long identifier was accepted as %q", got)
+	}
+	// And the whole fact goes with it.
+	over := channelObservation("pool-1", strings.Repeat("c", MaxObservationString+1), "s", "e", "ROUND_CREATED")
+	if _, ok := sanitizeObservation(over, 1); ok {
+		t.Fatal("a fact with an over-long channel id was accepted")
 	}
 }
 
@@ -1714,12 +1780,15 @@ func TestObservationOfferStampsTheCurrentGeneration(t *testing.T) {
 	awaitCommitted(t, svc, 1)
 }
 
-// TestObservationPayloadOverCapFallsBackToAMinimalProjection exercises the
-// >64 KiB branch directly. A SANITIZED payload cannot reach that size (the
-// vocabularies are closed and the outcome list is capped), which is exactly
-// why the branch needs a direct test rather than one routed through
-// sanitization — the review found it was never executed at all.
-func TestObservationPayloadOverCapFallsBackToAMinimalProjection(t *testing.T) {
+// TestObservationPayloadOverCapIsRefusedWhole replaces a test that asserted an
+// oversized payload "falls back to a minimal projection".
+//
+// That fallback wrote a phase/reason stub, hashed the stub as though it were
+// what happened, and counted the row as a fact faithfully recorded. The
+// session then reported it among its committed facts, so nothing at any layer
+// could tell that the content had been discarded. An over-cap payload is
+// refused, and the refusal is a counted drop.
+func TestObservationPayloadOverCapIsRefusedWhole(t *testing.T) {
 	huge := ObservationPayload{Phase: "ROUND_UPDATED", ReasonCode: "OK"}
 	filler := strings.Repeat("x", 4096)
 	for i := 0; i < MaxObservationOutcomes; i++ {
@@ -1730,30 +1799,70 @@ func TestObservationPayloadOverCapFallsBackToAMinimalProjection(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(raw) <= MaxObservationPayloadBytes {
-		t.Fatalf("fixture is %d bytes, need more than the %d cap to exercise the branch", len(raw), MaxObservationPayloadBytes)
+		t.Fatalf("fixture is %d bytes, need more than the %d cap to exercise the branch",
+			len(raw), MaxObservationPayloadBytes)
 	}
 
-	rendered, ok := marshalObservationPayload(huge)
+	if rendered, ok := marshalObservationPayload(huge); ok {
+		t.Fatalf("an over-cap payload rendered %d bytes instead of being refused", len(rendered))
+	}
+
+	// The byte ceiling is defence in depth, and this says why it has to be
+	// tested directly: the closed vocabulary makes a SANITIZED payload far
+	// smaller than the ceiling by construction, so no producer input can reach
+	// the branch through sanitization. The 4 KiB filler above is exactly what
+	// the vocabulary discards.
+	over := channelObservation("pool-1", "chan-a", "s", "event-1", "ROUND_UPDATED")
+	over.Payload = huge
+	out, ok := sanitizeObservation(over, 1)
 	if !ok {
-		t.Fatal("an over-cap payload must fall back, not be refused outright")
+		t.Fatal("the fixture was refused for some other reason; it must reach the size check")
 	}
-	if len(rendered) > MaxObservationPayloadBytes {
-		t.Fatalf("fallback is %d bytes, still over the %d cap", len(rendered), MaxObservationPayloadBytes)
+	sanitized, ok := marshalObservationPayload(out.Payload)
+	if !ok {
+		t.Fatal("a sanitized payload exceeded the byte ceiling")
 	}
-	// The fallback is still VALID and still the same type — never a truncated
-	// string that would not parse.
-	var back ObservationPayload
-	if err := json.Unmarshal([]byte(rendered), &back); err != nil {
-		t.Fatalf("fallback payload does not parse: %v", err)
+	if strings.Contains(sanitized, filler) {
+		t.Fatal("the raw filler survived sanitization")
 	}
-	if back.Phase != "ROUND_UPDATED" || back.ReasonCode != "OK" {
-		t.Fatalf("fallback lost the identifying fields: %+v", back)
+	if len(sanitized) > MaxObservationPayloadBytes/8 {
+		t.Fatalf("sanitized payload is %d bytes; the closed vocabulary is supposed to keep it far "+
+			"below the %d ceiling", len(sanitized), MaxObservationPayloadBytes)
 	}
-	if len(back.Outcomes) != 0 {
-		t.Fatalf("fallback kept %d outcomes; it must be minimal", len(back.Outcomes))
+}
+
+// TestOverCapFactIsDroppedAndCounted is the end-to-end half: an over-cap fact
+// is not merely refused by the sanitizer, it is accounted as a LOSS. That is
+// what makes the session INCOMPLETE and stops a silently-shortened trail from
+// finalizing as a complete one.
+func TestOverCapFactIsDroppedAndCounted(t *testing.T) {
+	svc, repo := newObservationService(t)
+
+	over := channelObservation("pool-1", "chan-a", "over", "event-1", "ROUND_UPDATED")
+	over.Payload.Outcomes = make([]ObservationOutcome, MaxObservationOutcomes+1)
+	svc.RecordPredictionObservation(over)
+	awaitDropped(t, svc, 1)
+
+	got, err := repo.ObservationsBySession(context.Background(), svc.observations.sessionID, 0)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if strings.Contains(rendered, filler) {
-		t.Fatal("the over-cap content survived into the fallback")
+	if len(got) != 0 {
+		t.Fatalf("an over-cap fact was stored anyway: %+v", got)
+	}
+	if c := svc.observations.committed.Load(); c != 0 {
+		t.Fatalf("committed = %d, want 0: a refused fact must not count as recorded", c)
+	}
+
+	// The session cannot finalize COMPLETE while it has dropped a fact.
+	svc.observations.Close()
+	reading, _, err := repo.ReadObservationSession(context.Background(), svc.observations.epoch.Load())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reading.Session.CloseState != SessionIncomplete {
+		t.Fatalf("close state = %q, want %q after a dropped fact",
+			reading.Session.CloseState, SessionIncomplete)
 	}
 }
 

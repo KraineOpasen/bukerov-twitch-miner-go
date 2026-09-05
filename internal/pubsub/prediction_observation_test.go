@@ -390,28 +390,63 @@ func TestChannelFrameObservationIsSanitized(t *testing.T) {
 	}
 }
 
-// TestOutcomeProjectionIsBounded proves the producer never builds a fact the
-// store would have to truncate.
-func TestOutcomeProjectionIsBounded(t *testing.T) {
-	raw := make([]interface{}, maxObservedOutcomes+40)
+// TestOutcomeProjectionReportsABreachInsteadOfHidingIt proves the producer
+// builds a bounded projection that still lets the store SEE a cap breach.
+//
+// It used to project exactly the first 64 outcomes and clamp the predictor
+// cohort to 256, so a round with 104 outcomes and a 356-strong cohort arrived
+// at the store looking like an ordinary 64-outcome round with a 256 cohort,
+// and was committed as a complete fact. The producer's bound must not be able
+// to launder an over-cap round into an in-cap one.
+//
+// The projection stops one past the ceiling — enough for the store to refuse
+// the fact, not enough to be unbounded — and the cohort SIZE is reported
+// truthfully. A size is not an identity: nothing here reads an entry, so no
+// predictor is representable at any length.
+func TestOutcomeProjectionReportsABreachInsteadOfHidingIt(t *testing.T) {
 	predictors := make([]interface{}, maxTopPredictorsExamined+100)
 	for i := range predictors {
 		predictors[i] = map[string]interface{}{"user_display_name": "someone"}
 	}
-	for i := range raw {
-		raw[i] = map[string]interface{}{"color": "BLUE", "total_points": float64(i), "top_predictors": predictors}
+	build := func(n int) []interface{} {
+		raw := make([]interface{}, n)
+		for i := range raw {
+			raw[i] = map[string]interface{}{
+				"color": "BLUE", "total_points": float64(i), "top_predictors": predictors}
+		}
+		return raw
 	}
-	out := projectOutcomes(raw)
-	if len(out) != maxObservedOutcomes {
-		t.Fatalf("projected %d outcomes, want the %d cap", len(out), maxObservedOutcomes)
+
+	// At the ceiling: projected whole, and the store accepts it.
+	atCap := projectOutcomes(build(maxObservedOutcomes))
+	if len(atCap) != maxObservedOutcomes {
+		t.Fatalf("projected %d of %d outcomes at the ceiling", len(atCap), maxObservedOutcomes)
 	}
-	for i, o := range out {
+
+	// Past it: the projection stays bounded but is visibly over the ceiling.
+	over := projectOutcomes(build(maxObservedOutcomes + 40))
+	if len(over) != maxObservedOutcomes+1 {
+		t.Fatalf("projected %d outcomes, want exactly one past the %d ceiling so the store can "+
+			"refuse the fact", len(over), maxObservedOutcomes)
+	}
+	for i, o := range over {
 		if o.Slot != i {
 			t.Fatalf("outcome %d has slot %d", i, o.Slot)
 		}
-		if o.TopPredictorsExamined != maxTopPredictorsExamined {
-			t.Fatalf("examined = %d, want the %d cap", o.TopPredictorsExamined, maxTopPredictorsExamined)
+		if o.TopPredictorsExamined != len(predictors) {
+			t.Fatalf("cohort = %d, want the real %d: a clamped count would make an over-cap "+
+				"cohort indistinguishable from one exactly at the cap",
+				o.TopPredictorsExamined, len(predictors))
 		}
+	}
+
+	// No predictor identity is representable at any size.
+	blob, err := json.Marshal(over)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(blob), "someone") {
+		t.Fatalf("a predictor identity reached the projection: %s", blob)
 	}
 }
 

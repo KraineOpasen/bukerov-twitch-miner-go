@@ -51,7 +51,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-	"unicode/utf8"
 
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/database"
 )
@@ -555,25 +554,30 @@ func closedOptional(v string, allowed []string) string {
 // boundedIdentifier caps an opaque identifier (a channel id, an event id, a
 // pool instance id) at MaxObservationString and trims it. These are
 // identifiers the store already keys on; they are never free text.
-func boundedIdentifier(v string) string {
+// comparableIdentity normalizes an identity that is used to MATCH stored rows
+// — an erasure selector, a fence key — rather than to be stored. It applies no
+// ceiling: every stored value is already within one, so a value above the
+// ceiling simply matches nothing. Shortening it here would turn an exact match
+// into a prefix and let an erasure delete by a prefix of a channel id.
+func comparableIdentity(v string) string { return strings.TrimSpace(v) }
+
+func comparableLogin(v string) string { return strings.ToLower(strings.TrimSpace(v)) }
+
+func boundedIdentifier(v string) (string, bool) {
 	v = strings.TrimSpace(v)
-	if len(v) <= MaxObservationString {
-		return v
-	}
-	// Cut on a RUNE boundary. A byte-offset slice can split a multi-byte
-	// sequence, which would store invalid UTF-8 in a TEXT column and feed
-	// invalid UTF-8 into a hash input.
-	cut := MaxObservationString
-	for cut > 0 && !utf8.RuneStart(v[cut]) {
-		cut--
-	}
-	return v[:cut]
+	// Over the ceiling the FACT is refused, not shortened. A truncated
+	// identifier is a different identifier: it names a different channel, a
+	// different event, a different pool, and it is stored, hashed and erased
+	// as if it were the real one. Refusing costs one fact and one counted
+	// drop; accepting costs the trail its meaning.
+	return v, len(v) <= MaxObservationString
 }
 
 // sanitizeObservationPayload projects an arbitrary producer payload onto the
-// closed vocabulary. It is total: every input yields a valid payload, and no
-// unrecognized text survives.
-func sanitizeObservationPayload(in ObservationPayload) ObservationPayload {
+// closed vocabulary. No unrecognized text survives. ok is false when the input
+// breaches a frozen ceiling, which refuses the whole fact rather than storing a
+// shortened version of it.
+func sanitizeObservationPayload(in ObservationPayload) (ObservationPayload, bool) {
 	out := ObservationPayload{
 		Phase:      closedValue(in.Phase, observationPhases),
 		RoundState: closedOptional(in.RoundState, observationRoundStates),
@@ -585,23 +589,38 @@ func sanitizeObservationPayload(in ObservationPayload) ObservationPayload {
 		m := *in.Manual
 		out.Manual = &m
 	}
-	if in.OutcomeSlot != nil && *in.OutcomeSlot >= 0 && *in.OutcomeSlot < MaxObservationOutcomes {
-		s := *in.OutcomeSlot
-		out.OutcomeSlot = &s
+	if in.OutcomeSlot != nil {
+		switch s := *in.OutcomeSlot; {
+		case s >= MaxObservationOutcomes:
+			// A slot past the outcome ceiling names an outcome that could
+			// never have been stored: the fact is refused, not renumbered.
+			return out, false
+		case s >= 0:
+			slot := s
+			out.OutcomeSlot = &slot
+		}
+		// A negative slot is the ABSENCE of a chosen outcome, not a breach:
+		// it stays absent.
 	}
 	if n := len(in.Outcomes); n > 0 {
+		// Over the ceiling the fact is refused. Keeping the first 64 of 70
+		// outcomes would store a round's aggregate cohort as if it were
+		// complete, and nothing downstream could tell it was not.
 		if n > MaxObservationOutcomes {
-			n = MaxObservationOutcomes
+			return out, false
 		}
 		out.Outcomes = make([]ObservationOutcome, 0, n)
 		for i := 0; i < n; i++ {
 			o := in.Outcomes[i]
+			if o.TopPredictorsExamined > MaxTopPredictorsExamined {
+				// The cohort is larger than the bounded scan can honestly
+				// account for, so the fact is refused rather than reporting a
+				// clamped count as the real one.
+				return out, false
+			}
 			examined := o.TopPredictorsExamined
 			if examined < 0 {
 				examined = 0
-			}
-			if examined > MaxTopPredictorsExamined {
-				examined = MaxTopPredictorsExamined
 			}
 			out.Outcomes = append(out.Outcomes, ObservationOutcome{
 				Slot:                  i,
@@ -634,24 +653,49 @@ func sanitizeObservationPayload(in ObservationPayload) ObservationPayload {
 			out.Presence = nil
 		}
 	}
-	return out
+	return out, true
 }
 
 // sanitizeObservation projects a producer's fact onto the closed contract.
 // The returned value is what is hashed and stored; ok is false when the fact
-// cannot be stored at all (no pool provenance, or an identity that names a
-// parent without its channel).
+// cannot be stored AT ALL.
+//
+// There are two different failures here and only one of them is a projection.
+// An unrecognized enum value becomes UNKNOWN: the fact is still exactly true,
+// it just says "a value this build does not know" instead of carrying raw text
+// into the store. A value over a frozen ceiling is not like that. Shortening a
+// 5 KiB channel id, keeping 64 of 70 outcomes, or replacing an oversized
+// payload with a stub produces a fact that is FALSE and indistinguishable from
+// a true one — and it is then hashed, counted as committed, and erased as if it
+// were real. Those are refused whole, and the refusal is counted as a drop,
+// which is what makes the session INCOMPLETE and says so.
 func sanitizeObservation(in PredictionObservation, now int64) (PredictionObservation, bool) {
+	overCeiling := false
+	bounded := func(v string) string {
+		s, ok := boundedIdentifier(v)
+		if !ok {
+			overCeiling = true
+		}
+		return s
+	}
+	login := func(v string) string {
+		s, ok := canonicalObservationLogin(v)
+		if !ok {
+			overCeiling = true
+		}
+		return s
+	}
+	payload, payloadOK := sanitizeObservationPayload(in.Payload)
 	out := PredictionObservation{
-		PoolInstanceID:               boundedIdentifier(in.PoolInstanceID),
-		RoutedChannelID:              boundedIdentifier(in.RoutedChannelID),
-		RoutedLogin:                  canonicalObservationLogin(in.RoutedLogin),
-		RoundOwnerChannelID:          boundedIdentifier(in.RoundOwnerChannelID),
-		RoundOwnerLogin:              canonicalObservationLogin(in.RoundOwnerLogin),
-		RetentionGroupOwnerChannelID: boundedIdentifier(in.RetentionGroupOwnerChannelID),
-		RetentionGroupOwnerLogin:     canonicalObservationLogin(in.RetentionGroupOwnerLogin),
-		RoundIncarnationID:           boundedIdentifier(in.RoundIncarnationID),
-		EventID:                      boundedIdentifier(in.EventID),
+		PoolInstanceID:               bounded(in.PoolInstanceID),
+		RoutedChannelID:              bounded(in.RoutedChannelID),
+		RoutedLogin:                  login(in.RoutedLogin),
+		RoundOwnerChannelID:          bounded(in.RoundOwnerChannelID),
+		RoundOwnerLogin:              login(in.RoundOwnerLogin),
+		RetentionGroupOwnerChannelID: bounded(in.RetentionGroupOwnerChannelID),
+		RetentionGroupOwnerLogin:     login(in.RetentionGroupOwnerLogin),
+		RoundIncarnationID:           bounded(in.RoundIncarnationID),
+		EventID:                      bounded(in.EventID),
 		Kind:                         closedValue(in.Kind, observationKinds),
 		SourceTopicType:              closedOptional(in.SourceTopicType, observationTopicTypes),
 		SourceMessageType:            closedOptional(in.SourceMessageType, observationMessageTypes),
@@ -662,11 +706,15 @@ func sanitizeObservation(in PredictionObservation, now int64) (PredictionObserva
 		ConnectionGeneration:         in.ConnectionGeneration,
 		ConnectionSequence:           in.ConnectionSequence,
 		ConnectionKnown:              in.ConnectionKnown,
-		Payload:                      sanitizeObservationPayload(in.Payload),
+		Payload:                      payload,
 		generation:                   in.generation,
+		sequence:                     in.sequence,
 	}
 	if out.Kind == ValueUnknown {
 		out.Kind = KindSourceUnknown
+	}
+	if overCeiling || !payloadOK {
+		return out, false
 	}
 	if out.PoolInstanceID == "" {
 		return out, false
@@ -705,11 +753,18 @@ func sanitizeObservation(in PredictionObservation, now int64) (PredictionObserva
 	// The source fingerprint is P1's OWN digest over the sanitized source
 	// identity — never the transport EventFingerprint.
 	out.SourceFingerprint = observationSourceFingerprint(out)
+	// Last, the rendered size. Every field is individually within its ceiling
+	// and the whole can still exceed the payload ceiling, so it is checked on
+	// the bytes that would actually be stored.
+	if _, ok := marshalObservationPayload(out.Payload); !ok {
+		return out, false
+	}
 	return out, true
 }
 
-func canonicalObservationLogin(login string) string {
-	return strings.ToLower(strings.TrimSpace(boundedIdentifier(login)))
+func canonicalObservationLogin(login string) (string, bool) {
+	v, ok := boundedIdentifier(login)
+	return strings.ToLower(v), ok
 }
 
 // observationSourceFingerprint digests the sanitized SOURCE identity of a
@@ -748,20 +803,17 @@ func writeDigestPart(h hash.Hash, part string) {
 // marshalObservationPayload renders the sanitized projection as canonical
 // JSON. Go's encoder emits struct fields in declaration order and map keys in
 // sorted order, so the same projection always renders the same bytes — which
-// is what makes observation_sha256 reproducible. A payload that somehow
-// exceeded MaxObservationPayloadBytes is replaced by a minimal, still-valid
-// projection rather than truncated into invalid JSON.
+// is what makes observation_sha256 reproducible.
+//
+// A payload over MaxObservationPayloadBytes is REFUSED. It used to be replaced
+// by a minimal phase/reason stub and committed as a success: a fact that had
+// quietly lost its content, was hashed as though that stub were what happened,
+// and counted toward the session as a fact faithfully recorded. A refused fact
+// is counted as a drop instead, which is both true and visible.
 func marshalObservationPayload(p ObservationPayload) (string, bool) {
 	b, err := json.Marshal(p)
-	if err != nil {
+	if err != nil || len(b) > MaxObservationPayloadBytes {
 		return "", false
-	}
-	if len(b) > MaxObservationPayloadBytes {
-		minimal, merr := json.Marshal(ObservationPayload{Phase: p.Phase, ReasonCode: p.ReasonCode})
-		if merr != nil || len(minimal) > MaxObservationPayloadBytes {
-			return "", false
-		}
-		return string(minimal), true
 	}
 	return string(b), true
 }
@@ -1672,8 +1724,8 @@ func (r *SQLiteRepository) EraseObservationsForIdentityCtxTx(ctx context.Context
 }
 
 func (r *SQLiteRepository) eraseObservationsForIdentityTx(ctx context.Context, tx *sql.Tx, id ObservationIdentity) (int64, error) {
-	channel := boundedIdentifier(id.ChannelID)
-	login := canonicalObservationLogin(id.Login)
+	channel := comparableIdentity(id.ChannelID)
+	login := comparableLogin(id.Login)
 	if channel == "" && login == "" {
 		return 0, nil
 	}
@@ -1948,8 +2000,8 @@ func observationFenceKeys(o PredictionObservation) []string {
 // are fenced, and the pairing is remembered so lifting the login also lifts
 // the channel that was erased with it.
 func (c *observationCollector) fence(channelID, login string) {
-	login = canonicalObservationLogin(login)
-	channelID = boundedIdentifier(channelID)
+	login = comparableLogin(login)
+	channelID = comparableIdentity(channelID)
 	if login == "" && channelID == "" {
 		return
 	}
@@ -1970,7 +2022,7 @@ func (c *observationCollector) fence(channelID, login string) {
 // so a re-added streamer records fresh observations again. It mirrors the
 // repository's Reinstate exactly.
 func (c *observationCollector) unfence(login string) {
-	login = canonicalObservationLogin(login)
+	login = comparableLogin(login)
 	if login == "" {
 		return
 	}

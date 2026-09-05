@@ -313,8 +313,13 @@ const (
 // predictor identity can escape, by construction rather than by filtering.
 func projectOutcomes(raw []interface{}) []ObservationOutcome {
 	n := len(raw)
-	if n > maxObservedOutcomes {
-		n = maxObservedOutcomes
+	// Project ONE past the store's ceiling and stop. The extra entry is not
+	// data the store will keep: it is what lets the store SEE that the round
+	// exceeded the cap and drop the whole fact, which is what the caps
+	// require. Silently projecting the first 64 of 70 outcomes would commit a
+	// fact that looks complete and is not.
+	if n > maxObservedOutcomes+1 {
+		n = maxObservedOutcomes + 1
 	}
 	if n == 0 {
 		return nil
@@ -337,11 +342,12 @@ func projectOutcomes(raw []interface{}) []ObservationOutcome {
 			o.TotalUsers = int64(v)
 		}
 		if tp, ok := data["top_predictors"].([]interface{}); ok {
-			examined := len(tp)
-			if examined > maxTopPredictorsExamined {
-				examined = maxTopPredictorsExamined
-			}
-			o.TopPredictorsExamined = examined
+			// The COUNT of entries, never an entry. Reported truthfully even
+			// when it exceeds the scan ceiling: the store drops a fact whose
+			// cohort is larger than the bound, and it can only do that if the
+			// real size reaches it. Nothing here reads an element, so no
+			// predictor identity is representable at any size.
+			o.TopPredictorsExamined = len(tp)
 		}
 		out = append(out, o)
 	}
