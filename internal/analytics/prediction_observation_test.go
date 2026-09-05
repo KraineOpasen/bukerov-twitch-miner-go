@@ -344,9 +344,16 @@ func TestObservationSanitizationIsClosedAndPrivate(t *testing.T) {
 	if out.Kind != KindSourceUnknown {
 		t.Fatalf("unrecognized kind became %q, want %q", out.Kind, KindSourceUnknown)
 	}
+	// source_message_type falls back to UNKNOWN_PRESENT rather than the bare
+	// UNKNOWN the other closed fields use: an unrecognized type that ARRIVED
+	// must stay distinguishable from a "type" key that never did. The raw
+	// value is discarded either way, which is what this test is about.
+	if out.SourceMessageType != PresenceUnknownPresent {
+		t.Fatalf("message survived sanitization as %q, want %q",
+			out.SourceMessageType, PresenceUnknownPresent)
+	}
 	for name, got := range map[string]string{
 		"topic":      out.SourceTopicType,
-		"message":    out.SourceMessageType,
 		"timeSource": out.ProducerTimeSource,
 		"phase":      out.Payload.Phase,
 		"roundState": out.Payload.RoundState,
@@ -1949,6 +1956,54 @@ func TestALostFactLeavesACausalGap(t *testing.T) {
 	// The session's accounting explains the gap rather than contradicting it.
 	if c, d := svc.observations.committed.Load(), svc.observations.dropped.Load(); c != 1 || d != 1 {
 		t.Fatalf("accounting = %d committed / %d dropped, want 1/1", c, d)
+	}
+}
+
+// TestMessageTypeWireStatesAreStorable proves the store keeps the four wire
+// states the producer can now report, and keeps them APART. Before this, the
+// column's CHECK admitted only the four real types plus a bare UNKNOWN, so
+// every state the producer distinguished collapsed back to NULL on the way in
+// — the whole distinction lost at the last step.
+func TestMessageTypeWireStatesAreStorable(t *testing.T) {
+	svc, repo := newObservationService(t)
+	ctx := context.Background()
+	epoch := svc.observations.epoch.Load()
+	sessionID := svc.observations.sessionID
+
+	want := []string{
+		MessageTypeEventUpdated,
+		PresenceAbsentOnWire,
+		PresenceNullOnWire,
+		PresenceInvalid,
+		PresenceUnknownPresent,
+	}
+	for i, state := range want {
+		in := channelObservation("pool-1", "chan-a", "streamer-a", "event-"+strconv.Itoa(i), "ROUND_CREATED")
+		in.SourceMessageType = state
+		fact := mustSanitize(t, in)
+		if fact.SourceMessageType != state {
+			t.Fatalf("%q did not survive sanitization: got %q", state, fact.SourceMessageType)
+		}
+		if err := repo.AppendObservation(ctx, fact, sessionID, epoch, int64(i+1)); err != nil {
+			t.Fatalf("the store refused %q: %v", state, err)
+		}
+	}
+
+	got, err := repo.ObservationsBySession(ctx, sessionID, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != len(want) {
+		t.Fatalf("stored %d facts, want %d", len(got), len(want))
+	}
+	stored := make(map[string]bool, len(got))
+	for _, o := range got {
+		stored[o.SourceMessageType] = true
+	}
+	for _, state := range want {
+		if !stored[state] {
+			t.Fatalf("%q did not survive the round trip; stored set was %v", state, stored)
+		}
 	}
 }
 

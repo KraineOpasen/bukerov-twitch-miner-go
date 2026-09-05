@@ -625,6 +625,82 @@ func TestObservationGoldenSequence(t *testing.T) {
 	}
 }
 
+// TestRepeatedCleanupWritesNoUnreachableIdentifier is the regression for the
+// general form of the manual-bet defect below. removePrediction is idempotent:
+// the second call finds nothing in the maps, resolves no channel and no
+// incarnation, and used to emit a cleanup fact carrying the Twitch event id
+// with NO identity column at all. A channel-scoped privacy erasure deletes by
+// routed channel or by retention-group channel; a row with neither is
+// unreachable forever, so an erased channel's event id would survive its own
+// erasure.
+func TestRepeatedCleanupWritesNoUnreachableIdentifier(t *testing.T) {
+	p, sink := observedPool(t, &fakePlacer{})
+	s := newTestStreamer(1000)
+	admitRound(p, s, "event-cleaned-twice")
+
+	p.removePrediction("event-cleaned-twice")
+	p.removePrediction("event-cleaned-twice")
+
+	got := sink.all()
+	var cleanups []PredictionObservation
+	for _, o := range got {
+		if o.Kind == ObsKindRoundCleanup {
+			cleanups = append(cleanups, o)
+		}
+	}
+	if len(cleanups) != 2 {
+		t.Fatalf("want both cleanup attempts recorded, got %d of %d facts", len(cleanups), len(got))
+	}
+	// The FIRST one still resolves the round: it must keep its identity, or the
+	// guard would be buying privacy by destroying the trail.
+	if cleanups[0].EventID != "event-cleaned-twice" || cleanups[0].RoutedChannelID != "chan-1" {
+		t.Fatalf("the first cleanup lost the identity it could resolve: %+v", cleanups[0])
+	}
+	// The SECOND resolves nothing, so it must name nothing.
+	if cleanups[1].EventID != "" {
+		t.Fatalf("a cleanup with no resolvable identity carries the Twitch event id %q — no erasure can reach it: %+v",
+			cleanups[1].EventID, cleanups[1])
+	}
+	assertNoUnreachableIdentifier(t, got)
+}
+
+// TestUnreachableFactsCarryNoChannelScopedIdentifier states the invariant
+// itself, at the one funnel every fact leaves this package by. event_id and
+// round_owner_channel_id are both channel-scoped and NEITHER is a door the
+// store's erasure can open — only the routed and retention-group pairs are —
+// so a fact holding neither of those pairs must hold neither identifier.
+func TestUnreachableFactsCarryNoChannelScopedIdentifier(t *testing.T) {
+	p, sink := observedPool(t, &fakePlacer{})
+	p.observe(PredictionObservation{
+		Kind:                "round_cleanup",
+		EventID:             "some-twitch-event",
+		RoundOwnerChannelID: "chan-9",
+		RoundOwnerLogin:     "victim",
+	})
+	got := sink.all()
+	if len(got) != 1 {
+		t.Fatalf("want exactly one fact, got %d", len(got))
+	}
+	if got[0].EventID != "" || got[0].RoundOwnerChannelID != "" || got[0].RoundOwnerLogin != "" {
+		t.Fatalf("an unreachable fact kept a channel-scoped identifier: %+v", got[0])
+	}
+	assertNoUnreachableIdentifier(t, got)
+}
+
+// assertNoUnreachableIdentifier is the shared predicate: no fact that a
+// channel-scoped erasure cannot reach may name a channel or one of its rounds.
+func assertNoUnreachableIdentifier(t *testing.T, got []PredictionObservation) {
+	t.Helper()
+	for _, o := range got {
+		if o.RoutedChannelID != "" || o.RetentionGroupOwnerChannelID != "" {
+			continue // reachable by erasure: an identifier is fine
+		}
+		if o.EventID != "" || o.RoundOwnerChannelID != "" {
+			t.Fatalf("a fact no erasure can reach names a channel or its round: %+v", o)
+		}
+	}
+}
+
 // TestUntrackedManualBetWritesNoUnreachableIdentifier is the regression for a
 // defect an independent review found: a manual bet on an untracked round
 // emitted the caller-supplied Twitch event id on facts with NO identity
@@ -1001,6 +1077,64 @@ func TestEveryTrackedRoundIsAdmittedWithAnIncarnation(t *testing.T) {
 // Twitch had stated a time for frames whose time this process had invented —
 // and the RECEIVER branch was unreachable for any parsed frame.
 //
+// TestMessageTypeStatesAreDistinguishedOnTheWire is the regression for a
+// defect an independent review found: four different things Twitch can do with
+// the "type" key all reached the store as the same empty value.
+//
+// A key that never arrived, one sent explicitly null, one sent with the wrong
+// shape and a type outside this build's vocabulary are four distinct
+// observations, and a trail that stores them identically cannot answer what it
+// exists to answer. The raw value of an unrecognized type is still never kept.
+func TestMessageTypeStatesAreDistinguishedOnTheWire(t *testing.T) {
+	const event = `"event":{"id":"e1","status":"ACTIVE"}`
+	for _, tc := range []struct {
+		name  string
+		inner string
+		wire  string
+		want  string
+	}{
+		{"a type this build understands", `{"type":"event-updated","data":{` + event + `}}`,
+			ObsPresent, "event-updated"},
+		{"no type key at all", `{"data":{` + event + `}}`,
+			ObsAbsentOnWire, ObsAbsentOnWire},
+		{"type sent as null", `{"type":null,"data":{` + event + `}}`,
+			ObsNullOnWire, ObsNullOnWire},
+		{"type sent with the wrong shape", `{"type":7,"data":{` + event + `}}`,
+			ObsInvalid, ObsInvalid},
+		{"type sent as an empty string", `{"type":"","data":{` + event + `}}`,
+			ObsPresent, ObsUnknownPresent},
+		{"a type outside this build's vocabulary", `{"type":"event-teleported","data":{` + event + `}}`,
+			ObsPresent, "event-teleported"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			msg, err := ParsePubSubMessage(&WSData{
+				Topic:   "predictions-channel-v1.chan-1",
+				Message: tc.inner,
+			})
+			if err != nil {
+				t.Fatalf("parse: %v", err)
+			}
+			if msg.TypePresence != tc.wire {
+				t.Fatalf("wire state = %q, want %q", msg.TypePresence, tc.wire)
+			}
+			if got := observationFromMessage(msg, nil).SourceMessageType; got != tc.want {
+				t.Fatalf("observed message type = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestUnparsedMessageClaimsNoWireState: a message a caller built rather than
+// parsed off a wire observed no "type" key, so it must state no wire fact
+// about one. Storing ABSENT_ON_WIRE here would assert something about a wire
+// this fact never came from.
+func TestUnparsedMessageClaimsNoWireState(t *testing.T) {
+	o := observationFromMessage(&PubSubMessage{ChannelID: "chan-1"}, nil)
+	if o.SourceMessageType != "" {
+		t.Fatalf("observed message type = %q, want none: no wire was read", o.SourceMessageType)
+	}
+}
+
 // Provenance now travels with the value, and a receiver-clock reading is
 // recorded as the absence of a producer time rather than as one.
 func TestProducerTimeIsNotClaimedForAReceiverClockReading(t *testing.T) {

@@ -59,6 +59,15 @@ type PubSubMessage struct {
 	// so a durable record can say which it has. Empty on a message a caller
 	// built directly rather than parsed off the wire.
 	TimestampSource string
+
+	// TypePresence classifies what the frame's "type" key actually was, from the
+	// closed presence vocabulary: PRESENT, ABSENT_ON_WIRE, NULL_ON_WIRE or
+	// INVALID. Type alone cannot say — a key that never arrived, one sent
+	// explicitly null and one sent as a number all leave it empty, and so does a
+	// type sent as the empty string. Nothing in the transport branches on this;
+	// it exists so a durable record can state which of those happened. Empty on
+	// a message a caller built directly rather than parsed off the wire.
+	TypePresence string
 }
 
 // Where a PubSubMessage.Timestamp came from.
@@ -91,6 +100,7 @@ func ParsePubSubMessage(data *WSData) (*PubSubMessage, error) {
 		EventFingerprint: fingerprintPubSubEvent(topic, message),
 	}
 
+	msg.TypePresence = wirePresence(message, "type", isString)
 	if msgType, ok := message["type"].(string); ok {
 		msg.Type = msgType
 	}

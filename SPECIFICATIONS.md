@@ -2271,10 +2271,17 @@ CREATE TABLE prediction_observations (
     round_owner_channel_id            TEXT,
     retention_group_owner_streamer_id INTEGER,
     retention_group_owner_channel_id  TEXT,
-    event_id                          TEXT,            -- NOT unique: many facts per round
+    event_id                          TEXT,            -- NOT unique: many facts per round; only
+                                                       -- ever set on a fact a channel-scoped
+                                                       -- erasure can reach (routed or retention
+                                                       -- group channel), never on one it cannot
     kind                              TEXT NOT NULL,   -- one of the nine closed kinds
     source_topic_type                 TEXT,            -- topic TYPE only, closed enum
-    source_message_type               TEXT,            -- closed enum
+    source_message_type               TEXT,            -- closed enum: the four Prediction message
+                                                       -- types, or the wire state that says why
+                                                       -- none is there (ABSENT_ON_WIRE,
+                                                       -- NULL_ON_WIRE, INVALID, UNKNOWN_PRESENT);
+                                                       -- the unrecognized value is never stored
     source_fingerprint                TEXT,            -- own digest, NOT the transport one
     producer_at_ms                    INTEGER,
     producer_time_source              TEXT NOT NULL,   -- where producer_at_ms came from; a frame

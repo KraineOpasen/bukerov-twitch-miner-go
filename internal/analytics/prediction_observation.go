@@ -132,6 +132,21 @@ var observationTopicTypes = []string{
 	ValueUnknown,
 }
 
+// The closed wire-state vocabulary. It distinguishes what a frame actually did
+// — never sent the key, sent it as null, sent it with the wrong shape, sent an
+// unrecognized value — from what a reading path did: not looking at the key, or
+// not being able to. Collapsing those into PRESENT/ABSENT throws away the only
+// thing a source-of-truth trail is for.
+const (
+	PresencePresent        = "PRESENT"
+	PresenceAbsentOnWire   = "ABSENT_ON_WIRE"
+	PresenceNullOnWire     = "NULL_ON_WIRE"
+	PresenceInvalid        = "INVALID"
+	PresenceUnknownPresent = "UNKNOWN_PRESENT"
+	PresenceNotObserved    = "NOT_OBSERVED"
+	PresenceUnavailable    = "UNAVAILABLE"
+)
+
 // Source message types — the closed projection of the Prediction-relevant
 // PubSub message types.
 const (
@@ -141,12 +156,24 @@ const (
 	MessageTypePredictionResult = "prediction-result"
 )
 
+// observationMessageTypes is the closed stored vocabulary for
+// source_message_type: the four Prediction message types this build proves it
+// understands, plus the wire states that say why none of them is there.
+//
+// The states are not decoration. A frame that omitted "type", one that sent it
+// as null, one that sent it as a number and one that sent a type this build
+// does not model are four different events, and a trail that records all four
+// as an empty column cannot answer the question it exists for. The raw value
+// of an unrecognized type is never stored — only that one was there.
 var observationMessageTypes = []string{
 	MessageTypeEventCreated,
 	MessageTypeEventUpdated,
 	MessageTypePredictionMade,
 	MessageTypePredictionResult,
-	ValueUnknown,
+	PresenceUnknownPresent,
+	PresenceAbsentOnWire,
+	PresenceNullOnWire,
+	PresenceInvalid,
 }
 
 // Producer time sources classify where producer_at_ms came from, so a reader
@@ -320,8 +347,8 @@ var (
 	// or not being able to. Collapsing those into PRESENT/ABSENT throws away
 	// the only thing a source-of-truth trail is for.
 	observationPresenceValues = []string{
-		"PRESENT", "ABSENT_ON_WIRE", "NULL_ON_WIRE", "INVALID",
-		"UNKNOWN_PRESENT", "NOT_OBSERVED", "UNAVAILABLE", ValueUnknown,
+		PresencePresent, PresenceAbsentOnWire, PresenceNullOnWire, PresenceInvalid,
+		PresenceUnknownPresent, PresenceNotObserved, PresenceUnavailable, ValueUnknown,
 	}
 )
 
@@ -564,6 +591,29 @@ func closedValue(v string, allowed []string) string {
 // closedOptional is closedValue for a column that may legitimately be absent:
 // an empty input stays empty (SQL NULL), anything unrecognized becomes
 // ValueUnknown.
+// closedMessageType projects the producer's message-type classification onto
+// the stored vocabulary. It differs from closedOptional in exactly one way,
+// and that difference is the point: a value that ARRIVED and was not
+// recognized becomes UNKNOWN_PRESENT — a statement that something was there —
+// rather than the bare UNKNOWN the other closed fields fall back to, which the
+// reader could not tell apart from a key that never arrived at all. Either
+// way the unrecognized value itself is never stored.
+func closedMessageType(v string) string {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return ""
+	}
+	if len(v) > MaxObservationString {
+		return PresenceUnknownPresent
+	}
+	for _, a := range observationMessageTypes {
+		if v == a {
+			return v
+		}
+	}
+	return PresenceUnknownPresent
+}
+
 func closedOptional(v string, allowed []string) string {
 	if strings.TrimSpace(v) == "" {
 		return ""
@@ -718,7 +768,7 @@ func sanitizeObservation(in PredictionObservation, now int64) (PredictionObserva
 		EventID:                      bounded(in.EventID),
 		Kind:                         closedValue(in.Kind, observationKinds),
 		SourceTopicType:              closedOptional(in.SourceTopicType, observationTopicTypes),
-		SourceMessageType:            closedOptional(in.SourceMessageType, observationMessageTypes),
+		SourceMessageType:            closedMessageType(in.SourceMessageType),
 		ProducerAtMS:                 in.ProducerAtMS,
 		ProducerTimeSource:           closedValue(in.ProducerTimeSource, observationTimeSources),
 		ReceivedAtMS:                 in.ReceivedAtMS,
@@ -1105,10 +1155,16 @@ var predictionObservationSchemaSQL = `
 			CHECK (source_topic_type IS NULL OR source_topic_type IN (
 				'predictions-channel-v1', 'predictions-user-v1', 'UNKNOWN'
 			)),
+		-- The four Prediction message types this build understands, plus the
+		-- wire states that say why none of them is there: a key that never
+		-- arrived, one sent explicitly null, one sent with the wrong shape,
+		-- and a value that was there but is outside this build's vocabulary.
+		-- NULL means only that this build classified nothing at all.
 		source_message_type               TEXT
 			CHECK (source_message_type IS NULL OR source_message_type IN (
 				'event-created', 'event-updated', 'prediction-made',
-				'prediction-result', 'UNKNOWN'
+				'prediction-result',
+				'UNKNOWN_PRESENT', 'ABSENT_ON_WIRE', 'NULL_ON_WIRE', 'INVALID'
 			)),
 		source_fingerprint                TEXT,
 		producer_at_ms                    INTEGER,

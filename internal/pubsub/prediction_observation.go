@@ -248,6 +248,25 @@ func (p *WebSocketPool) observe(obs PredictionObservation) {
 		obs.RetentionGroupOwnerChannelID = ""
 		obs.RetentionGroupOwnerLogin = ""
 	}
+	// A privacy erasure reaches a stored fact through exactly two doors: the
+	// routed channel (and the streamer id resolved from it) and the retention
+	// group owner's channel (which takes the whole round with it). A fact that
+	// has neither door is unreachable FOREVER — so it must not carry any
+	// channel-scoped identifier, or the erasure would leave behind the very
+	// thing it was asked to remove. The Twitch event id names one channel's
+	// round, and a round owner channel names a channel outright; both are
+	// dropped here, and the fact survives as an anonymous one.
+	//
+	// This is the general form of a defect an independent review found on the
+	// manual-bet path. It is enforced HERE because a call site cannot know it
+	// is producing an unreachable fact: removePrediction, for instance, is
+	// idempotent, and only its SECOND call — after the maps no longer hold the
+	// round — resolves no identity at all.
+	if obs.RoutedChannelID == "" && obs.RetentionGroupOwnerChannelID == "" {
+		obs.EventID = ""
+		obs.RoundOwnerChannelID = ""
+		obs.RoundOwnerLogin = ""
+	}
 	if obs.ReceivedAtMS == 0 {
 		obs.ReceivedAtMS = time.Now().UnixMilli()
 	}
@@ -286,7 +305,7 @@ func observationFromMessage(msg *PubSubMessage, streamer streamerIdentity) Predi
 	obs := PredictionObservation{
 		RoutedChannelID:   msg.ChannelID,
 		SourceTopicType:   string(msg.Topic.Type),
-		SourceMessageType: msg.Type,
+		SourceMessageType: sourceMessageType(msg),
 		ReceivedAtMS:      time.Now().UnixMilli(),
 		// A round is retained and erased under the channel that owns it, which
 		// for both Prediction topics is the channel the frame is about.
@@ -358,9 +377,40 @@ func wirePresence(data map[string]interface{}, key string, wellTyped func(interf
 	}
 }
 
+// sourceMessageType projects a frame's type key onto the stored vocabulary.
+//
+// The type STRING alone is not the observation. A key that never arrived, one
+// sent explicitly null and one sent with the wrong shape are three different
+// things Twitch did, and all three used to reach the store as the same empty
+// value — which the store then stored as NULL, indistinguishable from one
+// another and from a build that simply did not classify the frame. The parser
+// records what the wire actually was; this states it.
+//
+// When a type WAS read it is passed through verbatim and the store closes it:
+// a value outside the four Prediction types this build understands becomes
+// UNKNOWN_PRESENT there, and the unrecognized value itself is never stored.
+func sourceMessageType(msg *PubSubMessage) string {
+	if msg.Type != "" {
+		return msg.Type
+	}
+	switch msg.TypePresence {
+	case ObsPresent:
+		// Present, a string, and empty: a value, just not one this build
+		// recognizes. That is not an absence, and is not recorded as one.
+		return ObsUnknownPresent
+	case ObsAbsentOnWire, ObsNullOnWire, ObsInvalid:
+		return msg.TypePresence
+	default:
+		// A message a caller built rather than parsed off a wire: there is no
+		// wire state to state, so the store records none.
+		return ""
+	}
+}
+
 // isList / isObject / isString are the shapes the Prediction frames use.
 func isList(v interface{}) bool   { _, ok := v.([]interface{}); return ok }
 func isObject(v interface{}) bool { _, ok := v.(map[string]interface{}); return ok }
+func isString(v interface{}) bool { _, ok := v.(string); return ok }
 
 // boolPtr / intPtr keep the optional payload fields readable at call sites.
 func boolPtr(v bool) *bool { return &v }
