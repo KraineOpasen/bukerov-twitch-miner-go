@@ -7,7 +7,8 @@
     "eventId": "e1",
     "routedChannelId": "chan-1",
     "retentionGroupOwnerChannelId": "chan-1",
-    "roundIncarnationId": "round:pool-test:1"
+    "roundIncarnationId": "round:pool-test:1",
+    "manualActionId": 1
   },
   {
     "kind": "manual_control",
@@ -17,7 +18,8 @@
     "eventId": "e1",
     "routedChannelId": "chan-1",
     "retentionGroupOwnerChannelId": "chan-1",
-    "roundIncarnationId": "round:pool-test:1"
+    "roundIncarnationId": "round:pool-test:1",
+    "manualActionId": 1
   },
   {
     "kind": "manual_control",
@@ -27,7 +29,8 @@
     "eventId": "e1",
     "routedChannelId": "chan-1",
     "retentionGroupOwnerChannelId": "chan-1",
-    "roundIncarnationId": "round:pool-test:1"
+    "roundIncarnationId": "round:pool-test:1",
+    "manualActionId": 1
   },
   {
     "kind": "manual_control",
@@ -37,7 +40,8 @@
     "eventId": "e1",
     "routedChannelId": "chan-1",
     "retentionGroupOwnerChannelId": "chan-1",
-    "roundIncarnationId": "round:pool-test:1"
+    "roundIncarnationId": "round:pool-test:1",
+    "manualActionId": 1
   },
   {
     "kind": "manual_control",
@@ -47,7 +51,8 @@
     "eventId": "e1",
     "routedChannelId": "chan-1",
     "retentionGroupOwnerChannelId": "chan-1",
-    "roundIncarnationId": "round:pool-test:1"
+    "roundIncarnationId": "round:pool-test:1",
+    "manualActionId": 1
   },
   {
     "kind": "manual_control",
@@ -57,7 +62,8 @@
     "eventId": "e1",
     "routedChannelId": "chan-1",
     "retentionGroupOwnerChannelId": "chan-1",
-    "roundIncarnationId": "round:pool-test:1"
+    "roundIncarnationId": "round:pool-test:1",
+    "manualActionId": 1
   },
   {
     "kind": "placement",
@@ -67,7 +73,8 @@
     "eventId": "e1",
     "routedChannelId": "chan-1",
     "retentionGroupOwnerChannelId": "chan-1",
-    "roundIncarnationId": "round:pool-test:1"
+    "roundIncarnationId": "round:pool-test:1",
+    "manualActionId": 1
   },
   {
     "kind": "placement",
@@ -77,7 +84,8 @@
     "eventId": "e1",
     "routedChannelId": "chan-1",
     "retentionGroupOwnerChannelId": "chan-1",
-    "roundIncarnationId": "round:pool-test:1"
+    "roundIncarnationId": "round:pool-test:1",
+    "manualActionId": 1
   },
   {
     "kind": "manual_control",
@@ -87,7 +95,8 @@
     "eventId": "e1",
     "routedChannelId": "chan-1",
     "retentionGroupOwnerChannelId": "chan-1",
-    "roundIncarnationId": "round:pool-test:1"
+    "roundIncarnationId": "round:pool-test:1",
+    "manualActionId": 1
   },
   {
     "kind": "round_cleanup",

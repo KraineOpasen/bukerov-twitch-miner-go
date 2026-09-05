@@ -286,6 +286,10 @@ type WebSocketPool struct {
 	// shutdown drain — once Close has run. Guarded by p.mu.
 	closed bool
 
+	// manualActions mints the sealed correlation token for one operator
+	// action. Observation-only: nothing in the placement path reads it.
+	manualActions atomic.Uint64
+
 	// roundAdmissions counts the rounds THIS pool instance has admitted. It is
 	// the second half of a round incarnation and is never reset, so a counter
 	// value is used once per pool instance.
@@ -1536,7 +1540,18 @@ func (p *WebSocketPool) placeAutoBet(eventID string) {
 // placement lock. On success the round is marked so auto-bet skips it. Returns
 // the chosen outcome's title for the confirmation message.
 func (p *WebSocketPool) PlaceManualBet(eventID, outcomeID string, amount int) (string, error) {
-	return p.placeManualBet(eventID, outcomeID, amount, "MANUAL_DIRECT_ROOT")
+	// A direct call opens its own root, so it mints its own correlation token.
+	return p.placeManualBet(eventID, outcomeID, amount, "MANUAL_DIRECT_ROOT", p.NextManualActionToken())
+}
+
+// NextManualActionToken mints the sealed correlation token for ONE operator
+// action. A relaying caller takes it before delegating, so the root it opens
+// and every fact the pool produces for that action carry the same token.
+//
+// It is a process-local monotonic number: it identifies an action within one
+// run and says nothing about the account, the channel or the operator.
+func (p *WebSocketPool) NextManualActionToken() uint64 {
+	return p.manualActions.Add(1)
 }
 
 // PlaceManualBetRelayed is PlaceManualBet for a caller that has ALREADY
@@ -1545,13 +1560,14 @@ func (p *WebSocketPool) PlaceManualBet(eventID, outcomeID string, amount int) (s
 // byte-for-byte the same placement: the ONLY difference is that the manual
 // root was opened by the relaying caller, so this entry point does not open a
 // second one. Exactly one root exists per operator action.
-func (p *WebSocketPool) PlaceManualBetRelayed(eventID, outcomeID string, amount int) (string, error) {
-	return p.placeManualBet(eventID, outcomeID, amount, "MANUAL_MINER_ROOT")
+func (p *WebSocketPool) PlaceManualBetRelayed(eventID, outcomeID string, amount int, token uint64) (string, error) {
+	return p.placeManualBet(eventID, outcomeID, amount, "MANUAL_MINER_ROOT", token)
 }
 
 // placeManualBet is the shared body. `root` names the manual-control root
 // phase this action is recorded under; it affects nothing else.
-func (p *WebSocketPool) placeManualBet(eventID, outcomeID string, amount int, root string) (string, error) {
+func (p *WebSocketPool) placeManualBet(eventID, outcomeID string, amount int, root string, token uint64) (string, error) {
+	act := manualAction{pool: p, id: token}
 	p.mu.RLock()
 	event := p.predictions[eventID]
 	rc := p.control[eventID]
@@ -1573,42 +1589,42 @@ func (p *WebSocketPool) placeManualBet(eventID, outcomeID string, amount int, ro
 	if obsChannel == "" {
 		obsEventID = ""
 	}
-	p.observeManualPhase(obsEventID, obsChannel, obsLogin, root, "OK",
+	act.phase(obsEventID, obsChannel, obsLogin, root, "OK",
 		map[string]int64{"stake": int64(amount)})
 
 	if event == nil || rc == nil {
-		p.observeManualPhase(obsEventID, obsChannel, obsLogin, "MANUAL_POOL_LOOKUP", "NO_ROUND", nil)
+		act.phase(obsEventID, obsChannel, obsLogin, "MANUAL_POOL_LOOKUP", "NO_ROUND", nil)
 		return "", ErrPredictionNotFound
 	}
-	p.observeManualPhase(eventID, obsChannel, obsLogin, "MANUAL_POOL_LOOKUP", "OK", nil)
+	act.phase(eventID, obsChannel, obsLogin, "MANUAL_POOL_LOOKUP", "OK", nil)
 
 	// Centralized capability gate for a manual bet — the same policy as auto-bets,
 	// with a user-safe reason (unknown is distinct from disabled/offline; no raw
 	// Twitch/Go error is surfaced).
 	if event.Streamer != nil {
 		if d := pointsEligibility.EvaluatePointsTask(event.Streamer, eligibility.TaskPrediction); !d.Eligible {
-			p.observeManualPhase(eventID, obsChannel, obsLogin, "MANUAL_ELIGIBILITY", "NOT_ELIGIBLE", nil)
+			act.phase(eventID, obsChannel, obsLogin, "MANUAL_ELIGIBILITY", "NOT_ELIGIBLE", nil)
 			return "", manualBetGateError(d)
 		}
 	}
-	p.observeManualPhase(eventID, obsChannel, obsLogin, "MANUAL_ELIGIBILITY", "OK", nil)
+	act.phase(eventID, obsChannel, obsLogin, "MANUAL_ELIGIBILITY", "OK", nil)
 
 	if amount <= 0 {
-		p.observeManualPhase(eventID, obsChannel, obsLogin, "MANUAL_ARGUMENTS", "REJECTED", nil)
+		act.phase(eventID, obsChannel, obsLogin, "MANUAL_ARGUMENTS", "REJECTED", nil)
 		return "", ErrInvalidAmount
 	}
 	if amount < minPredictionBet {
-		p.observeManualPhase(eventID, obsChannel, obsLogin, "MANUAL_ARGUMENTS", "BELOW_MINIMUM_POINTS",
+		act.phase(eventID, obsChannel, obsLogin, "MANUAL_ARGUMENTS", "BELOW_MINIMUM_POINTS",
 			map[string]int64{"stake": int64(amount)})
 		return "", ErrAmountTooLow
 	}
 
 	outcomeIdx, outcomeTitle := p.findOutcome(event, outcomeID)
 	if outcomeIdx < 0 {
-		p.observeManualPhase(eventID, obsChannel, obsLogin, "MANUAL_ARGUMENTS", "REJECTED", nil)
+		act.phase(eventID, obsChannel, obsLogin, "MANUAL_ARGUMENTS", "REJECTED", nil)
 		return "", ErrOutcomeNotFound
 	}
-	p.observeManualPhase(eventID, obsChannel, obsLogin, "MANUAL_ARGUMENTS", "OK",
+	act.phase(eventID, obsChannel, obsLogin, "MANUAL_ARGUMENTS", "OK",
 		map[string]int64{"stake": int64(amount)})
 
 	// Fast pre-check + double-submit guard, holding no lock across the network.
@@ -1616,20 +1632,20 @@ func (p *WebSocketPool) placeManualBet(eventID, outcomeID string, amount int, ro
 	switch {
 	case event.BetPlaced && rc.manualBet:
 		p.mu.Unlock()
-		p.observeManualPhase(eventID, obsChannel, obsLogin, "MANUAL_RESERVATION", "ALREADY_PLACED", nil)
+		act.phase(eventID, obsChannel, obsLogin, "MANUAL_RESERVATION", "ALREADY_PLACED", nil)
 		return "", ErrAlreadyBet
 	case event.BetPlaced:
 		p.mu.Unlock()
-		p.observeManualPhase(eventID, obsChannel, obsLogin, "MANUAL_RESERVATION", "ALREADY_PLACED", nil)
+		act.phase(eventID, obsChannel, obsLogin, "MANUAL_RESERVATION", "ALREADY_PLACED", nil)
 		return "", ErrAutoBetPlaced
 	case rc.manualPending:
 		p.mu.Unlock()
-		p.observeManualPhase(eventID, obsChannel, obsLogin, "MANUAL_RESERVATION", "CONFLICT", nil)
+		act.phase(eventID, obsChannel, obsLogin, "MANUAL_RESERVATION", "CONFLICT", nil)
 		return "", ErrManualBetInFlight
 	}
 	rc.manualPending = true
 	p.mu.Unlock()
-	p.observeManualPhase(eventID, obsChannel, obsLogin, "MANUAL_RESERVATION", "OK", nil)
+	act.phase(eventID, obsChannel, obsLogin, "MANUAL_RESERVATION", "OK", nil)
 	defer func() {
 		p.mu.Lock()
 		rc.manualPending = false
@@ -1652,39 +1668,39 @@ func (p *WebSocketPool) placeManualBet(eventID, outcomeID string, amount int, ro
 
 	switch {
 	case betPlaced && manualByUs:
-		p.observeManualPhase(eventID, obsChannel, obsLogin, "MANUAL_VALIDATION", "ALREADY_PLACED", nil)
+		act.phase(eventID, obsChannel, obsLogin, "MANUAL_VALIDATION", "ALREADY_PLACED", nil)
 		return "", ErrAlreadyBet
 	case betPlaced:
-		p.observeManualPhase(eventID, obsChannel, obsLogin, "MANUAL_VALIDATION", "ALREADY_PLACED", nil)
+		act.phase(eventID, obsChannel, obsLogin, "MANUAL_VALIDATION", "ALREADY_PLACED", nil)
 		return "", ErrAutoBetPlaced
 	case status != models.PredictionActive:
-		p.observeManualSkip(eventID, obsChannel, obsLogin, "NOT_ACTIVE", string(status))
+		act.skip(eventID, obsChannel, obsLogin, "NOT_ACTIVE", string(status))
 		return "", ErrRoundClosed
 	case closing <= 0:
-		p.observeManualSkip(eventID, obsChannel, obsLogin, "WINDOW_ELAPSED", string(status))
+		act.skip(eventID, obsChannel, obsLogin, "WINDOW_ELAPSED", string(status))
 		return "", ErrRoundClosed
 	case !online:
-		p.observeManualSkip(eventID, obsChannel, obsLogin, "NOT_ELIGIBLE", string(status))
+		act.skip(eventID, obsChannel, obsLogin, "NOT_ELIGIBLE", string(status))
 		return "", ErrStreamerOffline
 	case amount > balance:
-		p.observeManualPhase(eventID, obsChannel, obsLogin, "MANUAL_VALIDATION", "BELOW_MINIMUM_POINTS",
+		act.phase(eventID, obsChannel, obsLogin, "MANUAL_VALIDATION", "BELOW_MINIMUM_POINTS",
 			map[string]int64{"stake": int64(amount), "balance": int64(balance)})
 		return "", ErrInsufficientPoints
 	}
-	p.observeManualPhase(eventID, obsChannel, obsLogin, "MANUAL_VALIDATION", "OK",
+	act.phase(eventID, obsChannel, obsLogin, "MANUAL_VALIDATION", "OK",
 		map[string]int64{"stake": int64(amount), "balance": int64(balance)})
 
 	// CALL_STARTED immediately before the ONE existing placement call, and
 	// CALL_RETURNED immediately after it.
-	p.observePlacementCall(eventID, obsChannel, obsLogin, "CALL_STARTED", false, "NONE", outcomeIdx, amount)
+	act.placementCall(eventID, obsChannel, obsLogin, "CALL_STARTED", false, "NONE", outcomeIdx, amount)
 	err := p.placer.PlacePredictionBet(event, outcomeID, amount)
-	p.observePlacementCall(eventID, obsChannel, obsLogin, "CALL_RETURNED", err == nil, placementErrorClass(err), outcomeIdx, amount)
+	act.placementCall(eventID, obsChannel, obsLogin, "CALL_RETURNED", err == nil, placementErrorClass(err), outcomeIdx, amount)
 	if err != nil {
 		human := humanizeBetError(err)
 		p.mu.Lock()
 		rc.manualErr = human
 		p.mu.Unlock()
-		p.observeManualPhase(eventID, obsChannel, obsLogin, "MANUAL_EXECUTION", "REJECTED", nil)
+		act.phase(eventID, obsChannel, obsLogin, "MANUAL_EXECUTION", "REJECTED", nil)
 		return "", errors.New(human)
 	}
 
@@ -1702,7 +1718,7 @@ func (p *WebSocketPool) placeManualBet(eventID, outcomeID string, amount int, ro
 		"event", event.Title,
 		"amount", amount,
 	)
-	p.observeManualPhase(eventID, obsChannel, obsLogin, "MANUAL_EXECUTION", "OK",
+	act.phase(eventID, obsChannel, obsLogin, "MANUAL_EXECUTION", "OK",
 		map[string]int64{"stake": int64(amount)})
 	return outcomeTitle, nil
 }

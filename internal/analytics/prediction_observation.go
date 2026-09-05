@@ -302,6 +302,10 @@ var (
 		"outcomeCount", "trackedRounds", "windowSeconds", "closingBetAfterSeconds",
 		"minimumPoints", "balance", "stake", "returnedStake", "payout", "odds1e4",
 		"attempt", "queueDepth", "topPredictorsExamined",
+		// The sealed correlation token of one operator action: a process-local
+		// monotonic number that ties a manual root to its descendants even
+		// when the round they name never existed locally.
+		"manualActionId",
 	}
 	observationPresenceKeys = []string{
 		"event", "outcomes", "result", "decision", "balance", "pool",

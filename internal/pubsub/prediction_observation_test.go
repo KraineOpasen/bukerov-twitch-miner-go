@@ -190,7 +190,9 @@ func TestManualRootsAreMutuallyExclusive(t *testing.T) {
 		want string
 	}{
 		{"direct", func(p *WebSocketPool) (string, error) { return p.PlaceManualBet("e1", "o1", 100) }, "MANUAL_DIRECT_ROOT"},
-		{"relayed", func(p *WebSocketPool) (string, error) { return p.PlaceManualBetRelayed("e1", "o1", 100) }, "MANUAL_MINER_ROOT"},
+		{"relayed", func(p *WebSocketPool) (string, error) {
+			return p.PlaceManualBetRelayed("e1", "o1", 100, p.NextManualActionToken())
+		}, "MANUAL_MINER_ROOT"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			p, sink := observedPool(t, &fakePlacer{})
@@ -575,7 +577,7 @@ func TestManualBetUnderConcurrencyEmitsOneRootPerAction(t *testing.T) {
 func TestObservationGoldenSequence(t *testing.T) {
 	p, sink := observedPool(t, &fakePlacer{})
 	admitRound(p, newTestStreamer(1000), "e1")
-	if _, err := p.PlaceManualBetRelayed("e1", "o2", 250); err != nil {
+	if _, err := p.PlaceManualBetRelayed("e1", "o2", 250, p.NextManualActionToken()); err != nil {
 		t.Fatal(err)
 	}
 	p.removePrediction("e1")
@@ -591,6 +593,7 @@ func TestObservationGoldenSequence(t *testing.T) {
 		Channel    string `json:"routedChannelId"`
 		Retention  string `json:"retentionGroupOwnerChannelId,omitempty"`
 		Round      string `json:"roundIncarnationId,omitempty"`
+		Action     int64  `json:"manualActionId,omitempty"`
 	}
 	var got []goldenFact
 	for _, o := range sink.all() {
@@ -598,7 +601,7 @@ func TestObservationGoldenSequence(t *testing.T) {
 			Kind: o.Kind, Phase: o.Payload.Phase, Reason: o.Payload.ReasonCode,
 			Decision: o.Payload.Decision, ErrorClass: o.Payload.ErrorClass, Manual: o.Payload.Manual,
 			EventID: o.EventID, Channel: o.RoutedChannelID, Retention: o.RetentionGroupOwnerChannelID,
-			Round: o.RoundIncarnationID,
+			Round: o.RoundIncarnationID, Action: o.Payload.Counters["manualActionId"],
 		})
 	}
 	actual, err := json.MarshalIndent(got, "", "  ")
@@ -1208,4 +1211,97 @@ func TestPresenceStatesSurviveTheStore(t *testing.T) {
 			t.Fatalf("%s was rewritten to %q by the producer", state, got[0].Payload.Presence["result"])
 		}
 	}
+}
+
+// TestAManualActionCarriesOneSealedToken proves the correlation token the
+// contract requires: one per operator action, minted before delegation, and
+// carried by every fact that action produces.
+//
+// The case it exists for is the one with no round. A manual bet on an event
+// this pool never admitted stores no event id -- that identifier is
+// caller-supplied and reached no local state, so recording it would put an
+// unreachable Twitch identifier on a fact no channel-scoped erasure could
+// find. Without the token, such an action's root and its NO_ROUND descendant
+// had nothing in common at all.
+func TestAManualActionCarriesOneSealedToken(t *testing.T) {
+	t.Run("an untracked round still correlates", func(t *testing.T) {
+		p, sink := observedPool(t, &fakePlacer{})
+		token := p.NextManualActionToken()
+		if _, err := p.PlaceManualBetRelayed("never-admitted", "o1", 100, token); err == nil {
+			t.Fatal("a bet on an untracked round succeeded")
+		}
+
+		facts := sink.all()
+		if len(facts) < 2 {
+			t.Fatalf("emitted %d facts, want the root and its lookup", len(facts))
+		}
+		for _, o := range facts {
+			if o.Kind != ObsKindManualControl {
+				continue
+			}
+			if got := o.Payload.Counters["manualActionId"]; got != int64(token) {
+				t.Fatalf("%s carries token %d, want the action's %d", o.Payload.Phase, got, token)
+			}
+			if o.Payload.Presence["correlationToken"] != ObsPresent {
+				t.Fatalf("%s does not report its correlation token", o.Payload.Phase)
+			}
+			// The unreachable identifier is still not stored.
+			if o.EventID != "" {
+				t.Fatalf("%s stored the caller-supplied event id %q", o.Payload.Phase, o.EventID)
+			}
+		}
+	})
+
+	t.Run("every fact of one action shares the token, and two actions differ", func(t *testing.T) {
+		p, sink := observedPool(t, &fakePlacer{})
+		admitRound(p, newTestStreamer(100000), "e1")
+
+		first := p.NextManualActionToken()
+		if _, err := p.PlaceManualBetRelayed("e1", "o1", 100, first); err != nil {
+			t.Fatal(err)
+		}
+		tokens := map[int64]bool{}
+		for _, o := range sink.all() {
+			if id, ok := o.Payload.Counters["manualActionId"]; ok {
+				tokens[id] = true
+			}
+		}
+		if len(tokens) != 1 || !tokens[int64(first)] {
+			t.Fatalf("one action produced tokens %v, want only %d", tokens, first)
+		}
+
+		second := p.NextManualActionToken()
+		if second == first {
+			t.Fatal("two operator actions were minted the same token")
+		}
+	})
+
+	t.Run("a direct call mints its own", func(t *testing.T) {
+		p, sink := observedPool(t, &fakePlacer{})
+		admitRound(p, newTestStreamer(100000), "e1")
+		if _, err := p.PlaceManualBet("e1", "o1", 100); err != nil {
+			t.Fatal(err)
+		}
+		for _, o := range sink.all() {
+			if o.Kind != ObsKindManualControl {
+				continue
+			}
+			if o.Payload.Counters["manualActionId"] == 0 {
+				t.Fatalf("%s has no correlation token; a direct call opens its own root and must "+
+					"seal it the same way", o.Payload.Phase)
+			}
+		}
+	})
+
+	// An AUTOMATED placement is not an operator action and carries no token.
+	t.Run("auto placements carry no token", func(t *testing.T) {
+		p, sink := observedPool(t, &fakePlacer{})
+		admitRound(p, newTestStreamer(100000), "auto-1")
+		p.placeAutoBet("auto-1")
+		for _, o := range sink.all() {
+			if _, ok := o.Payload.Counters["manualActionId"]; ok {
+				t.Fatalf("an automated %s carries a manual correlation token", o.Payload.Phase)
+			}
+		}
+	})
 }

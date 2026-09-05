@@ -568,16 +568,26 @@ func (p *WebSocketPool) observeAutoSkipState(eventID, channelID, login, reason, 
 // CLOSED error class — never the error itself, which can carry a provider
 // message or a Twitch transaction identifier.
 func (p *WebSocketPool) observePlacementCall(eventID, channelID, login, phase string, ok bool, errorClass string, slot, amount int) {
+	p.observePlacementCallOf(eventID, channelID, login, phase, ok, errorClass, slot, amount, nil)
+}
+
+// observePlacementCallOf is observePlacementCall for a manual action, which
+// also reports the correlation token the operator's action carries.
+func (p *WebSocketPool) observePlacementCallOf(eventID, channelID, login, phase string, ok bool, errorClass string, slot, amount int, extra map[string]int64) {
 	reason := "OK"
 	if !ok && phase == "CALL_RETURNED" {
 		reason = "REJECTED"
+	}
+	counters := map[string]int64{"stake": int64(amount)}
+	for k, v := range extra {
+		counters[k] = v
 	}
 	p.observeRoundFact(eventID, channelID, login, ObsKindPlacement, ObservationPayload{
 		Phase:       phase,
 		ReasonCode:  reason,
 		ErrorClass:  errorClass,
 		OutcomeSlot: intPtr(slot),
-		Counters:    map[string]int64{"stake": int64(amount)},
+		Counters:    counters,
 	})
 }
 
@@ -622,12 +632,71 @@ func placementErrorClass(err error) string {
 
 // observeManualPhase records one phase of an operator-initiated placement.
 func (p *WebSocketPool) observeManualPhase(eventID, channelID, login, phase, reason string, counters map[string]int64) {
-	p.observeRoundFact(eventID, channelID, login, ObsKindManualControl, ObservationPayload{
+	manualAction{pool: p}.phase(eventID, channelID, login, phase, reason, counters)
+}
+
+// manualAction carries ONE operator action's sealed correlation token through
+// every fact that action produces.
+//
+// Without it the facts of one manual action are correlated only by the round
+// they name — and the case that most needs correlating is exactly the one with
+// no round: a manual bet on an event this pool never admitted stores no event
+// id (it is a caller-supplied identifier that reached no local state), so its
+// root and its NO_ROUND descendant had nothing in common at all.
+//
+// The token is a process-local monotonic number. It identifies an action
+// within one run and says nothing about the account, the channel, or the
+// operator.
+type manualAction struct {
+	pool *WebSocketPool
+	id   uint64
+}
+
+// counters merges the action's token into whatever the call site already
+// reports, without mutating the caller's map.
+func (a manualAction) counters(in map[string]int64) map[string]int64 {
+	if a.id == 0 {
+		return in
+	}
+	out := make(map[string]int64, len(in)+1)
+	for k, v := range in {
+		out[k] = v
+	}
+	out["manualActionId"] = int64(a.id)
+	return out
+}
+
+func (a manualAction) presence() map[string]string {
+	if a.id == 0 {
+		return map[string]string{"correlationToken": ObsAbsentOnWire}
+	}
+	return map[string]string{"correlationToken": ObsPresent}
+}
+
+func (a manualAction) phase(eventID, channelID, login, phase, reason string, counters map[string]int64) {
+	a.pool.observeRoundFact(eventID, channelID, login, ObsKindManualControl, ObservationPayload{
 		Phase:      phase,
 		ReasonCode: reason,
 		Manual:     boolPtr(true),
-		Counters:   counters,
+		Counters:   a.counters(counters),
+		Presence:   a.presence(),
 	})
+}
+
+func (a manualAction) skip(eventID, channelID, login, reason, roundState string) {
+	a.pool.observeRoundFact(eventID, channelID, login, ObsKindManualControl, ObservationPayload{
+		Phase:      "MANUAL_SKIPPED",
+		Decision:   "SKIP",
+		ReasonCode: reason,
+		RoundState: roundState,
+		Manual:     boolPtr(true),
+		Counters:   a.counters(nil),
+		Presence:   a.presence(),
+	})
+}
+
+func (a manualAction) placementCall(eventID, channelID, login, phase string, ok bool, errorClass string, slot, amount int) {
+	a.pool.observePlacementCallOf(eventID, channelID, login, phase, ok, errorClass, slot, amount, a.counters(nil))
 }
 
 // observeManualSkip records a manual placement the pool declined at the
