@@ -3054,3 +3054,40 @@ func TestSessionCeilingsStopCommittingAtTheLimit(t *testing.T) {
 		}
 	})
 }
+
+// TestAnUngatedReaderNeverWaitsLongerThanTheReleaseWatchdog pins the bound the
+// points snapshot actually depends on.
+//
+// The snapshot is deliberately ungated, which means it cannot claim priority
+// and cancel an observation the way a business writer can -- it can only wait
+// for the shared connection. So whatever a P1 transaction is allowed to hold
+// IS the worst delay an ungated dashboard read can suffer, and a two-second
+// maintenance ceiling made that two seconds. "Still preemptible" is no comfort
+// to a reader with nothing to preempt with.
+//
+// This is asserted as a constant rather than as a measured latency on purpose:
+// the number is the contract, and a timing assertion would be flaky on a busy
+// machine while pinning nothing.
+func TestAnUngatedReaderNeverWaitsLongerThanTheReleaseWatchdog(t *testing.T) {
+	const releaseWatchdog = 250 * time.Millisecond
+	if observationMaintenanceBudget > releaseWatchdog {
+		t.Fatalf("a runtime maintenance transaction may hold the shared connection for %v; an "+
+			"ungated points snapshot would wait that long, and the bound is %v",
+			observationMaintenanceBudget, releaseWatchdog)
+	}
+	if ObservationWriteDeadline > observationMaintenanceBudget {
+		t.Fatalf("a single fact may hold the connection longer (%v) than a whole maintenance "+
+			"transaction (%v)", ObservationWriteDeadline, observationMaintenanceBudget)
+	}
+	// The startup scan is allowed to be longer, and only because of when it
+	// runs: before intake opens, and before the web server serves.
+	if observationBootstrapBudget < observationMaintenanceBudget {
+		t.Fatal("the bootstrap budget is tighter than the runtime one; the split exists to let the " +
+			"one-time recount take longer, not less")
+	}
+	src := readPackageFile(t, "prediction_observation.go")
+	if strings.Count(src, "observationBootstrapBudget") != 3 {
+		t.Fatal("the bootstrap budget must be used by exactly one call site (its declaration, its " +
+			"doc reference and that site); a runtime path must not borrow it")
+	}
+}

@@ -2887,7 +2887,7 @@ func (c *observationCollector) bootstrap(ctx context.Context) error {
 
 func (c *observationCollector) recountQuotas(ctx context.Context) error {
 	c.repo.quotas.setStoreLimits(c.maxStoreRows, c.maxStoreBytes)
-	return c.leased(ctx, observationMaintenanceBudget, func(lease context.Context) error {
+	return c.leased(ctx, observationBootstrapBudget, func(lease context.Context) error {
 		return c.repo.RecountObservationQuotas(lease, c.repo.quotas)
 	})
 }
@@ -3014,11 +3014,27 @@ func (c *observationCollector) leased(ctx context.Context, budget time.Duration,
 	return fn(granted)
 }
 
-// observationMaintenanceBudget bounds one leased maintenance/bootstrap
-// transaction. It is larger than the per-fact deadline because these
-// statements are aggregate work, but it is still a hard ceiling and still
-// preemptible: a business claim cancels it immediately.
-const observationMaintenanceBudget = 2 * time.Second
+// observationMaintenanceBudget bounds one leased RUNTIME maintenance
+// transaction: a retention unit, a store measurement, a session write.
+//
+// It is the release watchdog the contract names, and the reason it is that
+// small is the points snapshot. The snapshot is deliberately UNGATED, so
+// unlike a business writer it cannot claim priority and cancel an observation
+// — it can only wait for the shared connection. Whatever a P1 transaction may
+// hold is therefore the worst delay an ungated dashboard read can suffer, and
+// a two-second ceiling made that delay two seconds. Preemptibility does not
+// help a reader that has nothing to preempt with.
+const observationMaintenanceBudget = 250 * time.Millisecond
+
+// observationBootstrapBudget bounds the one-time startup work: the recount
+// scan that seeds the quota ledger, which reads every stored fact's identity
+// columns and payload length.
+//
+// It is larger because that scan is genuinely aggregate work, and it is safe
+// to be larger because of WHEN it runs: the bootstrap completes before intake
+// opens, and analytics starts before the web server serves, so no dashboard
+// read is waiting behind it. A runtime pass gets no such licence.
+const observationBootstrapBudget = 2 * time.Second
 
 func (c *observationCollector) prune(ctx context.Context, cutoffMS int64) (int64, error) {
 	var removed int64
