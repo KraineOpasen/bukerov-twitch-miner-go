@@ -307,7 +307,15 @@ var (
 		"event", "outcomes", "result", "decision", "balance", "pool",
 		"correlationToken", "terminalVerdict", "channelIdentity",
 	}
-	observationPresenceValues = []string{"PRESENT", "ABSENT", ValueUnknown}
+	// The closed presence vocabulary. It distinguishes what a frame actually
+	// did — never sent the key, sent it as null, sent it with the wrong shape,
+	// sent an unrecognized value — from what this path did: not looking at it,
+	// or not being able to. Collapsing those into PRESENT/ABSENT throws away
+	// the only thing a source-of-truth trail is for.
+	observationPresenceValues = []string{
+		"PRESENT", "ABSENT_ON_WIRE", "NULL_ON_WIRE", "INVALID",
+		"UNKNOWN_PRESENT", "NOT_OBSERVED", "UNAVAILABLE", ValueUnknown,
+	}
 )
 
 // Closed phase / decision / reason / error-class vocabularies. These are the
@@ -1120,6 +1128,8 @@ var predictionObservationSchemaSQL = `
 		ON prediction_observations(collector_session_id, collector_sequence);
 	CREATE INDEX IF NOT EXISTS idx_predobs_epoch
 		ON prediction_observations(collector_epoch, id);
+	CREATE INDEX IF NOT EXISTS idx_predobs_exact_pair
+		ON prediction_observations(collector_epoch, collector_session_id, collector_sequence);
 	CREATE INDEX IF NOT EXISTS idx_predobs_routed_identity
 		ON prediction_observations(routed_channel_id, id);
 	CREATE INDEX IF NOT EXISTS idx_predobs_retention_identity
@@ -1598,13 +1608,26 @@ type observationQuotaLedger struct {
 	mu           sync.Mutex
 	deletionKeys map[string]observationUsage
 	rounds       map[string]observationUsage
+	store        observationUsage
+	// The store ceilings, as fields so a test can drive them at a real limit.
+	maxStoreRows, maxStoreBytes int64
 }
 
 func newObservationQuotaLedger() *observationQuotaLedger {
 	return &observationQuotaLedger{
-		deletionKeys: make(map[string]observationUsage),
-		rounds:       make(map[string]observationUsage),
+		deletionKeys:  make(map[string]observationUsage),
+		rounds:        make(map[string]observationUsage),
+		maxStoreRows:  MaxStoreRows,
+		maxStoreBytes: MaxStoreBytes,
 	}
+}
+
+// setStoreLimits lets the collector hand the ledger the ceilings it enforces,
+// so the pre-insert check and the periodic measurement agree on them.
+func (l *observationQuotaLedger) setStoreLimits(rows, bytes int64) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.maxStoreRows, l.maxStoreBytes = rows, bytes
 }
 
 // observationDeletionKeys returns the DEDUPLICATED deletion identity keys one
@@ -1652,6 +1675,13 @@ func (l *observationQuotaLedger) admit(keys []string, roundKey string, bytes int
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
+	// The store ceilings, checked here rather than only by the periodic pass.
+	// A pass that runs every ten minutes measures a store that has already
+	// grown past its bound; the bound is meant to stop it getting there.
+	if l.store.Rows+1 > l.maxStoreRows || l.store.Bytes+bytes > l.maxStoreBytes {
+		return false, true
+	}
+
 	if roundKey != "" {
 		u := l.rounds[roundKey]
 		if u.Rows+1 > MaxRoundRows || u.Bytes+bytes > MaxRoundBytes {
@@ -1676,6 +1706,7 @@ func (l *observationQuotaLedger) admit(keys []string, roundKey string, bytes int
 func (l *observationQuotaLedger) charge(keys []string, roundKey string, bytes int64) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	l.store.Rows, l.store.Bytes = l.store.Rows+1, l.store.Bytes+bytes
 	if roundKey != "" {
 		u := l.rounds[roundKey]
 		u.Rows, u.Bytes = u.Rows+1, u.Bytes+bytes
@@ -1694,6 +1725,13 @@ func (l *observationQuotaLedger) distinctDeletionKeys() int {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	return len(l.deletionKeys)
+}
+
+// storeUsage reports the whole store's charged usage.
+func (l *observationQuotaLedger) storeUsage() observationUsage {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.store
 }
 
 // roundUsage reports one round's usage, for tests and for the recount.
@@ -2841,6 +2879,7 @@ func (c *observationCollector) bootstrap(ctx context.Context) error {
 }
 
 func (c *observationCollector) recountQuotas(ctx context.Context) error {
+	c.repo.quotas.setStoreLimits(c.maxStoreRows, c.maxStoreBytes)
 	return c.leased(ctx, observationMaintenanceBudget, func(lease context.Context) error {
 		return c.repo.RecountObservationQuotas(lease, c.repo.quotas)
 	})

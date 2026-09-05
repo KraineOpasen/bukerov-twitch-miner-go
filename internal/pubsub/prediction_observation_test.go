@@ -489,8 +489,8 @@ func TestUnreadableFrameIsObservedAsSourceUnknown(t *testing.T) {
 	if len(got) != 1 || got[0].Kind != ObsKindSourceUnknown {
 		t.Fatalf("facts = %+v, want one source_unknown", got)
 	}
-	if got[0].Payload.Presence["event"] != ObsAbsent {
-		t.Fatalf("presence = %v, want event ABSENT", got[0].Payload.Presence)
+	if got[0].Payload.Presence["event"] != ObsAbsentOnWire {
+		t.Fatalf("presence = %v, want event ABSENT_ON_WIRE", got[0].Payload.Presence)
 	}
 	if got[0].RetentionGroupOwnerChannelID != "" {
 		t.Fatal("an unreadable frame claimed a retention group; it names no round")
@@ -1124,4 +1124,88 @@ func TestFireAndForgetTimersRegisterAProducerEpisode(t *testing.T) {
 			t.Fatalf("an accepted schedule registered %d episodes, want 1 for its auto-bet timer", begun)
 		}
 	})
+}
+
+// TestPresenceDistinguishesWhatTheWireActuallyDid is an independent review's
+// F3, presence half.
+//
+// The projection had two states, PRESENT and ABSENT, and mapped every optional
+// field onto them with a bool. A key Twitch never sent, a key it sent as null,
+// and a key it sent with the wrong type all became "ABSENT" -- three different
+// things the broadcaster's service did, recorded identically. A trail whose
+// whole value is being able to say what arrived cannot answer that question
+// with a bool.
+func TestPresenceDistinguishesWhatTheWireActuallyDid(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		event map[string]interface{}
+		want  string
+	}{
+		{"key never sent", map[string]interface{}{"id": "e1", "status": "ACTIVE"}, ObsAbsentOnWire},
+		{"key sent as null", map[string]interface{}{"id": "e1", "status": "ACTIVE", "outcomes": nil}, ObsNullOnWire},
+		{"key sent with the wrong shape", map[string]interface{}{"id": "e1", "status": "ACTIVE", "outcomes": "two"}, ObsInvalid},
+		{"key sent as an empty list", map[string]interface{}{"id": "e1", "status": "ACTIVE", "outcomes": []interface{}{}}, ObsPresent},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p, sink := observedPool(t, &fakePlacer{})
+			s := newTestStreamer(1000)
+			p.streamers = []*models.Streamer{s}
+			p.handlePredictionChannel(&PubSubMessage{
+				Topic: NewTopic(TopicPredictionsChannel, "chan-1"), Type: "event-updated",
+				ChannelID: "chan-1", Data: map[string]interface{}{"event": tc.event},
+			}, s)
+
+			got := sink.all()
+			if len(got) != 1 {
+				t.Fatalf("emitted %d facts, want 1", len(got))
+			}
+			if state := got[0].Payload.Presence["outcomes"]; state != tc.want {
+				t.Fatalf("outcomes presence = %q, want %q", state, tc.want)
+			}
+		})
+	}
+
+	// An empty list is PRESENT, not absent: a round whose outcomes list really
+	// was empty is a different fact from one that never carried the key.
+	t.Run("an empty list is a present value", func(t *testing.T) {
+		empty := wirePresence(map[string]interface{}{"outcomes": []interface{}{}}, "outcomes", isList)
+		missing := wirePresence(map[string]interface{}{}, "outcomes", isList)
+		if empty == missing {
+			t.Fatalf("an empty list and a missing key are both %q", empty)
+		}
+	})
+
+	// A path that does not read a field records that, rather than claiming an
+	// absence it never checked for.
+	t.Run("not observed is not the same as absent", func(t *testing.T) {
+		if got := wirePresence(nil, "outcomes", isList); got != ObsNotObserved {
+			t.Fatalf("unobserved field = %q, want %q", got, ObsNotObserved)
+		}
+	})
+}
+
+// TestPresenceStatesSurviveTheStore proves the store keeps the distinctions
+// rather than folding them back into UNKNOWN, which would make the producer's
+// extra precision unobservable.
+func TestPresenceStatesSurviveTheStore(t *testing.T) {
+	for _, state := range []string{
+		ObsPresent, ObsAbsentOnWire, ObsNullOnWire, ObsInvalid,
+		ObsUnknownPresent, ObsNotObserved, ObsUnavailable,
+	} {
+		p, sink := observedPool(t, &fakePlacer{})
+		admitRound(p, newTestStreamer(1000), "e1")
+		p.observeUserFrame(&PubSubMessage{
+			Topic: NewTopic(TopicPredictionsUser, "chan-1"), Type: "prediction-result",
+			ChannelID: "chan-1",
+		}, newTestStreamer(1000), "e1", ObsKindUserTerminal, "TERMINAL_DELIVERED", "REJECTED",
+			nil, map[string]string{"result": state})
+
+		got := sink.all()
+		if len(got) != 1 {
+			t.Fatalf("%s: emitted %d facts", state, len(got))
+		}
+		if got[0].Payload.Presence["result"] != state {
+			t.Fatalf("%s was rewritten to %q by the producer", state, got[0].Payload.Presence["result"])
+		}
+	}
 }

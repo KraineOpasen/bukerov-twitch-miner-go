@@ -2791,3 +2791,127 @@ func TestASettledEpisodeLeavesTheSessionWhole(t *testing.T) {
 		t.Fatalf("reading = %q (%s)", reading.Reading, reading.Detail)
 	}
 }
+
+// TestObservationIndexContractIsPinned asserts the index set itself.
+//
+// Every reader and every deletion path in this file was written against a
+// specific index, and an index quietly dropped or reordered turns a bounded
+// operation into a table scan without failing anything. The whole-round
+// erasure pilot exists because that difference is the gap between 159 ms and
+// several seconds -- and nothing else in the suite would notice.
+func TestObservationIndexContractIsPinned(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "miner.db")
+	db := openPrivateDB(t, path)
+	defer func() { _ = db.Close() }()
+	if _, err := NewSQLiteRepository(db, filepath.Dir(path)); err != nil {
+		t.Fatal(err)
+	}
+
+	want := map[string]string{
+		// One session's facts in causal order.
+		"idx_predobs_session": "collector_session_id,collector_sequence",
+		// One epoch, and the EXACT (epoch, session id) pair the reader counts
+		// and range-checks on.
+		"idx_predobs_epoch":      "collector_epoch,id",
+		"idx_predobs_exact_pair": "collector_epoch,collector_session_id,collector_sequence",
+		// The four identity roles a privacy erasure selects on.
+		"idx_predobs_routed_identity":    "routed_channel_id,id",
+		"idx_predobs_retention_identity": "retention_group_owner_channel_id,id",
+		"idx_predobs_routed_parent":      "routed_streamer_id,id",
+		"idx_predobs_retention_parent":   "retention_group_owner_streamer_id,id",
+		// A round by incarnation (erasure expansion), and the compound local
+		// round retention deletes and ages out by.
+		"idx_predobs_round":      "round_incarnation_id,id",
+		"idx_predobs_round_unit": "collector_epoch,pool_instance_id,round_incarnation_id,received_at_ms",
+		// Bounded oldest-first retention of the facts that belong to no round.
+		"idx_predobs_null_round_retention": "received_at_ms,id",
+		// Re-deliveries of one source event, found together.
+		"idx_predobs_fingerprint": "source_fingerprint",
+	}
+
+	rows, err := db.Query(`SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='prediction_observations' AND name LIKE 'idx_%'`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]string{}
+	var names []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			t.Fatal(err)
+		}
+		names = append(names, name)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	_ = rows.Close()
+
+	for _, name := range names {
+		cols, err := db.Query(`SELECT name FROM pragma_index_info(?) ORDER BY seqno`, name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var list []string
+		for cols.Next() {
+			var c string
+			if err := cols.Scan(&c); err != nil {
+				t.Fatal(err)
+			}
+			list = append(list, c)
+		}
+		_ = cols.Close()
+		got[name] = strings.Join(list, ",")
+	}
+
+	for name, cols := range want {
+		actual, ok := got[name]
+		if !ok {
+			t.Errorf("index %s is missing; the readers and deletions written against it become scans", name)
+			continue
+		}
+		if actual != cols {
+			t.Errorf("index %s covers (%s), want (%s)", name, actual, cols)
+		}
+	}
+	for name := range got {
+		if _, ok := want[name]; !ok {
+			t.Errorf("index %s exists but is not part of the pinned contract; add it here with the "+
+				"reader or deletion that needs it", name)
+		}
+	}
+}
+
+// TestStoreKeepsEveryPresenceState proves the store's closed vocabulary
+// accepts the full retained set rather than folding the new states into
+// UNKNOWN, which would make the producer's extra precision unobservable in
+// the only place it matters.
+func TestStoreKeepsEveryPresenceState(t *testing.T) {
+	for _, state := range []string{
+		"PRESENT", "ABSENT_ON_WIRE", "NULL_ON_WIRE", "INVALID",
+		"UNKNOWN_PRESENT", "NOT_OBSERVED", "UNAVAILABLE",
+	} {
+		out, ok := sanitizeObservationPayload(ObservationPayload{
+			Phase:    "ROUND_UPDATED",
+			Presence: map[string]string{"outcomes": state},
+		})
+		if !ok {
+			t.Fatalf("%s was refused", state)
+		}
+		if got := out.Presence["outcomes"]; got != state {
+			t.Fatalf("%s was rewritten to %q; the distinction the producer recorded is lost", state, got)
+		}
+	}
+	// A value outside the vocabulary is still UNKNOWN, and its raw text never
+	// reaches the payload.
+	out, ok := sanitizeObservationPayload(ObservationPayload{
+		Phase:    "ROUND_UPDATED",
+		Presence: map[string]string{"outcomes": "oauth:SECRET"},
+	})
+	if !ok {
+		t.Fatal("an unrecognized presence value refused the fact; it must become UNKNOWN")
+	}
+	if out.Presence["outcomes"] != ValueUnknown {
+		t.Fatalf("unrecognized presence became %q, want %q", out.Presence["outcomes"], ValueUnknown)
+	}
+}

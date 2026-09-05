@@ -1234,7 +1234,7 @@ func (p *WebSocketPool) handlePredictionUser(msg *PubSubMessage, streamer *model
 
 		if !exists {
 			p.observeUserFrame(msg, streamer, eventID, ObsKindUserPredictionMade, "PLACEMENT_CONFIRMED", "NO_ROUND",
-				nil, map[string]string{"event": ObsAbsent})
+				nil, map[string]string{"event": ObsAbsentOnWire})
 			return outcome
 		}
 		p.mu.Lock()
@@ -1257,18 +1257,18 @@ func (p *WebSocketPool) handlePredictionUser(msg *PubSubMessage, streamer *model
 		// ever receives already-validated terminal data.
 		if eventID == "" {
 			p.observeUserFrame(msg, streamer, eventID, ObsKindUserTerminal, "TERMINAL_REJECTED", "NO_ROUND",
-				nil, map[string]string{"event": ObsAbsent})
+				nil, map[string]string{"event": ObsAbsentOnWire})
 			return outcome
 		}
 		result, ok := prediction["result"].(map[string]interface{})
 		if !ok {
 			p.observeUserFrame(msg, streamer, eventID, ObsKindUserTerminal, "TERMINAL_REJECTED", "REJECTED",
-				nil, map[string]string{"result": ObsAbsent})
+				nil, map[string]string{"result": wirePresence(prediction, "result", isObject)})
 			return outcome
 		}
 		if !models.ValidateTerminalResult(result) {
 			p.observeUserFrame(msg, streamer, eventID, ObsKindUserTerminal, "TERMINAL_REJECTED", "REJECTED",
-				nil, map[string]string{"result": ObsPresent})
+				nil, map[string]string{"result": ObsInvalid})
 			return outcome
 		}
 

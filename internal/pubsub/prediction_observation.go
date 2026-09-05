@@ -52,10 +52,34 @@ const (
 	ObsTimeReceiver = "RECEIVER"
 )
 
-// Presence values.
+// Presence states. One closed vocabulary for every optional scalar or list a
+// frame may carry.
+//
+// PRESENT and ABSENT alone lose the distinctions that matter about a wire. A
+// key that was never sent, a key sent explicitly as null, and a key sent with
+// the wrong type are three different things Twitch did, and a trail that
+// records them identically cannot answer the question it exists for. So is the
+// difference between "we looked and it was not there" and "this path never
+// looks at it": collapsing those invents an observation nobody made.
 const (
+	// ObsPresent: the key was there, well-typed, and its value was read. A
+	// legitimate zero or false is PRESENT.
 	ObsPresent = "PRESENT"
-	ObsAbsent  = "ABSENT"
+	// ObsAbsentOnWire: the key was not in the frame at all.
+	ObsAbsentOnWire = "ABSENT_ON_WIRE"
+	// ObsNullOnWire: the key was there and explicitly null.
+	ObsNullOnWire = "NULL_ON_WIRE"
+	// ObsInvalid: the key was there with a value of the wrong shape.
+	ObsInvalid = "INVALID"
+	// ObsUnknownPresent: a well-typed value outside this build's closed
+	// vocabulary. The raw value is never kept — only the fact that one was
+	// there and was not recognized.
+	ObsUnknownPresent = "UNKNOWN_PRESENT"
+	// ObsNotObserved: this path does not read the field. Not an absence on
+	// the wire: an absence of observation.
+	ObsNotObserved = "NOT_OBSERVED"
+	// ObsUnavailable: the field cannot be observed here at all.
+	ObsUnavailable = "UNAVAILABLE"
 )
 
 // ObservationOutcome is the sanitized aggregate projection of one round
@@ -314,14 +338,29 @@ func observationRoundIdentity(obs *PredictionObservation, eventID, channelID, lo
 	obs.RoutedLogin = login
 }
 
-// presence reports PRESENT/ABSENT for a structural part of a frame without
-// recording any of its content.
-func presence(ok bool) string {
-	if ok {
+// wirePresence classifies one key of a frame WITHOUT recording its content.
+// want reports whether a present, non-null value had the shape this path
+// expects.
+func wirePresence(data map[string]interface{}, key string, wellTyped func(interface{}) bool) string {
+	if data == nil {
+		return ObsNotObserved
+	}
+	raw, found := data[key]
+	switch {
+	case !found:
+		return ObsAbsentOnWire
+	case raw == nil:
+		return ObsNullOnWire
+	case !wellTyped(raw):
+		return ObsInvalid
+	default:
 		return ObsPresent
 	}
-	return ObsAbsent
 }
+
+// isList / isObject / isString are the shapes the Prediction frames use.
+func isList(v interface{}) bool   { _, ok := v.([]interface{}); return ok }
+func isObject(v interface{}) bool { _, ok := v.(map[string]interface{}); return ok }
 
 // boolPtr / intPtr keep the optional payload fields readable at call sites.
 func boolPtr(v bool) *bool { return &v }
@@ -392,7 +431,7 @@ func (p *WebSocketPool) observeUnclassifiedFrame(msg *PubSubMessage, streamer st
 	obs.Kind = ObsKindSourceUnknown
 	obs.Payload = ObservationPayload{
 		Phase:    "UNCLASSIFIED",
-		Presence: map[string]string{missing: ObsAbsent},
+		Presence: map[string]string{missing: ObsAbsentOnWire},
 	}
 	// An unreadable frame names no round, so it belongs to no retention group.
 	obs.RetentionGroupOwnerChannelID = ""
@@ -426,7 +465,7 @@ func (p *WebSocketPool) observeChannelEvent(msg *PubSubMessage, streamer streame
 		},
 	}
 	rawOutcomes, hasOutcomes := eventData["outcomes"].([]interface{})
-	payload.Presence["outcomes"] = presence(hasOutcomes)
+	payload.Presence["outcomes"] = wirePresence(eventData, "outcomes", isList)
 	if hasOutcomes {
 		payload.Outcomes = projectOutcomes(rawOutcomes)
 		payload.Counters = map[string]int64{"outcomeCount": int64(len(rawOutcomes))}
