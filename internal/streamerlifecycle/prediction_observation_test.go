@@ -451,11 +451,19 @@ func TestAnalyticsRepositorySatisfiesTheIdentityPurger(t *testing.T) {
 	ctx := context.Background()
 
 	// A streamer with both ordinary history and an observation fact.
-	if err := repo.RecordPoints("purged-user", 100, "WATCH"); err != nil {
+	if err := repo.RecordPoints("purged-user-p1", 100, "WATCH"); err != nil {
 		t.Fatal(err)
 	}
 	var streamerID int64
-	if err := db.QueryRow(`SELECT id FROM streamers WHERE name = ?`, "purged-user").Scan(&streamerID); err != nil {
+	if err := db.QueryRow(`SELECT id FROM streamers WHERE name = ?`, "purged-user-p1").Scan(&streamerID); err != nil {
+		t.Fatal(err)
+	}
+	// This package shares the process-wide database singleton, so a fact's
+	// (collector_epoch, collector_sequence) pair must be unique across the
+	// WHOLE package, not just this test. Allocating a real session gives this
+	// test its own epoch and makes it order-independent.
+	epoch, err := repo.OpenObservationSession(ctx, "purge-session", 1)
+	if err != nil {
 		t.Fatal(err)
 	}
 	if _, err := db.Exec(`INSERT INTO prediction_observations
@@ -463,9 +471,9 @@ func TestAnalyticsRepositorySatisfiesTheIdentityPurger(t *testing.T) {
 		 pool_instance_id, round_incarnation_id, retention_group_owner_channel_id,
 		 retention_group_owner_streamer_id, routed_channel_id, routed_streamer_id,
 		 kind, producer_time_source, received_at_ms, payload_version, payload_json, observation_sha256)
-		VALUES ('o-purge', 's', 1, 1, 'pool', 'round:x', 'chan-purge', ?, 'chan-purge', ?,
+		VALUES ('o-purge', 'purge-session', ?, 1, 'pool', 'round:x', 'chan-purge', ?, 'chan-purge', ?,
 		        'channel_event', 'RECEIVER', 1, 1, '{"phase":"ROUND_CREATED"}', 'sha256:x')`,
-		streamerID, streamerID); err != nil {
+		epoch, streamerID, streamerID); err != nil {
 		t.Fatal(err)
 	}
 	// A bystander channel's fact that must survive.
@@ -473,12 +481,12 @@ func TestAnalyticsRepositorySatisfiesTheIdentityPurger(t *testing.T) {
 		(observation_id, collector_session_id, collector_epoch, collector_sequence,
 		 pool_instance_id, routed_channel_id, kind, producer_time_source, received_at_ms,
 		 payload_version, payload_json, observation_sha256)
-		VALUES ('o-keep', 's', 1, 2, 'pool', 'chan-other',
-		        'channel_event', 'RECEIVER', 1, 1, '{"phase":"ROUND_CREATED"}', 'sha256:x')`); err != nil {
+		VALUES ('o-keep', 'purge-session', ?, 2, 'pool', 'chan-other',
+		        'channel_event', 'RECEIVER', 1, 1, '{"phase":"ROUND_CREATED"}', 'sha256:x')`, epoch); err != nil {
 		t.Fatal(err)
 	}
 
-	if _, err := coord.Delete(ctx, "chan-purge", "purged-user"); err != nil {
+	if _, err := coord.Delete(ctx, "chan-purge", "purged-user-p1"); err != nil {
 		t.Fatalf("delete: %v", err)
 	}
 
@@ -497,7 +505,7 @@ func TestAnalyticsRepositorySatisfiesTheIdentityPurger(t *testing.T) {
 	}
 	// And the ordinary history is gone too, in the same transaction.
 	var streamers int
-	if err := db.QueryRow(`SELECT COUNT(*) FROM streamers WHERE name = ?`, "purged-user").Scan(&streamers); err != nil {
+	if err := db.QueryRow(`SELECT COUNT(*) FROM streamers WHERE name = ?`, "purged-user-p1").Scan(&streamers); err != nil {
 		t.Fatal(err)
 	}
 	if streamers != 0 {
@@ -524,32 +532,36 @@ func TestRenamePerformsZeroUpdatesOnObservations(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := repo.RecordPoints("oldlogin", 100, "WATCH"); err != nil {
+	if err := repo.RecordPoints("oldlogin-p1", 100, "WATCH"); err != nil {
 		t.Fatal(err)
 	}
 	var streamerID int64
-	if err := db.QueryRow(`SELECT id FROM streamers WHERE name = ?`, "oldlogin").Scan(&streamerID); err != nil {
+	if err := db.QueryRow(`SELECT id FROM streamers WHERE name = ?`, "oldlogin-p1").Scan(&streamerID); err != nil {
+		t.Fatal(err)
+	}
+	renameEpoch, err := repo.OpenObservationSession(context.Background(), "rename-session", 1)
+	if err != nil {
 		t.Fatal(err)
 	}
 	if _, err := db.Exec(`INSERT INTO prediction_observations
 		(observation_id, collector_session_id, collector_epoch, collector_sequence,
 		 pool_instance_id, routed_channel_id, routed_streamer_id,
 		 kind, producer_time_source, received_at_ms, payload_version, payload_json, observation_sha256)
-		VALUES ('o-rename', 's', 1, 1, 'pool', 'chan-rename', ?,
+		VALUES ('o-rename', 'rename-session', ?, 1, 'pool', 'chan-rename', ?,
 		        'channel_event', 'RECEIVER', 1, 1, '{"phase":"ROUND_CREATED"}', 'sha256:frozen')`,
-		streamerID); err != nil {
+		renameEpoch, streamerID); err != nil {
 		t.Fatal(err)
 	}
 	before := dumpObservation(t, db, "o-rename")
 
-	if err := coord.RenameStreamer("oldlogin", "newlogin"); err != nil {
+	if err := coord.RenameStreamer("oldlogin-p1", "newlogin-p1"); err != nil {
 		t.Fatalf("rename: %v", err)
 	}
 	var name string
 	if err := db.QueryRow(`SELECT name FROM streamers WHERE id = ?`, streamerID).Scan(&name); err != nil {
 		t.Fatal(err)
 	}
-	if name != "newlogin" {
+	if name != "newlogin-p1" {
 		t.Fatalf("streamers row = %q, want newlogin", name)
 	}
 	if after := dumpObservation(t, db, "o-rename"); after != before {

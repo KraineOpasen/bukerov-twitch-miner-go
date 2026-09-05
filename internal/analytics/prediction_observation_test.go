@@ -1359,3 +1359,86 @@ func TestObservationUnfenceLiftsTheErasedChannelToo(t *testing.T) {
 		t.Fatal("Reinstate did not lift the channel erased alongside the login")
 	}
 }
+
+// TestObservationOfferStampsTheCurrentGeneration closes a gap an independent
+// review found: both generation tests called the unexported write() directly,
+// so offer()'s stamping was never verified. Losing that stamp would silently
+// kill capture after the first erasure — every later fact would carry a zero
+// generation and be dropped — with the suite still green.
+func TestObservationOfferStampsTheCurrentGeneration(t *testing.T) {
+	// An UNSTARTED collector: nothing drains the queue, so the stamped value
+	// can be read back directly instead of inferred from a side effect.
+	path := filepath.Join(t.TempDir(), "miner.db")
+	db := openPrivateDB(t, path)
+	defer func() { _ = db.Close() }()
+	unstarted, err := NewService(db, filepath.Dir(path), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := unstarted.observations
+	c.running.Store(true) // publish capture WITHOUT a writer
+	c.generation.Add(7)
+	want := c.generation.Load()
+
+	unstarted.RecordPredictionObservation(channelObservation("pool-1", "chan-a", "s", "e1", "ROUND_CREATED"))
+
+	select {
+	case got := <-c.queue:
+		if got.generation != want {
+			t.Fatalf("offer stamped generation %d, want the current %d", got.generation, want)
+		}
+	default:
+		t.Fatal("offer enqueued nothing")
+	}
+
+	// And capture still WORKS after a generation bump on a running collector:
+	// a fact offered through the public entry point is committed, not
+	// silently dropped by a stale stamp.
+	svc, _ := newObservationService(t)
+	svc.observations.generation.Add(3)
+	svc.RecordPredictionObservation(channelObservation("pool-1", "chan-a", "s", "e2", "ROUND_CREATED"))
+	awaitCommitted(t, svc, 1)
+}
+
+// TestObservationPayloadOverCapFallsBackToAMinimalProjection exercises the
+// >64 KiB branch directly. A SANITIZED payload cannot reach that size (the
+// vocabularies are closed and the outcome list is capped), which is exactly
+// why the branch needs a direct test rather than one routed through
+// sanitization — the review found it was never executed at all.
+func TestObservationPayloadOverCapFallsBackToAMinimalProjection(t *testing.T) {
+	huge := ObservationPayload{Phase: "ROUND_UPDATED", ReasonCode: "OK"}
+	filler := strings.Repeat("x", 4096)
+	for i := 0; i < MaxObservationOutcomes; i++ {
+		huge.Outcomes = append(huge.Outcomes, ObservationOutcome{Slot: i, Color: filler})
+	}
+	raw, err := json.Marshal(huge)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(raw) <= MaxObservationPayloadBytes {
+		t.Fatalf("fixture is %d bytes, need more than the %d cap to exercise the branch", len(raw), MaxObservationPayloadBytes)
+	}
+
+	rendered, ok := marshalObservationPayload(huge)
+	if !ok {
+		t.Fatal("an over-cap payload must fall back, not be refused outright")
+	}
+	if len(rendered) > MaxObservationPayloadBytes {
+		t.Fatalf("fallback is %d bytes, still over the %d cap", len(rendered), MaxObservationPayloadBytes)
+	}
+	// The fallback is still VALID and still the same type — never a truncated
+	// string that would not parse.
+	var back ObservationPayload
+	if err := json.Unmarshal([]byte(rendered), &back); err != nil {
+		t.Fatalf("fallback payload does not parse: %v", err)
+	}
+	if back.Phase != "ROUND_UPDATED" || back.ReasonCode != "OK" {
+		t.Fatalf("fallback lost the identifying fields: %+v", back)
+	}
+	if len(back.Outcomes) != 0 {
+		t.Fatalf("fallback kept %d outcomes; it must be minimal", len(back.Outcomes))
+	}
+	if strings.Contains(rendered, filler) {
+		t.Fatal("the over-cap content survived into the fallback")
+	}
+}

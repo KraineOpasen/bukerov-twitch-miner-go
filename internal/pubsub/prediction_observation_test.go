@@ -601,3 +601,205 @@ func TestPlacementErrorClassSeparatesTransportFromRejection(t *testing.T) {
 		})
 	}
 }
+
+// TestScheduleDecisionIsObserved closes a coverage gap an independent review
+// found: schedule_decision had no behavioural test at all. A new round that is
+// accepted, and one refused because the toggle is off, must both leave the
+// decision the existing code already made.
+func TestScheduleDecisionIsObserved(t *testing.T) {
+	newFrame := func(eventID string) *PubSubMessage {
+		return &PubSubMessage{
+			Topic: NewTopic(TopicPredictionsChannel, "chan-1"), Type: "event-created",
+			ChannelID: "chan-1",
+			Data: map[string]interface{}{"event": map[string]interface{}{
+				"id": eventID, "status": "ACTIVE", "created_at": time.Now().Format(time.RFC3339),
+				"prediction_window_seconds": float64(600),
+				"outcomes": []interface{}{
+					map[string]interface{}{"id": "o1", "color": "BLUE", "total_points": float64(10)},
+					map[string]interface{}{"id": "o2", "color": "PINK", "total_points": float64(20)},
+				},
+			}},
+		}
+	}
+
+	t.Run("accepted", func(t *testing.T) {
+		p, sink := observedPool(t, &fakePlacer{})
+		s := newTestStreamer(100000)
+		p.streamers = []*models.Streamer{s}
+		p.handlePredictionChannel(newFrame("sched-1"), s)
+
+		var decisions []string
+		for _, o := range sink.all() {
+			if o.Kind == ObsKindScheduleDecision {
+				decisions = append(decisions, o.Payload.Phase+"/"+o.Payload.Decision+"/"+o.Payload.ReasonCode)
+			}
+		}
+		want := []string{"SCHEDULE_ACCEPTED/PLACE/OK"}
+		if !reflect.DeepEqual(decisions, want) {
+			t.Fatalf("schedule decisions = %v, want %v (all facts: %v)", decisions, want, sink.phases())
+		}
+	})
+
+	t.Run("skipped when predictions are off", func(t *testing.T) {
+		p, sink := observedPool(t, &fakePlacer{})
+		s := newTestStreamer(100000)
+		settings := s.GetSettings()
+		settings.MakePredictions = false
+		s.SetSettings(settings)
+		p.streamers = []*models.Streamer{s}
+		p.handlePredictionChannel(newFrame("sched-2"), s)
+
+		var decisions []string
+		for _, o := range sink.all() {
+			if o.Kind == ObsKindScheduleDecision {
+				decisions = append(decisions, o.Payload.Phase+"/"+o.Payload.Decision+"/"+o.Payload.ReasonCode)
+			}
+		}
+		want := []string{"SCHEDULE_SKIPPED/SKIP/TOGGLE_OFF"}
+		if !reflect.DeepEqual(decisions, want) {
+			t.Fatalf("schedule decisions = %v, want %v", decisions, want)
+		}
+	})
+}
+
+// TestAutoDecisionIsObserved closes a coverage gap: auto_decision had no
+// behavioural test. The due fact, the decision and the placement's two sides
+// must all appear, and the Twitch call must still happen exactly once.
+func TestAutoDecisionIsObserved(t *testing.T) {
+	placer := &fakePlacer{}
+	p, sink := observedPool(t, placer)
+	s := newTestStreamer(100000)
+	addRound(p, s, "auto-1")
+
+	p.placeAutoBet("auto-1")
+
+	var phases []string
+	for _, o := range sink.all() {
+		if o.Kind == ObsKindAutoDecision || o.Kind == ObsKindPlacement {
+			phases = append(phases, o.Kind+"/"+o.Payload.Phase)
+		}
+	}
+	want := []string{
+		"auto_decision/AUTO_DUE",
+		"auto_decision/AUTO_DECIDED",
+		"placement/CALL_STARTED",
+		"placement/CALL_RETURNED",
+	}
+	if !reflect.DeepEqual(phases, want) {
+		t.Fatalf("auto phases = %v, want %v", phases, want)
+	}
+	if placer.callCount() != 1 {
+		t.Fatalf("Twitch calls = %d, want exactly 1", placer.callCount())
+	}
+	// Every auto fact is marked non-manual, and the round is identified.
+	for _, o := range sink.all() {
+		if o.Kind == ObsKindAutoDecision {
+			if o.Payload.Manual == nil || *o.Payload.Manual {
+				t.Fatalf("auto fact not marked automated: %+v", o.Payload)
+			}
+			if o.EventID != "auto-1" || o.RetentionGroupOwnerChannelID != "chan-1" {
+				t.Fatalf("auto fact lost the round identity: %+v", o)
+			}
+		}
+	}
+}
+
+// TestAutoDecisionSkipIsObserved proves a declined auto-bet records the closed
+// reason and makes NO Twitch call.
+func TestAutoDecisionSkipIsObserved(t *testing.T) {
+	placer := &fakePlacer{}
+	p, sink := observedPool(t, placer)
+	s := newTestStreamer(100000)
+	addRound(p, s, "auto-2")
+	// Suppress this round: the existing per-round auto-bet skip.
+	if err := p.SetAutoBetSkip("auto-2", true); err != nil {
+		t.Fatal(err)
+	}
+
+	p.placeAutoBet("auto-2")
+
+	var skipped bool
+	for _, o := range sink.all() {
+		if o.Kind == ObsKindAutoDecision && o.Payload.Phase == "AUTO_SKIPPED" {
+			skipped = true
+			if o.Payload.Decision != "SKIP" || o.Payload.ReasonCode != "FILTER_REJECTED" {
+				t.Fatalf("skip fact = %+v, want SKIP/FILTER_REJECTED", o.Payload)
+			}
+		}
+		if o.Kind == ObsKindPlacement {
+			t.Fatalf("a skipped auto-bet produced a placement fact: %+v", o)
+		}
+	}
+	if !skipped {
+		t.Fatalf("no AUTO_SKIPPED fact; got %v", sink.phases())
+	}
+	if placer.callCount() != 0 {
+		t.Fatalf("Twitch calls = %d, want 0 for a skipped auto-bet", placer.callCount())
+	}
+}
+
+// TestUserFrameObservationsAreRecorded closes the last producer coverage gap:
+// user_prediction_made and user_terminal had no behavioural test. The terminal
+// verdict recorded must be the one the admission logic already reached — the
+// trail reads it, never re-decides it.
+func TestUserFrameObservationsAreRecorded(t *testing.T) {
+	p, sink := observedPool(t, &fakePlacer{})
+	s := newTestStreamer(100000)
+	p.streamers = []*models.Streamer{s}
+	event := addRound(p, s, "user-1")
+	event.Bet.Decision = models.Decision{Choice: 0, Amount: 250, ID: "o1"}
+
+	made := &PubSubMessage{
+		Topic: NewTopic(TopicPredictionsUser, "user-id"), Type: "prediction-made",
+		ChannelID: "chan-1",
+		Data:      map[string]interface{}{"prediction": map[string]interface{}{"event_id": "user-1"}},
+	}
+	p.handlePredictionUser(made, s)
+
+	var confirmed bool
+	for _, o := range sink.all() {
+		if o.Kind == ObsKindUserPredictionMade {
+			confirmed = true
+			if o.Payload.Phase != "PLACEMENT_CONFIRMED" || o.Payload.ReasonCode != "ACCEPTED" {
+				t.Fatalf("confirmation fact = %+v", o.Payload)
+			}
+			if o.SourceTopicType != string(TopicPredictionsUser) {
+				t.Fatalf("confirmation fact topic = %q", o.SourceTopicType)
+			}
+			if o.Payload.Counters["stake"] != 250 {
+				t.Fatalf("confirmation fact lost the stake: %+v", o.Payload.Counters)
+			}
+		}
+	}
+	if !confirmed {
+		t.Fatalf("no user_prediction_made fact; got %v", sink.phases())
+	}
+
+	// A terminal frame for a round that was never confirmed is REFUSED by the
+	// existing admission logic; the trail must record that verdict, not
+	// invent one.
+	unknown := &PubSubMessage{
+		Topic: NewTopic(TopicPredictionsUser, "user-id"), Type: "prediction-result",
+		ChannelID: "chan-1",
+		Data: map[string]interface{}{"prediction": map[string]interface{}{
+			"event_id": "not-a-tracked-round",
+			"result":   map[string]interface{}{"type": "WIN", "points_won": float64(500)},
+		}},
+	}
+	outcome := p.handlePredictionUser(unknown, s)
+	if outcome.PredictionResultAccepted {
+		t.Fatal("an untracked terminal was admitted; the observer must not change admission")
+	}
+	var terminal bool
+	for _, o := range sink.all() {
+		if o.Kind == ObsKindUserTerminal {
+			terminal = true
+			if o.Payload.ReasonCode != "NO_ROUND" {
+				t.Fatalf("terminal fact = %+v, want the NO_ROUND verdict the admission logic reached", o.Payload)
+			}
+		}
+	}
+	if !terminal {
+		t.Fatalf("no user_terminal fact; got %v", sink.phases())
+	}
+}
