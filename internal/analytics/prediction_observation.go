@@ -2530,6 +2530,12 @@ type observationCollector struct {
 	// documentation.
 	sessionBytes atomic.Int64
 
+	// lifecycleMu makes Start's phase transition, canceller publication and
+	// worker launch one step with respect to Close's fence and canceller
+	// read. It is held only across those few operations, never across a
+	// database call, a gate operation or the drain.
+	lifecycleMu sync.Mutex
+
 	// closeOnce guards the teardown. Start needs no equivalent: its guard is
 	// the NEW->STARTING compare-and-swap, which a sync.Once could not provide
 	// because it cannot also fail for a collector that is already closed.
@@ -2610,8 +2616,8 @@ func (c *observationCollector) beginEpisode() func() {
 // writer-less collector accepting facts nobody will ever write — queued,
 // uncounted, and still allowing the session to finalize COMPLETE. As a
 // compare-and-swap it simply loses.
-func (c *observationCollector) publishRunning() {
-	c.phase.CompareAndSwap(phaseStarting, phaseRunning)
+func (c *observationCollector) publishRunning() bool {
+	return c.phase.CompareAndSwap(phaseStarting, phaseRunning)
 }
 
 // fence moves the collector to phaseClosing from wherever it is, and reports
@@ -2742,9 +2748,18 @@ func (c *observationCollector) Start() {
 	// The CAS is the guard: it succeeds exactly once, and it FAILS for a
 	// collector already closed. A sync.Once could not do the second part —
 	// Close before the first Start left the Once unfired, so this call still
-	// spawned a goroutine, and nothing would ever cancel it. That goroutine
-	// holds the shared database open through its maintenance ticker, which is
-	// exactly what "no DB-capable P1 goroutine survives Close" forbids.
+	// spawned a goroutine, and nothing would ever cancel it.
+	//
+	// The CAS alone is still not enough, and this lock is why. Between the
+	// swap and the store below there was a window where the phase already
+	// said STARTING but the canceller did not exist yet: a Close landing in
+	// it saw a worker it could not cancel, skipped the join, and returned —
+	// and then this call launched a worker that nothing would ever stop. The
+	// phase transition, the canceller's publication and the launch have to be
+	// ONE step as far as Close is concerned, and Close takes the same lock to
+	// read them.
+	c.lifecycleMu.Lock()
+	defer c.lifecycleMu.Unlock()
 	if !c.phase.CompareAndSwap(phaseNew, phaseStarting) {
 		return
 	}
@@ -2765,8 +2780,18 @@ func (c *observationCollector) run(ctx context.Context) {
 		c.drainUntil(ctx)
 		return
 	}
-	c.publishRunning()
+	published := c.publishRunning()
 	close(c.bootstrapped)
+	if !published {
+		// Close fenced intake while this bootstrap was finishing, so intake
+		// will never open and there is nothing to serve. Returning here is
+		// what keeps the promise that no database-capable collector goroutine
+		// outlives Close: entering the loop below would start a maintenance
+		// ticker on a collector that is already shut down, and only a
+		// cancellation Close may already have decided not to send could stop
+		// it. Anything left in the queue is counted by Close after the join.
+		return
+	}
 
 	// Retention is WORKER-OWNED, so the worker has to own it continuously —
 	// a single unit at bootstrap would let a long-running miner keep every
@@ -3198,12 +3223,19 @@ func (c *observationCollector) Close() {
 		//    in flight publishes RUNNING by swapping out of STARTING, so it
 		//    either wins before this or loses to it — it can never reopen
 		//    intake on top of the fence.
+		//    The lock is what makes "was" and the canceller agree. Start
+		//    publishes both under it, so either this runs first and Start's
+		//    swap from NEW then fails outright, or Start has finished and the
+		//    canceller below is the live worker's.
+		c.lifecycleMu.Lock()
 		was := c.fencePhase()
+		stop := c.stop.Load()
+		c.lifecycleMu.Unlock()
 
 		// 2. Bounded drain. A collector that never started has no writer to
 		//    drain or join, and the fence above already stops a later Start
 		//    from creating one.
-		if stop := c.stop.Load(); stop != nil && was != phaseNew {
+		if stop != nil && was != phaseNew {
 			c.drain(observationDrainGrace)
 			// 3. Cancel and 4. JOIN the writer.
 			(*stop)()

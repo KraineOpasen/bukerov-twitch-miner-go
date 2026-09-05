@@ -126,13 +126,18 @@ func TestPriorityClaimCancelsTheObservationLease(t *testing.T) {
 		t.Fatal("the first lease was refused on an idle gate")
 	}
 
+	// The claim is held until this test says so, not for a fixed duration: a
+	// sleep would decide by scheduling whether the assertions below run while
+	// the claim is still held, which is the only state they are about.
 	claimed := make(chan struct{})
+	releaseClaim := make(chan struct{})
 	go func() {
 		release := p.Claim()
 		close(claimed)
 		defer release()
-		time.Sleep(20 * time.Millisecond)
+		<-releaseClaim
 	}()
+	defer close(releaseClaim)
 
 	select {
 	case <-leaseCtx.Done():
@@ -322,7 +327,13 @@ func TestObservationCloseJoinsWriterBeforeDatabaseClose(t *testing.T) {
 	<-svc.observations.bootstrapped
 
 	var wg sync.WaitGroup
+	// Every producer signals that it has actually offered a fact, and the
+	// window closes once all four have. A fixed sleep decided by scheduling
+	// how much work -- possibly none -- had happened before Close, so on a
+	// loaded machine this could assert the shutdown path against an idle
+	// collector and still pass.
 	stop := make(chan struct{})
+	offered := make(chan struct{}, 4)
 	wg.Add(4)
 	for w := 0; w < 4; w++ {
 		go func(w int) {
@@ -334,10 +345,19 @@ func TestObservationCloseJoinsWriterBeforeDatabaseClose(t *testing.T) {
 				default:
 				}
 				svc.RecordPredictionObservation(channelObservation("pool-1", "chan-a", "s", fmt.Sprintf("e%d-%d", w, i), "ROUND_CREATED"))
+				if i == 0 {
+					offered <- struct{}{}
+				}
 			}
 		}(w)
 	}
-	time.Sleep(50 * time.Millisecond)
+	for i := 0; i < 4; i++ {
+		select {
+		case <-offered:
+		case <-time.After(10 * time.Second):
+			t.Fatalf("only %d of 4 producers reached the collector", i)
+		}
+	}
 	close(stop)
 	wg.Wait()
 

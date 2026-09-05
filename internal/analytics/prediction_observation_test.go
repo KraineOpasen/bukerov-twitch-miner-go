@@ -3108,3 +3108,123 @@ func TestAnUngatedReaderNeverWaitsLongerThanTheReleaseWatchdog(t *testing.T) {
 			"doc reference and that site); a runtime path must not borrow it")
 	}
 }
+
+// TestStartAndClosePublishTheirLifecycleStateTogether is CodeRabbit's finding
+// on the previous head, and it was right: the compare-and-swap alone did not
+// close the window it looked like it closed.
+//
+// Between Start's swap to STARTING and its publication of the canceller there
+// was an instant where the phase already said a worker existed and the thing
+// that could stop it did not. A Close landing there read a nil canceller,
+// skipped the cancel and the join, and returned -- and Start then launched a
+// worker with a context nothing would ever cancel. It bootstrapped against the
+// database, failed to publish RUNNING, and sat in its maintenance ticker
+// touching the database for the rest of the process.
+//
+// The window is a few instructions wide, so a concurrency test cannot force
+// it: an attempt at one reached the interleaving roughly once in two hundred
+// runs and did not fail when the fix was removed, which makes it a test that
+// reports scheduling rather than correctness. The invariant is therefore
+// asserted where it is decided -- both sides publishing and reading their
+// lifecycle state under the same lock -- exactly as this package already
+// asserts its gate participants and its index set. The CONSEQUENCE of getting
+// it wrong is covered behaviourally by the two tests below and by
+// TestCloseBeforeStartLeavesNoWorker.
+func TestStartAndClosePublishTheirLifecycleStateTogether(t *testing.T) {
+	src := readPackageFile(t, "prediction_observation.go")
+
+	body := func(header string) string {
+		t.Helper()
+		i := strings.Index(src, header)
+		if i < 0 {
+			t.Fatalf("%s not found", header)
+		}
+		j := strings.Index(src[i:], "\n}\n")
+		if j < 0 {
+			t.Fatalf("%s has no end", header)
+		}
+		return src[i : i+j]
+	}
+
+	start := body("func (c *observationCollector) Start() {")
+	lock := strings.Index(start, "c.lifecycleMu.Lock()")
+	swap := strings.Index(start, "c.phase.CompareAndSwap(phaseNew, phaseStarting)")
+	store := strings.Index(start, "c.stop.Store(")
+	launch := strings.Index(start, "go c.run(")
+	switch {
+	case lock < 0:
+		t.Fatal("Start does not take the lifecycle lock; a Close can land between its phase " +
+			"transition and the canceller it publishes, and skip a join it needed to perform")
+	case !(lock < swap && swap < store && store < launch):
+		t.Fatalf("Start's order is lock=%d swap=%d store=%d launch=%d; the transition, the "+
+			"canceller's publication and the launch must all follow the lock", lock, swap, store, launch)
+	}
+
+	closeBody := body("func (c *observationCollector) Close() {")
+	cLock := strings.Index(closeBody, "c.lifecycleMu.Lock()")
+	fence := strings.Index(closeBody, "c.fencePhase()")
+	load := strings.Index(closeBody, "c.stop.Load()")
+	unlock := strings.Index(closeBody, "c.lifecycleMu.Unlock()")
+	switch {
+	case cLock < 0:
+		t.Fatal("Close does not take the lifecycle lock, so the phase it observes and the " +
+			"canceller it reads can describe different instants")
+	case !(cLock < fence && fence < load && load < unlock):
+		t.Fatalf("Close's order is lock=%d fence=%d load=%d unlock=%d; it must fence and read the "+
+			"canceller under one hold", cLock, fence, load, unlock)
+	}
+	// The drain and the join must NOT be inside that hold: they block, and a
+	// Start waiting behind them would be waiting on the collector's own
+	// shutdown.
+	if drain := strings.Index(closeBody, "c.drain("); drain >= 0 && drain < unlock {
+		t.Fatal("Close drains while holding the lifecycle lock; the hold must cover only the " +
+			"fence and the canceller read")
+	}
+}
+
+// TestABootstrapThatLosesTheFenceDoesNotStartATicker is the other half of the
+// same repair, asserted on its own.
+//
+// A bootstrap that finishes after Close has fenced intake cannot publish
+// RUNNING -- and used to fall through into the maintenance loop anyway, with a
+// ticker that keeps touching the database and only a cancellation Close may
+// already have decided not to send. There is nothing for it to serve: intake
+// will never open again.
+func TestABootstrapThatLosesTheFenceDoesNotStartATicker(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "miner.db")
+	db := openPrivateDB(t, path)
+	defer func() { _ = db.Close() }()
+	svc, err := NewService(db, filepath.Dir(path), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := svc.observations
+	c.writeDeadline = 5 * time.Second
+	// A ticker that would fire immediately, so a worker that wrongly entered
+	// the loop would be doing database work while this test watches.
+	c.maintenanceInterval = time.Millisecond
+
+	// The collector is mid-bootstrap and the fence goes up underneath it.
+	c.phase.Store(phaseStarting)
+	if was := c.fencePhase(); was != phaseStarting {
+		t.Fatalf("fence saw phase %d, want STARTING", was)
+	}
+
+	done := make(chan struct{})
+	go func() { defer close(done); c.run(context.Background()) }()
+
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the worker did not return after failing to publish RUNNING; it entered its " +
+			"maintenance loop on a collector that is already shut down")
+	}
+	select {
+	case <-c.joined:
+	default:
+		t.Fatal("the worker returned without settling its join signal")
+	}
+	if c.capturing() {
+		t.Fatal("intake opened on a fenced collector")
+	}
+}
