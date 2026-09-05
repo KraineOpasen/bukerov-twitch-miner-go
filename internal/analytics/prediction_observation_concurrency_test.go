@@ -530,6 +530,29 @@ func TestObservationIdentityPurgePilot(t *testing.T) {
 	if survivors != 256 {
 		t.Fatalf("%d facts survived, want the 256 bystander facts exactly", survivors)
 	}
+
+	// The measurement only means something if this fixture really is the worst
+	// case an erasure can meet. It is, and by construction rather than by
+	// assumption: the insert path refuses a fact once its deletion identity is
+	// at the per-key ceiling, so a proved parent+channel union can never hold
+	// more than two of those. Before the ceilings were enforced pre-insert,
+	// nothing stopped an identity accumulating far more than this pilot
+	// measured, and the number below bounded nothing at all.
+	l := newObservationQuotaLedger()
+	l.deletionKeys["chan:worst-case"] = observationUsage{Rows: MaxDeletionIdentityRows}
+	if ok, identity := l.admit([]string{"chan:worst-case"}, "", 1); ok || !identity {
+		t.Fatalf("an identity already at its ceiling was admitted (ok=%v identity=%v); the pilot's "+
+			"fixture would not be the worst case", ok, identity)
+	}
+	if want := int64(MaxProvedIdentityUnionRows); MaxDeletionIdentityRows*2 != want {
+		t.Fatalf("the proved parent+channel union bound (%d) is no longer two per-key ceilings "+
+			"(%d); the pilot fixture must be rebuilt to the real worst case",
+			want, MaxDeletionIdentityRows*2)
+	}
+	if want := int64(MaxProvedIdentityUnionBytes); MaxDeletionIdentityBytes*2 != want {
+		t.Fatalf("the union byte bound (%d) is no longer two per-key ceilings (%d)",
+			want, MaxDeletionIdentityBytes*2)
+	}
 }
 
 // TestObservationRetentionRunsPeriodically is the regression for a defect an
