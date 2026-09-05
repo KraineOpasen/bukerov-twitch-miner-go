@@ -1092,3 +1092,98 @@ func TestObservationSnapshotStaysUngated(t *testing.T) {
 		t.Fatal("PointsSnapshotBetween took the gate or the repository mutex; it must stay ungated and lock-free")
 	}
 }
+
+// TestObservationRemoveReAddDoesNotInheritFacts proves the identity lifecycle:
+// after a streamer is erased and then re-added under the SAME login and
+// channel, it starts clean — it inherits no observation from its previous
+// life, and the facts it records afterwards are its own.
+func TestObservationRemoveReAddDoesNotInheritFacts(t *testing.T) {
+	svc, repo := newObservationService(t)
+	ctx := context.Background()
+
+	if err := repo.RecordPoints("recycled", 100, "WATCH"); err != nil {
+		t.Fatal(err)
+	}
+	svc.RecordPredictionObservation(channelObservation("pool-1", "chan-recycled", "recycled", "old-round", "ROUND_CREATED"))
+	awaitCommitted(t, svc, 1)
+
+	// Erase the identity exactly as the lifecycle purge does.
+	if err := repo.db.WithTx(ctx, func(tx *sql.Tx) error {
+		if _, err := repo.EraseObservationsForIdentityTx(tx, ObservationIdentity{ChannelID: "chan-recycled", Login: "recycled"}); err != nil {
+			return err
+		}
+		_, err := repo.DeleteStreamerTx(tx, "recycled")
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	repo.Tombstone("recycled")
+
+	// Re-add: the fence lifts and fresh history is allowed again.
+	repo.Reinstate("recycled")
+	if err := repo.RecordPoints("recycled", 200, "WATCH"); err != nil {
+		t.Fatal(err)
+	}
+	svc.RecordPredictionObservation(channelObservation("pool-1", "chan-recycled", "recycled", "new-round", "ROUND_CREATED"))
+	awaitCommitted(t, svc, 2)
+
+	got, err := repo.ObservationsBySession(ctx, svc.observations.sessionID, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].EventID != "new-round" {
+		t.Fatalf("facts after re-add = %+v, want only the new round's fact", got)
+	}
+	// The re-added streamer got a FRESH parent row; the new fact points at it,
+	// never at the purged one.
+	var freshID int64
+	if err := repo.db.QueryRow(`SELECT id FROM streamers WHERE name = ?`, "recycled").Scan(&freshID); err != nil {
+		t.Fatal(err)
+	}
+	if got[0].RoutedStreamerID != freshID {
+		t.Fatalf("re-added fact points at parent %d, want the fresh %d", got[0].RoutedStreamerID, freshID)
+	}
+}
+
+// TestObservationErasureIsFencedAgainstQueuedFacts proves the ordering that
+// makes an erasure trustworthy: a fact accepted BEFORE the erasure but not yet
+// written can never commit afterwards, so it cannot resurrect the identity.
+func TestObservationErasureIsFencedAgainstQueuedFacts(t *testing.T) {
+	svc, repo := newObservationService(t)
+	ctx := context.Background()
+	c := svc.observations
+
+	// A fact accepted under the CURRENT generation, held back from the writer.
+	queued := mustSanitize(t, channelObservation("pool-1", "chan-erased", "erased", "round-1", "ROUND_CREATED"))
+	queued.generation = c.generation.Load()
+
+	// The erasure fences capture BEFORE its transaction opens — exactly what
+	// the lifecycle coordinator does via InvalidateIdentity.
+	repo.InvalidateIdentity("chan-erased", "erased")
+	if err := repo.db.WithTx(ctx, func(tx *sql.Tx) error {
+		_, err := repo.EraseObservationsForIdentityTx(tx, ObservationIdentity{ChannelID: "chan-erased", Login: "erased"})
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// The held-back fact now reaches the writer and must be refused.
+	c.write(ctx, queued)
+	left, err := repo.ObservationsBySession(ctx, c.sessionID, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(left) != 0 {
+		t.Fatalf("a fact queued before the erasure resurrected the identity: %+v", left)
+	}
+	// ...and the session is permanently INCOMPLETE, which is how a reader
+	// learns the trail is not whole for this run.
+	c.Close()
+	reading, _, err := repo.ReadObservationSession(ctx, c.epoch.Load())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reading.Session.CloseState != SessionIncomplete {
+		t.Fatalf("session after an erasure = %q, want INCOMPLETE", reading.Session.CloseState)
+	}
+}
