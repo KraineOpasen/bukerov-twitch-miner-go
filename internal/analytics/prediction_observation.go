@@ -237,11 +237,22 @@ const (
 	// observationPruneUnit bounds one retention transaction's NULL-round or
 	// factless-session batch.
 	observationPruneUnit = 128
+	// observationPruneUnitsPerPass bounds how many bounded units one
+	// maintenance pass removes. Each unit is still its own transaction, so a
+	// business writer never waits for more than one of them; the cap keeps a
+	// single pass from monopolizing the connection on a large backlog.
+	observationPruneUnitsPerPass = 16
+	// observationMaintenanceInterval paces the worker-owned retention pass.
+	observationMaintenanceInterval = 10 * time.Minute
 )
 
 // errObservationDisabled marks a collector that never bootstrapped (or was
 // disabled by a privacy erasure): capture is off and every enqueue is dropped.
 var errObservationDisabled = errors.New("analytics: prediction observations disabled")
+
+// errObservationAtCapacity marks a store that has reached a hard bound with
+// nothing left to prune. Capture pauses rather than growing past the bound.
+var errObservationAtCapacity = errors.New("analytics: observation store at capacity")
 
 // ObservationOutcome is the sanitized projection of ONE round outcome. It
 // carries aggregate shape only: no predictor identity, no display text, no
@@ -1406,14 +1417,20 @@ func (r *SQLiteRepository) PruneObservationUnit(ctx context.Context, cutoffMS in
 	err := r.db.WithTx(ctx, func(tx *sql.Tx) error {
 		// (1) one whole eligible round.
 		var incarnation string
+		// The DELETE below removes a round WHOLE, by incarnation — so the
+		// active epoch has to be excluded at ROUND granularity, not row
+		// granularity. Filtering rows by `collector_epoch <> ?` here and then
+		// deleting by incarnation would take the active session's facts with
+		// it whenever a round spans a restart. Only rounds with no
+		// active-epoch fact at all are eligible.
 		e := tx.QueryRowContext(ctx, `
 			SELECT round_incarnation_id
 			  FROM prediction_observations
 			 WHERE round_incarnation_id IS NOT NULL
-			   AND collector_epoch <> ?
 			 GROUP BY round_incarnation_id
 			HAVING MAX(received_at_ms) < ?
-			 LIMIT 1`, activeEpoch, cutoffMS).Scan(&incarnation)
+			   AND SUM(CASE WHEN collector_epoch = ? THEN 1 ELSE 0 END) = 0
+			 LIMIT 1`, cutoffMS, activeEpoch).Scan(&incarnation)
 		if e != nil && e != sql.ErrNoRows {
 			return e
 		}
@@ -1647,6 +1664,16 @@ type observationCollector struct {
 	// no scheduler of its own.
 	retentionDays int
 
+	// maintenanceInterval paces the worker-owned retention pass. Always
+	// observationMaintenanceInterval in production; a test shortens it.
+	maintenanceInterval time.Duration
+	// overCapacity records that capture was paused by a hard store bound, so
+	// a later pass that frees space can resume it.
+	overCapacity atomic.Bool
+	// closing is set by Close BEFORE it fences intake, so a bootstrap still
+	// finishing cannot publish RUNNING over the top of a teardown.
+	closing atomic.Bool
+
 	// writeDeadline is the hard per-fact budget. It is ALWAYS
 	// ObservationWriteDeadline in production (newObservationCollector is the
 	// only constructor and there is no setting for it); a test raises it only
@@ -1713,16 +1740,17 @@ type observationCollector struct {
 
 func newObservationCollector(repo *SQLiteRepository, gate *txPriority, retentionDays int, now func() time.Time) *observationCollector {
 	return &observationCollector{
-		repo:          repo,
-		gate:          gate,
-		now:           now,
-		retentionDays: retentionDays,
-		writeDeadline: ObservationWriteDeadline,
-		queue:         make(chan PredictionObservation, ObservationQueueCapacity),
-		joined:        make(chan struct{}),
-		bootstrapped:  make(chan struct{}),
-		fenced:        make(map[string]struct{}),
-		loginChannels: make(map[string][]string),
+		repo:                repo,
+		gate:                gate,
+		now:                 now,
+		retentionDays:       retentionDays,
+		writeDeadline:       ObservationWriteDeadline,
+		maintenanceInterval: observationMaintenanceInterval,
+		queue:               make(chan PredictionObservation, ObservationQueueCapacity),
+		joined:              make(chan struct{}),
+		bootstrapped:        make(chan struct{}),
+		fenced:              make(map[string]struct{}),
+		loginChannels:       make(map[string][]string),
 	}
 }
 
@@ -1827,8 +1855,21 @@ func (c *observationCollector) run(ctx context.Context) {
 		c.drainUntil(ctx)
 		return
 	}
-	c.running.Store(true)
+	// Close may already have fenced intake while the bootstrap was still
+	// finishing. Publishing RUNNING unconditionally here would reopen a
+	// collector that is being torn down, leaving a writer-less RUNNING state
+	// and a session that finalizes COMPLETE despite having lost work.
+	if !c.closing.Load() {
+		c.running.Store(true)
+	}
 	close(c.bootstrapped)
+
+	// Retention is WORKER-OWNED, so the worker has to own it continuously —
+	// a single unit at bootstrap would let a long-running miner keep every
+	// observation it ever wrote. The ticker keeps pruning off the write path
+	// while still bounding each transaction to one unit.
+	maintenance := time.NewTicker(c.maintenanceInterval)
+	defer maintenance.Stop()
 
 	for {
 		select {
@@ -1836,7 +1877,54 @@ func (c *observationCollector) run(ctx context.Context) {
 			return
 		case obs := <-c.queue:
 			c.write(ctx, obs)
+		case <-maintenance.C:
+			c.maintain(ctx)
 		}
+	}
+}
+
+// maintain is one bounded retention pass: it removes up to
+// observationPruneUnitsPerPass units (each its own transaction) and then
+// re-measures the store against its hard caps. It runs on the collector's own
+// goroutine, behind the same priority lease as a fact write, so it can never
+// make a business writer wait for more than one bounded transaction.
+func (c *observationCollector) maintain(ctx context.Context) {
+	if c.disabled.Load() {
+		return
+	}
+	if c.retentionDays > 0 {
+		cutoff := c.now().Add(-time.Duration(c.retentionDays) * 24 * time.Hour).UnixMilli()
+		for i := 0; i < observationPruneUnitsPerPass; i++ {
+			n, err := c.prune(ctx, cutoff)
+			if err != nil {
+				observationLog("Prediction observation retention pass failed", err)
+				return
+			}
+			if n == 0 {
+				break
+			}
+		}
+	}
+
+	// The hard store caps are enforced HERE, against a fresh measurement —
+	// not once at startup against a stale one. A store that has grown past a
+	// bound with nothing left to prune stops accepting new facts rather than
+	// growing without limit; capture resumes on the next pass if retention
+	// later frees space.
+	stats, err := c.storeStats(ctx)
+	if err != nil {
+		return
+	}
+	over := stats.Rows >= MaxStoreRows || stats.Bytes >= MaxStoreBytes || stats.Sessions >= MaxStoreSessions
+	if over && c.running.Load() {
+		c.running.Store(false)
+		c.overCapacity.Store(true)
+		observationLog("Prediction observation capture paused: store is at a hard capacity bound", errObservationAtCapacity)
+		return
+	}
+	if !over && c.overCapacity.Load() && !c.closing.Load() {
+		c.overCapacity.Store(false)
+		c.running.Store(true)
 	}
 }
 
@@ -1850,24 +1938,33 @@ func (c *observationCollector) bootstrap(ctx context.Context) error {
 	}
 	c.sessionID = sessionID
 
-	stats, err := c.repo.ObservationStoreStats(ctx)
+	// Prune BEFORE measuring. Measuring first and pruning second compares the
+	// caps against a figure the prune is about to invalidate, which can leave
+	// capture permanently disabled on a store the very same pass just drained.
+	if c.retentionDays > 0 {
+		cutoff := c.now().Add(-time.Duration(c.retentionDays) * 24 * time.Hour).UnixMilli()
+		for i := 0; i < observationPruneUnitsPerPass; i++ {
+			n, perr := c.prune(ctx, cutoff)
+			if perr != nil {
+				return fmt.Errorf("analytics: observation bootstrap retention: %w", perr)
+			}
+			if n == 0 {
+				break
+			}
+		}
+	}
+	stats, err := c.storeStats(ctx)
 	if err != nil {
 		return fmt.Errorf("analytics: observation store recount: %w", err)
 	}
-	if c.retentionDays > 0 {
-		cutoff := c.now().Add(-time.Duration(c.retentionDays) * 24 * time.Hour).UnixMilli()
-		if _, perr := c.repo.PruneObservationUnit(ctx, cutoff, 0); perr != nil {
-			return fmt.Errorf("analytics: observation bootstrap retention: %w", perr)
-		}
-	}
 	if stats.Sessions >= MaxStoreSessions || stats.Rows >= MaxStoreRows || stats.Bytes >= MaxStoreBytes {
-		// The store is already at a hard cap and one bootstrap unit did not
-		// clear it. Refuse to add more rather than growing past the bound.
-		return fmt.Errorf("analytics: observation store at capacity (rows=%d bytes=%d sessions=%d)",
-			stats.Rows, stats.Bytes, stats.Sessions)
+		// Still at a hard cap after a full pruning pass: refuse to add more
+		// rather than growing past the bound.
+		return fmt.Errorf("%w (rows=%d bytes=%d sessions=%d)",
+			errObservationAtCapacity, stats.Rows, stats.Bytes, stats.Sessions)
 	}
 
-	epoch, err := c.repo.OpenObservationSession(ctx, sessionID, c.now().UnixMilli())
+	epoch, err := c.leasedSession(ctx, sessionID)
 	if err != nil {
 		return fmt.Errorf("analytics: open observation session: %w", err)
 	}
@@ -1940,6 +2037,58 @@ func (c *observationCollector) write(ctx context.Context, raw PredictionObservat
 	c.committed.Add(1)
 }
 
+// leased runs one of the collector's OWN transactions behind the priority
+// gate and a deadline, exactly like a fact write. Without this the bootstrap,
+// the retention pass and the session control writes would be full-table work
+// on the single shared connection that a business writer could not preempt —
+// which is precisely the interference the gate exists to prevent.
+func (c *observationCollector) leased(ctx context.Context, budget time.Duration, fn func(context.Context) error) error {
+	leaseCtx, cancel := context.WithTimeout(ctx, budget)
+	defer cancel()
+	granted, settle, ok := c.gate.lease(leaseCtx)
+	if !ok {
+		return context.DeadlineExceeded
+	}
+	defer settle()
+	return fn(granted)
+}
+
+// observationMaintenanceBudget bounds one leased maintenance/bootstrap
+// transaction. It is larger than the per-fact deadline because these
+// statements are aggregate work, but it is still a hard ceiling and still
+// preemptible: a business claim cancels it immediately.
+const observationMaintenanceBudget = 2 * time.Second
+
+func (c *observationCollector) prune(ctx context.Context, cutoffMS int64) (int64, error) {
+	var removed int64
+	err := c.leased(ctx, observationMaintenanceBudget, func(lease context.Context) error {
+		var e error
+		removed, e = c.repo.PruneObservationUnit(lease, cutoffMS, c.epoch.Load())
+		return e
+	})
+	return removed, err
+}
+
+func (c *observationCollector) storeStats(ctx context.Context) (ObservationStoreStats, error) {
+	var st ObservationStoreStats
+	err := c.leased(ctx, observationMaintenanceBudget, func(lease context.Context) error {
+		var e error
+		st, e = c.repo.ObservationStoreStats(lease)
+		return e
+	})
+	return st, err
+}
+
+func (c *observationCollector) leasedSession(ctx context.Context, sessionID string) (int64, error) {
+	var epoch int64
+	err := c.leased(ctx, observationMaintenanceBudget, func(lease context.Context) error {
+		var e error
+		epoch, e = c.repo.OpenObservationSession(lease, sessionID, c.now().UnixMilli())
+		return e
+	})
+	return epoch, err
+}
+
 // offer is the producer-side entry point: a single nonblocking send. It never
 // allocates on the shared connection, never waits and never returns an error
 // a producer could be tempted to act on.
@@ -1948,6 +2097,13 @@ func (c *observationCollector) offer(obs PredictionObservation) {
 		// Not yet bootstrapped, already fenced, or disabled: the fact is
 		// honestly lost, and the session says so at finalization.
 		c.dropped.Add(1)
+		// A producer that is STILL offering after the shutdown fence is the
+		// thing post_fence_producer_count exists to record: it proves the
+		// collector closed while a producer was demonstrably alive, which is
+		// why such a session can never be COMPLETE.
+		if c.closing.Load() {
+			c.postFenceProducers.Add(1)
+		}
 		return
 	}
 	obs.generation = c.generation.Load()
@@ -2015,6 +2171,10 @@ func (c *observationCollector) drain(grace time.Duration) {
 // shared database immediately afterwards.
 func (c *observationCollector) Close() {
 	c.closeOnce.Do(func() {
+		// 0. Announce the teardown FIRST. A bootstrap still in flight checks
+		//    this before publishing RUNNING, so it cannot reopen intake over
+		//    the top of the fence below.
+		c.closing.Store(true)
 		// 1. Fence intake. Every later offer is a counted drop.
 		c.running.Store(false)
 
@@ -2030,9 +2190,13 @@ func (c *observationCollector) Close() {
 		if c.epoch.Load() == 0 {
 			return // bootstrap never allocated a session: nothing to finalize
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
-		if _, err := c.repo.FinalizeObservationSession(ctx, c.epoch.Load(), c.accounting(), c.now().UnixMilli()); err != nil {
+		err := c.leased(ctx, observationMaintenanceBudget, func(lease context.Context) error {
+			_, e := c.repo.FinalizeObservationSession(lease, c.epoch.Load(), c.accounting(), c.now().UnixMilli())
+			return e
+		})
+		if err != nil {
 			observationLog("Failed to finalize the prediction observation session", err)
 		}
 	})

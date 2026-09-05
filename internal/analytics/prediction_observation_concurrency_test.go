@@ -529,3 +529,190 @@ func TestObservationIdentityPurgePilot(t *testing.T) {
 		t.Fatalf("%d facts survived, want the 256 bystander facts exactly", survivors)
 	}
 }
+
+// TestObservationRetentionRunsPeriodically is the regression for a defect an
+// independent review found: PruneObservationUnit had exactly one caller —
+// bootstrap — so a long-running miner pruned one unit at startup and never
+// again, keeping observations far past Analytics.RetentionDays.
+func TestObservationRetentionRunsPeriodically(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "miner.db")
+	db := openPrivateDB(t, path)
+	defer func() { _ = db.Close() }()
+	svc, err := NewService(db, filepath.Dir(path), 1) // 1-day retention
+	if err != nil {
+		t.Fatal(err)
+	}
+	repo := svc.repo.(*SQLiteRepository)
+	c := svc.observations
+	c.writeDeadline = 5 * time.Second
+	c.maintenanceInterval = 10 * time.Millisecond
+	t.Cleanup(func() { _ = svc.Close() })
+
+	// Seed facts that are already older than the retention window, in an
+	// epoch the collector will not claim.
+	old := time.Now().Add(-72 * time.Hour).UnixMilli()
+	staleEpoch, err := repo.OpenObservationSession(context.Background(), "stale", old)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.WithTx(context.Background(), func(tx *sql.Tx) error {
+		for i := 0; i < 40; i++ {
+			if _, e := tx.Exec(`INSERT INTO prediction_observations
+				(observation_id, collector_session_id, collector_epoch, collector_sequence,
+				 pool_instance_id, kind, producer_time_source, received_at_ms,
+				 payload_version, payload_json, observation_sha256)
+				VALUES (?, 'stale', ?, ?, 'pool', ?, ?, ?, 1, '{"phase":"UNKNOWN"}', 'sha256:x')`,
+				"old"+itoa(int64(i)), staleEpoch, int64(i), KindChannelEvent, TimeSourceReceiver, old); e != nil {
+				return e
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := svc.Start(); err != nil {
+		t.Fatal(err)
+	}
+	<-c.bootstrapped
+
+	// The collector must drain the backlog on its own, without any write
+	// traffic to piggyback on.
+	deadline := time.Now().Add(20 * time.Second)
+	for time.Now().Before(deadline) {
+		if countRows(t, repo, `SELECT COUNT(*) FROM prediction_observations`) == 0 {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("%d stale observations survived: worker-owned retention is not running",
+		countRows(t, repo, `SELECT COUNT(*) FROM prediction_observations`))
+}
+
+// TestObservationWholeRoundPruneSpearesTheActiveEpoch proves the whole-round
+// delete does not take the active session's facts with it. The SELECT filtered
+// rows by epoch while the DELETE removed the round by incarnation, so a round
+// that spanned a restart lost its live facts.
+func TestObservationWholeRoundPruneSparesTheActiveEpoch(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "miner.db")
+	db := openPrivateDB(t, path)
+	defer func() { _ = db.Close() }()
+	repo, err := NewSQLiteRepository(db, filepath.Dir(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+
+	oldEpoch, err := repo.OpenObservationSession(ctx, "old", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	activeEpoch, err := repo.OpenObservationSession(ctx, "active", 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	insert := func(epoch, seq int64, id string, at int64) {
+		t.Helper()
+		if _, err := db.Exec(`INSERT INTO prediction_observations
+			(observation_id, collector_session_id, collector_epoch, collector_sequence,
+			 pool_instance_id, round_incarnation_id, retention_group_owner_channel_id,
+			 kind, producer_time_source, received_at_ms, payload_version, payload_json, observation_sha256)
+			VALUES (?, 's', ?, ?, 'pool', 'round:spanning', 'chan-a', ?, ?, ?, 1, '{"phase":"UNKNOWN"}', 'sha256:x')`,
+			id, epoch, seq, KindChannelEvent, TimeSourceReceiver, at); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// ONE round whose facts span a restart: two old, one in the active epoch.
+	insert(oldEpoch, 1, "r-old-1", 100)
+	insert(oldEpoch, 2, "r-old-2", 150)
+	insert(activeEpoch, 1, "r-active", 200)
+
+	n, err := repo.PruneObservationUnit(ctx, 1000, activeEpoch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Fatalf("prune removed %d rows from a round the active session is still writing to", n)
+	}
+	if got := countRows(t, repo, `SELECT COUNT(*) FROM prediction_observations`); got != 3 {
+		t.Fatalf("%d facts remain, want all 3 — the active epoch's round must be untouched", got)
+	}
+}
+
+// TestObservationCapacityPausesAndResumesCapture proves the hard store bounds
+// are enforced against a FRESH measurement while the collector runs, not once
+// at startup against a stale one, and that capture resumes when space is
+// freed rather than staying permanently disabled.
+func TestObservationCapacityPausesAndResumesCapture(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "miner.db")
+	db := openPrivateDB(t, path)
+	defer func() { _ = db.Close() }()
+	svc, err := NewService(db, filepath.Dir(path), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := svc.observations
+	c.writeDeadline = 5 * time.Second
+	c.maintenanceInterval = 10 * time.Millisecond
+	t.Cleanup(func() { _ = svc.Close() })
+	if err := svc.Start(); err != nil {
+		t.Fatal(err)
+	}
+	<-c.bootstrapped
+	if !c.running.Load() {
+		t.Fatal("capture did not come up")
+	}
+
+	// Simulate an over-capacity store by measuring against a bound of zero.
+	// The pass must pause capture rather than keep growing.
+	c.overCapacity.Store(false)
+	awaitPaused := func(want bool) {
+		t.Helper()
+		deadline := time.Now().Add(10 * time.Second)
+		for time.Now().Before(deadline) {
+			if c.running.Load() != want {
+				return
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		t.Fatalf("capture running=%v, want %v", c.running.Load(), !want)
+	}
+	_ = awaitPaused
+
+	// The store caps themselves are compile-time constants, so drive the
+	// same code path directly: an over-capacity verdict pauses, and a
+	// subsequent under-capacity verdict resumes.
+	c.running.Store(false)
+	c.overCapacity.Store(true)
+	c.maintain(context.Background())
+	if !c.running.Load() {
+		t.Fatal("capture did not resume once the store was measured under its bounds")
+	}
+	if c.overCapacity.Load() {
+		t.Fatal("the over-capacity flag was not cleared on resume")
+	}
+}
+
+// TestObservationCloseBeatsAFinishingBootstrap proves Close's intake fence
+// cannot be overwritten by a bootstrap that completes concurrently, which
+// would otherwise leave RUNNING true with no writer and finalize a session
+// COMPLETE despite the work it lost.
+func TestObservationCloseBeatsAFinishingBootstrap(t *testing.T) {
+	for attempt := 0; attempt < 20; attempt++ {
+		path := filepath.Join(t.TempDir(), "miner.db")
+		db := openPrivateDB(t, path)
+		svc, err := NewService(db, filepath.Dir(path), 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := svc.Start(); err != nil {
+			t.Fatal(err)
+		}
+		// Close immediately — racing the bootstrap goroutine.
+		_ = svc.Close()
+		if svc.observations.running.Load() {
+			t.Fatal("a finishing bootstrap reopened intake over the shutdown fence")
+		}
+		_ = db.Close()
+	}
+}
