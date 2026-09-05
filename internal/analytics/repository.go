@@ -343,6 +343,15 @@ func NewSQLiteRepository(db *database.DB, basePath string) (*SQLiteRepository, e
 func (r *SQLiteRepository) Tombstone(login string) {
 	login = strings.ToLower(login)
 	defer r.priority.Claim()()
+	// The immutable Prediction observation trail is fenced by the SAME
+	// barrier. Without this a late event could be refused by the write paths
+	// below and still leave an observation behind for the login being purged.
+	// Armed outside the repository mutex: the collector may consult its fence
+	// while holding a priority lease, so it must never have to wait on a lock
+	// a claimer already holds.
+	if r.observations != nil {
+		r.observations.fence("", login)
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.deleted[login] = struct{}{}
@@ -353,6 +362,12 @@ func (r *SQLiteRepository) Tombstone(login string) {
 func (r *SQLiteRepository) Reinstate(login string) {
 	login = strings.ToLower(login)
 	defer r.priority.Claim()()
+	// Lift the observation fence with the tombstone, including every channel
+	// erased alongside this login, so a re-added streamer records fresh
+	// observations again.
+	if r.observations != nil {
+		r.observations.unfence(login)
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	delete(r.deleted, login)

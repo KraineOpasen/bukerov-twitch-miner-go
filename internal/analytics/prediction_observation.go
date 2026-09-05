@@ -1609,15 +1609,24 @@ func (r *SQLiteRepository) DeleteStreamerIdentityTx(tx *sql.Tx, channelID, login
 
 // InvalidateIdentity satisfies the lifecycle coordinator's optional
 // identity-fencer contract. It runs OUTSIDE — and strictly before — the purge
-// transaction, bumping the capture generation so every fact already queued for
-// any identity is dropped rather than committed. The bump is deliberately
-// global rather than per-identity: a queued fact is not yet resolved against
-// the store, so the only way to guarantee it cannot resurrect the identity
-// being erased is to invalidate everything in flight. Erring toward dropping
-// too much is the safe direction for a privacy erasure.
+// transaction, and does TWO things, because either alone is insufficient:
+//
+//  1. It bumps the capture generation, so every fact ALREADY QUEUED (for any
+//     identity) is dropped rather than committed. The bump is deliberately
+//     global: a queued fact is not yet resolved against the store, so the only
+//     way to guarantee it cannot resurrect the identity being erased is to
+//     invalidate everything in flight. Dropping too much is the safe direction
+//     for a privacy erasure.
+//  2. It arms the identity fence, so facts produced AFTER the purge are
+//     refused too. Without this the generation bump is a one-shot: a producer
+//     still live for the erased channel would stamp its next fact with the NEW
+//     generation and re-persist exactly what was erased.
+//
+// The fence is lifted by Reinstate, mirroring the repository's own tombstone.
 func (r *SQLiteRepository) InvalidateIdentity(channelID, login string) {
 	if r.observations != nil {
 		r.observations.invalidateGeneration()
+		r.observations.fence(channelID, login)
 	}
 }
 
@@ -1659,8 +1668,27 @@ type observationCollector struct {
 	disabled atomic.Bool
 	// generation is bumped by a privacy erasure. A queued fact stamped with
 	// an older generation is dropped rather than committed, so an erased
-	// identity can never be resurrected by work already in flight.
+	// identity can never be resurrected by work ALREADY IN FLIGHT.
 	generation atomic.Uint64
+
+	// fenceMu/fenced is the identity fence, and it is what a generation bump
+	// alone cannot provide. The bump only invalidates work already queued; a
+	// producer that is STILL LIVE after the purge would otherwise stamp a
+	// fresh fact with the NEW generation and re-persist the erased channel.
+	// This mirrors the repository's own tombstone fence: an erased identity
+	// stays refused until it is explicitly reinstated.
+	//
+	// It is deliberately NOT the repository's mutex. The collector may hold a
+	// priority lease while checking the fence, and a business writer claims
+	// the gate BEFORE taking repo.mu — so a collector that blocked on repo.mu
+	// while holding a lease would deadlock against a claimer waiting for that
+	// same lease to settle. This lock is only ever held for a map lookup and
+	// never across a database call or a gate operation.
+	fenceMu sync.RWMutex
+	// fenced holds fence keys ("login:x" / "chan:y"); loginChannels remembers
+	// which channels were fenced alongside a login so Reinstate can lift both.
+	fenced        map[string]struct{}
+	loginChannels map[string][]string
 
 	// Session accounting. All are plain atomics touched by producers and the
 	// writer; none is read under a lock held by a business path.
@@ -1693,7 +1721,86 @@ func newObservationCollector(repo *SQLiteRepository, gate *txPriority, retention
 		queue:         make(chan PredictionObservation, ObservationQueueCapacity),
 		joined:        make(chan struct{}),
 		bootstrapped:  make(chan struct{}),
+		fenced:        make(map[string]struct{}),
+		loginChannels: make(map[string][]string),
 	}
+}
+
+// observationFenceKeys are the identity keys one fact is checked against. A
+// fact is refused if ANY identity it names is fenced — the routed identity or
+// the retention-group owner. round_owner is deliberately absent: it is
+// provenance, and since it never widens deletion it must not widen refusal
+// either.
+func observationFenceKeys(o PredictionObservation) []string {
+	keys := make([]string, 0, 4)
+	if o.RoutedLogin != "" {
+		keys = append(keys, "login:"+o.RoutedLogin)
+	}
+	if o.RoutedChannelID != "" {
+		keys = append(keys, "chan:"+o.RoutedChannelID)
+	}
+	if o.RetentionGroupOwnerLogin != "" {
+		keys = append(keys, "login:"+o.RetentionGroupOwnerLogin)
+	}
+	if o.RetentionGroupOwnerChannelID != "" {
+		keys = append(keys, "chan:"+o.RetentionGroupOwnerChannelID)
+	}
+	return keys
+}
+
+// fence arms the identity fence for an erased (channelID, login). Both halves
+// are fenced, and the pairing is remembered so lifting the login also lifts
+// the channel that was erased with it.
+func (c *observationCollector) fence(channelID, login string) {
+	login = canonicalObservationLogin(login)
+	channelID = boundedIdentifier(channelID)
+	if login == "" && channelID == "" {
+		return
+	}
+	c.fenceMu.Lock()
+	defer c.fenceMu.Unlock()
+	if login != "" {
+		c.fenced["login:"+login] = struct{}{}
+	}
+	if channelID != "" {
+		c.fenced["chan:"+channelID] = struct{}{}
+		if login != "" {
+			c.loginChannels[login] = append(c.loginChannels[login], channelID)
+		}
+	}
+}
+
+// unfence lifts the fence for a login and every channel erased alongside it,
+// so a re-added streamer records fresh observations again. It mirrors the
+// repository's Reinstate exactly.
+func (c *observationCollector) unfence(login string) {
+	login = canonicalObservationLogin(login)
+	if login == "" {
+		return
+	}
+	c.fenceMu.Lock()
+	defer c.fenceMu.Unlock()
+	delete(c.fenced, "login:"+login)
+	for _, ch := range c.loginChannels[login] {
+		delete(c.fenced, "chan:"+ch)
+	}
+	delete(c.loginChannels, login)
+}
+
+// isFenced reports whether any identity this fact names has been erased.
+func (c *observationCollector) isFenced(o PredictionObservation) bool {
+	keys := observationFenceKeys(o)
+	if len(keys) == 0 {
+		return false
+	}
+	c.fenceMu.RLock()
+	defer c.fenceMu.RUnlock()
+	for _, k := range keys {
+		if _, ok := c.fenced[k]; ok {
+			return true
+		}
+	}
+	return false
 }
 
 // Start launches the collector. It is NONBLOCKING: it spawns one goroutine
@@ -1797,6 +1904,13 @@ func (c *observationCollector) write(ctx context.Context, raw PredictionObservat
 		c.dropped.Add(1)
 		return
 	}
+	// The identity fence, checked BEFORE the sequence is spent. A fact naming
+	// an erased identity is refused outright — a live producer must not be
+	// able to re-persist what an operator has just erased.
+	if c.isFenced(obs) {
+		c.dropped.Add(1)
+		return
+	}
 	seq := c.sequence.Add(1)
 
 	writeCtx, cancel := context.WithTimeout(ctx, c.writeDeadline)
@@ -1808,6 +1922,16 @@ func (c *observationCollector) write(ctx context.Context, raw PredictionObservat
 		return
 	}
 	defer settle()
+
+	// Re-check AFTER the lease. Acquiring it can wait for a business writer to
+	// release the connection, and an erasure can land in exactly that window;
+	// without this re-check a fact admitted before the erasure would commit
+	// after it, which is the difference between an erasure that holds and one
+	// that only looks like it does.
+	if c.disabled.Load() || raw.generation != c.generation.Load() || c.isFenced(obs) {
+		c.dropped.Add(1)
+		return
+	}
 
 	if err := c.repo.AppendObservation(leaseCtx, obs, c.sessionID, c.epoch.Load(), seq); err != nil {
 		c.dropped.Add(1)

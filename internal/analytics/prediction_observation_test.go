@@ -1187,3 +1187,108 @@ func TestObservationErasureIsFencedAgainstQueuedFacts(t *testing.T) {
 		t.Fatalf("session after an erasure = %q, want INCOMPLETE", reading.Session.CloseState)
 	}
 }
+
+// TestObservationFenceRefusesPostErasureProduction is the regression for the
+// defect an independent review found: a generation bump alone is a ONE-SHOT.
+// It drops facts already queued, but a producer still live for the erased
+// channel stamps its NEXT fact with the new generation, so the erased identity
+// comes straight back. The identity fence is what makes an erasure hold.
+func TestObservationFenceRefusesPostErasureProduction(t *testing.T) {
+	svc, repo := newObservationService(t)
+	ctx := context.Background()
+
+	svc.RecordPredictionObservation(channelObservation("pool-1", "chan-gone", "gone", "round-1", "ROUND_CREATED"))
+	awaitCommitted(t, svc, 1)
+
+	// Erase exactly as the lifecycle coordinator does.
+	repo.InvalidateIdentity("chan-gone", "gone")
+	if err := repo.db.WithTx(ctx, func(tx *sql.Tx) error {
+		_, err := repo.EraseObservationsForIdentityTx(tx, ObservationIdentity{ChannelID: "chan-gone", Login: "gone"})
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// A producer that is STILL LIVE offers a fresh fact for the erased channel.
+	// It carries the CURRENT generation, so only the identity fence can refuse
+	// it.
+	before := svc.observations.dropped.Load()
+	svc.RecordPredictionObservation(channelObservation("pool-1", "chan-gone", "gone", "round-2", "ROUND_CREATED"))
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) && svc.observations.dropped.Load() == before {
+		time.Sleep(time.Millisecond)
+	}
+
+	left, err := repo.ObservationsBySession(ctx, svc.observations.sessionID, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(left) != 0 {
+		t.Fatalf("a live producer resurrected the erased identity after the purge: %+v", left)
+	}
+	if svc.observations.dropped.Load() == before {
+		t.Fatal("the post-erasure fact was neither written nor counted as a drop")
+	}
+
+	// A DIFFERENT identity is unaffected — the fence is identity-scoped, not a
+	// global kill switch.
+	svc.RecordPredictionObservation(channelObservation("pool-1", "chan-other", "other", "round-3", "ROUND_CREATED"))
+	awaitCommitted(t, svc, 2)
+	left, err = repo.ObservationsBySession(ctx, svc.observations.sessionID, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(left) != 1 || left[0].RoutedChannelID != "chan-other" {
+		t.Fatalf("facts = %+v, want only the unaffected identity's", left)
+	}
+}
+
+// TestObservationTombstoneFencesObservations proves the trail honours the SAME
+// resurrection barrier the rest of the analytics store does: while a login is
+// tombstoned, an observation naming it is refused, and Reinstate lifts both.
+func TestObservationTombstoneFencesObservations(t *testing.T) {
+	svc, repo := newObservationService(t)
+	ctx := context.Background()
+
+	repo.Tombstone("fenced-login")
+	before := svc.observations.dropped.Load()
+	svc.RecordPredictionObservation(channelObservation("pool-1", "chan-f", "fenced-login", "r1", "ROUND_CREATED"))
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) && svc.observations.dropped.Load() == before {
+		time.Sleep(time.Millisecond)
+	}
+	got, err := repo.ObservationsBySession(ctx, svc.observations.sessionID, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("an observation was written for a tombstoned login: %+v", got)
+	}
+
+	repo.Reinstate("fenced-login")
+	svc.RecordPredictionObservation(channelObservation("pool-1", "chan-f", "fenced-login", "r2", "ROUND_CREATED"))
+	awaitCommitted(t, svc, 1)
+	got, err = repo.ObservationsBySession(ctx, svc.observations.sessionID, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].EventID != "r2" {
+		t.Fatalf("facts after reinstate = %+v, want the one recorded afterwards", got)
+	}
+}
+
+// TestObservationUnfenceLiftsTheErasedChannelToo proves Reinstate lifts the
+// channel that was erased alongside the login, so a re-added streamer is not
+// permanently unobservable.
+func TestObservationUnfenceLiftsTheErasedChannelToo(t *testing.T) {
+	svc, repo := newObservationService(t)
+	repo.InvalidateIdentity("chan-pair", "pair-login")
+
+	if !svc.observations.isFenced(mustSanitize(t, channelObservation("pool-1", "chan-pair", "someone-else", "r", "ROUND_CREATED"))) {
+		t.Fatal("the erased CHANNEL is not fenced")
+	}
+	repo.Reinstate("pair-login")
+	if svc.observations.isFenced(mustSanitize(t, channelObservation("pool-1", "chan-pair", "pair-login", "r", "ROUND_CREATED"))) {
+		t.Fatal("Reinstate did not lift the channel erased alongside the login")
+	}
+}
