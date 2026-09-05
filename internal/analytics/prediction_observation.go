@@ -1071,6 +1071,8 @@ var predictionObservationSchemaSQL = `
 		ON prediction_observations(retention_group_owner_streamer_id, id);
 	CREATE INDEX IF NOT EXISTS idx_predobs_round
 		ON prediction_observations(round_incarnation_id, id);
+	CREATE INDEX IF NOT EXISTS idx_predobs_round_unit
+		ON prediction_observations(collector_epoch, pool_instance_id, round_incarnation_id, received_at_ms);
 	CREATE INDEX IF NOT EXISTS idx_predobs_null_round_retention
 		ON prediction_observations(received_at_ms, id)
 		WHERE round_incarnation_id IS NULL;
@@ -1504,8 +1506,9 @@ func (r *SQLiteRepository) ObservationStoreStats(ctx context.Context) (Observati
 // PruneObservationUnit removes exactly ONE bounded retention unit in ONE
 // transaction and reports how many rows it removed:
 //
-//  1. one whole eligible round (every fact sharing a round incarnation whose
-//     newest fact is older than the cutoff), or
+//  1. one whole eligible local round — every fact of one
+//     (collector_epoch, pool_instance_id, round_incarnation_id) unit whose
+//     newest fact is older than the cutoff — or
 //  2. at most observationPruneUnit NULL-round facts older than the cutoff, or
 //  3. at most observationPruneUnit finalized sessions that have no facts left.
 //
@@ -1521,31 +1524,50 @@ func (r *SQLiteRepository) ObservationStoreStats(ctx context.Context) (Observati
 func (r *SQLiteRepository) PruneObservationUnit(ctx context.Context, cutoffMS int64, activeEpoch int64) (int64, error) {
 	var removed int64
 	err := r.db.WithTx(ctx, func(tx *sql.Tx) error {
-		// (1) one whole eligible round.
-		var incarnation string
-		// The DELETE below removes a round WHOLE, by incarnation — so the
-		// active epoch has to be excluded at ROUND granularity, not row
-		// granularity. Filtering rows by `collector_epoch <> ?` here and then
-		// deleting by incarnation would take the active session's facts with
-		// it whenever a round spans a restart. Only rounds with no
-		// active-epoch fact at all are eligible.
+		// (1) one whole eligible LOCAL round.
+		//
+		// The retention unit is the compound local round
+		// (collector_epoch, pool_instance_id, round_incarnation_id), and this
+		// query GROUPS BY exactly the key the DELETE below acts on. That
+		// equality is the whole safety argument: a row this SELECT's WHERE
+		// filtered out necessarily belongs to a DIFFERENT group, so no
+		// filtered-out row can be swept up by the DELETE.
+		//
+		// Grouping on the incarnation alone did not have that property. A
+		// round that spans a collector restart — an ordinary prediction that
+		// outlives a miner restart — has facts in two epochs under one
+		// incarnation. Excluding OPEN-session rows in the WHERE clause hid the
+		// live ones from the GROUP BY, so MAX(received_at_ms) saw only the old
+		// rows and the active-epoch guard was trivially satisfied; the DELETE
+		// then removed the live facts the guard existed to protect.
+		var (
+			unitEpoch       int64
+			unitPool        string
+			unitIncarnation string
+		)
+		// collector_epoch <> activeEpoch is redundant with the OPEN filter
+		// while the active session's row is OPEN, and is kept because it stops
+		// being redundant during finalization.
 		e := tx.QueryRowContext(ctx, `
-			SELECT round_incarnation_id
+			SELECT collector_epoch, pool_instance_id, round_incarnation_id
 			  FROM prediction_observations
 			 WHERE round_incarnation_id IS NOT NULL
+			   AND collector_epoch <> ?
 			   AND collector_epoch NOT IN (
 			       SELECT collector_epoch FROM prediction_observation_sessions
 			        WHERE close_state = 'OPEN')
-			 GROUP BY round_incarnation_id
+			 GROUP BY collector_epoch, pool_instance_id, round_incarnation_id
 			HAVING MAX(received_at_ms) < ?
-			   AND SUM(CASE WHEN collector_epoch = ? THEN 1 ELSE 0 END) = 0
-			 LIMIT 1`, cutoffMS, activeEpoch).Scan(&incarnation)
+			 LIMIT 1`, activeEpoch, cutoffMS).Scan(&unitEpoch, &unitPool, &unitIncarnation)
 		if e != nil && e != sql.ErrNoRows {
 			return e
 		}
 		if e == nil {
-			res, err := tx.ExecContext(ctx,
-				`DELETE FROM prediction_observations WHERE round_incarnation_id = ?`, incarnation)
+			res, err := tx.ExecContext(ctx, `
+				DELETE FROM prediction_observations
+				 WHERE collector_epoch = ?
+				   AND pool_instance_id = ?
+				   AND round_incarnation_id = ?`, unitEpoch, unitPool, unitIncarnation)
 			if err != nil {
 				return err
 			}
@@ -1564,7 +1586,7 @@ func (r *SQLiteRepository) PruneObservationUnit(ctx context.Context, cutoffMS in
 			        AND collector_epoch NOT IN (
 			            SELECT collector_epoch FROM prediction_observation_sessions
 			             WHERE close_state = 'OPEN')
-			      ORDER BY id
+			      ORDER BY received_at_ms, id
 			      LIMIT ?)`, activeEpoch, cutoffMS, observationPruneUnit)
 		if err != nil {
 			return err

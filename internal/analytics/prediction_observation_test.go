@@ -11,6 +11,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/database"
 )
 
 // readPackageFile reads one of this package's own source files. Several
@@ -1175,6 +1177,179 @@ func TestObservationPruneSparesOpenSessionFacts(t *testing.T) {
 	}
 	if got := countRows(t, repo, `SELECT COUNT(*) FROM prediction_observations WHERE collector_epoch = ?`, crashed); got != 0 {
 		t.Fatalf("%d facts of the finalized session survived retention", got)
+	}
+}
+
+// insertObservationRow writes one fact straight through the driver, bypassing
+// the collector, so a retention test can build an exact table state.
+func insertObservationRow(t *testing.T, db *database.DB, epoch, seq int64, obsID, pool, incarnation, channel string, receivedAt int64) {
+	t.Helper()
+	var inc, ch interface{}
+	if incarnation != "" {
+		inc, ch = incarnation, channel
+	}
+	if _, err := db.Exec(`INSERT INTO prediction_observations
+		(observation_id, collector_session_id, collector_epoch, collector_sequence,
+		 pool_instance_id, round_incarnation_id, retention_group_owner_channel_id,
+		 kind, producer_time_source, received_at_ms, payload_version, payload_json, observation_sha256)
+		VALUES (?, 's', ?, ?, ?, ?, ?, ?, ?, ?, 1, '{"phase":"UNKNOWN"}', 'sha256:x')`,
+		obsID, epoch, seq, pool, inc, ch, KindChannelEvent, TimeSourceReceiver, receivedAt); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestObservationPruneSparesARoundThatSpansTheActiveSession is the real-driver
+// reproduction of an independent review's F1.
+//
+// A prediction round that outlives a miner restart is the ORDINARY case, not an
+// exotic one: the round keeps running on Twitch while the collector opens a new
+// session. Its facts therefore land in two collector epochs, and the retention
+// unit has to span both.
+//
+// The prune SELECT excluded OPEN-session rows in its WHERE clause — that is,
+// BEFORE the GROUP BY — so the active session's facts were invisible to the
+// HAVING guard that existed to protect them: MAX(received_at_ms) saw only the
+// old rows and the active-epoch SUM was trivially zero. The DELETE then removed
+// the whole incarnation, the live rows included. The guard read as if it worked
+// and did nothing.
+//
+// Every eligibility question about a round has to be asked of ALL of the round's
+// rows, because the DELETE acts on all of them.
+func TestObservationPruneSparesARoundThatSpansTheActiveSession(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "miner.db")
+	db := openPrivateDB(t, path)
+	defer func() { _ = db.Close() }()
+	repo, err := NewSQLiteRepository(db, filepath.Dir(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+
+	previous, err := repo.OpenObservationSession(ctx, "previous", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	active, err := repo.OpenObservationSession(ctx, "active", 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The round is admitted in the previous session and still live in the
+	// active one, so both epochs carry facts of the SAME retention unit.
+	const spanning = "round:spans-the-restart"
+	insertObservationRow(t, db, previous, 1, "old-1", "pool-a", spanning, "chan-a", 1_000)
+	insertObservationRow(t, db, previous, 2, "old-2", "pool-a", spanning, "chan-a", 1_500)
+	insertObservationRow(t, db, active, 1, "live-1", "pool-b", spanning, "chan-a", 20_000)
+	// A round entirely inside the finalized session, to prove the guard does
+	// not simply disable retention.
+	const finished = "round:entirely-in-the-past"
+	insertObservationRow(t, db, previous, 3, "old-3", "pool-a", finished, "chan-b", 1_200)
+
+	if applied, err := repo.FinalizeObservationSession(ctx, previous,
+		ObservationAccounting{Committed: 3}, 2_000); err != nil || !applied {
+		t.Fatalf("finalize previous session: applied=%v err=%v", applied, err)
+	}
+
+	// Drain retention completely at a cutoff that is past every old fact but
+	// well short of the live one.
+	for i := 0; i < 8; i++ {
+		n, err := repo.PruneObservationUnit(ctx, 10_000, active)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if n == 0 {
+			break
+		}
+	}
+
+	if got := countRows(t, repo,
+		`SELECT COUNT(*) FROM prediction_observations WHERE collector_epoch = ?`, active); got != 1 {
+		t.Fatalf("the active session kept %d of its 1 fact: retention deleted a live round's facts "+
+			"because they shared an incarnation with the finalized session's rows", got)
+	}
+	// The unit is the LOCAL round — (collector_epoch, pool_instance_id,
+	// round_incarnation_id) — so the previous session's slice of the same
+	// round ages out on its own. That boundary is the point: ageing one
+	// session's slice must never reach into another session's.
+	if got := countRows(t, repo,
+		`SELECT COUNT(*) FROM prediction_observations
+		  WHERE round_incarnation_id = ? AND collector_epoch = ?`, spanning, previous); got != 0 {
+		t.Fatalf("the finalized session's slice of the spanning round kept %d facts; a finalized, "+
+			"fully-elapsed slice is an ordinary retention unit", got)
+	}
+	if got := countRows(t, repo,
+		`SELECT COUNT(*) FROM prediction_observations
+		  WHERE round_incarnation_id = ? AND collector_epoch = ?`, spanning, active); got != 1 {
+		t.Fatalf("the active session's slice of the spanning round kept %d of its 1 fact", got)
+	}
+	if got := countRows(t, repo,
+		`SELECT COUNT(*) FROM prediction_observations WHERE round_incarnation_id = ?`, finished); got != 0 {
+		t.Fatalf("the fully-elapsed round kept %d facts; the guard must protect live rounds, "+
+			"not stop retention", got)
+	}
+}
+
+// TestObservationPruneSparesARoundThatSpansACrashLeftSession is the same defect
+// reached through the other protected session state. A crash-left OPEN session
+// is the only durable evidence of an unclean shutdown, and its facts are part of
+// that evidence. When such a session shares a round with a finalized one, the
+// finalized rows made the whole incarnation look eligible and the DELETE took
+// the crashed session's facts with it — leaving an OPEN session that claims
+// committed facts which are gone, which reads as corruption rather than as the
+// crash it actually was.
+func TestObservationPruneSparesARoundThatSpansACrashLeftSession(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "miner.db")
+	db := openPrivateDB(t, path)
+	defer func() { _ = db.Close() }()
+	repo, err := NewSQLiteRepository(db, filepath.Dir(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+
+	crashed, err := repo.OpenObservationSession(ctx, "crashed", 1) // never finalized
+	if err != nil {
+		t.Fatal(err)
+	}
+	finalized, err := repo.OpenObservationSession(ctx, "finalized", 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	active, err := repo.OpenObservationSession(ctx, "active", 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	const shared = "round:spans-the-crash"
+	insertObservationRow(t, db, crashed, 1, "crashed-1", "pool-a", shared, "chan-a", 1_000)
+	insertObservationRow(t, db, finalized, 1, "finalized-1", "pool-b", shared, "chan-a", 1_100)
+	insertObservationRow(t, db, active, 1, "active-1", "pool-c", "", "", 30_000)
+
+	if applied, err := repo.FinalizeObservationSession(ctx, finalized,
+		ObservationAccounting{Committed: 1}, 2_000); err != nil || !applied {
+		t.Fatalf("finalize: applied=%v err=%v", applied, err)
+	}
+
+	for i := 0; i < 8; i++ {
+		n, err := repo.PruneObservationUnit(ctx, 10_000, active)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if n == 0 {
+			break
+		}
+	}
+
+	if got := countRows(t, repo,
+		`SELECT COUNT(*) FROM prediction_observations WHERE collector_epoch = ?`, crashed); got != 1 {
+		t.Fatalf("the crash-left OPEN session kept %d of its 1 fact; its facts are the evidence of "+
+			"the unclean shutdown and are never pruned automatically", got)
+	}
+	// The finalized session's own slice is a separate unit and ages out
+	// normally; the crash-left slice is what must be untouchable.
+	if got := countRows(t, repo,
+		`SELECT COUNT(*) FROM prediction_observations
+		  WHERE round_incarnation_id = ? AND collector_epoch = ?`, shared, finalized); got != 0 {
+		t.Fatalf("the finalized session's slice kept %d facts; it is an ordinary retention unit", got)
 	}
 }
 
