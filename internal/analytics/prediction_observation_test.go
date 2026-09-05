@@ -242,23 +242,58 @@ func TestObservationDigestIsStableAndCoversContent(t *testing.T) {
 	payload, _ := marshalObservationPayload(base.Payload)
 	inc := roundIncarnationID(base)
 
-	d1 := observationDigest(base, "o:1", "s", 1, 1, inc, payload)
-	d2 := observationDigest(base, "o:1", "s", 1, 1, inc, payload)
+	digest := func(o PredictionObservation, seq int64, inc, pl string, routed, owner, retention interface{}) string {
+		return observationDigest(o, "o:1", "s", 1, seq, inc, pl, routed, owner, retention)
+	}
+
+	d1 := digest(base, 1, inc, payload, int64(7), nil, int64(7))
+	d2 := digest(base, 1, inc, payload, int64(7), nil, int64(7))
 	if d1 != d2 {
 		t.Fatal("digest is not reproducible for identical content")
 	}
 
 	changed := base
 	changed.EventID = "event-2"
-	if observationDigest(changed, "o:1", "s", 1, 1, inc, payload) == d1 {
+	if digest(changed, 1, inc, payload, int64(7), nil, int64(7)) == d1 {
 		t.Fatal("digest ignores the event identity")
 	}
 	otherPayload, _ := marshalObservationPayload(ObservationPayload{Phase: "ROUND_UPDATED"})
-	if observationDigest(base, "o:1", "s", 1, 1, inc, otherPayload) == d1 {
+	if digest(base, 1, inc, otherPayload, int64(7), nil, int64(7)) == d1 {
 		t.Fatal("digest ignores the payload")
 	}
-	if observationDigest(base, "o:1", "s", 1, 2, inc, payload) == d1 {
+	if digest(base, 2, inc, payload, int64(7), nil, int64(7)) == d1 {
 		t.Fatal("digest ignores the causal position")
+	}
+
+	// Every OTHER persisted column is covered too — the review found the
+	// digest silently omitted the resolved parent ids and the connection
+	// provenance while its comment claimed to cover every column.
+	if digest(base, 1, inc, payload, int64(8), nil, int64(7)) == d1 {
+		t.Fatal("digest ignores the resolved routed parent id")
+	}
+	if digest(base, 1, inc, payload, int64(7), int64(9), int64(7)) == d1 {
+		t.Fatal("digest ignores the resolved round-owner parent id")
+	}
+	if digest(base, 1, inc, payload, int64(7), nil, int64(8)) == d1 {
+		t.Fatal("digest ignores the resolved retention-group parent id")
+	}
+	if digest(base, 1, inc, payload, nil, nil, int64(7)) == d1 {
+		t.Fatal("digest cannot distinguish a NULL parent from a real one")
+	}
+	for _, mutate := range []func(o *PredictionObservation){
+		func(o *PredictionObservation) { o.ConnectionIndex = 99 },
+		func(o *PredictionObservation) { o.ConnectionGeneration = 99 },
+		func(o *PredictionObservation) { o.ConnectionSequence = 99 },
+		func(o *PredictionObservation) { o.ConnectionKnown = false },
+	} {
+		other := base
+		mutate(&other)
+		if digest(other, 1, inc, payload, int64(7), nil, int64(7)) == d1 {
+			t.Fatal("digest ignores a persisted connection-provenance column")
+		}
+	}
+	if digest(base, 1, "", payload, int64(7), nil, int64(7)) == d1 {
+		t.Fatal("digest ignores the round incarnation")
 	}
 }
 
@@ -338,7 +373,7 @@ func TestObservationSanitizationIsClosedAndPrivate(t *testing.T) {
 		payload,
 		out.Kind, out.SourceTopicType, out.SourceMessageType, out.ProducerTimeSource,
 		out.SourceFingerprint,
-		observationDigest(out, "o:1", "s", 1, 1, "", payload),
+		observationDigest(out, "o:1", "s", 1, 1, "", payload, nil, nil, nil),
 	}, "\x00")
 	if strings.Contains(blob, "SECRET") || strings.Contains(blob, "oauth") {
 		t.Fatalf("raw input survived into the persisted projection: %s", blob)
@@ -776,6 +811,12 @@ func TestObservationProducerRevisionIsPinned(t *testing.T) {
 		t.Fatalf("stored revision = %q, want %q", rev, ObservationProducerRevision)
 	}
 
+	// A session written under a DIFFERENT producer contract is NOT an
+	// integrity failure: its rows are exactly what that contract wrote.
+	// Treating it as one (as this originally did) would make every session
+	// unreadable the moment the revision is bumped, which destroys the whole
+	// point of an append-only trail across an upgrade. The reading stands and
+	// the caller is told which contract's invariants apply.
 	if _, err := repo.db.Exec(`UPDATE prediction_observation_sessions SET producer_revision = 'obs-v0|other' WHERE collector_epoch = ?`,
 		svc.observations.epoch.Load()); err != nil {
 		t.Fatal(err)
@@ -784,8 +825,34 @@ func TestObservationProducerRevisionIsPinned(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if reading.Reading != ReadingAsFinalized {
+		t.Fatalf("foreign-contract session reads %q, want %q", reading.Reading, ReadingAsFinalized)
+	}
+	if !strings.Contains(reading.Detail, "different observation contract") {
+		t.Fatalf("a foreign-contract session must say so; detail = %q", reading.Detail)
+	}
+	if reading.Session.ProducerRevision != "obs-v0|other" {
+		t.Fatalf("the reading lost the contract it was written under: %q", reading.Session.ProducerRevision)
+	}
+
+	// A genuinely self-contradicting row IS still an integrity error. (A
+	// negative counter cannot be used to demonstrate it — the schema's own
+	// CHECK already refuses that — so use a session claiming to have
+	// committed fewer facts than are actually present.)
+	if _, err := repo.db.Exec(`INSERT INTO prediction_observations
+		(observation_id, collector_session_id, collector_epoch, collector_sequence,
+		 pool_instance_id, kind, producer_time_source, received_at_ms,
+		 payload_version, payload_json, observation_sha256)
+		VALUES ('o-extra', ?, ?, 9999, 'pool', ?, ?, 1, 1, '{"phase":"UNKNOWN"}', 'sha256:x')`,
+		svc.observations.sessionID, svc.observations.epoch.Load(), KindChannelEvent, TimeSourceReceiver); err != nil {
+		t.Fatal(err)
+	}
+	reading, _, err = repo.ReadObservationSession(context.Background(), svc.observations.epoch.Load())
+	if err != nil {
+		t.Fatal(err)
+	}
 	if reading.Reading != ReadingIntegrityError {
-		t.Fatalf("foreign-contract session reads %q, want %q", reading.Reading, ReadingIntegrityError)
+		t.Fatalf("more facts present than committed reads %q, want %q", reading.Reading, ReadingIntegrityError)
 	}
 }
 

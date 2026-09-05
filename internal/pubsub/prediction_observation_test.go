@@ -1,8 +1,10 @@
 package pubsub
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
+	"net/url"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -535,5 +537,67 @@ func TestObservationGoldenSequence(t *testing.T) {
 	}
 	if string(actual) != string(want) {
 		t.Fatalf("observation sequence drifted from %s\n--- got ---\n%s\n--- want ---\n%s", golden, actual, want)
+	}
+}
+
+// TestUntrackedManualBetWritesNoUnreachableIdentifier is the regression for a
+// defect an independent review found: a manual bet on an untracked round
+// emitted the caller-supplied Twitch event id on facts with NO identity
+// columns at all — rows no channel-scoped privacy erasure could ever reach.
+func TestUntrackedManualBetWritesNoUnreachableIdentifier(t *testing.T) {
+	p, sink := observedPool(t, &fakePlacer{})
+	// No round is registered, so the pool cannot resolve any identity.
+	if _, err := p.PlaceManualBet("event-that-is-not-tracked", "o1", 100); err == nil {
+		t.Fatal("expected the untracked round to be refused")
+	}
+	got := sink.all()
+	if len(got) == 0 {
+		t.Fatal("an attempted manual bet on an unknown round left no trace at all")
+	}
+	for _, o := range got {
+		if o.RoutedChannelID != "" || o.RetentionGroupOwnerChannelID != "" {
+			continue // reachable by erasure: an identifier is fine
+		}
+		if o.EventID != "" {
+			t.Fatalf("a fact with no identity carries the Twitch event id %q — no erasure can reach it: %+v", o.EventID, o)
+		}
+	}
+	// The audit value survives: the attempt and its outcome are still recorded.
+	var sawRoot, sawLookup bool
+	for _, o := range got {
+		switch o.Payload.Phase {
+		case "MANUAL_DIRECT_ROOT":
+			sawRoot = true
+		case "MANUAL_POOL_LOOKUP":
+			if o.Payload.ReasonCode == "NO_ROUND" {
+				sawLookup = true
+			}
+		}
+	}
+	if !sawRoot || !sawLookup {
+		t.Fatalf("the attempt was not recorded: root=%v lookup=%v (%v)", sawRoot, sawLookup, sink.phases())
+	}
+}
+
+// TestPlacementErrorClassSeparatesTransportFromRejection proves a local or
+// network fault is not recorded as a Twitch rejection — conflating them would
+// make the trail claim Twitch refused a bet it never received.
+func TestPlacementErrorClassSeparatesTransportFromRejection(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+		want string
+	}{
+		{"context cancelled", context.Canceled, "TRANSPORT"},
+		{"deadline exceeded", context.DeadlineExceeded, "TRANSPORT"},
+		{"url error", &url.Error{Op: "Post", URL: "https://gql.twitch.tv/gql", Err: errors.New("dial tcp: timeout")}, "TRANSPORT"},
+		{"syscall error", os.NewSyscallError("connect", errors.New("connection refused")), "TRANSPORT"},
+		{"twitch rejection", errors.New("a provider rejection"), "REJECTED_BY_TWITCH"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := placementErrorClass(tc.err); got != tc.want {
+				t.Fatalf("placementErrorClass = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }

@@ -1,7 +1,9 @@
 package miner
 
 import (
+	"os"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/analytics"
@@ -191,5 +193,47 @@ func TestSetAnalyticsServiceNilClearsOwnership(t *testing.T) {
 	m.SetAnalyticsService(nil)
 	if m.externalAnalytics {
 		t.Fatal("ownership was not cleared on a second nil injection")
+	}
+}
+
+// TestObservationSinkIsAttachedAfterTheServiceExists is the regression for a
+// defect an independent review found: attachPredictionObservations ran BEFORE
+// the block that builds a self-owned analytics service, so on that path the
+// pool kept a nil sink and P1 was silently inert for the life of the process.
+//
+// It is asserted against setupComponents' source because the ordering is the
+// whole defect — a runtime assertion would need a fully wired miner, and the
+// bug is precisely that the wiring order was wrong.
+func TestObservationSinkIsAttachedAfterTheServiceExists(t *testing.T) {
+	src, err := os.ReadFile("miner.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := string(src)
+	start := strings.Index(body, "func (m *Miner) setupComponents(")
+	if start < 0 {
+		t.Fatal("setupComponents not found")
+	}
+	end := strings.Index(body[start:], "\n}\n")
+	if end < 0 {
+		t.Fatal("could not bound setupComponents")
+	}
+	fn := body[start : start+end]
+
+	buildAt := strings.Index(fn, "analytics.NewService(")
+	attachAt := strings.Index(fn, "m.attachPredictionObservations()")
+	if buildAt < 0 || attachAt < 0 {
+		t.Fatalf("expected both the analytics build and the sink attach in setupComponents (build=%d attach=%d)", buildAt, attachAt)
+	}
+	if attachAt < buildAt {
+		t.Fatal("the observation sink is attached BEFORE the analytics service is built; on the self-owned path the pool would keep a nil sink and capture would be silently inert")
+	}
+	if strings.Count(fn, "m.attachPredictionObservations()") != 1 {
+		t.Fatal("the sink must be attached exactly once, after both ownership paths have settled")
+	}
+	// A self-owned service has no App lifecycle step, so the miner must start
+	// it itself or the collector never bootstraps.
+	if !strings.Contains(fn, "svc.Start()") {
+		t.Fatal("a self-owned analytics service is never started; its observation collector would never bootstrap")
 	}
 }

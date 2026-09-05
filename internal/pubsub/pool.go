@@ -1529,11 +1529,21 @@ func (p *WebSocketPool) placeManualBet(eventID, outcomeID string, amount int, ro
 	if event != nil && event.Streamer != nil {
 		obsLogin, obsChannel = event.Streamer.GetUsername(), event.Streamer.ChannelID
 	}
-	p.observeManualPhase(eventID, obsChannel, obsLogin, root, "OK",
+	// An UNTRACKED round yields no identity at all. Recording the caller's
+	// event id on such a fact would write a Twitch identifier onto a row with
+	// no channel and no login — a row no channel-scoped privacy erasure could
+	// ever reach. The action is still recorded (that a manual bet was
+	// attempted, and that the round was unknown, is exactly the audit value
+	// here); only the unreachable identifier is withheld.
+	obsEventID := eventID
+	if obsChannel == "" {
+		obsEventID = ""
+	}
+	p.observeManualPhase(obsEventID, obsChannel, obsLogin, root, "OK",
 		map[string]int64{"stake": int64(amount)})
 
 	if event == nil || rc == nil {
-		p.observeManualPhase(eventID, obsChannel, obsLogin, "MANUAL_POOL_LOOKUP", "NO_ROUND", nil)
+		p.observeManualPhase(obsEventID, obsChannel, obsLogin, "MANUAL_POOL_LOOKUP", "NO_ROUND", nil)
 		return "", ErrPredictionNotFound
 	}
 	p.observeManualPhase(eventID, obsChannel, obsLogin, "MANUAL_POOL_LOOKUP", "OK", nil)

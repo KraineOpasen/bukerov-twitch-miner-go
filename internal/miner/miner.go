@@ -831,10 +831,6 @@ func (m *Miner) setupComponents(ctx context.Context) {
 	if m.analyticsSvc != nil {
 		m.wsPool.SetBetResultHandler(m.recordBetResult)
 	}
-	// Wire the immutable Prediction observation sink. A no-op when analytics
-	// is disabled, in which case every observation call site in pubsub stays
-	// a no-op too.
-	m.attachPredictionObservations()
 
 	// Registered AFTER m.wsPool is assigned (SetRotationCallback's mutex
 	// gives the flight goroutines a happens-before edge to that write, so the
@@ -866,6 +862,14 @@ func (m *Miner) setupComponents(ctx context.Context) {
 				slog.Error("Failed to create analytics service", "error", err)
 			} else {
 				m.analyticsSvc = svc
+				// A self-owned service has no App lifecycle step to start it,
+				// so the miner starts it here. Start is nonblocking and never
+				// fails runtime startup; without it the immutable Prediction
+				// observation collector never bootstraps and every observation
+				// is silently dropped.
+				if serr := svc.Start(); serr != nil {
+					slog.Error("Failed to start analytics service", "error", serr)
+				}
 			}
 
 			m.webServer = web.NewServer(
@@ -886,6 +890,13 @@ func (m *Miner) setupComponents(ctx context.Context) {
 			}
 		}
 	}
+
+	// Wire the immutable Prediction observation sink AFTER the analytics
+	// service exists. Attaching before it is built leaves capture silently
+	// inert on the self-owned path — the pool keeps a nil sink and every
+	// observation call site stays a no-op for the life of the process. A
+	// no-op is still the correct outcome when analytics is disabled.
+	m.attachPredictionObservations()
 
 	m.initNotificationManager(ctx)
 

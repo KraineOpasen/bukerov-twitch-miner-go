@@ -20,9 +20,13 @@ package pubsub
 //     hand-off.
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
+	"net"
+	"net/url"
+	"os"
 	"time"
 )
 
@@ -440,9 +444,26 @@ func placementErrorClass(err error) string {
 		return "INVALID_ARGUMENT"
 	case errors.Is(err, ErrInsufficientPoints):
 		return "NOT_ENOUGH_POINTS"
-	default:
-		return "REJECTED_BY_TWITCH"
+	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
+		return "TRANSPORT"
 	}
+	// Classify what remains by TYPE, never by text — a message can carry a
+	// provider string, a URL or a transaction id. A transport failure is a
+	// local/network fault and must not read as a Twitch rejection: conflating
+	// them would make the trail claim Twitch refused a bet it never received.
+	var netErr net.Error
+	if errors.As(err, &netErr) {
+		return "TRANSPORT"
+	}
+	var urlErr *url.Error
+	if errors.As(err, &urlErr) {
+		return "TRANSPORT"
+	}
+	var syscallErr *os.SyscallError
+	if errors.As(err, &syscallErr) {
+		return "TRANSPORT"
+	}
+	return "REJECTED_BY_TWITCH"
 }
 
 // observeManualPhase records one phase of an operator-initiated placement.

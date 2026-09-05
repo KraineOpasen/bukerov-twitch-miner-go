@@ -726,7 +726,7 @@ func marshalObservationPayload(p ObservationPayload) (string, bool) {
 // observationDigest is the content hash of one stored fact: a canonical digest
 // over every persisted column except the digest itself. It lets a reader prove
 // a row was not altered after it was written.
-func observationDigest(o PredictionObservation, observationID, sessionID string, epoch, seq int64, incarnation, payloadJSON string) string {
+func observationDigest(o PredictionObservation, observationID, sessionID string, epoch, seq int64, incarnation, payloadJSON string, routedID, ownerID, retentionID interface{}) string {
 	h := sha256.New()
 	write := func(parts ...string) {
 		for _, p := range parts {
@@ -753,10 +753,37 @@ func observationDigest(o PredictionObservation, observationID, sessionID string,
 		fmt.Sprintf("%d", o.ProducerAtMS),
 		o.ProducerTimeSource,
 		fmt.Sprintf("%d", o.ReceivedAtMS),
+		// The resolved parent ids and the connection provenance are persisted
+		// columns too, so the digest covers them: a witness that omitted them
+		// could not detect a row whose parent or provenance had been altered.
+		observationNullableDigestPart(routedID),
+		observationNullableDigestPart(ownerID),
+		observationNullableDigestPart(retentionID),
+		observationConnectionDigestPart(o.ConnectionKnown, int64(o.ConnectionIndex)),
+		observationConnectionDigestPart(o.ConnectionKnown, int64(o.ConnectionGeneration)),
+		observationConnectionDigestPart(o.ConnectionKnown, int64(o.ConnectionSequence)),
 		fmt.Sprintf("%d", ObservationPayloadVersion),
 		payloadJSON,
 	)
 	return "sha256:" + hex.EncodeToString(h.Sum(nil))
+}
+
+// observationNullableDigestPart renders a nullable parent id for the digest,
+// distinguishing SQL NULL from any real id.
+func observationNullableDigestPart(v interface{}) string {
+	if v == nil {
+		return "\x00NULL"
+	}
+	return fmt.Sprintf("%v", v)
+}
+
+// observationConnectionDigestPart renders a connection provenance column for
+// the digest, distinguishing "no connection" from any real value.
+func observationConnectionDigestPart(known bool, v int64) string {
+	if !known {
+		return "\x00NULL"
+	}
+	return fmt.Sprintf("%d", v)
 }
 
 // newCollectorSessionID mints a random, non-identifying session identifier.
@@ -1127,7 +1154,6 @@ func (r *SQLiteRepository) AppendObservation(ctx context.Context, o PredictionOb
 	}
 	incarnation := roundIncarnationID(o)
 	observationID := fmt.Sprintf("%s:%d", sessionID, seq)
-	digest := observationDigest(o, observationID, sessionID, epoch, seq, incarnation, payloadJSON)
 
 	return r.db.WithTx(ctx, func(tx *sql.Tx) error {
 		routedID, err := observationParentID(ctx, tx, o.RoutedLogin, o.RoutedChannelID)
@@ -1142,6 +1168,10 @@ func (r *SQLiteRepository) AppendObservation(ctx context.Context, o PredictionOb
 		if err != nil {
 			return err
 		}
+		// Computed HERE, after the parents are resolved, so the witness covers
+		// the ids actually stored rather than the ones the producer guessed.
+		digest := observationDigest(o, observationID, sessionID, epoch, seq, incarnation, payloadJSON,
+			routedID, ownerID, retentionID)
 		_, err = tx.ExecContext(ctx, `
 			INSERT INTO prediction_observations
 				(observation_id, collector_session_id, collector_epoch, collector_sequence,
@@ -1350,10 +1380,6 @@ func classifyObservationSession(s ObservationSessionRecord, factsPresent int64) 
 		out.Reading = ReadingIntegrityError
 		out.Detail = "negative session counter"
 		return out
-	case s.ProducerRevision != ObservationProducerRevision:
-		out.Reading = ReadingIntegrityError
-		out.Detail = "session was produced under a different observation contract"
-		return out
 	case factsPresent > s.CommittedCount:
 		out.Reading = ReadingIntegrityError
 		out.Detail = "more facts are present than the session committed"
@@ -1366,6 +1392,15 @@ func classifyObservationSession(s ObservationSessionRecord, factsPresent int64) 
 		out.Reading = ReadingAsFinalized
 		if s.CloseState == SessionIncomplete {
 			out.Detail = "every committed fact is present, but the session itself did not observe everything it was offered"
+		}
+		// A session written under a DIFFERENT producer contract is not an
+		// integrity failure — its rows are exactly what that contract wrote.
+		// Classifying it as one would make every session unreadable the
+		// moment the revision is bumped, destroying the trail's whole value
+		// across an upgrade. The reading stands; the caller is told which
+		// contract's invariants apply.
+		if s.ProducerRevision != ObservationProducerRevision {
+			out.Detail = "session was produced under a different observation contract: read its facts under that contract's invariants"
 		}
 		return out
 	}
