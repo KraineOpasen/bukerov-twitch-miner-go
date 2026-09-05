@@ -2718,3 +2718,76 @@ func TestQuotaRecountSurvivesARestart(t *testing.T) {
 		t.Fatalf("after a restart the identity's usage is %d bytes, want %d", got.Bytes, firstRun.Bytes)
 	}
 }
+
+// TestAnEpisodeStillRunningAtTheFenceIsLatched proves what
+// unsettled_obligation_count now means: the producer episodes that were alive
+// when the collector closed.
+//
+// It used to be the queue length plus the in-flight count at the drain
+// timeout, which is a different thing entirely -- those facts are drops, and
+// they are now counted as such. The number a session finalizes with is taken
+// AT the fence transition: reading it afterwards would race a settle and
+// under-report, reading it before would race a registration and over-report.
+func TestAnEpisodeStillRunningAtTheFenceIsLatched(t *testing.T) {
+	svc, repo := newObservationService(t)
+	c := svc.observations
+
+	// A producer episode that is still running when the collector closes --
+	// a scheduled auto-bet whose timer has not fired yet.
+	settle := svc.BeginPredictionProducerEpisode()
+	svc.RecordPredictionObservation(channelObservation("pool-1", "chan-a", "s", "e1", "ROUND_CREATED"))
+	awaitCommitted(t, svc, 1)
+
+	c.Close()
+
+	reading, _, err := repo.ReadObservationSession(context.Background(), c.epoch.Load())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reading.Session.UnsettledObligationCount != 1 {
+		t.Fatalf("unsettled obligations = %d, want 1: a producer was still running when the "+
+			"collector closed", reading.Session.UnsettledObligationCount)
+	}
+	if reading.Session.CloseState != SessionIncomplete {
+		t.Fatalf("close state = %q, want %q: a session cannot claim to have observed everything "+
+			"while one of its producers was still running",
+			reading.Session.CloseState, SessionIncomplete)
+	}
+
+	// Settling afterwards cannot retroactively make the session whole.
+	settle()
+	if c.unsettledObligations.Load() != 1 {
+		t.Fatal("a settle after the fence reduced the latched count")
+	}
+}
+
+// TestASettledEpisodeLeavesTheSessionWhole is the other side: an episode that
+// finished before the fence is not an obligation, so an undisturbed run still
+// finalizes COMPLETE. Without this the counter would make every session with a
+// scheduled timer permanently incomplete, which would drain it of meaning.
+func TestASettledEpisodeLeavesTheSessionWhole(t *testing.T) {
+	svc, repo := newObservationService(t)
+	c := svc.observations
+
+	settle := svc.BeginPredictionProducerEpisode()
+	svc.RecordPredictionObservation(channelObservation("pool-1", "chan-a", "s", "e1", "ROUND_CREATED"))
+	awaitCommitted(t, svc, 1)
+	settle()
+	settle() // idempotent: a double settle must not invent a negative count
+
+	c.Close()
+
+	reading, _, err := repo.ReadObservationSession(context.Background(), c.epoch.Load())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reading.Session.UnsettledObligationCount != 0 {
+		t.Fatalf("unsettled obligations = %d, want 0", reading.Session.UnsettledObligationCount)
+	}
+	if reading.Session.CloseState != SessionComplete {
+		t.Fatalf("close state = %q, want %q", reading.Session.CloseState, SessionComplete)
+	}
+	if reading.Reading != ReadingAsFinalized {
+		t.Fatalf("reading = %q (%s)", reading.Reading, reading.Detail)
+	}
+}

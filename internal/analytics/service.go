@@ -128,6 +128,25 @@ func (s *Service) InvalidatePredictionObservationIdentity() {
 	s.observations.invalidateGeneration()
 }
 
+// BeginPredictionProducerEpisode registers one producer episode and returns
+// the function that settles it.
+//
+// It is what makes "the pool closed cleanly" mean "no producer of this pool is
+// still running". Closing a pool joins its connections, but a scheduled
+// auto-bet or cleanup is a producer sleeping on a timer that Close neither
+// cancels nor waits for. An episode still unsettled when the collector's
+// shutdown fence goes up is latched into the session's unsettled-obligation
+// count, and a session with one cannot be COMPLETE.
+//
+// A nil service, or a collector that never started, returns a settle function
+// that does nothing — a producer must never have to know which.
+func (s *Service) BeginPredictionProducerEpisode() func() {
+	if s == nil || s.observations == nil {
+		return func() {}
+	}
+	return s.observations.beginEpisode()
+}
+
 // NotePredictionProducerShutdownUncertain records that a producer could not
 // prove it had stopped offering facts (the PubSub pool's Close returned a
 // non-nil result, so a late producer may still exist). It forces the

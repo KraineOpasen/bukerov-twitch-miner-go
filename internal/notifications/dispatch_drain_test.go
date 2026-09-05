@@ -37,10 +37,10 @@ func newBlockingDiscord() *blockingDiscord {
 	}
 }
 
-func (b *blockingDiscord) Connect(context.Context) error   { return nil }
-func (b *blockingDiscord) Disconnect() error               { return nil }
-func (b *blockingDiscord) UpdateConfig(_, _ string)        {}
-func (b *blockingDiscord) IsConnected() bool               { return true }
+func (b *blockingDiscord) Connect(context.Context) error { return nil }
+func (b *blockingDiscord) Disconnect() error             { return nil }
+func (b *blockingDiscord) UpdateConfig(_, _ string)      {}
+func (b *blockingDiscord) IsConnected() bool             { return true }
 func (b *blockingDiscord) GetChannels(context.Context, bool) ([]Channel, error) {
 	return nil, nil
 }

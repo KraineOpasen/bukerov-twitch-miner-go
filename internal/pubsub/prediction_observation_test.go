@@ -20,9 +20,11 @@ import (
 // nonblocking and lock-cheap, exactly as the sink contract requires: a sink
 // that blocked here would deadlock the producer paths it is called from.
 type recordingSink struct {
-	mu   sync.Mutex
-	got  []PredictionObservation
-	hook func(PredictionObservation)
+	mu      sync.Mutex
+	got     []PredictionObservation
+	hook    func(PredictionObservation)
+	begun   int64
+	settled int64
 }
 
 func (r *recordingSink) RecordPredictionObservation(obs PredictionObservation) {
@@ -33,6 +35,28 @@ func (r *recordingSink) RecordPredictionObservation(obs PredictionObservation) {
 	if hook != nil {
 		hook(obs)
 	}
+}
+
+func (r *recordingSink) BeginPredictionProducerEpisode() func() {
+	r.mu.Lock()
+	r.begun++
+	r.mu.Unlock()
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			r.mu.Lock()
+			r.settled++
+			r.mu.Unlock()
+		})
+	}
+}
+
+// episodes reports how many producer episodes were registered and how many
+// have settled.
+func (r *recordingSink) episodes() (begun, settled int64) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.begun, r.settled
 }
 
 func (r *recordingSink) all() []PredictionObservation {
@@ -1037,6 +1061,67 @@ func TestProducerTimeIsNotClaimedForAReceiverClockReading(t *testing.T) {
 		if o.ProducerAtMS != 0 {
 			t.Fatalf("producer time = %d, want none: this process's own clock reading is not a "+
 				"time the producer stated", o.ProducerAtMS)
+		}
+	})
+}
+
+// TestFireAndForgetTimersRegisterAProducerEpisode proves the two producers the
+// pool's own Close cannot join are visible to the collector's shutdown fence.
+//
+// wsPool.Close joins the pool's CONNECTIONS. A scheduled auto-bet and a
+// scheduled cleanup are producers of their own, sleeping on timers that Close
+// neither cancels nor waits for, so a nil result from it proved nothing about
+// them. One could fire after the collector had finalized a session as
+// COMPLETE, and that session's claim to have observed everything would simply
+// be false.
+func TestFireAndForgetTimersRegisterAProducerEpisode(t *testing.T) {
+	t.Run("the cleanup timer", func(t *testing.T) {
+		p, sink := observedPool(t, &fakePlacer{})
+		admitRound(p, newTestStreamer(1000), "e1")
+
+		begun, settled := sink.episodes()
+		if begun != 0 || settled != 0 {
+			t.Fatalf("episodes before scheduling = %d/%d, want 0/0", begun, settled)
+		}
+		p.scheduleCleanup("e1", time.Millisecond)
+		// Registered BEFORE the goroutine starts, so the fence can never miss
+		// a timer that has been scheduled but not yet begun running.
+		if begun, _ = sink.episodes(); begun != 1 {
+			t.Fatalf("scheduling a cleanup registered %d episodes, want 1", begun)
+		}
+
+		deadline := time.Now().Add(5 * time.Second)
+		for time.Now().Before(deadline) {
+			if _, settled = sink.episodes(); settled == 1 {
+				break
+			}
+			time.Sleep(time.Millisecond)
+		}
+		if settled != 1 {
+			t.Fatal("the cleanup timer never settled its episode; the collector would report an " +
+				"obligation it could not settle for the life of the session")
+		}
+	})
+
+	t.Run("the auto-bet timer", func(t *testing.T) {
+		p, sink := observedPool(t, &fakePlacer{})
+		s := newTestStreamer(100000)
+		p.streamers = []*models.Streamer{s}
+		p.handlePredictionChannel(&PubSubMessage{
+			Topic: NewTopic(TopicPredictionsChannel, "chan-1"), Type: "event-created",
+			ChannelID: "chan-1",
+			Data: map[string]interface{}{"event": map[string]interface{}{
+				"id": "auto-episode", "status": "ACTIVE", "created_at": time.Now().Format(time.RFC3339),
+				"prediction_window_seconds": float64(600),
+				"outcomes": []interface{}{
+					map[string]interface{}{"id": "o1", "color": "BLUE", "total_points": float64(10)},
+					map[string]interface{}{"id": "o2", "color": "PINK", "total_points": float64(20)},
+				},
+			}},
+		}, s)
+
+		if begun, _ := sink.episodes(); begun != 1 {
+			t.Fatalf("an accepted schedule registered %d episodes, want 1 for its auto-bet timer", begun)
 		}
 	})
 }

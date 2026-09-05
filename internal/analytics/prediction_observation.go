@@ -2364,6 +2364,14 @@ type observationCollector struct {
 	// inFlight counts facts the writer has taken off the queue but not yet
 	// settled, so a drain can tell "queue empty" from "actually finished".
 	inFlight atomic.Int64
+	// activeEpisodes counts producer episodes registered and not yet settled:
+	// the fire-and-forget timers whose goroutines the pool's own Close does
+	// not join. The count is LATCHED by the transition into CLOSING, so an
+	// episode that settles afterwards never reduces the number the session
+	// finalizes with, and one that was still running is permanently visible
+	// as an obligation the collector could not settle.
+	activeEpisodes atomic.Int64
+
 	// preIntakeLosses counts facts offered while capture was not running —
 	// before bootstrap published intake, or after it was disabled. They took
 	// no causal position, so they cannot be counted as drops without breaking
@@ -2536,6 +2544,17 @@ func (c *observationCollector) capturing() bool { return c.phase.Load() == phase
 // producer was alive — from one that simply arrived before intake opened.
 func (c *observationCollector) tearingDown() bool { return c.phase.Load() >= phaseClosing }
 
+// beginEpisode registers one producer episode. The settle function is
+// idempotent: a producer that settles twice must not make the collector
+// believe an episode that was running had never existed.
+func (c *observationCollector) beginEpisode() func() {
+	c.activeEpisodes.Add(1)
+	var once sync.Once
+	return func() {
+		once.Do(func() { c.activeEpisodes.Add(-1) })
+	}
+}
+
 // publishRunning is the bootstrap's ONE transition into RUNNING: a move OUT of
 // STARTING, never a store.
 //
@@ -2558,6 +2577,14 @@ func (c *observationCollector) fencePhase() int32 {
 			return was
 		}
 		if c.phase.CompareAndSwap(was, phaseClosing) {
+			// Latch the producer episodes that were still running AT the
+			// fence. Reading it after the transition would race a settle and
+			// under-report; reading it before would race a registration and
+			// over-report. Taken here it is exactly the set of producers the
+			// collector closed underneath.
+			if n := c.activeEpisodes.Load(); n > 0 {
+				c.unsettledObligations.Add(n)
+			}
 			return was
 		}
 	}
@@ -3086,7 +3113,11 @@ func (c *observationCollector) drain(grace time.Duration) {
 		}
 		select {
 		case <-deadline.C:
-			c.unsettledObligations.Add(int64(len(c.queue)) + c.inFlight.Load())
+			// Nothing is counted here. What is still queued is counted as a
+			// DROP after the join (it reserved a position and will never be
+			// written), and what is in flight drops itself when its statement
+			// is cancelled. The obligation count means one thing only: the
+			// producer episodes that were alive at the fence.
 			return
 		case <-tick.C:
 		}

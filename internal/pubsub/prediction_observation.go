@@ -132,6 +132,22 @@ type PredictionObservation struct {
 // has nothing it may legitimately do about one.
 type PredictionObservationSink interface {
 	RecordPredictionObservation(PredictionObservation)
+
+	// BeginPredictionProducerEpisode registers that a producer episode is
+	// about to run, and returns the function that settles it.
+	//
+	// It exists for the fire-and-forget timers. Closing the pool joins its
+	// connections, so a nil result proves no CONNECTION is still delivering —
+	// but a scheduled auto-bet or cleanup is a producer of its own, sleeping
+	// on a timer that Close neither cancels nor waits for. Without an episode
+	// registered before the goroutine starts, such a timer could fire after
+	// the collector had finalized a session as COMPLETE, and the session's
+	// claim to have observed everything would be false.
+	//
+	// CONTRACT, same as the record call: it must not block, allocate on the
+	// shared connection, or do I/O. Register before the goroutine starts and
+	// settle only after its last capture attempt returns.
+	BeginPredictionProducerEpisode() func()
 }
 
 // newPoolInstanceID mints the identity of one pool instance. Random and
@@ -215,6 +231,17 @@ func (p *WebSocketPool) observe(obs PredictionObservation) {
 		obs.ProducerTimeSource = ObsTimeReceiver
 	}
 	(*sinkPtr).RecordPredictionObservation(obs)
+}
+
+// beginEpisode registers a producer episode with the sink, if one is wired.
+// The returned settle function is always safe to call and is a no-op when
+// nothing is observing.
+func (p *WebSocketPool) beginEpisode() func() {
+	sinkPtr := p.observationSink.Load()
+	if sinkPtr == nil || *sinkPtr == nil {
+		return func() {}
+	}
+	return (*sinkPtr).BeginPredictionProducerEpisode()
 }
 
 // observing reports whether a sink is wired, so a call site can skip building

@@ -30,6 +30,16 @@ func (s predictionObservationSink) RecordPredictionObservation(obs pubsub.Predic
 	s.svc.RecordPredictionObservation(toAnalyticsObservation(obs))
 }
 
+// BeginPredictionProducerEpisode forwards a producer episode registration to
+// the collector. Like the record call it is a pure hand-off: two atomics and
+// no allocation on the shared connection.
+func (s predictionObservationSink) BeginPredictionProducerEpisode() func() {
+	if s.svc == nil {
+		return func() {}
+	}
+	return s.svc.BeginPredictionProducerEpisode()
+}
+
 // toAnalyticsObservation is the field-for-field translation. Every field of
 // the producer's type has exactly one destination, and the store's sanitizer
 // is what finally decides which values are admissible — this function

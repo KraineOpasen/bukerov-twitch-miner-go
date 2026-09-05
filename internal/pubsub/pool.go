@@ -1153,7 +1153,14 @@ func (p *WebSocketPool) handlePredictionChannel(msg *PubSubMessage, streamer *mo
 			"SCHEDULE_ACCEPTED", "PLACE", "OK",
 			map[string]int64{"closingBetAfterSeconds": int64(closingBetAfter)})
 
+		// The timer is a producer episode of its own: the pool's Close joins
+		// its connections, not this goroutine. Registering BEFORE it starts
+		// is what lets the collector's shutdown fence see that a producer was
+		// still alive; settling after placeAutoBet returns is what lets an
+		// undisturbed run finalize as complete.
+		settleEpisode := p.beginEpisode()
 		go func() {
+			defer settleEpisode()
 			time.Sleep(time.Duration(closingBetAfter) * time.Second)
 			p.placeAutoBet(eventID)
 		}()
@@ -1757,7 +1764,9 @@ func (p *WebSocketPool) scheduleCleanup(eventID string, after time.Duration) {
 	p.mu.RUnlock()
 	p.observeRoundCleanup(eventID, channelID, login, incarnation, "CLEANUP_SCHEDULED", "OK")
 
+	settleEpisode := p.beginEpisode()
 	go func() {
+		defer settleEpisode()
 		time.Sleep(after)
 		p.removePrediction(eventID)
 	}()
