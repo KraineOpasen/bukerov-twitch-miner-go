@@ -2491,6 +2491,7 @@ type observationCollector struct {
 	// or a gigabyte of payload in a test is not feasible, and a ceiling whose
 	// enforcement has never been executed is a comment.
 	maxStoreRows, maxStoreBytes, maxStoreSessions int64
+	maxSessionRows, maxSessionBytes               int64
 
 	// erasedAt records, per fence key, the causal position this session had
 	// reached when that identity was last erased — and unlike the fence it is
@@ -2558,6 +2559,8 @@ func newObservationCollector(repo *SQLiteRepository, gate *txPriority, retention
 		maxStoreRows:        MaxStoreRows,
 		maxStoreBytes:       MaxStoreBytes,
 		maxStoreSessions:    MaxStoreSessions,
+		maxSessionRows:      MaxSessionRows,
+		maxSessionBytes:     MaxSessionBytes,
 	}
 }
 
@@ -2981,7 +2984,7 @@ func (c *observationCollector) write(ctx context.Context, raw PredictionObservat
 // check costs nothing on the write path — which is why they can be enforced
 // per fact rather than merely documented.
 func (c *observationCollector) withinSessionBounds() bool {
-	return c.committed.Load() < MaxSessionRows && c.sessionBytes.Load() < MaxSessionBytes
+	return c.committed.Load() < c.maxSessionRows && c.sessionBytes.Load() < c.maxSessionBytes
 }
 
 // payloadJSONOf renders a fact's payload for accounting. It is the same

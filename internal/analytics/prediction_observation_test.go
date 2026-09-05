@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -2914,4 +2915,142 @@ func TestStoreKeepsEveryPresenceState(t *testing.T) {
 	if out.Presence["outcomes"] != ValueUnknown {
 		t.Fatalf("unrecognized presence became %q, want %q", out.Presence["outcomes"], ValueUnknown)
 	}
+}
+
+// TestEveryFrozenCeilingIsCheckedAtItsLimit gives each ceiling the acceptance
+// item's limit / limit+1 pair, on the arithmetic that actually admits a fact.
+//
+// Every one of these is a number that no test could ever reach by writing real
+// rows -- 262,144 rows, a gigabyte of payload -- so a ceiling asserted only by
+// reading the constant is a ceiling nobody has ever executed. These drive the
+// admission itself.
+func TestEveryFrozenCeilingIsCheckedAtItsLimit(t *testing.T) {
+	const payload = int64(100)
+	for _, tc := range []struct {
+		name string
+		// seed puts the ledger exactly ONE fact below the ceiling.
+		seed  func(*observationQuotaLedger)
+		keys  []string
+		round string
+		// identityBreach says whether the refusal is one that stops capture.
+		identityBreach bool
+	}{
+		{
+			name:  "round rows",
+			seed:  func(l *observationQuotaLedger) { l.rounds["r"] = observationUsage{Rows: MaxRoundRows - 1} },
+			round: "r",
+		},
+		{
+			name:  "round bytes",
+			seed:  func(l *observationQuotaLedger) { l.rounds["r"] = observationUsage{Bytes: MaxRoundBytes - payload} },
+			round: "r",
+		},
+		{
+			name: "deletion key rows",
+			seed: func(l *observationQuotaLedger) {
+				l.deletionKeys["k"] = observationUsage{Rows: MaxDeletionIdentityRows - 1}
+			},
+			keys:           []string{"k"},
+			identityBreach: true,
+		},
+		{
+			name: "deletion key bytes",
+			seed: func(l *observationQuotaLedger) {
+				l.deletionKeys["k"] = observationUsage{Bytes: MaxDeletionIdentityBytes - payload}
+			},
+			keys:           []string{"k"},
+			identityBreach: true,
+		},
+		{
+			name:           "store rows",
+			seed:           func(l *observationQuotaLedger) { l.store = observationUsage{Rows: MaxStoreRows - 1} },
+			identityBreach: true,
+		},
+		{
+			name:           "store bytes",
+			seed:           func(l *observationQuotaLedger) { l.store = observationUsage{Bytes: MaxStoreBytes - payload} },
+			identityBreach: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			l := newObservationQuotaLedger()
+			tc.seed(l)
+
+			// AT the limit: admitted, and the charge lands exactly on it.
+			ok, _ := l.admit(tc.keys, tc.round, payload)
+			if !ok {
+				t.Fatalf("the fact that reaches the %s ceiling exactly was refused", tc.name)
+			}
+			l.charge(tc.keys, tc.round, payload)
+
+			// One past it: refused, and refused for the right reason.
+			ok, identity := l.admit(tc.keys, tc.round, payload)
+			if ok {
+				t.Fatalf("a fact one past the %s ceiling was admitted", tc.name)
+			}
+			if identity != tc.identityBreach {
+				t.Fatalf("%s breach reported identityBreach=%v, want %v; only an identity ceiling "+
+					"stops capture for the rest of the process", tc.name, identity, tc.identityBreach)
+			}
+		})
+	}
+
+	t.Run("distinct deletion keys", func(t *testing.T) {
+		l := newObservationQuotaLedger()
+		// One short of the ceiling: a NEW key is still admitted.
+		for i := 0; i < MaxStoreDeletionKeys-1; i++ {
+			l.deletionKeys[strconv.Itoa(i)] = observationUsage{Rows: 1}
+		}
+		if ok, _ := l.admit([]string{"fresh"}, "", payload); !ok {
+			t.Fatal("a new deletion key one short of the ceiling was refused")
+		}
+		l.charge([]string{"fresh"}, "", payload)
+
+		// At it: a new key is refused, but an EXISTING one still is not --
+		// the ceiling counts separately erasable identities, not rows.
+		if ok, identity := l.admit([]string{"another"}, "", payload); ok || !identity {
+			t.Fatalf("a new key past the ceiling was admitted (ok=%v identity=%v)", ok, identity)
+		}
+		if ok, _ := l.admit([]string{"fresh"}, "", payload); !ok {
+			t.Fatal("an existing key was refused by the distinct-key ceiling; it bounds how many " +
+				"identities exist, not how many rows they hold")
+		}
+	})
+}
+
+// TestSessionCeilingsStopCommittingAtTheirLimit covers the two per-session
+// ceilings end to end, at the limit and one past it.
+func TestSessionCeilingsStopCommittingAtTheLimit(t *testing.T) {
+	t.Run("rows", func(t *testing.T) {
+		svc, repo := newObservationService(t)
+		svc.observations.maxSessionRows = 2
+
+		for i := 0; i < 3; i++ {
+			svc.RecordPredictionObservation(
+				channelObservation("pool-1", "chan-a", "s", "e"+itoa(int64(i)), "ROUND_CREATED"))
+		}
+		awaitDropped(t, svc, 1)
+		if got := svc.observations.committed.Load(); got != 2 {
+			t.Fatalf("committed %d facts, want exactly the %d-row ceiling", got, 2)
+		}
+		if n := countRows(t, repo, `SELECT COUNT(*) FROM prediction_observations`); n != 2 {
+			t.Fatalf("the store holds %d facts, want 2", n)
+		}
+	})
+
+	t.Run("bytes", func(t *testing.T) {
+		svc, _ := newObservationService(t)
+		// One ordinary payload is ~47 bytes, so a ceiling of 1 admits the
+		// first fact (the tally starts empty) and refuses everything after.
+		svc.observations.maxSessionBytes = 1
+
+		for i := 0; i < 3; i++ {
+			svc.RecordPredictionObservation(
+				channelObservation("pool-1", "chan-a", "s", "e"+itoa(int64(i)), "ROUND_CREATED"))
+		}
+		awaitDropped(t, svc, 2)
+		if got := svc.observations.committed.Load(); got != 1 {
+			t.Fatalf("committed %d facts past the byte ceiling, want 1", got)
+		}
+	})
 }

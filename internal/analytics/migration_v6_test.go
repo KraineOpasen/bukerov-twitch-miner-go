@@ -468,3 +468,94 @@ func TestMigrationV6PreV6BinaryReadsAndWrites(t *testing.T) {
 		t.Fatalf("current binary erased %d observation rows, want 1", removed)
 	}
 }
+
+// TestMigrationV6FreshReopenAndFailureRollback covers the three cases the
+// acceptance item names alongside the populated v5 upgrade.
+//
+// The failure case is the load-bearing one: a v6 body that half-applied and
+// still bumped schema_versions would leave every later run believing the
+// tables it needs are there. Nothing afterwards would re-run the migration,
+// and every observation would fail against a schema that does not exist.
+func TestMigrationV6FreshReopenAndFailureRollback(t *testing.T) {
+	t.Run("fresh", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "miner.db")
+		db := openPrivateDB(t, path)
+		defer func() { _ = db.Close() }()
+		if _, err := NewSQLiteRepository(db, filepath.Dir(path)); err != nil {
+			t.Fatal(err)
+		}
+		if got := moduleVersion(t, db); got != currentAnalyticsVersion() {
+			t.Fatalf("fresh database is at analytics v%d, want v%d", got, currentAnalyticsVersion())
+		}
+		for _, table := range []string{"prediction_observations", "prediction_observation_sessions"} {
+			if !tableExists(t, db, table) {
+				t.Fatalf("fresh migration did not create %s", table)
+			}
+		}
+	})
+
+	t.Run("reopen is a no-op that preserves rows", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "miner.db")
+		db := openPrivateDB(t, path)
+		repo, err := NewSQLiteRepository(db, filepath.Dir(path))
+		if err != nil {
+			t.Fatal(err)
+		}
+		ctx := context.Background()
+		epoch, err := repo.OpenObservationSession(ctx, "reopen", 1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		insertObservationRow(t, db, epoch, 1, "kept", "pool-1", "", "", 10)
+		_ = db.Close()
+
+		db2 := openPrivateDB(t, path)
+		defer func() { _ = db2.Close() }()
+		repo2, err := NewSQLiteRepository(db2, filepath.Dir(path))
+		if err != nil {
+			t.Fatalf("reopening an already-migrated database failed: %v", err)
+		}
+		if got := moduleVersion(t, db2); got != currentAnalyticsVersion() {
+			t.Fatalf("reopen moved analytics to v%d", got)
+		}
+		if n := countRows(t, repo2, `SELECT COUNT(*) FROM prediction_observations`); n != 1 {
+			t.Fatalf("reopen left %d facts, want the 1 already stored", n)
+		}
+		if n := countRows(t, repo2, `SELECT COUNT(*) FROM prediction_observation_sessions`); n != 1 {
+			t.Fatalf("reopen left %d sessions, want 1", n)
+		}
+	})
+
+	t.Run("a failing v6 body rolls back the version with it", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "miner.db")
+		db := openPrivateDB(t, path)
+		defer func() { _ = db.Close() }()
+
+		// Bring the database to exactly v5, then occupy one of v6's index
+		// names with a TABLE. CREATE INDEX IF NOT EXISTS does not tolerate a
+		// different object of the same name, so the v6 body fails partway --
+		// after it has already created the tables ahead of that statement.
+		if err := db.RegisterModule(ledgerV5Module{}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.Exec(`CREATE TABLE idx_predobs_round (x INTEGER)`); err != nil {
+			t.Fatal(err)
+		}
+
+		if _, err := NewSQLiteRepository(db, filepath.Dir(path)); err == nil {
+			t.Fatal("a failing v6 migration was reported as success")
+		}
+
+		if got := moduleVersion(t, db); got != 5 {
+			t.Fatalf("analytics is at v%d after a failed v6 migration, want v5: a bumped version "+
+				"means no later run will ever retry it", got)
+		}
+		// And the half of the body that had already run is gone.
+		for _, table := range []string{"prediction_observations", "prediction_observation_sessions"} {
+			if tableExists(t, db, table) {
+				t.Fatalf("%s survived a rolled-back migration; the next run would find a partial "+
+					"schema and a version that says it is complete", table)
+			}
+		}
+	})
+}
