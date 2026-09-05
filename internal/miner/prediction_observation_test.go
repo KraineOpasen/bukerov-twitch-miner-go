@@ -1,6 +1,7 @@
 package miner
 
 import (
+	"errors"
 	"os"
 	"reflect"
 	"strings"
@@ -174,8 +175,9 @@ func TestAttachPredictionObservationsIsSafeWithoutAnalytics(t *testing.T) {
 // recordingProducerSink captures what a real pool emits, so a miner-level test
 // can assert on the trail rather than on the call it believes it made.
 type recordingProducerSink struct {
-	mu  sync.Mutex
-	got []pubsub.PredictionObservation
+	mu        sync.Mutex
+	got       []pubsub.PredictionObservation
+	uncertain int64
 }
 
 func (r *recordingProducerSink) RecordPredictionObservation(o pubsub.PredictionObservation) {
@@ -186,10 +188,88 @@ func (r *recordingProducerSink) RecordPredictionObservation(o pubsub.PredictionO
 
 func (r *recordingProducerSink) BeginPredictionProducerEpisode() func() { return func() {} }
 
+func (r *recordingProducerSink) NotePredictionProducerShutdownUncertain() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.uncertain++
+}
+
+func (r *recordingProducerSink) uncertainShutdownCount() int64 {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.uncertain
+}
+
 func (r *recordingProducerSink) all() []pubsub.PredictionObservation {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return append([]pubsub.PredictionObservation(nil), r.got...)
+}
+
+// TestTheMinerSettlesItsPoolAsAProducer is the regression for a defect an
+// independent review found: deleting the miner's shutdown wiring left the
+// whole module green, so a pool that could not prove it had stopped would
+// finalize its session as COMPLETE. And there was no wiring at all for the
+// other half — a pool never closed leaves nothing to check.
+func TestTheMinerSettlesItsPoolAsAProducer(t *testing.T) {
+	t.Run("attaching makes the pool a live producer", func(t *testing.T) {
+		m := &Miner{}
+		m.wsPool = pubsub.NewWebSocketPool(nil, nil, nil, config.RateLimitSettings{})
+		sink := &recordingProducerSink{}
+		// The real attach path needs an analytics service; wire the sink
+		// directly and hold the handle the same way attach does.
+		m.settlePredictionProducer = m.wsPool.SetPredictionObservationSink(sink)
+
+		if m.settlePredictionProducer == nil {
+			t.Fatal("wiring a sink produced no settle handle; a pool that is never closed would " +
+				"then leave nothing for the collector to notice")
+		}
+		if got := sink.uncertainShutdownCount(); got != 0 {
+			t.Fatalf("attaching recorded %d uncertain shutdowns, want 0", got)
+		}
+
+		// A pool that could not prove it stopped.
+		m.settlePredictionObservations(errors.New("connections not joined"))
+		if got := sink.uncertainShutdownCount(); got != 1 {
+			t.Fatalf("a pool that could not prove it stopped recorded %d uncertainties, want 1", got)
+		}
+	})
+
+	// The shutdown path itself. It is asserted structurally because reaching
+	// it needs a fully built miner: the property is that the pool's OWN Close
+	// result is the evidence the handle is settled with, and that the settle
+	// happens on the shutdown path at all — deleting the line otherwise left
+	// the whole module green.
+	t.Run("stop settles with the pool's own Close result", func(t *testing.T) {
+		src, err := os.ReadFile("miner.go")
+		if err != nil {
+			t.Fatal(err)
+		}
+		i := strings.Index(string(src), "poolErr := m.wsPool.Close()")
+		if i < 0 {
+			t.Fatal("the pool is no longer closed on the shutdown path; this test no longer " +
+				"asserts anything")
+		}
+		after := string(src)[i:]
+		j := strings.Index(after, "m.settlePredictionObservations(poolErr)")
+		if j < 0 {
+			t.Fatal("the shutdown path does not settle the Prediction producer with the pool's " +
+				"own Close result; a pool that could not prove it stopped would leave its " +
+				"session finalizing as if everything had been observed")
+		}
+		if k := strings.Index(after, "drainErrs = append(drainErrs, poolErr)"); k < 0 || j > k {
+			t.Fatal("the settle does not happen before the Close result is aggregated away")
+		}
+	})
+
+	t.Run("no analytics, nothing to settle", func(t *testing.T) {
+		m := &Miner{}
+		m.wsPool = pubsub.NewWebSocketPool(nil, nil, nil, config.RateLimitSettings{})
+		m.attachPredictionObservations() // pool but no analytics
+		// Settling is safe and does nothing: this is the configuration every
+		// pre-existing test runs in.
+		m.settlePredictionObservations(errors.New("anything"))
+	})
 }
 
 // TestAnOperatorActionOpensExactlyOneMinerRoot closes a coverage gap an

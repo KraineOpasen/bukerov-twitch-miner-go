@@ -162,6 +162,12 @@ type Miner struct {
 
 	deviceID          string
 	externalAnalytics bool
+	// settlePredictionProducer settles this miner's pool as a Prediction
+	// observation producer, exactly once, with the pool's own Close result as
+	// the evidence. Nil when nothing is observing. Written only by
+	// attachPredictionObservations, which runs during setup, and read only by
+	// stop(); the handle itself is one-shot and safe to call more than once.
+	settlePredictionProducer func(error)
 	// externalWebServer is true when the web server was injected via
 	// SetWebServer (the cmd/app composition root owns its Stop). When the miner
 	// builds its own web server (the library-use fallback in setupComponents),
@@ -2105,9 +2111,7 @@ func (m *Miner) teardown() error {
 		// could not prove it had stopped producing, so the collector session
 		// is forced INCOMPLETE. This never alters the shutdown result.
 		poolErr := m.wsPool.Close()
-		if poolErr != nil && m.analyticsSvc != nil {
-			m.analyticsSvc.NotePredictionProducerShutdownUncertain()
-		}
+		m.settlePredictionObservations(poolErr)
 		drainErrs = append(drainErrs, poolErr)
 	}
 	if m.watcher != nil {

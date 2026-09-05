@@ -21,11 +21,12 @@ import (
 // nonblocking and lock-cheap, exactly as the sink contract requires: a sink
 // that blocked here would deadlock the producer paths it is called from.
 type recordingSink struct {
-	mu      sync.Mutex
-	got     []PredictionObservation
-	hook    func(PredictionObservation)
-	begun   int64
-	settled int64
+	mu        sync.Mutex
+	got       []PredictionObservation
+	hook      func(PredictionObservation)
+	begun     int64
+	settled   int64
+	uncertain int64
 }
 
 func (r *recordingSink) RecordPredictionObservation(obs PredictionObservation) {
@@ -50,6 +51,21 @@ func (r *recordingSink) BeginPredictionProducerEpisode() func() {
 			r.mu.Unlock()
 		})
 	}
+}
+
+// NotePredictionProducerShutdownUncertain records a shutdown whose evidence was
+// inconclusive.
+func (r *recordingSink) NotePredictionProducerShutdownUncertain() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.uncertain++
+}
+
+// uncertainShutdowns reports how many inconclusive shutdowns were recorded.
+func (r *recordingSink) uncertainShutdowns() int64 {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.uncertain
 }
 
 // episodes reports how many producer episodes were registered and how many
@@ -1243,6 +1259,67 @@ func TestEveryTrackedRoundIsAdmittedWithAnIncarnation(t *testing.T) {
 // Twitch had stated a time for frames whose time this process had invented —
 // and the RECEIVER branch was unreachable for any parsed frame.
 //
+// TestAWiredPoolIsAProducerUntilItIsSettled is the regression for a defect an
+// independent review found: nothing tied the POOL's lifetime to the
+// collector's. The only link was a nil-check on the pool's Close result inside
+// the miner, and a Close that never happens returns no result to check — so a
+// pool still alive at shutdown left a session finalizing COMPLETE, claiming to
+// have observed everything, with a producer demonstrably still wired to it.
+//
+// Wiring a sink now opens a producer episode for the pool's whole life, and
+// the handle that closes it is the only thing that can end it.
+func TestAWiredPoolIsAProducerUntilItIsSettled(t *testing.T) {
+	t.Run("a pool that proves it stopped", func(t *testing.T) {
+		p := newTestPool(&fakePlacer{})
+		sink := &recordingSink{}
+		settle := p.SetPredictionObservationSink(sink)
+
+		begun, settled := sink.episodes()
+		if begun != 1 || settled != 0 {
+			t.Fatalf("wiring a sink opened %d episodes and settled %d, want 1 and 0: a wired "+
+				"pool is a live producer until something says otherwise", begun, settled)
+		}
+		settle(nil)
+		if _, settled = sink.episodes(); settled != 1 {
+			t.Fatalf("the handle settled %d episodes, want 1", settled)
+		}
+		if got := sink.uncertainShutdowns(); got != 0 {
+			t.Fatalf("a clean shutdown recorded %d uncertainties, want 0", got)
+		}
+		// One-shot: settling again changes nothing.
+		settle(errors.New("a second call"))
+		if _, settled = sink.episodes(); settled != 1 {
+			t.Fatalf("a second settle re-settled the episode (%d)", settled)
+		}
+		if got := sink.uncertainShutdowns(); got != 0 {
+			t.Fatalf("a second settle recorded %d uncertainties, want 0", got)
+		}
+	})
+
+	t.Run("a pool that cannot prove it stopped", func(t *testing.T) {
+		p := newTestPool(&fakePlacer{})
+		sink := &recordingSink{}
+		settle := p.SetPredictionObservationSink(sink)
+
+		settle(errors.New("the pool could not join its connections"))
+		if got := sink.uncertainShutdowns(); got != 1 {
+			t.Fatalf("a shutdown that could not prove itself recorded %d uncertainties, want 1: "+
+				"the session must not finalize as if everything had been observed", got)
+		}
+		if _, settled := sink.episodes(); settled != 1 {
+			t.Fatal("the episode was not settled")
+		}
+	})
+
+	t.Run("no sink wired", func(t *testing.T) {
+		p := newTestPool(&fakePlacer{})
+		// A miner without analytics wires nothing; the handle must still be
+		// safe to hold and to call.
+		settle := p.SetPredictionObservationSink(nil)
+		settle(errors.New("anything"))
+	})
+}
+
 // TestATimerRecordsWhichAdmissionItWasScheduledFor is the regression for a
 // defect an independent review found: the auto-bet timer captured only the
 // Twitch event id, and re-looked-up the round when it fired. A round that was
@@ -1689,25 +1766,25 @@ func TestFireAndForgetTimersRegisterAProducerEpisode(t *testing.T) {
 		p, sink := observedPool(t, &fakePlacer{})
 		admitRound(p, newTestStreamer(1000), "e1")
 
-		begun, settled := sink.episodes()
-		if begun != 0 || settled != 0 {
-			t.Fatalf("episodes before scheduling = %d/%d, want 0/0", begun, settled)
-		}
+		// Measured as a DELTA: wiring the sink opens the pool's own lifetime
+		// episode, and this subtest is about the timer's.
+		baseBegun, baseSettled := sink.episodes()
 		p.scheduleCleanup("e1", time.Millisecond)
 		// Registered BEFORE the goroutine starts, so the fence can never miss
 		// a timer that has been scheduled but not yet begun running.
-		if begun, _ = sink.episodes(); begun != 1 {
-			t.Fatalf("scheduling a cleanup registered %d episodes, want 1", begun)
+		if begun, _ := sink.episodes(); begun-baseBegun != 1 {
+			t.Fatalf("scheduling a cleanup registered %d episodes, want 1", begun-baseBegun)
 		}
 
+		var settled int64
 		deadline := time.Now().Add(5 * time.Second)
 		for time.Now().Before(deadline) {
-			if _, settled = sink.episodes(); settled == 1 {
+			if _, settled = sink.episodes(); settled-baseSettled == 1 {
 				break
 			}
 			time.Sleep(time.Millisecond)
 		}
-		if settled != 1 {
+		if settled-baseSettled != 1 {
 			t.Fatal("the cleanup timer never settled its episode; the collector would report an " +
 				"obligation it could not settle for the life of the session")
 		}
@@ -1717,6 +1794,7 @@ func TestFireAndForgetTimersRegisterAProducerEpisode(t *testing.T) {
 		p, sink := observedPool(t, &fakePlacer{})
 		s := newTestStreamer(100000)
 		p.streamers = []*models.Streamer{s}
+		baseBegun, baseSettled := sink.episodes()
 		// A window short enough that the timer fires DURING this subtest. A
 		// long one would leave the producer sleeping after the test returned,
 		// free to place a bet against a fake placer belonging to some later
@@ -1740,13 +1818,14 @@ func TestFireAndForgetTimersRegisterAProducerEpisode(t *testing.T) {
 			}},
 		}, s)
 
-		if begun, _ := sink.episodes(); begun != 1 {
-			t.Fatalf("an accepted schedule registered %d episodes, want 1 for its auto-bet timer", begun)
+		if begun, _ := sink.episodes(); begun-baseBegun != 1 {
+			t.Fatalf("an accepted schedule registered %d episodes, want 1 for its auto-bet timer",
+				begun-baseBegun)
 		}
 
 		deadline := time.Now().Add(30 * time.Second)
 		for time.Now().Before(deadline) {
-			if _, settled := sink.episodes(); settled == 1 {
+			if _, settled := sink.episodes(); settled-baseSettled == 1 {
 				return
 			}
 			time.Sleep(time.Millisecond)

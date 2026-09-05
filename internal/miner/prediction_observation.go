@@ -40,6 +40,15 @@ func (s predictionObservationSink) BeginPredictionProducerEpisode() func() {
 	return s.svc.BeginPredictionProducerEpisode()
 }
 
+// NotePredictionProducerShutdownUncertain forwards a shutdown whose evidence
+// was inconclusive. Like the other two calls it is a pure hand-off.
+func (s predictionObservationSink) NotePredictionProducerShutdownUncertain() {
+	if s.svc == nil {
+		return
+	}
+	s.svc.NotePredictionProducerShutdownUncertain()
+}
+
 // toAnalyticsObservation is the field-for-field translation. Every field of
 // the producer's type has exactly one destination, and the store's sanitizer
 // is what finally decides which values are admissible — this function
@@ -116,5 +125,22 @@ func (m *Miner) attachPredictionObservations() {
 	if m.wsPool == nil || m.analyticsSvc == nil {
 		return
 	}
-	m.wsPool.SetPredictionObservationSink(predictionObservationSink{svc: m.analyticsSvc})
+	// The handle is what makes the pool's shutdown PROVABLE rather than
+	// assumed. Until it is settled the collector counts this pool as a live
+	// producer, so a pool that is never closed at all cannot leave a session
+	// claiming to have observed everything — which a bare nil-check on Close's
+	// result could never detect, because a Close that never happened returns
+	// no result to check.
+	m.settlePredictionProducer = m.wsPool.SetPredictionObservationSink(
+		predictionObservationSink{svc: m.analyticsSvc})
+}
+
+// settlePredictionObservations settles the pool's producer obligation exactly
+// once, with the pool's own Close result as the evidence. Safe to call with no
+// pool, no analytics and more than once.
+func (m *Miner) settlePredictionObservations(poolErr error) {
+	if m.settlePredictionProducer == nil {
+		return
+	}
+	m.settlePredictionProducer(poolErr)
 }

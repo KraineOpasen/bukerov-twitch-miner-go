@@ -1461,9 +1461,10 @@ func (p *WebSocketPool) placeAutoBetScheduled(eventID, scheduled string) {
 	// infer it. A caller that carried no scheduled coordinate makes no claim
 	// either way.
 	dueReason := ""
-	switch {
-	case scheduled == "":
-	case scheduled == rc.incarnation:
+	switch scheduled {
+	case "":
+		// No scheduled coordinate was carried, so no claim is made.
+	case rc.incarnation:
 		dueReason = "OK"
 	default:
 		dueReason = "CONFLICT"

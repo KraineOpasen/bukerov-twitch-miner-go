@@ -28,6 +28,7 @@ import (
 	"net/url"
 	"os"
 	"strconv"
+	"sync"
 	"time"
 )
 
@@ -181,6 +182,13 @@ type PredictionObservationSink interface {
 	// shared connection, or do I/O. Register before the goroutine starts and
 	// settle only after its last capture attempt returns.
 	BeginPredictionProducerEpisode() func()
+
+	// NotePredictionProducerShutdownUncertain records that a producer could
+	// not be PROVEN to have stopped. It is not an error channel and not a
+	// retry: it is the one thing a shutdown may say when its own evidence is
+	// inconclusive, and it forces the session INCOMPLETE rather than letting
+	// it claim to have observed everything.
+	NotePredictionProducerShutdownUncertain()
 }
 
 // newPoolInstanceID mints the identity of one pool instance. Random and
@@ -228,8 +236,33 @@ func (p *WebSocketPool) roundIncarnation(eventID string) string {
 // SetPredictionObservationSink installs the observation sink. It is wired once
 // at construction time, before Start; the atomic store means every later read
 // on a hot path is lock-free.
-func (p *WebSocketPool) SetPredictionObservationSink(sink PredictionObservationSink) {
+// It returns the handle that SETTLES this pool as a producer. A pool is a
+// producer for as long as it is wired, and its Close joins only its WebSocket
+// clients — so a nil Close result proves no CONNECTION is still delivering and
+// proves nothing about the pool as a whole. Until the handle is settled the
+// collector cannot honestly finalize a session as COMPLETE, and settling it
+// with a non-nil error records that the pool could not prove it had stopped.
+//
+// The handle is one-shot and always safe to call. Wiring no sink returns a
+// handle that settles nothing, so a miner without analytics is unchanged.
+func (p *WebSocketPool) SetPredictionObservationSink(sink PredictionObservationSink) func(error) {
 	p.observationSink.Store(&sink)
+	if sink == nil {
+		return func(error) {}
+	}
+	// The pool's whole life is one producer episode. Registering it here —
+	// before any fact can be produced — is what makes an unsettled pool
+	// visible at the collector's shutdown fence.
+	settle := sink.BeginPredictionProducerEpisode()
+	var once sync.Once
+	return func(err error) {
+		once.Do(func() {
+			if err != nil {
+				sink.NotePredictionProducerShutdownUncertain()
+			}
+			settle()
+		})
+	}
 }
 
 // PoolInstanceID is this pool instance's observation provenance.
