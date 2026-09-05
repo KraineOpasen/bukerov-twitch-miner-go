@@ -1522,7 +1522,9 @@ func (p *WebSocketPool) placeAutoBetScheduled(eventID, scheduled string) {
 		reason := "NOT_ACTIVE"
 		switch {
 		case skipped:
-			reason = "FILTER_REJECTED"
+			// The operator suppressed auto-bet for THIS round. Not a strategy
+			// filter rejecting it, and not the global toggle.
+			reason = "ROUND_SUPPRESSED"
 		case placed:
 			reason = "ALREADY_PLACED"
 		}
@@ -1546,7 +1548,10 @@ func (p *WebSocketPool) placeAutoBetScheduled(eventID, scheduled string) {
 			slog.Warn("Auto-bet gated",
 				"reason", string(d.Reason),
 				"limit", 0, "proposed", decision.Amount, "allowed", 0, "streamer", streamer)
-			p.observeAutoSkip(eventID, obsChannel, obsLogin, "FILTER_REJECTED",
+			// The account-wide betting health gate, not this round's strategy.
+			// The two used to emit byte-identical facts, so a reader could not
+			// tell why the bet did not happen.
+			p.observeAutoSkip(eventID, obsChannel, obsLogin, "HEALTH_GATED",
 				map[string]int64{"stake": int64(decision.Amount)})
 			return
 		}
@@ -1558,7 +1563,7 @@ func (p *WebSocketPool) placeAutoBetScheduled(eventID, scheduled string) {
 		slog.Warn("Auto-bet gated",
 			"reason", string(reason),
 			"limit", limit, "proposed", decision.Amount, "allowed", 0, "streamer", streamer)
-		p.observeAutoSkip(eventID, obsChannel, obsLogin, "FILTER_REJECTED",
+		p.observeAutoSkip(eventID, obsChannel, obsLogin, "RESERVE_VIOLATION",
 			map[string]int64{"stake": int64(decision.Amount), "balance": int64(balance)})
 		return
 	case models.GatePercent:

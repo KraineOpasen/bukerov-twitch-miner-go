@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/config"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/models"
 )
 
@@ -902,36 +903,86 @@ func TestAutoDecisionIsObserved(t *testing.T) {
 }
 
 // TestAutoDecisionSkipIsObserved proves a declined auto-bet records the closed
-// reason and makes NO Twitch call.
+// reason and makes NO Twitch call — and that four causally DISTINCT gates say
+// four distinct things.
+//
+// An independent review proved two of them byte-identical: the account-wide
+// health gate and this round's strategy filter both emitted AUTO_SKIPPED / SKIP
+// / FILTER_REJECTED with the same single counter, so nothing downstream could
+// tell why a bet had not happened — a reader chasing "why did the bot stop
+// betting" could not distinguish an unhealthy transport from a strategy working
+// exactly as configured. The per-round suppression toggle and the reserve floor
+// were collapsed into the same code too.
 func TestAutoDecisionSkipIsObserved(t *testing.T) {
-	placer := &fakePlacer{}
-	p, sink := observedPool(t, placer)
-	s := newTestStreamer(100000)
-	admitRound(p, s, "auto-2")
-	// Suppress this round: the existing per-round auto-bet skip.
-	if err := p.SetAutoBetSkip("auto-2", true); err != nil {
-		t.Fatal(err)
-	}
+	for _, tc := range []struct {
+		name  string
+		setup func(t *testing.T, p *WebSocketPool, ep *models.EventPrediction)
+		want  string
+	}{
+		{
+			name: "this round is suppressed",
+			setup: func(t *testing.T, p *WebSocketPool, _ *models.EventPrediction) {
+				if err := p.SetAutoBetSkip("auto-2", true); err != nil {
+					t.Fatal(err)
+				}
+			},
+			want: "ROUND_SUPPRESSED",
+		},
+		{
+			name: "the account's betting health gate is closed",
+			setup: func(_ *testing.T, p *WebSocketPool, _ *models.EventPrediction) {
+				p.SetBetHealthGate(fakeBetGate{d: blockingHealth})
+				p.SetRiskSettings(config.PredictionRiskSettings{HealthGateEnabled: true})
+			},
+			want: "HEALTH_GATED",
+		},
+		{
+			name: "the bet would breach the points reserve",
+			setup: func(_ *testing.T, p *WebSocketPool, _ *models.EventPrediction) {
+				p.SetRiskSettings(config.PredictionRiskSettings{ReservePoints: 99000})
+			},
+			want: "RESERVE_VIOLATION",
+		},
+		{
+			name: "the strategy's own filter rejects it",
+			setup: func(_ *testing.T, _ *WebSocketPool, ep *models.EventPrediction) {
+				ep.Bet.Settings.FilterCondition = &models.FilterCondition{
+					By: models.OutcomeTotalUsers, Where: models.ConditionGT, Value: 1e9,
+				}
+			},
+			want: "FILTER_REJECTED",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			placer := &fakePlacer{}
+			p, sink := observedPool(t, placer)
+			s := newTestStreamer(100000)
+			ep := admitRound(p, s, "auto-2")
+			ep.Bet.Settings = autoBetSettings(5)
+			tc.setup(t, p, ep)
 
-	p.placeAutoBet("auto-2")
+			p.placeAutoBet("auto-2")
 
-	var skipped bool
-	for _, o := range sink.all() {
-		if o.Kind == ObsKindAutoDecision && o.Payload.Phase == "AUTO_SKIPPED" {
-			skipped = true
-			if o.Payload.Decision != "SKIP" || o.Payload.ReasonCode != "FILTER_REJECTED" {
-				t.Fatalf("skip fact = %+v, want SKIP/FILTER_REJECTED", o.Payload)
+			var skipped bool
+			for _, o := range sink.all() {
+				if o.Kind == ObsKindAutoDecision && o.Payload.Phase == "AUTO_SKIPPED" {
+					skipped = true
+					if o.Payload.Decision != "SKIP" || o.Payload.ReasonCode != tc.want {
+						t.Fatalf("skip fact = %+v, want SKIP/%s: two gates that record the same "+
+							"reason are indistinguishable to every reader", o.Payload, tc.want)
+					}
+				}
+				if o.Kind == ObsKindPlacement {
+					t.Fatalf("a skipped auto-bet produced a placement fact: %+v", o)
+				}
 			}
-		}
-		if o.Kind == ObsKindPlacement {
-			t.Fatalf("a skipped auto-bet produced a placement fact: %+v", o)
-		}
-	}
-	if !skipped {
-		t.Fatalf("no AUTO_SKIPPED fact; got %v", sink.phases())
-	}
-	if placer.callCount() != 0 {
-		t.Fatalf("Twitch calls = %d, want 0 for a skipped auto-bet", placer.callCount())
+			if !skipped {
+				t.Fatalf("no AUTO_SKIPPED fact; got %v", sink.phases())
+			}
+			if placer.callCount() != 0 {
+				t.Fatalf("Twitch calls = %d, want 0 for a skipped auto-bet", placer.callCount())
+			}
+		})
 	}
 }
 
