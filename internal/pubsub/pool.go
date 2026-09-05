@@ -1362,8 +1362,14 @@ func (p *WebSocketPool) placeAutoBet(eventID string) {
 	defer rc.placeMu.Unlock()
 
 	// Round identity for every fact below. Read once, outside the pool lock:
-	// the event pointer is stable and its streamer has its own mutex.
-	obsLogin, obsChannel := event.Streamer.GetUsername(), event.Streamer.ChannelID
+	// the event pointer is stable and its streamer has its own mutex. Guarded
+	// like PlaceManualBet's own read — a scheduled round always carries a
+	// streamer, but an observation must never be the first thing in this
+	// function to dereference it.
+	var obsLogin, obsChannel string
+	if event.Streamer != nil {
+		obsLogin, obsChannel = event.Streamer.GetUsername(), event.Streamer.ChannelID
+	}
 	p.observeRoundFact(eventID, obsChannel, obsLogin, ObsKindAutoDecision, ObservationPayload{
 		Phase: "AUTO_DUE", Manual: boolPtr(false),
 	})
