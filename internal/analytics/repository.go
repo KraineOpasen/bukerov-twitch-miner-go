@@ -508,8 +508,14 @@ func (r *SQLiteRepository) DeleteStreamer(ctx context.Context, login string) (bo
 	defer r.priority.Claim()()
 	var existed bool
 	err := r.db.WithTx(ctx, func(tx *sql.Tx) error {
+		// Route through the identity-aware purge so this convenience path
+		// leaves nothing behind either. It has no channel id — only the
+		// login — so the observation erasure falls back to the PROVED parent,
+		// exactly as it does for a ledger record with an empty channel. A
+		// caller that knows the channel gets a complete erasure through
+		// DeleteStreamerIdentityTx.
 		var e error
-		existed, e = r.DeleteStreamerTx(tx, login)
+		existed, e = r.DeleteStreamerIdentityTx(tx, "", login)
 		return e
 	})
 	return existed, err

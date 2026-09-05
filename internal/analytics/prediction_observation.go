@@ -40,15 +40,18 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"database/sql"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash"
 	"log/slog"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/database"
 )
@@ -488,7 +491,11 @@ type ObservationRecord struct {
 	ConnectionSequence            int64
 	PayloadVersion                int64
 	Payload                       ObservationPayload
-	ObservationSHA256             string
+	// PayloadUndecodable marks a row whose stored payload could not be
+	// decoded. The row is still returned — its columns are intact and its
+	// digest still witnesses them — but its payload must not be read.
+	PayloadUndecodable bool
+	ObservationSHA256  string
 }
 
 // ObservationSessionReading is a session plus the classification a reader MUST
@@ -538,10 +545,17 @@ func closedOptional(v string, allowed []string) string {
 // identifiers the store already keys on; they are never free text.
 func boundedIdentifier(v string) string {
 	v = strings.TrimSpace(v)
-	if len(v) > MaxObservationString {
-		return v[:MaxObservationString]
+	if len(v) <= MaxObservationString {
+		return v
 	}
-	return v
+	// Cut on a RUNE boundary. A byte-offset slice can split a multi-byte
+	// sequence, which would store invalid UTF-8 in a TEXT column and feed
+	// invalid UTF-8 into a hash input.
+	cut := MaxObservationString
+	for cut > 0 && !utf8.RuneStart(v[cut]) {
+		cut--
+	}
+	return v[:cut]
 }
 
 // sanitizeObservationPayload projects an arbitrary producer payload onto the
@@ -690,10 +704,20 @@ func observationSourceFingerprint(o PredictionObservation) string {
 		o.RetentionGroupOwnerChannelID,
 		o.Payload.Phase,
 	} {
-		_, _ = h.Write([]byte(part))
-		_, _ = h.Write([]byte{0})
+		writeDigestPart(h, part)
 	}
 	return "sha256:" + hex.EncodeToString(h.Sum(nil))
+}
+
+// writeDigestPart feeds one field into a digest LENGTH-PREFIXED rather than
+// NUL-separated. A separator can be forged by a field that contains it; a
+// length prefix cannot, so two different field sequences can never hash the
+// same way.
+func writeDigestPart(h hash.Hash, part string) {
+	var lenBuf [8]byte
+	binary.BigEndian.PutUint64(lenBuf[:], uint64(len(part)))
+	_, _ = h.Write(lenBuf[:])
+	_, _ = h.Write([]byte(part))
 }
 
 // roundIncarnationID identifies ONE round as a retention unit. It exists
@@ -701,7 +725,11 @@ func observationSourceFingerprint(o PredictionObservation) string {
 // invariant whole-round retention depends on. It is derived (not random) so
 // every fact of a round agrees on it even across a collector restart.
 func roundIncarnationID(o PredictionObservation) string {
-	if o.RetentionGroupOwnerChannelID == "" {
+	// A round needs BOTH an owner and an event identity. Without the event id
+	// every identity-less fact of a channel would hash to the same value and
+	// collapse into ONE permanent retention unit — a unit that keeps growing
+	// and can never age out, because its newest fact is always recent.
+	if o.RetentionGroupOwnerChannelID == "" || o.EventID == "" {
 		return ""
 	}
 	h := sha256.New()
@@ -710,8 +738,7 @@ func roundIncarnationID(o PredictionObservation) string {
 		o.RetentionGroupOwnerChannelID,
 		o.EventID,
 	} {
-		_, _ = h.Write([]byte(part))
-		_, _ = h.Write([]byte{0})
+		writeDigestPart(h, part)
 	}
 	return "round:" + hex.EncodeToString(h.Sum(nil)[:16])
 }
@@ -744,8 +771,7 @@ func observationDigest(o PredictionObservation, observationID, sessionID string,
 	h := sha256.New()
 	write := func(parts ...string) {
 		for _, p := range parts {
-			_, _ = h.Write([]byte(p))
-			_, _ = h.Write([]byte{0})
+			writeDigestPart(h, p)
 		}
 	}
 	write(
@@ -1134,6 +1160,11 @@ type ObservationAccounting struct {
 	UnsettledObligations      int64
 	PostFenceProducers        int64
 	ProducerShutdownUncertain int64
+	// IdentityErasures is NOT persisted — it has no column, because it is not
+	// a property of the facts. It records that a privacy erasure ran during
+	// this session, which is enough to make the session INCOMPLETE: its facts
+	// are deliberately no longer the whole set it observed.
+	IdentityErasures int64
 }
 
 // Whole reports whether the session may be finalized COMPLETE: nothing was
@@ -1143,7 +1174,8 @@ func (a ObservationAccounting) Whole() bool {
 	return a.Dropped == 0 &&
 		a.UnsettledObligations == 0 &&
 		a.PostFenceProducers == 0 &&
-		a.ProducerShutdownUncertain == 0
+		a.ProducerShutdownUncertain == 0 &&
+		a.IdentityErasures == 0
 }
 
 // ---------------------------------------------------------------------------
@@ -1290,7 +1322,12 @@ func scanObservationRows(rows *sql.Rows) ([]ObservationRecord, error) {
 			return nil, err
 		}
 		if err := json.Unmarshal([]byte(payloadJSON), &rec.Payload); err != nil {
-			return nil, fmt.Errorf("analytics: decode observation payload %s: %w", rec.ObservationID, err)
+			// One undecodable payload must not discard every other fact in
+			// the session: the trail's whole value is that surviving facts
+			// stay readable. The row is returned with an empty payload and a
+			// phase that says so, rather than silently looking ordinary.
+			rec.Payload = ObservationPayload{Phase: ValueUnknown}
+			rec.PayloadUndecodable = true
 		}
 		out = append(out, rec)
 	}
@@ -1323,6 +1360,23 @@ func (r *SQLiteRepository) ObservationsByRound(ctx context.Context, incarnationI
 		FROM prediction_observations
 		WHERE round_incarnation_id = ?
 		ORDER BY collector_epoch ASC, collector_sequence ASC`, incarnationID)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	return scanObservationRows(rows)
+}
+
+// ObservationsByFingerprint reads every fact sharing one source fingerprint,
+// oldest first. This is what makes a re-delivery visible AS a re-delivery:
+// source_fingerprint is deliberately not unique, so two deliveries of one
+// source event are two facts, and this is how they are found together. It is
+// the reader idx_predobs_fingerprint exists for.
+func (r *SQLiteRepository) ObservationsByFingerprint(ctx context.Context, fingerprint string) ([]ObservationRecord, error) {
+	rows, err := r.db.QueryContext(ctx, `SELECT `+observationSelectColumns+`
+		FROM prediction_observations
+		WHERE source_fingerprint = ?
+		ORDER BY collector_epoch ASC, collector_sequence ASC`, fingerprint)
 	if err != nil {
 		return nil, err
 	}
@@ -1456,8 +1510,11 @@ func (r *SQLiteRepository) ObservationStoreStats(ctx context.Context) (Observati
 //  3. at most observationPruneUnit finalized sessions that have no facts left.
 //
 // The active epoch is never touched, and a crash-left OPEN session is never
-// pruned automatically: an unfinalized session is evidence of an unclean
-// shutdown and removing it would erase that evidence. This is deliberately
+// pruned automatically — neither its session row NOR its facts. An
+// unfinalized session is evidence of an unclean shutdown, and that evidence is
+// only meaningful together with the facts it did commit; pruning those while
+// keeping the row would leave a session claiming committed facts that are
+// gone, which reads as an integrity error rather than as the crash it was. This is deliberately
 // NOT part of the generic PruneBefore sweep — P1 retention is owned by the
 // collector's own worker so it can never lengthen a business retention
 // transaction.
@@ -1476,6 +1533,9 @@ func (r *SQLiteRepository) PruneObservationUnit(ctx context.Context, cutoffMS in
 			SELECT round_incarnation_id
 			  FROM prediction_observations
 			 WHERE round_incarnation_id IS NOT NULL
+			   AND collector_epoch NOT IN (
+			       SELECT collector_epoch FROM prediction_observation_sessions
+			        WHERE close_state = 'OPEN')
 			 GROUP BY round_incarnation_id
 			HAVING MAX(received_at_ms) < ?
 			   AND SUM(CASE WHEN collector_epoch = ? THEN 1 ELSE 0 END) = 0
@@ -1501,6 +1561,9 @@ func (r *SQLiteRepository) PruneObservationUnit(ctx context.Context, cutoffMS in
 			      WHERE round_incarnation_id IS NULL
 			        AND collector_epoch <> ?
 			        AND received_at_ms < ?
+			        AND collector_epoch NOT IN (
+			            SELECT collector_epoch FROM prediction_observation_sessions
+			             WHERE close_state = 'OPEN')
 			      ORDER BY id
 			      LIMIT ?)`, activeEpoch, cutoffMS, observationPruneUnit)
 		if err != nil {
@@ -1573,6 +1636,18 @@ type ObservationIdentity struct {
 // running any of those inside a caller-owned *sql.Tx would invert the lock
 // order the business paths rely on.
 func (r *SQLiteRepository) EraseObservationsForIdentityTx(tx *sql.Tx, id ObservationIdentity) (int64, error) {
+	return r.eraseObservationsForIdentityTx(context.Background(), tx, id)
+}
+
+// EraseObservationsForIdentityCtxTx is EraseObservationsForIdentityTx with the
+// caller's context, so the lookup it performs is cancelled with the
+// transaction that owns it rather than running under a detached background
+// context.
+func (r *SQLiteRepository) EraseObservationsForIdentityCtxTx(ctx context.Context, tx *sql.Tx, id ObservationIdentity) (int64, error) {
+	return r.eraseObservationsForIdentityTx(ctx, tx, id)
+}
+
+func (r *SQLiteRepository) eraseObservationsForIdentityTx(ctx context.Context, tx *sql.Tx, id ObservationIdentity) (int64, error) {
 	channel := boundedIdentifier(id.ChannelID)
 	login := canonicalObservationLogin(id.Login)
 	if channel == "" && login == "" {
@@ -1584,7 +1659,7 @@ func (r *SQLiteRepository) EraseObservationsForIdentityTx(tx *sql.Tx, id Observa
 	// never guessed.
 	var parentID interface{}
 	if login != "" {
-		if pid, ok, err := lookupStreamerID(context.Background(), tx, login); err != nil {
+		if pid, ok, err := lookupStreamerID(ctx, tx, login); err != nil {
 			return 0, err
 		} else if ok {
 			parentID = pid
@@ -1722,6 +1797,16 @@ type observationCollector struct {
 	// closing is set by Close BEFORE it fences intake, so a bootstrap still
 	// finishing cannot publish RUNNING over the top of a teardown.
 	closing atomic.Bool
+	// inFlight counts facts the writer has taken off the queue but not yet
+	// settled, so a drain can tell "queue empty" from "actually finished".
+	inFlight atomic.Int64
+	// identityErasures counts privacy erasures performed during this session.
+	// One is enough to make the session INCOMPLETE: after an erasure its facts
+	// are deliberately no longer the whole set it observed. It is deliberately
+	// SEPARATE from unsettled_obligation_count, which means "offered and never
+	// written" — conflating the two made every ordinary streamer removal
+	// report an obligation the collector had failed to settle.
+	identityErasures atomic.Int64
 
 	// writeDeadline is the hard per-fact budget. It is ALWAYS
 	// ObservationWriteDeadline in production (newObservationCollector is the
@@ -1787,8 +1872,11 @@ type observationCollector struct {
 
 	startOnce sync.Once
 	closeOnce sync.Once
-	stop      context.CancelFunc
-	joined    chan struct{}
+	// stop is written by Start and read by Close, which are different
+	// sync.Once instances — those establish no happens-before between each
+	// other, so this is an atomic rather than a plain field.
+	stop   atomic.Pointer[context.CancelFunc]
+	joined chan struct{}
 	// bootstrapped is closed once Start's bootstrap has settled either way,
 	// so tests can await a deterministic state without polling.
 	bootstrapped chan struct{}
@@ -1894,7 +1982,7 @@ func (c *observationCollector) isFenced(o PredictionObservation) bool {
 func (c *observationCollector) Start() {
 	c.startOnce.Do(func() {
 		ctx, cancel := context.WithCancel(context.Background())
-		c.stop = cancel
+		c.stop.Store(&cancel)
 		go c.run(ctx)
 	})
 }
@@ -1932,7 +2020,9 @@ func (c *observationCollector) run(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case obs := <-c.queue:
+			c.inFlight.Add(1)
 			c.write(ctx, obs)
+			c.inFlight.Add(-1)
 		case <-maintenance.C:
 			c.maintain(ctx)
 		}
@@ -2098,8 +2188,8 @@ func (c *observationCollector) write(ctx context.Context, raw PredictionObservat
 		c.dropped.Add(1)
 		return
 	}
-	c.committed.Add(1)
 	c.sessionBytes.Add(int64(len(payloadJSONOf(obs))))
+	c.committed.Add(1)
 }
 
 // withinSessionBounds reports whether this session may commit another fact.
@@ -2202,9 +2292,16 @@ func (c *observationCollector) offer(obs PredictionObservation) {
 // It bumps the capture generation (so every fact already queued is dropped
 // rather than committed) and forces the session INCOMPLETE, permanently. The
 // erasure's completeness matters more than the trail's.
+// invalidateGeneration bumps the capture generation so queued work is dropped.
+// It does NOT count an unsettled obligation: an erasure discarding queued facts
+// is a DELIBERATE, correct outcome, and the facts it discards are already
+// counted as drops — which is what makes the session INCOMPLETE. Counting it
+// here as well made every ordinary streamer removal report an obligation the
+// collector had failed to settle, which is a false explanation of why the
+// session is incomplete.
 func (c *observationCollector) invalidateGeneration() {
 	c.generation.Add(1)
-	c.unsettledObligations.Add(1)
+	c.identityErasures.Add(1)
 }
 
 // noteProducerShutdownUncertain records that a producer could not prove it had
@@ -2223,6 +2320,7 @@ func (c *observationCollector) accounting() ObservationAccounting {
 		UnsettledObligations:      c.unsettledObligations.Load(),
 		PostFenceProducers:        c.postFenceProducers.Load(),
 		ProducerShutdownUncertain: c.producerShutdownUncertain.Load(),
+		IdentityErasures:          c.identityErasures.Load(),
 	}
 }
 
@@ -2239,10 +2337,17 @@ func (c *observationCollector) drain(grace time.Duration) {
 	defer deadline.Stop()
 	tick := time.NewTicker(time.Millisecond)
 	defer tick.Stop()
-	for len(c.queue) > 0 {
+	for {
+		// The channel length drops the moment the writer RECEIVES a fact —
+		// before it has been sanitized, leased and committed. Waiting on the
+		// length alone would declare the queue drained with the last fact
+		// still in flight and then cancel it. inFlight closes that window.
+		if len(c.queue) == 0 && c.inFlight.Load() == 0 {
+			return
+		}
 		select {
 		case <-deadline.C:
-			c.unsettledObligations.Add(int64(len(c.queue)))
+			c.unsettledObligations.Add(int64(len(c.queue)) + c.inFlight.Load())
 			return
 		case <-tick.C:
 		}
@@ -2263,10 +2368,10 @@ func (c *observationCollector) Close() {
 		c.running.Store(false)
 
 		// 2. Bounded drain.
-		if c.stop != nil {
+		if stop := c.stop.Load(); stop != nil {
 			c.drain(observationDrainGrace)
 			// 3. Cancel and 4. JOIN the writer.
-			c.stop()
+			(*stop)()
 			<-c.joined
 		}
 

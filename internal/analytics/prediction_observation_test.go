@@ -582,8 +582,17 @@ func TestObservationUnsettledObligationForcesIncomplete(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if reading.Session.CloseState != SessionIncomplete || reading.Session.UnsettledObligationCount != 1 {
-		t.Fatalf("session = %q/%d, want INCOMPLETE/1", reading.Session.CloseState, reading.Session.UnsettledObligationCount)
+	// An erasure forces INCOMPLETE — after it, the session's facts are
+	// deliberately no longer the whole set it observed — but it must NOT be
+	// reported as an unsettled obligation, which means "offered and never
+	// written". Conflating the two made every ordinary streamer removal carry
+	// a false explanation of why its session was incomplete.
+	if reading.Session.CloseState != SessionIncomplete {
+		t.Fatalf("session after an erasure = %q, want INCOMPLETE", reading.Session.CloseState)
+	}
+	if reading.Session.UnsettledObligationCount != 0 {
+		t.Fatalf("an erasure was reported as %d unsettled obligations; it settled everything it dropped",
+			reading.Session.UnsettledObligationCount)
 	}
 }
 
@@ -1030,6 +1039,13 @@ func TestObservationPruneUnitIsBounded(t *testing.T) {
 		insert(oldEpoch, int64(100+i), "n"+itoa(int64(i)), "", "", 120)
 	}
 	insert(activeEpoch, 1, "active", "round:bbb", "chan-b", 100)
+	// A crash-left OPEN session's FACTS are protected too, so finalize the old
+	// session: this test is about the bounded prune, not about that guard
+	// (TestObservationPruneSparesOpenSessionFacts covers it).
+	if applied, err := repo.FinalizeObservationSession(ctx, oldEpoch,
+		ObservationAccounting{Committed: int64(observationPruneUnit + 22)}, 200); err != nil || !applied {
+		t.Fatalf("finalize old session: applied=%v err=%v", applied, err)
+	}
 
 	// Unit 1: the whole eligible round.
 	n, err := repo.PruneObservationUnit(ctx, 1000, activeEpoch)
@@ -1065,12 +1081,100 @@ func TestObservationPruneUnitIsBounded(t *testing.T) {
 			break
 		}
 	}
+	// The ACTIVE session is still never swept, even once it is factless.
+	var activeSessions int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM prediction_observation_sessions WHERE collector_epoch = ?`, activeEpoch).Scan(&activeSessions); err != nil {
+		t.Fatal(err)
+	}
+	if activeSessions != 1 {
+		t.Fatal("the active session row was pruned")
+	}
+}
+
+// TestObservationPruneSparesOpenSessionFacts proves a crash-left OPEN session
+// is protected WHOLE — its row and its facts. An independent review found the
+// facts were prunable while only the session row was guarded, which would
+// leave a session claiming committed facts that are gone: that reads as an
+// integrity error rather than as the unclean shutdown it actually was.
+func TestObservationPruneSparesOpenSessionFacts(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "miner.db")
+	db := openPrivateDB(t, path)
+	defer func() { _ = db.Close() }()
+	repo, err := NewSQLiteRepository(db, filepath.Dir(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+
+	crashed, err := repo.OpenObservationSession(ctx, "crashed", 1) // never finalized
+	if err != nil {
+		t.Fatal(err)
+	}
+	activeEpoch, err := repo.OpenObservationSession(ctx, "active", 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// One whole round and one NULL-round fact, both long past any cutoff.
+	for _, f := range []struct {
+		id, inc, ch string
+		seq         int64
+	}{
+		{"c1", "round:crashed", "chan-c", 1},
+		{"c2", "round:crashed", "chan-c", 2},
+		{"c3", "", "", 3},
+	} {
+		var inc, ch interface{}
+		if f.inc != "" {
+			inc, ch = f.inc, f.ch
+		}
+		if _, err := db.Exec(`INSERT INTO prediction_observations
+			(observation_id, collector_session_id, collector_epoch, collector_sequence,
+			 pool_instance_id, round_incarnation_id, retention_group_owner_channel_id,
+			 kind, producer_time_source, received_at_ms, payload_version, payload_json, observation_sha256)
+			VALUES (?, 'crashed', ?, ?, 'pool', ?, ?, ?, ?, 1, 1, '{"phase":"UNKNOWN"}', 'sha256:x')`,
+			f.id, crashed, f.seq, inc, ch, KindChannelEvent, TimeSourceReceiver); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	for i := 0; i < 5; i++ {
+		if n, err := repo.PruneObservationUnit(ctx, 1_000_000, activeEpoch); err != nil {
+			t.Fatal(err)
+		} else if n != 0 {
+			t.Fatalf("retention removed %d facts of a crash-left OPEN session", n)
+		}
+	}
+	if got := countRows(t, repo, `SELECT COUNT(*) FROM prediction_observations`); got != 3 {
+		t.Fatalf("%d of the crashed session's 3 facts survived", got)
+	}
 	var open int
-	if err := db.QueryRow(`SELECT COUNT(*) FROM prediction_observation_sessions WHERE collector_epoch = ? AND close_state = 'OPEN'`, oldEpoch).Scan(&open); err != nil {
+	if err := db.QueryRow(`SELECT COUNT(*) FROM prediction_observation_sessions WHERE collector_epoch = ? AND close_state = 'OPEN'`, crashed).Scan(&open); err != nil {
 		t.Fatal(err)
 	}
 	if open != 1 {
-		t.Fatal("a crash-left OPEN session was pruned automatically; it is the only evidence of an unclean shutdown")
+		t.Fatal("the crash-left OPEN session row was pruned; it is the only evidence of an unclean shutdown")
+	}
+
+	// Once it is finalized, its facts become ordinary retention candidates.
+	if applied, err := repo.FinalizeObservationSession(ctx, crashed, ObservationAccounting{Committed: 3, Dropped: 1}, 2); err != nil || !applied {
+		t.Fatalf("finalize: applied=%v err=%v", applied, err)
+	}
+	removed := int64(0)
+	for i := 0; i < 5; i++ {
+		n, err := repo.PruneObservationUnit(ctx, 1_000_000, activeEpoch)
+		if err != nil {
+			t.Fatal(err)
+		}
+		removed += n
+		if n == 0 {
+			break
+		}
+	}
+	if removed < 3 {
+		t.Fatalf("after finalization retention removed %d rows, want at least the 3 facts", removed)
+	}
+	if got := countRows(t, repo, `SELECT COUNT(*) FROM prediction_observations WHERE collector_epoch = ?`, crashed); got != 0 {
+		t.Fatalf("%d facts of the finalized session survived retention", got)
 	}
 }
 

@@ -1184,11 +1184,17 @@ func chosenOutcomeOdds(event *models.EventPrediction) float64 {
 func (p *WebSocketPool) handlePredictionUser(msg *PubSubMessage, streamer *models.Streamer) MessageOutcome {
 	var outcome MessageOutcome
 	if msg.Data == nil {
+		p.observeUnclassifiedFrame(msg, streamer, "event")
 		return outcome
 	}
 
 	prediction, ok := msg.Data["prediction"].(map[string]interface{})
 	if !ok {
+		// Symmetric with handlePredictionChannel: an unreadable frame stays
+		// visible as a fact. Returning silently here would let a COMPLETE
+		// session license the inference that nothing arrived, when in truth
+		// something arrived and could not be read.
+		p.observeUnclassifiedFrame(msg, streamer, "event")
 		return outcome
 	}
 

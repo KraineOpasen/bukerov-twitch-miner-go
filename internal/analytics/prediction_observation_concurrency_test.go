@@ -570,6 +570,13 @@ func TestObservationRetentionRunsPeriodically(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
+	// Finalize the stale session. A crash-left OPEN session's facts are
+	// deliberately protected from automatic pruning, so retention can only be
+	// observed against a session that closed cleanly.
+	if applied, err := repo.FinalizeObservationSession(context.Background(), staleEpoch,
+		ObservationAccounting{Committed: 40}, old); err != nil || !applied {
+		t.Fatalf("finalize stale session: applied=%v err=%v", applied, err)
+	}
 
 	if err := svc.Start(); err != nil {
 		t.Fatal(err)
@@ -758,6 +765,10 @@ func TestObservationSessionBoundsAreEnforced(t *testing.T) {
 	}
 	svc.RecordPredictionObservation(channelObservation("pool-1", "chan-a", "s", "under", "ROUND_CREATED"))
 	awaitCommitted(t, svc, 1)
+	deadline = time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) && c.sessionBytes.Load() <= 0 {
+		time.Sleep(time.Millisecond)
+	}
 	if c.sessionBytes.Load() <= 0 {
 		t.Fatal("committed payload bytes were not accounted, so the byte ceiling could never be reached")
 	}
