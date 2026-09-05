@@ -1221,6 +1221,11 @@ type ObservationAccounting struct {
 	// this session, which is enough to make the session INCOMPLETE: its facts
 	// are deliberately no longer the whole set it observed.
 	IdentityErasures int64
+	// PreIntakeLosses is NOT persisted either. It records facts offered while
+	// capture was not running, which took no causal position and so cannot be
+	// counted as drops without contradicting the session's counter form. They
+	// are still losses, and a session that had any is not COMPLETE.
+	PreIntakeLosses int64
 }
 
 // Whole reports whether the session may be finalized COMPLETE: nothing was
@@ -1231,12 +1236,48 @@ func (a ObservationAccounting) Whole() bool {
 		a.UnsettledObligations == 0 &&
 		a.PostFenceProducers == 0 &&
 		a.ProducerShutdownUncertain == 0 &&
-		a.IdentityErasures == 0
+		a.IdentityErasures == 0 &&
+		a.PreIntakeLosses == 0
 }
 
 // ---------------------------------------------------------------------------
 // Repository: facts
 // ---------------------------------------------------------------------------
+
+// Typed failures of the fact path. They are errors rather than silent drops
+// because each one means the store was asked for something it must refuse, and
+// the collector has to be able to tell them apart from a busy connection.
+var (
+	// errObservationSessionNotOpen: the target session is not the currently
+	// published OPEN one. A crash-left, abandoned or already-finalized session
+	// must never accept another row: its counters are fixed and a late row
+	// would make them a lie.
+	errObservationSessionNotOpen = errors.New("analytics: observation session is not open")
+	// errObservationCollision: an observation id already exists carrying
+	// DIFFERENT capture-supplied content. Fail closed and never overwrite: the
+	// first row is the fact, and a second one claiming the same causal
+	// position with different content is an integrity failure, not an update.
+	errObservationCollision = errors.New("analytics: observation id collides with different content")
+	// errObservationGroupConflict: a round group's immutable retention-group
+	// owner disagrees with this fact's.
+	errObservationGroupConflict = errors.New("analytics: round group owner conflict")
+)
+
+// observationCaptureColumns is the part of a fact the PRODUCER supplied. It is
+// what an identical retry has to match, and deliberately excludes the three
+// repository-resolved parent ids: those are insert metadata, and a parent row
+// created between the first attempt and the retry must not turn a retry into a
+// collision.
+type observationCaptureColumns struct {
+	pool, incarnation, routedChannel, ownerChannel, retentionChannel string
+	eventID, kind, topicType, messageType, fingerprint               string
+	producerAtMS                                                     int64
+	timeSource                                                       string
+	receivedAtMS                                                     int64
+	connIndex, connGeneration, connSequence                          sql.NullInt64
+	payloadVersion                                                   int64
+	payloadJSON                                                      string
+}
 
 // AppendObservation writes exactly ONE fact in ONE transaction. Facts are
 // INSERT-only: there is no UPDATE, REPLACE or upsert anywhere in this file's
@@ -1244,6 +1285,20 @@ func (a ObservationAccounting) Whole() bool {
 // resolved LOOKUP-ONLY through the shared lookupStreamerID — an observation
 // never creates a streamers row, so it can neither resurrect a purged
 // streamer nor invent one.
+//
+// The transaction does four things before it inserts, in this order:
+//
+//  1. It proves the target session is the published OPEN one. A finalized or
+//     crash-left session's counters are fixed; a late row would contradict them.
+//  2. It looks the observation id up. An identical retry is idempotent SUCCESS
+//     — the fact is already recorded, and a second row would double-count it.
+//     The same id with different capture-supplied content is a typed collision
+//     and the existing row is never overwritten.
+//  3. It resolves the parents lookup-only, freezing a round group's
+//     retention-group owner from whatever the group's FIRST committed row
+//     resolved, so companions of one round cannot disagree about who owns it
+//     after a parent appears or a rename lands mid-round.
+//  4. It computes the digest over the ids actually stored.
 //
 // ctx carries the per-fact deadline; every statement is context-aware, so a
 // cancellation (a business writer claiming priority) interrupts the statement
@@ -1255,9 +1310,53 @@ func (r *SQLiteRepository) AppendObservation(ctx context.Context, o PredictionOb
 		return fmt.Errorf("analytics: observation payload is not renderable")
 	}
 	incarnation := o.RoundIncarnationID
-	observationID := fmt.Sprintf("%s:%d", sessionID, seq)
+	// Composed from the exact causal coordinates the producer reserved, so it
+	// is the same value on every attempt at this fact and different for every
+	// other fact in the store.
+	observationID := fmt.Sprintf("%d:%s:%d", epoch, sessionID, seq)
+
+	want := observationCaptureColumns{
+		pool: o.PoolInstanceID, incarnation: incarnation,
+		routedChannel: o.RoutedChannelID, ownerChannel: o.RoundOwnerChannelID,
+		retentionChannel: o.RetentionGroupOwnerChannelID,
+		eventID:          o.EventID, kind: o.Kind,
+		topicType: o.SourceTopicType, messageType: o.SourceMessageType,
+		fingerprint:  o.SourceFingerprint,
+		producerAtMS: o.ProducerAtMS, timeSource: o.ProducerTimeSource,
+		receivedAtMS:   o.ReceivedAtMS,
+		connIndex:      nullableConnection(o.ConnectionKnown, int64(o.ConnectionIndex)),
+		connGeneration: nullableConnection(o.ConnectionKnown, int64(o.ConnectionGeneration)),
+		connSequence:   nullableConnection(o.ConnectionKnown, int64(o.ConnectionSequence)),
+		payloadVersion: ObservationPayloadVersion, payloadJSON: payloadJSON,
+	}
 
 	return r.db.WithTx(ctx, func(tx *sql.Tx) error {
+		// (1) the exact published OPEN session, by BOTH halves of the pair.
+		var closeState string
+		switch e := tx.QueryRowContext(ctx, `
+			SELECT close_state FROM prediction_observation_sessions
+			 WHERE collector_epoch = ? AND collector_session_id = ?`, epoch, sessionID).
+			Scan(&closeState); {
+		case e == sql.ErrNoRows:
+			return errObservationSessionNotOpen
+		case e != nil:
+			return e
+		case closeState != SessionOpen:
+			return errObservationSessionNotOpen
+		}
+
+		// (2) identical retry, before anything is written.
+		existing, found, e := readObservationCaptureColumns(ctx, tx, observationID)
+		if e != nil {
+			return e
+		}
+		if found {
+			if existing != want {
+				return errObservationCollision
+			}
+			return nil
+		}
+
 		routedID, err := observationParentID(ctx, tx, o.RoutedLogin, o.RoutedChannelID)
 		if err != nil {
 			return err
@@ -1266,12 +1365,36 @@ func (r *SQLiteRepository) AppendObservation(ctx context.Context, o PredictionOb
 		if err != nil {
 			return err
 		}
-		retentionID, err := observationParentID(ctx, tx, o.RetentionGroupOwnerLogin, o.RetentionGroupOwnerChannelID)
-		if err != nil {
+
+		// (3) the round group's owner is decided ONCE, by its first committed
+		// row, and repeated verbatim by every companion. Resolving it per row
+		// would let a parent created mid-round, or a rename, give two facts of
+		// one round two different owners — and the owner is what whole-round
+		// retention and whole-round erasure act on.
+		var retentionID interface{}
+		if incarnation != "" {
+			frozenChannel, frozenParent, groupFound, e := observationGroupOwner(ctx, tx, epoch, o.PoolInstanceID, incarnation)
+			if e != nil {
+				return e
+			}
+			if groupFound {
+				if frozenChannel != o.RetentionGroupOwnerChannelID {
+					return errObservationGroupConflict
+				}
+				retentionID = frozenParent
+			}
+			if !groupFound {
+				if retentionID, err = observationParentID(ctx, tx, o.RetentionGroupOwnerLogin, o.RetentionGroupOwnerChannelID); err != nil {
+					return err
+				}
+			}
+		} else if retentionID, err = observationParentID(ctx, tx, o.RetentionGroupOwnerLogin, o.RetentionGroupOwnerChannelID); err != nil {
 			return err
 		}
-		// Computed HERE, after the parents are resolved, so the witness covers
-		// the ids actually stored rather than the ones the producer guessed.
+
+		// (4) Computed HERE, after the parents are resolved, so the witness
+		// covers the ids actually stored rather than the ones the producer
+		// guessed.
 		digest := observationDigest(o, observationID, sessionID, epoch, seq, incarnation, payloadJSON,
 			routedID, ownerID, retentionID)
 		_, err = tx.ExecContext(ctx, `
@@ -1302,6 +1425,64 @@ func (r *SQLiteRepository) AppendObservation(ctx context.Context, o PredictionOb
 		)
 		return err
 	})
+}
+
+// readObservationCaptureColumns reads back the capture-supplied half of an
+// existing fact, so an identical retry can be recognized without consulting
+// the repository-resolved parent ids.
+func readObservationCaptureColumns(ctx context.Context, tx *sql.Tx, observationID string) (observationCaptureColumns, bool, error) {
+	var got observationCaptureColumns
+	var incarnation, routed, owner, retention, event, topic, message, fingerprint sql.NullString
+	var producerAt sql.NullInt64
+	e := tx.QueryRowContext(ctx, `
+		SELECT pool_instance_id, round_incarnation_id, routed_channel_id, round_owner_channel_id,
+		       retention_group_owner_channel_id, event_id, kind, source_topic_type,
+		       source_message_type, source_fingerprint, producer_at_ms, producer_time_source,
+		       received_at_ms, connection_index, connection_generation, connection_sequence,
+		       payload_version, payload_json
+		  FROM prediction_observations WHERE observation_id = ?`, observationID).
+		Scan(&got.pool, &incarnation, &routed, &owner, &retention, &event, &got.kind, &topic,
+			&message, &fingerprint, &producerAt, &got.timeSource,
+			&got.receivedAtMS, &got.connIndex, &got.connGeneration, &got.connSequence,
+			&got.payloadVersion, &got.payloadJSON)
+	if e == sql.ErrNoRows {
+		return got, false, nil
+	}
+	if e != nil {
+		return got, false, e
+	}
+	got.incarnation, got.routedChannel, got.ownerChannel = incarnation.String, routed.String, owner.String
+	got.retentionChannel, got.eventID = retention.String, event.String
+	got.topicType, got.messageType, got.fingerprint = topic.String, message.String, fingerprint.String
+	got.producerAtMS = producerAt.Int64
+	return got, true, nil
+}
+
+// observationGroupOwner returns the retention-group owner already frozen by a
+// round group's first committed row, if the group has one.
+func observationGroupOwner(ctx context.Context, tx *sql.Tx, epoch int64, pool, incarnation string) (string, interface{}, bool, error) {
+	var channel sql.NullString
+	var parent sql.NullInt64
+	e := tx.QueryRowContext(ctx, `
+		SELECT retention_group_owner_channel_id, retention_group_owner_streamer_id
+		  FROM prediction_observations
+		 WHERE collector_epoch = ? AND pool_instance_id = ? AND round_incarnation_id = ?
+		 ORDER BY collector_sequence ASC
+		 LIMIT 1`, epoch, pool, incarnation).Scan(&channel, &parent)
+	if e == sql.ErrNoRows {
+		return "", nil, false, nil
+	}
+	if e != nil {
+		return "", nil, false, e
+	}
+	if parent.Valid {
+		return channel.String, parent.Int64, true, nil
+	}
+	return channel.String, nil, true, nil
+}
+
+func nullableConnection(known bool, v int64) sql.NullInt64 {
+	return sql.NullInt64{Int64: v, Valid: known}
 }
 
 // observationParentID resolves a login to its analytics parent id WITHOUT
@@ -1470,64 +1651,141 @@ func (r *SQLiteRepository) ReadObservationSession(ctx context.Context, epoch int
 		s.LastAssignedSequence, s.LastAssignedSequenceKnown = lastSeq.Int64, lastSeq.Valid
 		found = true
 
-		var present int64
-		if e := tx.QueryRowContext(ctx,
-			`SELECT COUNT(*) FROM prediction_observations WHERE collector_epoch = ?`, epoch).
-			Scan(&present); e != nil {
+		// Counted on the EXACT (epoch, session id) pair. Counting by epoch
+		// alone would let a row that carries this epoch with a DIFFERENT
+		// session id — the shape a reused or corrupted epoch produces — be
+		// counted as one of this session's facts and make a broken store read
+		// as a coherent one.
+		var facts observationSessionFacts
+		var minSeq, maxSeq, distinct sql.NullInt64
+		if e := tx.QueryRowContext(ctx, `
+			SELECT COUNT(*), MIN(collector_sequence), MAX(collector_sequence),
+			       COUNT(DISTINCT collector_sequence)
+			  FROM prediction_observations
+			 WHERE collector_epoch = ? AND collector_session_id = ?`, epoch, s.CollectorSessionID).
+			Scan(&facts.Present, &minSeq, &maxSeq, &distinct); e != nil {
 			return e
 		}
-		out = classifyObservationSession(s, present)
+		facts.MinSequence, facts.MaxSequence, facts.DistinctSequences = minSeq.Int64, maxSeq.Int64, distinct.Int64
+		// A fact matching exactly ONE half of the pair is an orphan: it claims
+		// a session that does not own it, or an epoch that does not. Either
+		// way the dataset is not internally consistent and no reading of this
+		// session can be trusted.
+		if e := tx.QueryRowContext(ctx, `
+			SELECT COUNT(*) FROM prediction_observations
+			 WHERE (collector_epoch =  ? AND collector_session_id <> ?)
+			    OR (collector_epoch <> ? AND collector_session_id =  ?)`,
+			epoch, s.CollectorSessionID, epoch, s.CollectorSessionID).Scan(&facts.HalfPair); e != nil {
+			return e
+		}
+		out = classifyObservationSession(s, facts)
 		return nil
 	})
 	return out, found, err
 }
 
+// observationSessionFacts is what a reader measures about a session's
+// surviving facts, on the EXACT (epoch, session id) pair.
+type observationSessionFacts struct {
+	Present           int64
+	MinSequence       int64
+	MaxSequence       int64
+	DistinctSequences int64
+	// HalfPair counts facts matching exactly one half of the pair.
+	HalfPair int64
+}
+
 // classifyObservationSession is the reader contract: it decides which of the
 // four readings a session supports, so no caller can accidentally treat an
 // unfinalized or truncated session as authoritative about what did NOT happen.
-func classifyObservationSession(s ObservationSessionRecord, factsPresent int64) ObservationSessionReading {
-	out := ObservationSessionReading{Session: s, FactsPresent: factsPresent}
+//
+// The counter form it enforces is the one the session accounting is defined by:
+// last_assigned_sequence is NULL exactly when nothing was ever reserved, and
+// otherwise every reserved position was either committed or dropped, so
+// committed + dropped == last_assigned_sequence. A session that fails this is
+// not merely incomplete — its own numbers disagree, and nothing derived from it
+// means what it says.
+func classifyObservationSession(s ObservationSessionRecord, facts observationSessionFacts) ObservationSessionReading {
+	out := ObservationSessionReading{Session: s, FactsPresent: facts.Present}
+	integrity := func(detail string) ObservationSessionReading {
+		out.Reading = ReadingIntegrityError
+		out.Detail = detail
+		return out
+	}
 	switch {
 	case s.CloseState == SessionOpen:
 		out.Reading = ReadingUnfinalized
 		out.Detail = "collector session is still OPEN: it is either live or was left behind by an unclean shutdown"
 		return out
 	case s.CloseState != SessionComplete && s.CloseState != SessionIncomplete:
-		out.Reading = ReadingIntegrityError
-		out.Detail = "close_state is outside the closed set"
-		return out
+		return integrity("close_state is outside the closed set")
 	case !s.ClosedAtKnown:
-		out.Reading = ReadingIntegrityError
-		out.Detail = "finalized session carries no close time"
-		return out
+		return integrity("finalized session carries no close time")
 	case s.CommittedCount < 0 || s.DroppedCount < 0:
-		out.Reading = ReadingIntegrityError
-		out.Detail = "negative session counter"
-		return out
-	case factsPresent > s.CommittedCount:
-		out.Reading = ReadingIntegrityError
-		out.Detail = "more facts are present than the session committed"
-		return out
-	case factsPresent < s.CommittedCount:
+		return integrity("negative session counter")
+	case facts.HalfPair > 0:
+		return integrity("facts exist that match only one half of this session's (epoch, session id) pair")
+	}
+
+	// The counter form.
+	reserved := s.CommittedCount + s.DroppedCount
+	switch {
+	case !s.LastAssignedSequenceKnown:
+		if reserved != 0 {
+			return integrity("session reserved no sequence yet counts committed or dropped facts")
+		}
+	case s.LastAssignedSequence < 1:
+		return integrity("last assigned sequence is below the first position")
+	case reserved != s.LastAssignedSequence:
+		return integrity("committed plus dropped does not account for every reserved position")
+	}
+
+	// Surviving positions must lie inside what was actually reserved.
+	if facts.Present > 0 {
+		if facts.MinSequence < 1 || (s.LastAssignedSequenceKnown && facts.MaxSequence > s.LastAssignedSequence) {
+			return integrity("a surviving fact sits outside the reserved sequence range")
+		}
+		if facts.DistinctSequences != facts.Present {
+			return integrity("two surviving facts share one causal position")
+		}
+	}
+
+	switch {
+	case s.CloseState == SessionComplete &&
+		(s.DroppedCount > 0 || s.UnsettledObligationCount > 0 ||
+			s.PostFenceProducerCount > 0 || s.ProducerShutdownUncertainCount > 0):
+		return integrity("session is COMPLETE yet reports a loss, an unsettled obligation, a post-fence producer or an uncertain producer shutdown")
+	case facts.Present > s.CommittedCount:
+		return integrity("more facts are present than the session committed")
+	case facts.Present < s.CommittedCount:
 		out.Reading = ReadingAdministrativelyTruncated
 		out.Detail = "facts were removed after finalization by retention or a privacy erasure"
 		return out
-	default:
-		out.Reading = ReadingAsFinalized
-		if s.CloseState == SessionIncomplete {
-			out.Detail = "every committed fact is present, but the session itself did not observe everything it was offered"
-		}
-		// A session written under a DIFFERENT producer contract is not an
-		// integrity failure — its rows are exactly what that contract wrote.
-		// Classifying it as one would make every session unreadable the
-		// moment the revision is bumped, destroying the trail's whole value
-		// across an upgrade. The reading stands; the caller is told which
-		// contract's invariants apply.
-		if s.ProducerRevision != ObservationProducerRevision {
-			out.Detail = "session was produced under a different observation contract: read its facts under that contract's invariants"
-		}
-		return out
 	}
+
+	// Equal counts. A COMPLETE session lost nothing, so its surviving facts
+	// must be exactly the reserved positions {1..last} with no gap; an
+	// INCOMPLETE one may legitimately have gaps where facts were dropped.
+	if s.CloseState == SessionComplete && s.LastAssignedSequenceKnown {
+		if facts.Present != s.LastAssignedSequence || facts.MinSequence != 1 || facts.MaxSequence != s.LastAssignedSequence {
+			return integrity("COMPLETE session does not hold exactly the positions it reserved")
+		}
+	}
+
+	out.Reading = ReadingAsFinalized
+	if s.CloseState == SessionIncomplete {
+		out.Detail = "every committed fact is present, but the session itself did not observe everything it was offered"
+	}
+	// A session written under a DIFFERENT producer contract is not an
+	// integrity failure — its rows are exactly what that contract wrote.
+	// Classifying it as one would make every session unreadable the moment
+	// the revision is bumped, destroying the trail's whole value across an
+	// upgrade. The reading stands; the caller is told which contract's
+	// invariants apply.
+	if s.ProducerRevision != ObservationProducerRevision {
+		out.Detail = "session was produced under a different observation contract: read its facts under that contract's invariants"
+	}
+	return out
 }
 
 // ObservationStoreStats is the bounded shape of the whole store, used by the
@@ -1876,6 +2134,14 @@ type observationCollector struct {
 	// inFlight counts facts the writer has taken off the queue but not yet
 	// settled, so a drain can tell "queue empty" from "actually finished".
 	inFlight atomic.Int64
+	// preIntakeLosses counts facts offered while capture was not running —
+	// before bootstrap published intake, or after it was disabled. They took
+	// no causal position, so they cannot be counted as drops without breaking
+	// the session's counter form, but they are still losses and the session
+	// must not finalize COMPLETE while any exist. Not persisted: it is a
+	// reason for INCOMPLETE, not a column of its own.
+	preIntakeLosses atomic.Int64
+
 	// identityErasures counts privacy erasures performed during this session.
 	// One is enough to make the session INCOMPLETE: after an erasure its facts
 	// are deliberately no longer the whole set it observed. It is deliberately
@@ -2349,13 +2615,22 @@ func (c *observationCollector) offer(obs PredictionObservation) {
 	if !c.running.Load() {
 		// Not yet bootstrapped, already fenced, or disabled: the fact is
 		// honestly lost, and the session says so at finalization.
-		c.dropped.Add(1)
-		// A producer that is STILL offering after the shutdown fence is the
-		// thing post_fence_producer_count exists to record: it proves the
-		// collector closed while a producer was demonstrably alive, which is
-		// why such a session can never be COMPLETE.
+		//
+		// It is NOT counted as a drop. dropped_count accounts for the
+		// RESERVATION stream — positions this session handed out and did not
+		// commit — and a fact refused before intake opened never took a
+		// position. Counting it there would make committed + dropped exceed
+		// last_assigned_sequence, which is precisely the shape a reader is
+		// required to treat as an integrity failure. The session is still
+		// prevented from finalizing COMPLETE, by the counters that exist for
+		// exactly this: post_fence_producer_count after the shutdown fence,
+		// and the pre-intake loss below before it.
 		if c.closing.Load() {
+			// A producer STILL offering after the shutdown fence proves the
+			// collector closed while a producer was demonstrably alive.
 			c.postFenceProducers.Add(1)
+		} else {
+			c.preIntakeLosses.Add(1)
 		}
 		return
 	}
@@ -2415,6 +2690,7 @@ func (c *observationCollector) accounting() ObservationAccounting {
 		PostFenceProducers:        c.postFenceProducers.Load(),
 		ProducerShutdownUncertain: c.producerShutdownUncertain.Load(),
 		IdentityErasures:          c.identityErasures.Load(),
+		PreIntakeLosses:           c.preIntakeLosses.Load(),
 	}
 }
 

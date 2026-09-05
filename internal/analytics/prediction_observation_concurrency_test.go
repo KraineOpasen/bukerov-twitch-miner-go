@@ -411,8 +411,10 @@ func TestObservationBootstrapFailureDisablesOnlyP1(t *testing.T) {
 		t.Fatal("a failed bootstrap did not disable capture")
 	}
 	svc.RecordPredictionObservation(channelObservation("pool-1", "chan-a", "s", "e", "ROUND_CREATED"))
-	if svc.observations.dropped.Load() == 0 {
-		t.Fatal("an offer to a disabled collector was not counted")
+	// Accounted as a pre-intake loss, not a drop: capture never opened, so the
+	// fact took no causal position to be dropped from.
+	if svc.observations.preIntakeLosses.Load() == 0 {
+		t.Fatal("an offer to a disabled collector was not accounted")
 	}
 	if svc.observations.epoch.Load() != 0 {
 		t.Fatal("a failed bootstrap allocated a session")

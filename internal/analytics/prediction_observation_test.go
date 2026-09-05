@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -622,7 +623,13 @@ func TestObservationSessionIncompleteOnDrop(t *testing.T) {
 	svc, repo := newObservationService(t)
 	svc.RecordPredictionObservation(channelObservation("pool-1", "chan-a", "streamer-a", "event-1", "ROUND_CREATED"))
 	awaitCommitted(t, svc, 1)
-	svc.observations.dropped.Add(1) // stand in for a queue-full or refused write
+	// A REAL drop: a fact with no pool provenance reserves a causal position
+	// on the producer's call and is then refused by the writer. A bare
+	// counter bump would leave committed+dropped disagreeing with the
+	// positions actually reserved, which is itself an integrity failure.
+	svc.RecordPredictionObservation(PredictionObservation{
+		Kind: KindChannelEvent, ReceivedAtMS: 1, Payload: ObservationPayload{Phase: "ROUND_CREATED"}})
+	awaitDropped(t, svc, 1)
 	svc.observations.Close()
 
 	reading, _, err := repo.ReadObservationSession(context.Background(), svc.observations.epoch.Load())
@@ -715,7 +722,14 @@ func TestObservationGenerationFenceDropsQueuedFacts(t *testing.T) {
 
 // TestObservationCaptureOffBeforeStartAndAfterClose proves the fence at both
 // ends: a fact offered before the collector is running, or after Close has
-// fenced intake, is counted as a drop and never written.
+// fenced intake, is refused, ACCOUNTED, and never written.
+//
+// Each end has its own counter, and neither is dropped_count. A fact refused
+// before intake took no causal position, so counting it as a drop would make
+// committed + dropped exceed the positions the session actually reserved —
+// the exact shape a reader must treat as an integrity failure. Pre-intake
+// losses and post-fence producers are separate reasons the session is not
+// COMPLETE.
 func TestObservationCaptureOffBeforeStartAndAfterClose(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "miner.db")
 	db := openPrivateDB(t, path)
@@ -727,8 +741,11 @@ func TestObservationCaptureOffBeforeStartAndAfterClose(t *testing.T) {
 
 	// Before Start: NewService constructs and migrates only.
 	svc.RecordPredictionObservation(channelObservation("pool-1", "chan-a", "streamer-a", "early", "ROUND_CREATED"))
-	if svc.observations.dropped.Load() != 1 {
-		t.Fatal("a fact offered before Start was not counted as a drop")
+	if svc.observations.preIntakeLosses.Load() != 1 {
+		t.Fatal("a fact offered before Start was not accounted as a pre-intake loss")
+	}
+	if svc.observations.dropped.Load() != 0 {
+		t.Fatal("a fact that never took a causal position was counted as a drop")
 	}
 	if svc.observations.epoch.Load() != 0 {
 		t.Fatal("NewService allocated a collector session; Start must own that")
@@ -749,10 +766,10 @@ func TestObservationCaptureOffBeforeStartAndAfterClose(t *testing.T) {
 
 	// After Close the shared database is still open in this test, so a late
 	// offer must be refused by the fence, not by the driver.
-	dropped := svc.observations.dropped.Load()
+	postFence := svc.observations.postFenceProducers.Load()
 	svc.RecordPredictionObservation(channelObservation("pool-1", "chan-a", "streamer-a", "late", "ROUND_CREATED"))
-	if svc.observations.dropped.Load() != dropped+1 {
-		t.Fatal("a fact offered after Close was not fenced")
+	if svc.observations.postFenceProducers.Load() != postFence+1 {
+		t.Fatal("a fact offered after Close was not recorded as a post-fence producer")
 	}
 
 	db2 := openPrivateDB(t, path)
@@ -1928,5 +1945,320 @@ func TestALostFactLeavesACausalGap(t *testing.T) {
 	// The session's accounting explains the gap rather than contradicting it.
 	if c, d := svc.observations.committed.Load(), svc.observations.dropped.Load(); c != 1 || d != 1 {
 		t.Fatalf("accounting = %d committed / %d dropped, want 1/1", c, d)
+	}
+}
+
+// TestIdenticalRetryIsIdempotentSuccess is an independent review's F7: an
+// identical retry must be RECOGNIZED, not merely rejected by a UNIQUE
+// constraint.
+//
+// The difference matters to the caller. A constraint violation is
+// indistinguishable from a real conflict, so a retry after an ambiguous
+// failure -- a cancelled statement, a lost connection -- had to be treated as
+// an error and counted as a loss, even though the fact was already safely
+// recorded. Recognizing it makes the write idempotent: the same fact offered
+// twice is one row and one success.
+func TestIdenticalRetryIsIdempotentSuccess(t *testing.T) {
+	svc, repo := newObservationService(t)
+	ctx := context.Background()
+	epoch := svc.observations.epoch.Load()
+	sessionID := svc.observations.sessionID
+
+	fact := mustSanitize(t, channelObservation("pool-1", "chan-a", "streamer-a", "event-1", "ROUND_CREATED"))
+	if err := repo.AppendObservation(ctx, fact, sessionID, epoch, 1); err != nil {
+		t.Fatalf("first write: %v", err)
+	}
+	if err := repo.AppendObservation(ctx, fact, sessionID, epoch, 1); err != nil {
+		t.Fatalf("an identical retry was refused: %v", err)
+	}
+	got, err := repo.ObservationsBySession(ctx, sessionID, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("an identical retry produced %d rows, want 1", len(got))
+	}
+
+	// A LATER-created parent must not turn a retry into a conflict: the
+	// resolved parent ids are insert metadata, not part of what the producer
+	// captured, and the first row's are never recomputed.
+	if err := repo.RecordPoints("streamer-a", 100, "WATCH"); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.AppendObservation(ctx, fact, sessionID, epoch, 1); err != nil {
+		t.Fatalf("a retry after the parent appeared was refused: %v", err)
+	}
+	got, err = repo.ObservationsBySession(ctx, sessionID, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].RoutedStreamerID != 0 {
+		t.Fatalf("the stored row was rewritten by a retry: %+v", got)
+	}
+}
+
+// TestSameCausalPositionWithDifferentContentFailsClosed proves the other half:
+// the same causal position carrying DIFFERENT content is an integrity failure,
+// and the row already there is never overwritten.
+func TestSameCausalPositionWithDifferentContentFailsClosed(t *testing.T) {
+	svc, repo := newObservationService(t)
+	ctx := context.Background()
+	epoch := svc.observations.epoch.Load()
+	sessionID := svc.observations.sessionID
+
+	first := mustSanitize(t, channelObservation("pool-1", "chan-a", "streamer-a", "event-1", "ROUND_CREATED"))
+	if err := repo.AppendObservation(ctx, first, sessionID, epoch, 1); err != nil {
+		t.Fatal(err)
+	}
+	second := mustSanitize(t, channelObservation("pool-1", "chan-a", "streamer-a", "event-2", "ROUND_UPDATED"))
+	err := repo.AppendObservation(ctx, second, sessionID, epoch, 1)
+	if !errors.Is(err, errObservationCollision) {
+		t.Fatalf("colliding write returned %v, want a typed collision", err)
+	}
+	got, e := repo.ObservationsBySession(ctx, sessionID, 0)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if len(got) != 1 || got[0].EventID != "event-1" {
+		t.Fatalf("the first fact was overwritten: %+v", got)
+	}
+}
+
+// TestAFinalizedSessionNeverAcceptsAnotherFact proves the published-session
+// check. A finalized session's counters are fixed; a crash-left one is the
+// durable evidence of an unclean shutdown. A late row in either makes those
+// numbers a lie, and it is refused inside the same transaction that would
+// have written it.
+func TestAFinalizedSessionNeverAcceptsAnotherFact(t *testing.T) {
+	svc, repo := newObservationService(t)
+	ctx := context.Background()
+	epoch := svc.observations.epoch.Load()
+	sessionID := svc.observations.sessionID
+	fact := mustSanitize(t, channelObservation("pool-1", "chan-a", "streamer-a", "event-1", "ROUND_CREATED"))
+
+	if applied, err := repo.FinalizeObservationSession(ctx, epoch,
+		ObservationAccounting{LastAssignedSequence: 0}, 5); err != nil || !applied {
+		t.Fatalf("finalize: applied=%v err=%v", applied, err)
+	}
+	if err := repo.AppendObservation(ctx, fact, sessionID, epoch, 1); !errors.Is(err, errObservationSessionNotOpen) {
+		t.Fatalf("write into a finalized session returned %v, want a typed refusal", err)
+	}
+	// An epoch/session pair that does not exist at all is refused the same way.
+	if err := repo.AppendObservation(ctx, fact, "no-such-session", epoch, 2); !errors.Is(err, errObservationSessionNotOpen) {
+		t.Fatalf("write into an unknown session returned %v, want a typed refusal", err)
+	}
+	if n := countRows(t, repo, `SELECT COUNT(*) FROM prediction_observations`); n != 0 {
+		t.Fatalf("%d facts were written into a session that could not accept them", n)
+	}
+}
+
+// TestARoundGroupOwnerIsFrozenByItsFirstFact proves a round's retention-group
+// owner is decided ONCE. Resolving it per row would let a parent created
+// mid-round, or a rename, give two facts of one round two different owners --
+// and the owner is exactly what whole-round retention and whole-round erasure
+// act on, so the round would stop being one unit.
+func TestARoundGroupOwnerIsFrozenByItsFirstFact(t *testing.T) {
+	svc, repo := newObservationService(t)
+	ctx := context.Background()
+	epoch := svc.observations.epoch.Load()
+	sessionID := svc.observations.sessionID
+
+	// The first fact of the round is written while the streamer has no
+	// analytics row, so the group's owner parent freezes as NULL.
+	first := mustSanitize(t, channelObservation("pool-1", "chan-a", "late-parent", "event-1", "ROUND_CREATED"))
+	if err := repo.AppendObservation(ctx, first, sessionID, epoch, 1); err != nil {
+		t.Fatal(err)
+	}
+	// The parent appears mid-round.
+	if err := repo.RecordPoints("late-parent", 100, "WATCH"); err != nil {
+		t.Fatal(err)
+	}
+	companion := mustSanitize(t, channelObservation("pool-1", "chan-a", "late-parent", "event-1", "ROUND_UPDATED"))
+	if err := repo.AppendObservation(ctx, companion, sessionID, epoch, 2); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := repo.ObservationsByRound(ctx, first.RoundIncarnationID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("round has %d facts, want 2", len(got))
+	}
+	if got[0].RetentionGroupOwnerStreamerID != got[1].RetentionGroupOwnerStreamerID {
+		t.Fatalf("two facts of one round disagree about its owner: %d vs %d",
+			got[0].RetentionGroupOwnerStreamerID, got[1].RetentionGroupOwnerStreamerID)
+	}
+	if got[1].RetentionGroupOwnerStreamerID != 0 {
+		t.Fatalf("the companion resolved a parent of its own (%d); the group's owner is frozen "+
+			"by its first committed fact", got[1].RetentionGroupOwnerStreamerID)
+	}
+	// The routed role is per-fact and DOES see the new parent: only the
+	// retention group is frozen.
+	if got[1].RoutedStreamerID == 0 {
+		t.Fatal("the companion's own routed parent was frozen too; only the group owner is")
+	}
+
+	// A companion claiming a different owner for the same local round is
+	// refused rather than quietly splitting the retention unit.
+	conflicting := mustSanitize(t, channelObservation("pool-1", "chan-a", "late-parent", "event-1", "ROUND_UPDATED"))
+	conflicting.RetentionGroupOwnerChannelID = "chan-someone-else"
+	conflicting.RetentionGroupOwnerLogin = "someone-else"
+	if err := repo.AppendObservation(ctx, conflicting, sessionID, epoch, 3); !errors.Is(err, errObservationGroupConflict) {
+		t.Fatalf("a conflicting group owner returned %v, want a typed conflict", err)
+	}
+}
+
+// TestSessionReadingEnforcesTheCounterForm proves the integrity predicates the
+// reader contract requires. Each case is a store a reader must refuse to treat
+// as authoritative -- and each was previously read as AS_FINALIZED, because the
+// classifier checked only the fact count against committed_count.
+func TestSessionReadingEnforcesTheCounterForm(t *testing.T) {
+	base := ObservationSessionRecord{
+		CollectorEpoch: 1, CollectorSessionID: "s", ProducerRevision: ObservationProducerRevision,
+		StartedAtMS: 1, ClosedAtMS: 2, ClosedAtKnown: true, CloseState: SessionComplete,
+		LastAssignedSequence: 2, LastAssignedSequenceKnown: true, CommittedCount: 2,
+	}
+	whole := observationSessionFacts{Present: 2, MinSequence: 1, MaxSequence: 2, DistinctSequences: 2}
+
+	if got := classifyObservationSession(base, whole); got.Reading != ReadingAsFinalized {
+		t.Fatalf("a coherent COMPLETE session reads %q (%s)", got.Reading, got.Detail)
+	}
+
+	for _, tc := range []struct {
+		name    string
+		session func(ObservationSessionRecord) ObservationSessionRecord
+		facts   observationSessionFacts
+		want    string
+	}{
+		{
+			// ONLY the counter form is violated: the session is INCOMPLETE so
+			// the exact-set rule does not apply, and its surviving facts
+			// match committed_count exactly. Nothing but committed+dropped
+			// failing to account for the reserved positions can catch this.
+			name: "reserved positions are unaccounted for",
+			session: func(s ObservationSessionRecord) ObservationSessionRecord {
+				s.CloseState, s.CommittedCount, s.DroppedCount, s.LastAssignedSequence = SessionIncomplete, 2, 1, 9
+				return s
+			},
+			facts: observationSessionFacts{Present: 2, MinSequence: 1, MaxSequence: 2, DistinctSequences: 2},
+			want:  ReadingIntegrityError,
+		},
+		{
+			name: "counters without any reservation",
+			session: func(s ObservationSessionRecord) ObservationSessionRecord {
+				s.LastAssignedSequenceKnown = false
+				return s
+			},
+			facts: whole,
+			want:  ReadingIntegrityError,
+		},
+		{
+			name: "COMPLETE while reporting a loss",
+			session: func(s ObservationSessionRecord) ObservationSessionRecord {
+				s.DroppedCount, s.LastAssignedSequence = 1, 3
+				return s
+			},
+			facts: whole,
+			want:  ReadingIntegrityError,
+		},
+		{
+			name:    "a fact outside the reserved range",
+			session: func(s ObservationSessionRecord) ObservationSessionRecord { return s },
+			facts:   observationSessionFacts{Present: 2, MinSequence: 1, MaxSequence: 9, DistinctSequences: 2},
+			want:    ReadingIntegrityError,
+		},
+		{
+			name:    "an orphan fact matching one half of the pair",
+			session: func(s ObservationSessionRecord) ObservationSessionRecord { return s },
+			facts:   observationSessionFacts{Present: 2, MinSequence: 1, MaxSequence: 2, DistinctSequences: 2, HalfPair: 1},
+			want:    ReadingIntegrityError,
+		},
+		{
+			name:    "COMPLETE with a gap in the positions it reserved",
+			session: func(s ObservationSessionRecord) ObservationSessionRecord { return s },
+			facts:   observationSessionFacts{Present: 2, MinSequence: 1, MaxSequence: 3, DistinctSequences: 2},
+			want:    ReadingIntegrityError,
+		},
+		{
+			name: "INCOMPLETE may legitimately have gaps",
+			session: func(s ObservationSessionRecord) ObservationSessionRecord {
+				s.CloseState, s.DroppedCount, s.CommittedCount, s.LastAssignedSequence = SessionIncomplete, 1, 2, 3
+				return s
+			},
+			facts: observationSessionFacts{Present: 2, MinSequence: 1, MaxSequence: 3, DistinctSequences: 2},
+			want:  ReadingAsFinalized,
+		},
+		{
+			name: "facts removed after finalization",
+			session: func(s ObservationSessionRecord) ObservationSessionRecord {
+				s.CloseState = SessionIncomplete
+				return s
+			},
+			facts: observationSessionFacts{Present: 1, MinSequence: 1, MaxSequence: 1, DistinctSequences: 1},
+			want:  ReadingAdministrativelyTruncated,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := classifyObservationSession(tc.session(base), tc.facts)
+			if got.Reading != tc.want {
+				t.Fatalf("reading = %q (%s), want %q", got.Reading, got.Detail, tc.want)
+			}
+		})
+	}
+}
+
+// TestSessionReadingCountsOnTheExactPair proves the reader counts facts by the
+// EXACT (collector_epoch, collector_session_id) pair.
+//
+// The fixture is built so that epoch-only counting gives the WRONG answer
+// rather than merely a different route to the same one: the session committed
+// two facts, one of its own was removed afterwards, and one row carrying this
+// epoch under a different session id exists. Counted by epoch alone that is
+// two facts -- exactly committed_count -- and the session reads as a coherent,
+// fully intact AS_FINALIZED. Counted on the pair it is one fact, and the
+// stray row is an orphan that makes the dataset unreadable.
+func TestSessionReadingCountsOnTheExactPair(t *testing.T) {
+	svc, repo := newObservationService(t)
+	ctx := context.Background()
+	epoch := svc.observations.epoch.Load()
+
+	svc.RecordPredictionObservation(channelObservation("pool-1", "chan-a", "streamer-a", "event-1", "ROUND_CREATED"))
+	svc.RecordPredictionObservation(channelObservation("pool-1", "chan-a", "streamer-a", "event-2", "ROUND_UPDATED"))
+	awaitCommitted(t, svc, 2)
+	svc.observations.Close()
+
+	reading, _, err := repo.ReadObservationSession(ctx, epoch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reading.Reading != ReadingAsFinalized || reading.FactsPresent != 2 {
+		t.Fatalf("baseline reads %q with %d facts", reading.Reading, reading.FactsPresent)
+	}
+
+	// Retention or an erasure removes one of the session's own facts...
+	if _, err := repo.db.Exec(
+		`DELETE FROM prediction_observations WHERE collector_sequence = 2 AND collector_epoch = ?`, epoch); err != nil {
+		t.Fatal(err)
+	}
+	// ...and a row carrying this epoch under another session id takes its
+	// place in an epoch-only count.
+	insertObservationRow(t, repo.db, epoch, 2, "orphan", "pool-1", "", "", 10)
+	if _, err := repo.db.Exec(
+		`UPDATE prediction_observations SET collector_session_id = 'not-this-session' WHERE observation_id = 'orphan'`); err != nil {
+		t.Fatal(err)
+	}
+
+	reading, _, err = repo.ReadObservationSession(ctx, epoch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reading.FactsPresent != 1 {
+		t.Fatalf("the reader counted %d facts, want 1: a row under a different session id is not "+
+			"one of this session's facts", reading.FactsPresent)
+	}
+	if reading.Reading != ReadingIntegrityError {
+		t.Fatalf("a session with a cross-pair fact reads %q (%s), want %q",
+			reading.Reading, reading.Detail, ReadingIntegrityError)
 	}
 }
