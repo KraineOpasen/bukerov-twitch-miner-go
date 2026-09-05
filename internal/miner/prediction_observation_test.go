@@ -245,30 +245,46 @@ func TestTheMinerSettlesItsPoolAsAProducer(t *testing.T) {
 		}
 	})
 
-	// The shutdown path itself. It is asserted structurally because reaching
-	// it needs a fully built miner: the property is that the pool's OWN Close
-	// result is the evidence the handle is settled with, and that the settle
-	// happens on the shutdown path at all — deleting the line otherwise left
-	// the whole module green.
-	t.Run("stop settles with the pool's own Close result", func(t *testing.T) {
-		src, err := os.ReadFile("miner.go")
-		if err != nil {
-			t.Fatal(err)
+	// The shutdown step itself, executed rather than read. CodeRabbit's full
+	// review pointed out that this was asserted by scanning miner.go for
+	// string patterns, which passes on code that is arranged correctly and
+	// behaves wrongly. The step is now one method, so it can be run.
+	t.Run("closing the transport settles with the pool's own Close result", func(t *testing.T) {
+		m := &Miner{}
+		m.wsPool = pubsub.NewWebSocketPool(nil, nil, nil, config.RateLimitSettings{})
+		sink := &recordingProducerSink{}
+		m.settlePredictionProducer = m.wsPool.SetPredictionObservationSink(sink)
+
+		if got := m.closePredictionTransport(); got != nil {
+			t.Fatalf("closing a clean pool returned %v; the shutdown result must be the "+
+				"pool's own, unaltered", got)
 		}
-		i := strings.Index(string(src), "poolErr := m.wsPool.Close()")
-		if i < 0 {
-			t.Fatal("the pool is no longer closed on the shutdown path; this test no longer " +
-				"asserts anything")
+
+		// The settle handle is ONE-SHOT, so whether the close spent it is
+		// observable: a later settle carrying an error records an uncertainty
+		// only if the handle was still unspent. This is the discriminator —
+		// a clean pool's Close returns nil, so counting uncertainties
+		// immediately after the close cannot tell "settled with nil" from
+		// "never settled at all".
+		m.settlePredictionObservations(errors.New("late settle on an already-settled handle"))
+		if n := sink.uncertainShutdownCount(); n != 0 {
+			t.Fatalf("a settle after the close spent %d obligations: closing the transport did "+
+				"not settle the producer, so a pool that could not prove it stopped would "+
+				"leave its session finalizing as if everything had been observed", n)
 		}
-		after := string(src)[i:]
-		j := strings.Index(after, "m.settlePredictionObservations(poolErr)")
-		if j < 0 {
-			t.Fatal("the shutdown path does not settle the Prediction producer with the pool's " +
-				"own Close result; a pool that could not prove it stopped would leave its " +
-				"session finalizing as if everything had been observed")
-		}
-		if k := strings.Index(after, "drainErrs = append(drainErrs, poolErr)"); k < 0 || j > k {
-			t.Fatal("the settle does not happen before the Close result is aggregated away")
+	})
+
+	t.Run("a pool that cannot prove it stopped settles as uncertain", func(t *testing.T) {
+		m := &Miner{}
+		m.wsPool = pubsub.NewWebSocketPool(nil, nil, nil, config.RateLimitSettings{})
+		sink := &recordingProducerSink{}
+		m.settlePredictionProducer = m.wsPool.SetPredictionObservationSink(sink)
+
+		// Settling twice must not double-count: the handle is one-shot.
+		m.settlePredictionObservations(errors.New("connections not joined"))
+		m.settlePredictionObservations(errors.New("connections not joined"))
+		if n := sink.uncertainShutdownCount(); n != 1 {
+			t.Fatalf("settling twice recorded %d uncertain shutdowns, want exactly 1", n)
 		}
 	})
 

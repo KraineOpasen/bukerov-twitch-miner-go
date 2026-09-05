@@ -512,6 +512,29 @@ func (r *SQLiteRepository) DeleteStreamerTx(tx *sql.Tx, login string) (bool, err
 // handle. Convenience for standalone callers/tests; the miner's lifecycle
 // coordinator uses DeleteStreamerTx to purge several stores in one transaction.
 func (r *SQLiteRepository) DeleteStreamer(ctx context.Context, login string) (bool, error) {
+	login = strings.ToLower(login)
+	// Neither the empty login nor the drops bucket is a deletable identity,
+	// and this call is documented to be a no-op for them — so the barrier
+	// below must not be armed against them either. Checked here rather than
+	// relying on DeleteStreamerTx's own guard, because by then the barrier
+	// would already be up.
+	if login == "" || login == DropsBucket {
+		return false, nil
+	}
+	// Arm the SAME identity barrier the lifecycle deletion path arms, OUTSIDE
+	// and strictly before the purge transaction.
+	//
+	// The priority claim below is not that barrier. It preempts the
+	// observation lease currently IN FLIGHT and nothing else: a fact already
+	// sitting in the collector's queue, or the next one a live producer
+	// offers, is untouched by it and would be written after this call had
+	// erased everything it could see. InvalidateIdentity is what refuses those
+	// — it bumps the capture generation and arms the fence — and the tombstone
+	// is what stops a later point or annotation write from recreating the
+	// streamers row this is about to delete.
+	r.InvalidateIdentity("", login)
+	r.Tombstone(login)
+
 	defer r.priority.Claim()()
 	var existed bool
 	err := r.db.WithTx(ctx, func(tx *sql.Tx) error {

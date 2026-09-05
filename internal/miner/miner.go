@@ -1413,6 +1413,24 @@ var errLoopJoinTimeout = errors.New("miner: background loop join timed out")
 // spawned, returning the explicit errLoopJoinTimeout on timeout (it never
 // hangs). A miner whose startMining never ran has an empty loopWG and
 // returns nil immediately.
+// closePredictionTransport closes the pubsub pool and settles the Prediction
+// observation producer with the pool's OWN Close result, returning that result
+// unchanged for the caller to aggregate.
+//
+// The two are one step on purpose. A non-nil result means the pool could not
+// prove it had stopped producing, so the collector session must be forced
+// INCOMPLETE — and that evidence is exactly the value being aggregated away on
+// the next line. Separating them is how the settle gets dropped, or settled
+// with something other than the pool's own verdict; keeping them together also
+// makes the ordering assertable without standing up a whole miner.
+//
+// It never alters the shutdown result.
+func (m *Miner) closePredictionTransport() error {
+	poolErr := m.wsPool.Close()
+	m.settlePredictionObservations(poolErr)
+	return poolErr
+}
+
 func (m *Miner) joinLoops() error {
 	done := make(chan struct{})
 	go func() {
@@ -2105,14 +2123,7 @@ func (m *Miner) teardown() error {
 		drainErrs = append(drainErrs, m.chatManager.Close())
 	}
 	if m.wsPool != nil {
-		// The pool's own Close result is unchanged and still aggregated
-		// exactly as before. It ALSO settles the Prediction observation
-		// producer obligation exactly once: a non-nil result means the pool
-		// could not prove it had stopped producing, so the collector session
-		// is forced INCOMPLETE. This never alters the shutdown result.
-		poolErr := m.wsPool.Close()
-		m.settlePredictionObservations(poolErr)
-		drainErrs = append(drainErrs, poolErr)
+		drainErrs = append(drainErrs, m.closePredictionTransport())
 	}
 	if m.watcher != nil {
 		// A dirty watcher teardown (ErrStopJoinTimeout) means the watch loop is

@@ -2921,6 +2921,14 @@ type observationCollector struct {
 	// test can occupy that gap deterministically — it is the only window in
 	// which the two values a fact carries can disagree about time.
 	afterReserve func()
+	// beforeLease, when set, runs after write has made every check it can make
+	// WITHOUT the shared connection and immediately before it blocks
+	// acquiring the gate lease. It is nil in production and exists so a test
+	// can prove a writer really is inside that wait — the window an erasure
+	// has to land in for the post-lease re-check to be the thing that refuses
+	// a fact. A sleep can only show the writer has not finished, which is also
+	// true of a writer that has not started.
+	beforeLease func()
 
 	// identityErasures counts privacy erasures performed during this session.
 	// One is enough to make the session INCOMPLETE: after an erasure its facts
@@ -3620,6 +3628,9 @@ func (c *observationCollector) write(ctx context.Context, raw PredictionObservat
 	writeCtx, cancel := context.WithTimeout(ctx, c.writeDeadline)
 	defer cancel()
 
+	if c.beforeLease != nil {
+		c.beforeLease()
+	}
 	leaseCtx, settle, ok := c.gate.lease(writeCtx)
 	if !ok {
 		c.dropped.Add(1)

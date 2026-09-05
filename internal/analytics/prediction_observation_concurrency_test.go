@@ -1034,18 +1034,29 @@ func TestAnErasureThatLandsWhileTheWriteWaitsForTheLeaseStillHolds(t *testing.T)
 	}()
 	<-claimed
 
+	// The writer must be INSIDE the lease wait before the erasure lands,
+	// otherwise the PRE-lease check would be what refuses the fact and this
+	// test would prove nothing about the re-check after it. A sleep cannot
+	// establish that: it shows only that the writer has not finished, which is
+	// equally true of a writer the scheduler has not started. The seam fires
+	// once write has made every check it can make without the connection and
+	// is about to block, so waiting on it is a proof rather than a guess.
+	atLease := make(chan struct{})
+	var once sync.Once
+	c.beforeLease = func() { once.Do(func() { close(atLease) }) }
+	t.Cleanup(func() { c.beforeLease = nil })
+
 	written := make(chan struct{})
 	go func() {
 		defer close(written)
 		c.write(ctx, fact)
 	}()
 
-	// The writer must be INSIDE the lease wait before the erasure lands,
-	// otherwise the pre-lease check would be what refuses the fact and this
-	// test would pass for the wrong reason. Everything write does before the
-	// lease is non-blocking, so a writer that has not returned is blocked
-	// exactly there.
-	time.Sleep(100 * time.Millisecond)
+	select {
+	case <-atLease:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the writer never reached the lease wait")
+	}
 	select {
 	case <-written:
 		t.Fatal("the write completed while a business claim was held; it never waited for the " +

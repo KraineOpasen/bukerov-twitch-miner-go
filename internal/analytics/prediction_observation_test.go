@@ -4843,3 +4843,94 @@ func TestRunItselfRecordsThatIntakeNeverOpened(t *testing.T) {
 		t.Fatalf("close state = %q, want %q", reading.Session.CloseState, SessionIncomplete)
 	}
 }
+
+// TestDirectDeletionArmsTheSameIdentityBarrier is the regression for a finding
+// CodeRabbit raised in the full review of this head.
+//
+// The lifecycle deletion path arms an identity barrier OUTSIDE and strictly
+// before its purge transaction: InvalidateIdentity bumps the capture
+// generation and arms the fence, and Tombstone stops a later write from
+// recreating the streamers row. The repository's own DeleteStreamer erased the
+// persisted observations but armed neither, relying on the priority claim
+// alone — and a claim only preempts the observation lease CURRENTLY in flight.
+// It does nothing about a fact already sitting in the collector's queue, or
+// the next one a live producer offers.
+//
+// So a direct deletion could erase every stored observation of an identity and
+// then have one written back a moment later, which is the resurrection the
+// fence exists to prevent. There is no production caller today — which is
+// exactly why it is worth fixing now rather than when one appears.
+func TestDirectDeletionArmsTheSameIdentityBarrier(t *testing.T) {
+	svc, repo := newObservationService(t)
+	ctx := context.Background()
+	c := svc.observations
+
+	if err := repo.RecordPoints("victim", 100, "WATCH"); err != nil {
+		t.Fatal(err)
+	}
+
+	// A producer captures a fact and is descheduled: it is queued, with the
+	// pre-deletion generation, before the deletion runs.
+	inFlight := mustSanitize(t, channelObservation("pool-1", "chan-victim", "victim", "e-1", "ROUND_CREATED"))
+	inFlight.sequence = c.sequence.Add(1)
+	inFlight.generation = c.generation.Load()
+
+	existed, err := repo.DeleteStreamer(ctx, "victim")
+	if err != nil || !existed {
+		t.Fatalf("delete: existed=%v err=%v", existed, err)
+	}
+
+	// The in-flight fact must not survive the deletion.
+	before := c.dropped.Load()
+	c.write(ctx, inFlight)
+	if c.dropped.Load() != before+1 {
+		t.Fatal("a fact captured before a direct deletion was written after it: DeleteStreamer " +
+			"arms no identity barrier, so the erasure it just performed can be undone by " +
+			"anything already in flight")
+	}
+	stored, err := repo.ObservationsBySession(ctx, c.sessionID, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, rec := range stored {
+		if rec.EventID == "e-1" {
+			t.Fatalf("an observation of the deleted identity was persisted after deletion: %+v", rec)
+		}
+	}
+
+	// And a fact a LIVE producer offers next is refused too, by the fence.
+	svc.RecordPredictionObservation(
+		channelObservation("pool-1", "chan-victim", "victim", "e-2", "ROUND_CREATED"))
+	awaitDropped(t, svc, 2)
+
+	// The repository tombstone is the other half: a later write must not
+	// recreate the row the deletion just removed.
+	if err := repo.RecordPoints("victim", 200, "WATCH"); !errors.Is(err, ErrStreamerDeleted) {
+		t.Fatalf("a write after a direct deletion returned %v, want ErrStreamerDeleted: without "+
+			"the tombstone it recreates the streamers row the deletion removed", err)
+	}
+}
+
+// TestDirectDeletionLeavesUndeletableIdentitiesAlone is the other half: the
+// barrier above must not be armed for identities DeleteStreamer refuses to
+// delete, or the drops bucket would be fenced by a call that is documented to
+// be a no-op for it.
+func TestDirectDeletionLeavesUndeletableIdentitiesAlone(t *testing.T) {
+	svc, repo := newObservationService(t)
+	ctx := context.Background()
+
+	if err := repo.RecordAnnotation(DropsBucket, "WIN", "drop", "#36b535"); err != nil {
+		t.Fatal(err)
+	}
+	existed, err := repo.DeleteStreamer(ctx, DropsBucket)
+	if err != nil || existed {
+		t.Fatalf("delete of the drops bucket: existed=%v err=%v, want a no-op", existed, err)
+	}
+	if err := repo.RecordAnnotation(DropsBucket, "WIN", "drop", "#36b535"); err != nil {
+		t.Fatalf("the drops bucket was fenced by a call that deletes nothing: %v", err)
+	}
+	if svc.observations.isFenced(mustSanitize(t,
+		channelObservation("pool-1", "chan-drops", DropsBucket, "e-1", "ROUND_CREATED"))) {
+		t.Fatal("the drops bucket's observation identity was fenced by a no-op deletion")
+	}
+}
