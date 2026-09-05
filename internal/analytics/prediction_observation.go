@@ -2530,7 +2530,9 @@ type observationCollector struct {
 	// documentation.
 	sessionBytes atomic.Int64
 
-	startOnce sync.Once
+	// closeOnce guards the teardown. Start needs no equivalent: its guard is
+	// the NEW->STARTING compare-and-swap, which a sync.Once could not provide
+	// because it cannot also fail for a collector that is already closed.
 	closeOnce sync.Once
 	// stop is written by Start and read by Close, which are different
 	// sync.Once instances — those establish no happens-before between each

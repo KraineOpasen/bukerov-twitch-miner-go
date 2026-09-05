@@ -2981,7 +2981,17 @@ func TestEveryFrozenCeilingIsCheckedAtItsLimit(t *testing.T) {
 			if !ok {
 				t.Fatalf("the fact that reaches the %s ceiling exactly was refused", tc.name)
 			}
+			before := l.storeUsage()
 			l.charge(tc.keys, tc.round, payload)
+			if got := l.storeUsage(); got.Rows != before.Rows+1 || got.Bytes != before.Bytes+payload {
+				t.Fatalf("a charged fact moved the store tally to %+v, want one row and %d bytes "+
+					"more than %+v", got, payload, before)
+			}
+			if tc.round != "" {
+				if u := l.roundUsage(tc.round); u.Rows == 0 && u.Bytes == 0 {
+					t.Fatal("the round bucket was not charged")
+				}
+			}
 
 			// One past it: refused, and refused for the right reason.
 			ok, identity := l.admit(tc.keys, tc.round, payload)
@@ -3001,10 +3011,17 @@ func TestEveryFrozenCeilingIsCheckedAtItsLimit(t *testing.T) {
 		for i := 0; i < MaxStoreDeletionKeys-1; i++ {
 			l.deletionKeys[strconv.Itoa(i)] = observationUsage{Rows: 1}
 		}
+		if got := l.distinctDeletionKeys(); got != MaxStoreDeletionKeys-1 {
+			t.Fatalf("seeded %d distinct keys, want %d", got, MaxStoreDeletionKeys-1)
+		}
 		if ok, _ := l.admit([]string{"fresh"}, "", payload); !ok {
 			t.Fatal("a new deletion key one short of the ceiling was refused")
 		}
 		l.charge([]string{"fresh"}, "", payload)
+		if got := l.distinctDeletionKeys(); got != MaxStoreDeletionKeys {
+			t.Fatalf("after the last admissible key the store holds %d, want the %d ceiling",
+				got, MaxStoreDeletionKeys)
+		}
 
 		// At it: a new key is refused, but an EXISTING one still is not --
 		// the ceiling counts separately erasable identities, not rows.

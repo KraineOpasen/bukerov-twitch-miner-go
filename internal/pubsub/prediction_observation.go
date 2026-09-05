@@ -699,18 +699,6 @@ func (a manualAction) placementCall(eventID, channelID, login, phase string, ok 
 	a.pool.observePlacementCallOf(eventID, channelID, login, phase, ok, errorClass, slot, amount, a.counters(nil))
 }
 
-// observeManualSkip records a manual placement the pool declined at the
-// validation stage, with the round state it saw.
-func (p *WebSocketPool) observeManualSkip(eventID, channelID, login, reason, roundState string) {
-	p.observeRoundFact(eventID, channelID, login, ObsKindManualControl, ObservationPayload{
-		Phase:      "MANUAL_SKIPPED",
-		Decision:   "SKIP",
-		ReasonCode: reason,
-		RoundState: roundState,
-		Manual:     boolPtr(true),
-	})
-}
-
 // observeRoundCleanup records a tracked round's state being dropped.
 func (p *WebSocketPool) observeRoundCleanup(eventID, channelID, login, incarnation, phase, reason string) {
 	p.observeRoundFactOf(eventID, channelID, login, incarnation, ObsKindRoundCleanup, ObservationPayload{
