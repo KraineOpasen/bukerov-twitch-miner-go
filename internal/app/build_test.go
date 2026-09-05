@@ -445,7 +445,7 @@ func TestAnalyticsStepStartsBeforeWebAndStopsAfterIt(t *testing.T) {
 	if dbAt < 0 || analyticsAt < 0 || webAt < 0 {
 		t.Fatalf("steps = %v, want database, analytics and web", names)
 	}
-	if !(dbAt < analyticsAt && analyticsAt < webAt) {
+	if dbAt >= analyticsAt || analyticsAt >= webAt {
 		t.Fatalf("steps = %v, want database before analytics before web (Shutdown reverses this)", names)
 	}
 

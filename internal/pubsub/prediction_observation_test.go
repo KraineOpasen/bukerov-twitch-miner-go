@@ -88,7 +88,7 @@ func TestObservationSinkAbsentIsANoOp(t *testing.T) {
 // invisible to the placement contract: identical return values, identical
 // Twitch call count and identical arguments with and without a sink.
 func TestObservationDoesNotChangeManualBetBehaviour(t *testing.T) {
-	run := func(observed bool) (string, error, int, string, int) {
+	run := func(observed bool) (string, int, string, int, error) {
 		placer := &fakePlacer{}
 		var p *WebSocketPool
 		if observed {
@@ -99,17 +99,17 @@ func TestObservationDoesNotChangeManualBetBehaviour(t *testing.T) {
 		s := newTestStreamer(1000)
 		addRound(p, s, "e1")
 		title, err := p.PlaceManualBet("e1", "o2", 250)
-		return title, err, placer.callCount(), placer.lastID, placer.lastAmt
+		return title, placer.callCount(), placer.lastID, placer.lastAmt, err
 	}
-	t1, e1, c1, id1, a1 := run(false)
-	t2, e2, c2, id2, a2 := run(true)
+	t1, c1, id1, a1, e1 := run(false)
+	t2, c2, id2, a2, e2 := run(true)
 	if t1 != t2 || !sameError(e1, e2) || c1 != c2 || id1 != id2 || a1 != a2 {
 		t.Fatalf("observing changed the placement:\n unobserved: %q %v calls=%d id=%q amt=%d\n   observed: %q %v calls=%d id=%q amt=%d",
 			t1, e1, c1, id1, a1, t2, e2, c2, id2, a2)
 	}
 
 	// The same for a REJECTED placement.
-	rejected := func(observed bool) (string, error, int) {
+	rejected := func(observed bool) (string, int, error) {
 		placer := &fakePlacer{err: errors.New("twitch says no")}
 		var p *WebSocketPool
 		if observed {
@@ -120,10 +120,10 @@ func TestObservationDoesNotChangeManualBetBehaviour(t *testing.T) {
 		s := newTestStreamer(1000)
 		addRound(p, s, "e1")
 		title, err := p.PlaceManualBet("e1", "o1", 100)
-		return title, err, placer.callCount()
+		return title, placer.callCount(), err
 	}
-	rt1, re1, rc1 := rejected(false)
-	rt2, re2, rc2 := rejected(true)
+	rt1, rc1, re1 := rejected(false)
+	rt2, rc2, re2 := rejected(true)
 	if rt1 != rt2 || !sameError(re1, re2) || rc1 != rc2 {
 		t.Fatalf("observing changed a rejected placement: %q/%v/%d vs %q/%v/%d", rt1, re1, rc1, rt2, re2, rc2)
 	}

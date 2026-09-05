@@ -67,9 +67,8 @@ func (l *loginOnlyPurger) snapshot() []string {
 // recordingFencer records tombstones and identity invalidations, and the ORDER
 // they happened in relative to the purge.
 type recordingFencer struct {
-	mu          sync.Mutex
-	events      []string
-	purgeMarker func() string
+	mu     sync.Mutex
+	events []string
 }
 
 func (f *recordingFencer) Tombstone(login string) {
