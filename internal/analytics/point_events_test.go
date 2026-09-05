@@ -72,6 +72,9 @@ func readLedger(t *testing.T, r *SQLiteRepository, streamer string) []ledgerRow 
 		}
 		out = append(out, lr)
 	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("read ledger: %v", err)
+	}
 	return out
 }
 

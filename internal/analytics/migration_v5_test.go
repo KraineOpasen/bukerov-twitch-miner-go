@@ -91,6 +91,9 @@ func dumpTable(t *testing.T, db *database.DB, table string) []string {
 		}
 		out = append(out, strings.Join(parts, "|"))
 	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("dump %s: %v", table, err)
+	}
 	return out
 }
 
