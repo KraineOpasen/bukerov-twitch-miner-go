@@ -40,7 +40,9 @@ import (
 	"context"
 	"log/slog"
 	"strconv"
+	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/models"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/pubsub"
@@ -168,8 +170,8 @@ func logWatchStreakMilestoneObservation(obs twitch.WatchStreakMilestoneObservati
 	attrs := []any{
 		"record", milestoneObservationRecord,
 		"sequence", obs.Sequence,
-		"streamer", obs.RequestedLogin,
-		"channelId", obs.RequestedChannelID,
+		"streamer", truncateForLog(obs.RequestedLogin),
+		"channelId", truncateForLog(obs.RequestedChannelID),
 		"requestStart", obs.RequestStart.UTC().Format(time.RFC3339Nano),
 		"requestEnd", obs.RequestEnd.UTC().Format(time.RFC3339Nano),
 		"requestDurationMs", obs.Duration().Milliseconds(),
@@ -185,30 +187,23 @@ func logWatchStreakMilestoneObservation(obs twitch.WatchStreakMilestoneObservati
 		"milestoneNodePresence", string(snap.MilestoneNodePresence),
 
 		// Observed channel identity as Twitch returned it, kept distinct from
-		// the identity we asked for.
-		"observedChannelIdPresence", string(snap.ChannelID.Presence),
+		// the identity we asked for. Every value below carries its own presence
+		// classification when it was not validly observed (see
+		// milestoneLogString), so the record does not print it twice.
 		"observedChannelId", milestoneLogString(snap.ChannelID),
 
 		// Audited milestone fields. Values are reported, never interpreted.
-		"milestoneIdPresence", string(snap.MilestoneID.Presence),
 		"milestoneId", milestoneLogString(snap.MilestoneID),
-		"milestoneValuePresence", string(snap.MilestoneValue.Presence),
 		"milestoneValue", milestoneLogInt(snap.MilestoneValue),
-		"shareStatusPresence", string(snap.ShareStatus.Presence),
 		"shareStatus", milestoneLogString(snap.ShareStatus),
-		"watchStreakThresholdPresence", string(snap.WatchStreakThreshold.Presence),
 		"watchStreakThreshold", milestoneLogInt(snap.WatchStreakThreshold),
-		"watchStreakCopoBonusPresence", string(snap.WatchStreakCopoBonus.Presence),
 		"watchStreakCopoBonus", milestoneLogInt(snap.WatchStreakCopoBonus),
-		"statePresence", string(snap.State.Presence),
 		"state", milestoneLogString(snap.State),
-		"expiresAtPresence", string(snap.ExpiresAt.Presence),
 		"expiresAt", milestoneLogString(snap.ExpiresAt),
 
 		// achievementTimestamp belongs to the observed achievement field. It is
 		// NOT the sampling time of this response, which is requestStart/
 		// requestEnd above, and the two are never merged.
-		"achievementTimestampPresence", string(snap.AchievementTimestamp.Presence),
 		"achievementTimestamp", milestoneLogString(snap.AchievementTimestamp),
 
 		"missedStreamsPresence", string(snap.MissedStreams.Presence),
@@ -216,14 +211,19 @@ func logWatchStreakMilestoneObservation(obs twitch.WatchStreakMilestoneObservati
 		"missedStreamsMalformed", snap.MissedStreams.MalformedCount,
 	}
 
-	ids, idCount, idMalformed := milestoneBroadcastIdentifierSummary(snap.MissedStreams)
+	ids := milestoneBroadcastIdentifierSummary(snap.MissedStreams)
 	attrs = append(attrs,
-		"broadcastIdentifierCount", idCount,
-		"broadcastIdentifierMalformed", idMalformed,
-		"broadcastIdentifierSample", ids,
+		"broadcastIdentifierCount", ids.Total,
+		"broadcastIdentifierMalformed", ids.Malformed,
+		// The nested presence tallies: without these a malformed, null or
+		// missing broadcastIdentifiers array is indistinguishable from a
+		// genuinely empty one.
+		"broadcastIdentifierArrays", ids.Arrays,
+		"broadcastIdentifierIds", ids.IDs,
+		"broadcastIdentifierSample", ids.Sample,
 
 		// The two relationships this feature cannot prove, printed explicitly.
-		"localBroadcastContextOnly", localBroadcast,
+		"localBroadcastContextOnly", truncateForLog(localBroadcast),
 		"grantLink", unknownLink,
 		"expectedMilestone", unknownLink,
 	)
@@ -247,48 +247,125 @@ func logWatchStreakMilestoneObservation(obs twitch.WatchStreakMilestoneObservati
 	}
 }
 
-// milestoneBroadcastIdentifierSummary flattens the observed broadcast
-// identifiers into exact counts plus a bounded sample. Counts are never
-// truncated; only the printed list is.
-func milestoneBroadcastIdentifierSummary(missed twitch.MilestoneMissedStreams) (sample []string, total, malformed int) {
+// milestoneBroadcastIdentifiers is the bounded rendering of every observed
+// broadcastIdentifiers array.
+//
+// It reports exact counts, a bounded sample of the well-formed ids, AND two
+// presence tallies: one over the arrays themselves and one over the individual
+// id fields. The tallies are load-bearing — without them a MALFORMED array, a
+// NULL one, a MISSING one and a genuinely EMPTY one all render as
+// "count 0, malformed 0", which is the coercion of unparseable data into an
+// observed "this stream has no broadcast identifiers" that this feature must
+// never perform.
+type milestoneBroadcastIdentifiers struct {
+	Sample    []string
+	Total     int
+	Malformed int
+	Arrays    string
+	IDs       string
+}
+
+func milestoneBroadcastIdentifierSummary(missed twitch.MilestoneMissedStreams) milestoneBroadcastIdentifiers {
+	out := milestoneBroadcastIdentifiers{}
+	arrays := map[twitch.MilestoneFieldPresence]int{}
+	ids := map[twitch.MilestoneFieldPresence]int{}
 	for _, entry := range missed.Entries {
-		total += len(entry.BroadcastIdentifiers.IDs)
-		malformed += entry.BroadcastIdentifiers.MalformedCount
+		arrays[entry.BroadcastIdentifiers.Presence]++
+		out.Total += len(entry.BroadcastIdentifiers.IDs)
+		out.Malformed += entry.BroadcastIdentifiers.MalformedCount
+		for _, element := range entry.BroadcastIdentifiers.Elements {
+			ids[element.Presence]++
+		}
 		for _, id := range entry.BroadcastIdentifiers.IDs {
-			if len(sample) < milestoneLogIDSample {
-				sample = append(sample, truncateForLog(id))
+			if len(out.Sample) < milestoneLogIDSample {
+				out.Sample = append(out.Sample, truncateForLog(id))
 			}
 		}
 	}
-	return sample, total, malformed
+	out.Arrays = presenceTally(arrays)
+	out.IDs = presenceTally(ids)
+	return out
 }
 
 // milestoneLogString renders a string field for a log record. A field that was
-// not validly observed prints as its presence classification, never as an empty
-// string that could be misread as an observed empty value.
+// not validly observed prints as its presence classification in angle brackets
+// — never as an empty string that could be misread as an observed empty value,
+// and never ambiguous with a Twitch string that happens to READ like a
+// classification (a state field whose observed value is literally "MISSING"
+// prints as MISSING; an absent one prints as <MISSING>).
+//
+// Because the classification is carried in the value itself, the record does
+// not also emit a separate <field>Presence attribute for every scalar. That is
+// not lost information — it is the same information, once instead of twice, in
+// a record emitted for every online streamer on every bonus cycle.
 func milestoneLogString(f twitch.MilestoneStringField) string {
 	if f.Presence != twitch.MilestoneFieldValid {
-		return string(f.Presence)
+		return presenceToken(f.Presence)
 	}
 	return truncateForLog(f.Value)
 }
 
 // milestoneLogInt renders an integer field for a log record. A field that was
-// not validly observed prints as its presence classification, never as 0.
+// not validly observed prints as its bracketed presence classification, never
+// as 0.
 func milestoneLogInt(f twitch.MilestoneIntField) string {
 	if f.Presence != twitch.MilestoneFieldValid {
-		return string(f.Presence)
+		return presenceToken(f.Presence)
 	}
 	return strconv.Itoa(f.Value)
 }
 
-// truncateForLog bounds one observed string. Truncation is marked so a reader
-// never mistakes a cut value for a complete one.
+// presenceToken renders a presence classification so it can never be confused
+// with an observed value. An empty classification (a node the parser never
+// reached at all, e.g. after a failed request) reads as <UNSET>.
+func presenceToken(p twitch.MilestoneFieldPresence) string {
+	if p == "" {
+		return "<UNSET>"
+	}
+	return "<" + string(p) + ">"
+}
+
+// truncateForLog bounds one observed string. It cuts on a RUNE boundary — a
+// byte-offset cut can split a multi-byte UTF-8 sequence and put an invalid rune
+// into the operator's log — and marks the truncation so a reader never mistakes
+// a cut value for a complete one.
 func truncateForLog(v string) string {
 	if len(v) <= milestoneLogStringCap {
 		return v
 	}
-	return v[:milestoneLogStringCap] + "...(truncated)"
+	cut := milestoneLogStringCap
+	for cut > 0 && !utf8.RuneStart(v[cut]) {
+		cut--
+	}
+	return v[:cut] + "...(truncated)"
+}
+
+// milestonePresenceOrder is the stable order presence tallies are rendered in,
+// so two records are diffable.
+var milestonePresenceOrder = []twitch.MilestoneFieldPresence{
+	twitch.MilestoneFieldValid,
+	twitch.MilestoneFieldEmpty,
+	twitch.MilestoneFieldMissing,
+	twitch.MilestoneFieldNull,
+	twitch.MilestoneFieldMalformed,
+}
+
+// presenceTally renders a presence histogram as a compact, stable string such
+// as "VALID:2,NULL:1". It is how a repeated nested node keeps its per-element
+// classifications in a bounded record: a single aggregate count would collapse
+// MISSING, NULL, MALFORMED and a non-object element into one number and lose
+// the distinction the parser preserved. An empty histogram renders as "none".
+func presenceTally(counts map[twitch.MilestoneFieldPresence]int) string {
+	parts := make([]string, 0, len(milestonePresenceOrder))
+	for _, p := range milestonePresenceOrder {
+		if n := counts[p]; n > 0 {
+			parts = append(parts, string(p)+":"+strconv.Itoa(n))
+		}
+	}
+	if len(parts) == 0 {
+		return "none"
+	}
+	return strings.Join(parts, ",")
 }
 
 // logWatchStreakGrantCorrelation emits one diagnostic record for a WATCH_STREAK
@@ -351,14 +428,14 @@ func (m *Miner) logWatchStreakGrantCorrelation(
 
 	slog.Info("Watch Streak grant correlation",
 		"record", milestoneCorrelationRecord,
-		"streamer", s.GetUsername(),
-		"channelId", s.ChannelID,
+		"streamer", truncateForLog(s.GetUsername()),
+		"channelId", truncateForLog(s.ChannelID),
 
 		// Domain admission — accepted, and under which binding. Never conflated
 		// with the ledger outcome below.
 		"domainAdmission", string(grant.Admission),
 		"domainAccepted", grant.NewlyAccepted(),
-		"grantBinding", string(grantBinding(grant, msg.EventFingerprint)),
+		"grantBinding", grantBinding(grant, msg.EventFingerprint),
 
 		// The already-existing event identity and exact event-local amount.
 		"eventId", truncateForLog(msg.EventFingerprint),
@@ -374,8 +451,8 @@ func (m *Miner) logWatchStreakGrantCorrelation(
 		"ledgerOutcome", string(ledger),
 
 		// Relationships this feature cannot prove, printed explicitly.
-		"provenBroadcastId", provenBroadcast,
-		"localBroadcastContextOnly", localBroadcast,
+		"provenBroadcastId", truncateForLog(provenBroadcast),
+		"localBroadcastContextOnly", truncateForLog(localBroadcast),
 		"milestoneLink", unknownLink,
 		"expectedMilestone", unknownLink,
 	)
@@ -396,11 +473,13 @@ func admittedGrantFact(grant models.WatchStreakGrantResult, eventID string) (mod
 	return models.WatchStreakGrantFact{}, false
 }
 
-// grantBinding reports the admitted grant's binding, or the empty binding when
-// the fact is not present in the snapshot. It never guesses a bound binding.
-func grantBinding(grant models.WatchStreakGrantResult, eventID string) models.WatchStreakGrantBinding {
+// grantBinding reports the admitted grant's binding, or this feature's explicit
+// UNKNOWN vocabulary when the fact is not present in the snapshot. It never
+// guesses a bound binding, and it never prints a bare empty string that a
+// reader could mistake for an observed unbound binding.
+func grantBinding(grant models.WatchStreakGrantResult, eventID string) string {
 	if fact, ok := admittedGrantFact(grant, eventID); ok {
-		return fact.Binding
+		return string(fact.Binding)
 	}
-	return ""
+	return unknownLink
 }

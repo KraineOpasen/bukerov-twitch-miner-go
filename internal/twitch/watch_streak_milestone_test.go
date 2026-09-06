@@ -2,6 +2,8 @@ package twitch
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"io"
 	"math"
 	"net/http"
@@ -11,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/auth"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/constants"
 )
 
@@ -748,11 +751,16 @@ func TestObserveWatchStreakMilestoneOrderingIsByRequestStart(t *testing.T) {
 		t.Fatalf("fixture did not reverse completion: older ended %v, newer ended %v",
 			older.RequestEnd, newer.RequestEnd)
 	}
-	if older.NewerThan(newer) {
-		t.Fatal("an older request that completed last was presented as newer evidence")
+	// Ordering must follow REQUEST START, not completion. The sequence is the
+	// only recency authority the record carries, and it is stamped before the
+	// request is sent — so the late-completing older observation still sorts
+	// older, and nothing in the record claims otherwise.
+	if !older.RequestStart.Before(newer.RequestStart) && !older.RequestStart.Equal(newer.RequestStart) {
+		t.Fatalf("older request started at %v, after the newer one at %v", older.RequestStart, newer.RequestStart)
 	}
-	if !newer.NewerThan(older) {
-		t.Fatal("the later-started request was not recognized as newer evidence")
+	byCompletion := []WatchStreakMilestoneObservation{newer, older} // completion order
+	if byCompletion[0].Sequence < byCompletion[1].Sequence {
+		t.Fatal("sorting by completion order reproduces the start order; the fixture no longer reverses completion")
 	}
 }
 
@@ -775,14 +783,308 @@ func TestObserveWatchStreakMilestoneRepeatedIdenticalValuesStayDistinct(t *testi
 	if first.Sequence == second.Sequence {
 		t.Fatal("identical observations collapsed onto one sequence")
 	}
-	if !second.NewerThan(first) {
+	if second.Sequence < first.Sequence {
 		t.Fatal("the second identical observation is not ordered after the first")
 	}
-	// Identical content, identical achievement time, DIFFERENT sampling times.
+	// Identical content, identical achievement time, DIFFERENT sample windows.
+	// The achievement time is a property of the achievement and does not move
+	// with the sample; the sample window does.
 	if first.Snapshot.AchievementTimestamp.Value != second.Snapshot.AchievementTimestamp.Value {
 		t.Fatal("fixture achievement timestamps differ")
 	}
-	if !second.RequestStart.After(first.RequestStart) && second.RequestStart.Equal(first.RequestStart) {
-		t.Log("sampling clock resolution collapsed the two starts; sequence still separates them")
+	if second.RequestStart.Before(first.RequestStart) {
+		t.Fatalf("second sample started before the first: %v < %v", second.RequestStart, first.RequestStart)
+	}
+	if second.RequestEnd.Before(first.RequestEnd) {
+		t.Fatalf("second sample ended before the first: %v < %v", second.RequestEnd, first.RequestEnd)
+	}
+}
+
+// TestObserveWatchStreakMilestoneDoesNotTouchConnectionHealth is the BLOCKER
+// regression.
+//
+// The shared connectivity accounting feeds internal/miner.classifyAPI, which
+// turns RecentFunctionalFailures >= 2 into health.SignalGQLAPI = DEGRADED,
+// which minerBetHealthGate turns into "no automated prediction bets". A
+// RewardList hash Twitch does not accept is the EXPECTED outcome here until
+// live acceptance is separately evidenced, so without diagnostic isolation two
+// online streamers would permanently close the auto-bet gate.
+//
+// The suppression must be SYMMETRIC: a failing observation may not invent an
+// outage, and a succeeding one may not mask one.
+func TestObserveWatchStreakMilestoneDoesNotTouchConnectionHealth(t *testing.T) {
+	const window = time.Hour
+
+	tests := []struct {
+		name string
+		body string
+		code int
+		want WatchStreakMilestoneOutcome
+	}{
+		{"unsupported hash", persistedQueryNotFoundBody, http.StatusOK, MilestoneUnsupported},
+		{"top-level graphql errors", `{"errors":[{"message":"service error"}]}`, http.StatusOK, MilestoneGraphQLError},
+		{"permission denied", `{"message":"forbidden"}`, http.StatusForbidden, MilestoneUnavailable},
+		{"unauthorized", `{"message":"unauthorized"}`, http.StatusUnauthorized, MilestoneUnavailable},
+		{
+			"success",
+			`{"data":{"channel":{"id":"12345","self":{"watchStreakMilestone":{"watchStreakMilestone":{"value":4}}}}}}`,
+			http.StatusOK, MilestoneObserved,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(tc.code)
+				_, _ = io.WriteString(w, tc.body)
+			})
+
+			before := c.ConnHealth(time.Now(), window)
+
+			// Several cycles' worth of targets: more than enough to cross the
+			// miner's degrade threshold if any of this were being counted.
+			for i := 0; i < 6; i++ {
+				if got := c.ObserveWatchStreakMilestone(context.Background(), "12345", "somestreamer"); got.Outcome != tc.want {
+					t.Fatalf("observation %d outcome = %q, want %q (failure %q)", i, got.Outcome, tc.want, got.FailureClass)
+				}
+			}
+
+			after := c.ConnHealth(time.Now(), window)
+
+			if after.RecentFunctionalFailures != before.RecentFunctionalFailures {
+				t.Errorf("functional failures %d -> %d: a diagnostic observation must not degrade GQL health "+
+					"(this is what closes the auto-bet gate)",
+					before.RecentFunctionalFailures, after.RecentFunctionalFailures)
+			}
+			if after.RecentTransportFailures != before.RecentTransportFailures {
+				t.Errorf("transport failures %d -> %d: a diagnostic observation must not degrade GQL health",
+					before.RecentTransportFailures, after.RecentTransportFailures)
+			}
+			if !after.LastAttempt.Equal(before.LastAttempt) {
+				t.Errorf("last attempt %v -> %v: a diagnostic observation must not claim the link was exercised",
+					before.LastAttempt, after.LastAttempt)
+			}
+			if !after.LastSuccess.Equal(before.LastSuccess) {
+				t.Errorf("last success %v -> %v: a diagnostic observation must not mask a real business-path outage",
+					before.LastSuccess, after.LastSuccess)
+			}
+		})
+	}
+}
+
+// TestBusinessReadStillAccountsConnectionHealth is the other half of the
+// regression: the isolation must apply ONLY to the diagnostic read. A business
+// operation over the same client must still record exactly what it always did.
+func TestBusinessReadStillAccountsConnectionHealth(t *testing.T) {
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, persistedQueryNotFoundBody)
+	})
+
+	// A diagnostic observation first: it must leave the accounting untouched.
+	c.ObserveWatchStreakMilestone(context.Background(), "12345", "somestreamer")
+	if h := c.ConnHealth(time.Now(), time.Hour); h.RecentFunctionalFailures != 0 || !h.LastAttempt.IsZero() {
+		t.Fatalf("diagnostic observation polluted the accounting: %+v", h)
+	}
+
+	// The same failure on a BUSINESS read is still real evidence.
+	s := newTestStreamer("somestreamer")
+	if err := c.LoadChannelPointsContext(s); err == nil {
+		t.Fatal("expected the business read to fail on a stale hash")
+	}
+	h := c.ConnHealth(time.Now(), time.Hour)
+	if h.RecentFunctionalFailures == 0 {
+		t.Error("business read no longer records a functional failure; the isolation leaked past the diagnostic path")
+	}
+	if h.LastAttempt.IsZero() {
+		t.Error("business read no longer records an attempt; the isolation leaked past the diagnostic path")
+	}
+}
+
+// TestObserveWatchStreakMilestoneUnauthorizedDoesNotEscalate proves a
+// diagnostic 401 reports UNAUTHORIZED evidence and stops: it drives no
+// credential recovery and no operator reauth escalation. Business operations
+// own auth recovery; an observation must not be what declares the session dead.
+//
+// The recovery seam is stubbed to SUCCEED so the assertion discriminates. On
+// the business path a successful recovery replays the identical body, which
+// would show up as a second HTTP attempt; on the diagnostic path recovery must
+// never be reached at all.
+func TestObserveWatchStreakMilestoneUnauthorizedDoesNotEscalate(t *testing.T) {
+	var (
+		mu       sync.Mutex
+		attempts int
+	)
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		attempts++
+		mu.Unlock()
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = io.WriteString(w, `{"message":"unauthorized"}`)
+	})
+
+	recoveries := 0
+	c.recoverFn = func(uint64) (auth.Snapshot, error) {
+		recoveries++
+		return auth.Snapshot{AccessToken: "recovered-token", Generation: 99}, nil
+	}
+	escalated := false
+	c.SetAuthErrorHandler(func() { escalated = true })
+
+	obs := c.ObserveWatchStreakMilestone(context.Background(), "12345", "somestreamer")
+
+	if obs.Outcome != MilestoneUnavailable || obs.FailureClass != MilestoneFailureUnauthorized {
+		t.Fatalf("outcome = %q/%q, want UNAVAILABLE/UNAUTHORIZED", obs.Outcome, obs.FailureClass)
+	}
+	if recoveries != 0 {
+		t.Errorf("credential recovery ran %d time(s) for a diagnostic observation; it must own none", recoveries)
+	}
+	if escalated {
+		t.Error("a diagnostic observation escalated to the operator reauth path")
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if attempts != 1 {
+		t.Errorf("HTTP attempts = %d, want 1 (a diagnostic read owns no recovery replay)", attempts)
+	}
+}
+
+// TestBusinessReadStillRecoversOnUnauthorized is the other half: the
+// no-recovery rule applies ONLY to the diagnostic read. The identical 401 on a
+// business operation must still drive the single-flight recovery and its one
+// replay, exactly as before.
+func TestBusinessReadStillRecoversOnUnauthorized(t *testing.T) {
+	var (
+		mu       sync.Mutex
+		attempts int
+	)
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		attempts++
+		mu.Unlock()
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = io.WriteString(w, `{"message":"unauthorized"}`)
+	})
+
+	recoveries := 0
+	c.recoverFn = func(uint64) (auth.Snapshot, error) {
+		recoveries++
+		return auth.Snapshot{AccessToken: "recovered-token", Generation: 99}, nil
+	}
+
+	_ = c.LoadChannelPointsContext(newTestStreamer("somestreamer"))
+
+	if recoveries != 1 {
+		t.Errorf("business read ran recovery %d time(s), want 1; the diagnostic rule leaked", recoveries)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if attempts != 2 {
+		t.Errorf("business read HTTP attempts = %d, want 2 (original + one replay)", attempts)
+	}
+}
+
+// TestObserveWatchStreakMilestoneDeadlineExceeded covers the remaining failure
+// classification.
+func TestObserveWatchStreakMilestoneDeadlineExceeded(t *testing.T) {
+	var (
+		once    sync.Once
+		entered = make(chan struct{})
+		release = make(chan struct{})
+	)
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		once.Do(func() { close(entered) })
+		<-release
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		<-entered
+		cancel()
+	}()
+	// A cancelled parent and an exceeded deadline share the classification
+	// branch; drive the deadline form explicitly.
+	deadlined, stop := context.WithTimeout(ctx, time.Hour)
+	defer stop()
+
+	obs := c.ObserveWatchStreakMilestone(deadlined, "12345", "somestreamer")
+	close(release)
+
+	if obs.Outcome != MilestoneCancelled {
+		t.Fatalf("outcome = %q, want CANCELLED", obs.Outcome)
+	}
+	if obs.FailureClass != MilestoneFailureCancelled && obs.FailureClass != MilestoneFailureDeadline {
+		t.Fatalf("failureClass = %q, want a cancellation class", obs.FailureClass)
+	}
+}
+
+// TestClassifyMilestoneRequestErrorVocabularyIsClosed proves every failure
+// reaches a record as a bounded class, never as raw error text.
+func TestClassifyMilestoneRequestErrorVocabularyIsClosed(t *testing.T) {
+	allowed := map[MilestoneFailureClass]bool{
+		MilestoneFailureCancelled:     true,
+		MilestoneFailureDeadline:      true,
+		MilestoneFailureQueryNotFound: true,
+		MilestoneFailureUnauthorized:  true,
+		MilestoneFailureTransport:     true,
+	}
+	secret := "OAuth super-secret-token Authorization: Bearer abc"
+	tests := []error{
+		context.Canceled,
+		context.DeadlineExceeded,
+		fmt.Errorf("wrapped: %w", ErrPersistedQueryNotFound),
+		fmt.Errorf("wrapped: %w", ErrUnauthorized),
+		errors.New(secret),
+		fmt.Errorf("request failed: %s", secret),
+	}
+	for _, err := range tests {
+		outcome, class := classifyMilestoneRequestError(err)
+		if !allowed[class] {
+			t.Errorf("error %q produced class %q, outside the closed vocabulary", err, class)
+		}
+		if strings.Contains(string(class), "OAuth") || strings.Contains(string(class), secret) {
+			t.Errorf("error text leaked into the failure class: %q", class)
+		}
+		if outcome == MilestoneObserved {
+			t.Errorf("error %q classified as OBSERVED", err)
+		}
+	}
+}
+
+// TestParseWatchStreakMilestoneSelfNodeAbsence covers data.channel.self, whose
+// MISSING / NULL / MALFORMED forms were otherwise never observed.
+func TestParseWatchStreakMilestoneSelfNodeAbsence(t *testing.T) {
+	channelOf := func(t *testing.T, r map[string]interface{}) map[string]interface{} {
+		t.Helper()
+		return r["data"].(map[string]interface{})["channel"].(map[string]interface{})
+	}
+	tests := []struct {
+		name   string
+		mutate func(t *testing.T, r map[string]interface{})
+		want   MilestoneFieldPresence
+	}{
+		{"missing", func(t *testing.T, r map[string]interface{}) { delete(channelOf(t, r), "self") }, MilestoneFieldMissing},
+		{"null", func(t *testing.T, r map[string]interface{}) { channelOf(t, r)["self"] = nil }, MilestoneFieldNull},
+		{"malformed", func(t *testing.T, r map[string]interface{}) { channelOf(t, r)["self"] = "nope" }, MilestoneFieldMalformed},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			resp := fullRewardListResponse()
+			tc.mutate(t, resp)
+			snap := parseWatchStreakMilestone(resp)
+			if snap.SelfPresence != tc.want {
+				t.Errorf("self presence = %q, want %q", snap.SelfPresence, tc.want)
+			}
+			// The channel id above self is still observed; everything below it
+			// is absent and carries no fabricated value.
+			if snap.ChannelID.Presence != MilestoneFieldValid || snap.ChannelID.Value != "12345" {
+				t.Errorf("channel id = %+v, want the observed id", snap.ChannelID)
+			}
+			if snap.SelfMilestonePresence != MilestoneFieldMissing {
+				t.Errorf("S presence = %q, want MISSING", snap.SelfMilestonePresence)
+			}
+			assertNoFabricatedValues(t, snap)
+		})
 	}
 }

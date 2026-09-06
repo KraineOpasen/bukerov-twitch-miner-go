@@ -93,11 +93,20 @@ type MilestoneIntField struct {
 // is MALFORMED whenever MalformedCount is non-zero — so a reader can never
 // mistake a partially parsed array for a complete one, and a malformed element
 // never silently disappears.
+//
+// Elements carries the PER-ELEMENT classification of each element's id, in wire
+// order. It exists because a single MalformedCount would collapse four
+// different observations — an absent id key, an explicit id: null, a
+// wrong-typed id, and an element that is not an object at all — into one
+// number, destroying exactly the MISSING != NULL != VALID != MALFORMED
+// distinction this parser exists to preserve. An element that is not an object
+// contributes a MALFORMED entry, since its id cannot be classified at all.
 type MilestoneBroadcastIdentifiers struct {
 	Presence       MilestoneFieldPresence
 	Count          int
 	MalformedCount int
 	IDs            []string
+	Elements       []MilestoneStringField
 }
 
 // MilestoneMissedStream is one observed missedStreams element.
@@ -239,15 +248,6 @@ type WatchStreakMilestoneObservation struct {
 	Snapshot WatchStreakMilestoneSnapshot
 }
 
-// NewerThan reports whether o sampled later than other, by REQUEST START
-// sequence only.
-//
-// Completion time is deliberately not consulted. An observation that started
-// earlier is never "newer" evidence just because it finished later.
-func (o WatchStreakMilestoneObservation) NewerThan(other WatchStreakMilestoneObservation) bool {
-	return o.Sequence > other.Sequence
-}
-
 // Duration is the observation's own request window. It is a sampling duration,
 // never an achievement age.
 func (o WatchStreakMilestoneObservation) Duration() time.Duration {
@@ -273,6 +273,14 @@ func (o WatchStreakMilestoneObservation) Duration() time.Duration {
 // body) are the same ones every other read operation in this package already
 // uses. This function adds no retry, no backoff and no second request of its
 // own.
+//
+// The request is marked DIAGNOSTIC (see diagnosticRequestKey), so its outcome
+// is invisible to the shared connectivity accounting in both directions: it
+// records no functional failure, refreshes no success timestamp, drives no
+// credential recovery or operator reauth escalation, and raises no
+// operator-facing WARN/ERROR. That is what keeps a failed observation from
+// degrading health.SignalGQLAPI and closing the auto-bet gate — and equally
+// keeps a succeeding observation from masking a real business-path outage.
 //
 // ctx is the caller's existing loop context. Cancellation is honored before the
 // request is built and, through http.NewRequestWithContext and the
@@ -304,8 +312,17 @@ func (c *TwitchClient) ObserveWatchStreakMilestone(ctx context.Context, channelI
 		"shouldIncludeAllSuspendedStreaks": false,
 	})
 
+	// withDiagnosticRequest is what makes this observation genuinely
+	// side-effect free. Without it the shared read transport would fold this
+	// request's outcome into the process-wide connectivity accounting, and a
+	// RewardList hash Twitch does not accept — the outcome that is EXPECTED
+	// here until live acceptance is separately evidenced — would drive
+	// ConnHealth.RecentFunctionalFailures past the degrade threshold on the
+	// second target, pin health.SignalGQLAPI at DEGRADED, and block every
+	// automated prediction bet for as long as the miner runs. Cancellation and
+	// deadlines propagate through the wrapper unchanged.
 	obs.RequestStart = time.Now()
-	resp, err := c.postGQLRequest(ctx, op)
+	resp, err := c.postGQLRequest(withDiagnosticRequest(ctx), op)
 	obs.RequestEnd = time.Now()
 
 	if err != nil {
@@ -453,13 +470,18 @@ func parseMilestoneBroadcastIdentifiers(entry map[string]interface{}) MilestoneB
 		out.Presence = MilestoneFieldEmpty
 		return out
 	}
+	out.Elements = make([]MilestoneStringField, 0, len(list))
 	for _, element := range list {
 		identifier, ok := element.(map[string]interface{})
 		if !ok || identifier == nil {
+			// The element itself is not an object, so its id cannot be
+			// classified as missing or null — only as malformed.
+			out.Elements = append(out.Elements, MilestoneStringField{Presence: MilestoneFieldMalformed})
 			out.MalformedCount++
 			continue
 		}
 		id := milestoneString(identifier, "id")
+		out.Elements = append(out.Elements, id)
 		if id.Presence != MilestoneFieldValid {
 			out.MalformedCount++
 			continue

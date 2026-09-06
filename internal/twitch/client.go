@@ -339,6 +339,47 @@ func isAuthError(statusCode int, result map[string]interface{}) bool {
 	return false
 }
 
+// diagnosticRequestKey marks a request context as carrying a DIAGNOSTIC-ONLY
+// read.
+//
+// This is the transport owner's distinction between a BUSINESS read — one the
+// miner acts on, whose success or failure is real evidence about the Twitch
+// link — and a diagnostic observation, which must be able to fail without
+// telling the rest of the process anything about connectivity.
+//
+// It exists because the connectivity accounting below is shared, and it feeds
+// the auto-bet gate: functionalFailures reaches TwitchClient.ConnHealth ->
+// internal/miner.classifyAPI -> health.SignalGQLAPI = DEGRADED ->
+// minerBetHealthGate blocks every automated prediction bet. A diagnostic read
+// of an operation whose live acceptance is not established (see
+// constants.RewardList) would otherwise pin that gate closed forever on an
+// outcome that says nothing about whether Twitch is reachable.
+//
+// The suppression is SYMMETRIC and total: a diagnostic request contributes
+// neither failure nor success to the accounting, never escalates to the
+// operator reauth path, and never raises an operator-facing WARN/ERROR of its
+// own. It must not be able to mask a real outage any more than it can invent
+// one. It changes nothing else — the request itself, its client-ID candidates,
+// its retries and its returned error are identical.
+type diagnosticRequestKey struct{}
+
+// withDiagnosticRequest marks ctx as a diagnostic-only read. Cancellation and
+// deadlines propagate unchanged.
+func withDiagnosticRequest(ctx context.Context) context.Context {
+	return context.WithValue(ctx, diagnosticRequestKey{}, true)
+}
+
+// isDiagnosticRequest reports whether ctx was marked diagnostic-only. A nil or
+// unmarked context is a business request, so the accounting default is
+// unchanged for every pre-existing caller.
+func isDiagnosticRequest(ctx context.Context) bool {
+	if ctx == nil {
+		return false
+	}
+	marked, _ := ctx.Value(diagnosticRequestKey{}).(bool)
+	return marked
+}
+
 // PostGQL runs one GQL operation under the client's own lifetime. A caller that
 // owns a cancellation scope (today: the watch generation, through the ctx-taking
 // entry points below) reaches postGQLRequest directly with its context; this
@@ -381,7 +422,9 @@ func (c *TwitchClient) gqlSingleRoundTrip(ctx context.Context, body []byte, oper
 	// body must never reach per-operation parsers as if it were a result, nor
 	// refresh the connection-health timestamp.
 	if statusCode == http.StatusForbidden {
-		c.connAcct.markFunctionalFailure(time.Now())
+		if !isDiagnosticRequest(ctx) {
+			c.connAcct.markFunctionalFailure(time.Now())
+		}
 		return nil, false, fmt.Errorf("twitch GQL %s: permission denied (status 403)", operationName)
 	}
 
@@ -415,6 +458,14 @@ func (c *TwitchClient) postGQLRequest(ctx context.Context, operation constants.G
 	}
 
 	if authRejected {
+		// A diagnostic read owns no credential recovery: it neither drives a
+		// token refresh nor escalates to the operator reauth path. It reports
+		// ErrUnauthorized and stops. Business operations own auth recovery,
+		// and an observation must not be the thing that declares the session
+		// dead.
+		if isDiagnosticRequest(ctx) {
+			return nil, fmt.Errorf("%w: operation %s", ErrUnauthorized, operation.OperationName)
+		}
 		// Serialized recovery + exactly ONE replay of the identical body. A
 		// replay that is rejected again surfaces ErrUnauthorized with no
 		// further recovery and no third request.
@@ -447,6 +498,13 @@ func (c *TwitchClient) postGQLRequest(ctx context.Context, operation constants.G
 	// Checked explicitly here rather than via isAuthError, which only covers
 	// token rejection. The result is returned unchanged so per-operation
 	// parsing behaves exactly as before.
+	if isDiagnosticRequest(ctx) {
+		// Symmetric suppression: a diagnostic read neither refreshes the
+		// health timestamp nor records a functional failure. Letting it
+		// refresh lastSuccess would let a diagnostic that Twitch happens to
+		// answer mask a real business-path outage.
+		return result, nil
+	}
 	if !gql.HasTopLevelErrors(result) {
 		c.markSuccess()
 	} else {
@@ -912,7 +970,10 @@ func (c *TwitchClient) rememberWorkingClientID(operation, clientID string, viaFa
 // ErrPersistedQueryNotFound is returned so the caller keeps its last-known state
 // instead of parsing an error body as "no data".
 func (c *TwitchClient) doGQLRequestWithClientIDFallback(ctx context.Context, body []byte, operationLabel, token string) ([]byte, int, error) {
-	c.connAcct.markAttempt(time.Now())
+	diagnostic := isDiagnosticRequest(ctx)
+	if !diagnostic {
+		c.connAcct.markAttempt(time.Now())
+	}
 	candidates := c.candidateClientIDs(operationLabel)
 
 	var (
@@ -932,20 +993,53 @@ func (c *TwitchClient) doGQLRequestWithClientIDFallback(ctx context.Context, bod
 			return respBody, statusCode, nil
 		}
 
-		slog.Warn("GQL request returned PersistedQueryNotFound; trying next client ID",
+		// A diagnostic read of an operation whose live acceptance is not
+		// established fails this way BY DESIGN and on every cycle. Reporting it
+		// at WARN/ERROR would put an unactionable operator alert on the
+		// dashboard for every target on every poll; the caller records the
+		// outcome as its own diagnostic fact instead.
+		logStaleHash(diagnostic, "GQL request returned PersistedQueryNotFound; trying next client ID",
 			"operation", operationLabel,
 			"clientID", clientID,
 			"remainingCandidates", len(candidates)-i-1,
 		)
 	}
 
+	logStaleHashExhausted(diagnostic, operationLabel, len(candidates))
+
+	if !diagnostic {
+		c.connAcct.markFunctionalFailure(time.Now())
+	}
+	return respBody, statusCode, fmt.Errorf("%w: operation %s (tried %d client IDs)", ErrPersistedQueryNotFound, operationLabel, len(candidates))
+}
+
+// logStaleHash reports one candidate's PersistedQueryNotFound. A business read
+// keeps the historical WARN; a diagnostic read drops to DEBUG (see
+// diagnosticRequestKey).
+func logStaleHash(diagnostic bool, msg string, args ...any) {
+	if diagnostic {
+		slog.Debug(msg, args...)
+		return
+	}
+	slog.Warn(msg, args...)
+}
+
+// logStaleHashExhausted reports that every candidate client ID returned
+// PersistedQueryNotFound. For a business read this is the operator's signal to
+// refresh the hash in internal/constants/gql.go; for a diagnostic read it is an
+// expected outcome the caller records itself.
+func logStaleHashExhausted(diagnostic bool, operationLabel string, clientIDsTried int) {
+	if diagnostic {
+		slog.Debug("Diagnostic GQL request returned PersistedQueryNotFound on all known client IDs",
+			"operation", operationLabel,
+			"clientIDsTried", clientIDsTried,
+		)
+		return
+	}
 	slog.Error("GQL request returned PersistedQueryNotFound on all known client IDs; persisted-query hashes are stale and need updating in internal/constants/gql.go",
 		"operation", operationLabel,
-		"clientIDsTried", len(candidates),
+		"clientIDsTried", clientIDsTried,
 	)
-
-	c.connAcct.markFunctionalFailure(time.Now())
-	return respBody, statusCode, fmt.Errorf("%w: operation %s (tried %d client IDs)", ErrPersistedQueryNotFound, operationLabel, len(candidates))
 }
 
 // doGQLRequestWithRetry sends the given already-marshaled GQL request body
@@ -983,7 +1077,11 @@ func (c *TwitchClient) doGQLRequestWithRetry(ctx context.Context, body []byte, o
 		}
 
 		wait, via := gql.RetryWait(attempt, retryAfter)
-		slog.Warn("GQL request failed, retrying",
+		retryLog := slog.Warn
+		if isDiagnosticRequest(ctx) {
+			retryLog = slog.Debug
+		}
+		retryLog("GQL request failed, retrying",
 			"operation", operationLabel,
 			"attempt", attempt+1,
 			"maxAttempts", gqlMaxRetries+1,
@@ -1001,12 +1099,19 @@ func (c *TwitchClient) doGQLRequestWithRetry(ctx context.Context, body []byte, o
 		}
 	}
 
-	c.gqlFailures.mark(time.Now())
-	slog.Error("GQL request exhausted all retries, skipping this cycle",
-		"operation", operationLabel,
-		"attempts", gqlMaxRetries+1,
-		"error", lastErr,
-	)
+	if !isDiagnosticRequest(ctx) {
+		c.gqlFailures.mark(time.Now())
+		slog.Error("GQL request exhausted all retries, skipping this cycle",
+			"operation", operationLabel,
+			"attempts", gqlMaxRetries+1,
+			"error", lastErr,
+		)
+	} else {
+		slog.Debug("Diagnostic GQL request exhausted all retries",
+			"operation", operationLabel,
+			"attempts", gqlMaxRetries+1,
+		)
+	}
 
 	return nil, 0, fmt.Errorf("gql request failed after %d attempts: %w", gqlMaxRetries+1, lastErr)
 }
