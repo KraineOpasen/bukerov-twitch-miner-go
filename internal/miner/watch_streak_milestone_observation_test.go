@@ -50,6 +50,12 @@ type milestoneRoundTripper struct {
 	// body — the BUSINESS read, used to prove the diagnostic-only suppressions
 	// do not leak onto it.
 	contextBody string
+
+	// offerClaim makes the context read advertise an available bonus, so the
+	// business pass performs a real ClaimCommunityPoints mutation — the
+	// operation the contract says an observation must never be inserted
+	// between.
+	offerClaim bool
 }
 
 func (rt *milestoneRoundTripper) counts() (ops []string, reward map[string]int) {
@@ -113,15 +119,22 @@ func (rt *milestoneRoundTripper) RoundTrip(req *http.Request) (*http.Response, e
 	hook := rt.onRewardList
 	rewardBody := rt.rewardListBody
 	contextBody := rt.contextBody
+	offerClaim := rt.offerClaim
 	rt.mu.Unlock()
 
 	response := `{"data":{}}`
 	switch operation.Name {
 	case "ChannelPointsContext":
 		response = `{"data":{"community":{"channel":{"self":{"communityPoints":{"balance":777,"availableClaim":null}}}}}}`
+		if offerClaim {
+			response = `{"data":{"community":{"channel":{"self":{"communityPoints":{"balance":777,` +
+				`"availableClaim":{"id":"claim-1"}}}}}}}`
+		}
 		if contextBody != "" {
 			response = contextBody
 		}
+	case "ClaimCommunityPoints":
+		response = `{"data":{"claimCommunityPoints":{"claim":{"id":"claim-1"}}}}`
 	case "RewardList":
 		response = defaultRewardListBody
 		if rewardBody != "" {
@@ -271,7 +284,12 @@ func TestObservationRunsOncePerOnlineTargetAndSkipsIneligible(t *testing.T) {
 func TestObservationRunsAfterTheBusinessPassOfTheSameCycle(t *testing.T) {
 	captureLogs(t)
 	logins := milestoneLogins(t, 2)
-	rt := &milestoneRoundTripper{}
+	// A real bonus is available, so the business pass performs an actual
+	// ClaimCommunityPoints mutation. The contract does not merely require the
+	// observation to run last — it requires it never to be inserted BETWEEN
+	// bonus claiming and auto-redeem, which a context-read-only fixture could
+	// not detect.
+	rt := &milestoneRoundTripper{offerClaim: true}
 	m, _ := newMilestoneMiner(t, rt, logins, logins)
 
 	// Give both streamers a live auto-redeem config so the business pass really
@@ -325,10 +343,23 @@ func TestObservationRunsAfterTheBusinessPassOfTheSameCycle(t *testing.T) {
 	// number of calls per streamer, which is the bonus/auto-redeem path's own
 	// business and may change without weakening this guarantee.
 	prefix := ops[:firstReward]
+	businessOps := map[string]bool{"ChannelPointsContext": true, "ClaimCommunityPoints": true}
 	for i, op := range prefix {
-		if op != "ChannelPointsContext" {
-			t.Errorf("prefix op %d = %q, want a business-pass read; ops=%v", i, op, ops)
+		if !businessOps[op] {
+			t.Errorf("prefix op %d = %q, want a business-pass operation; ops=%v", i, op, ops)
 		}
+	}
+	// The claim mutation itself must be inside that prefix: an observation
+	// inserted between the context read and the claim would put a RewardList
+	// ahead of it.
+	claims := 0
+	for _, op := range prefix {
+		if op == "ClaimCommunityPoints" {
+			claims++
+		}
+	}
+	if claims == 0 {
+		t.Fatalf("the business pass performed no claim, so the fixture cannot prove non-interleaving; ops=%v", ops)
 	}
 	covered := map[string]bool{}
 	for i, login := range rt.businessTargets() {
@@ -489,7 +520,7 @@ func TestObservationRecordCarriesBoundedProvenance(t *testing.T) {
 		"missedStreamsPresence":        "VALID",
 		"missedStreamsCount":           "1",
 		"missedStreamsMalformed":       "0",
-		"broadcastIdentifierCount":     "1",
+		"broadcastIdentifierValidIds":  "1",
 		"broadcastIdentifierMalformed": "0",
 		"broadcastIdentifierArrays":    "VALID:1",
 		"broadcastIdentifierIds":       "VALID:1",
@@ -583,11 +614,11 @@ func TestObservationRecordDistinguishesNullMalformedAndEmpty(t *testing.T) {
 			body: `{"data":{"channel":{"id":"1","self":{"watchStreakMilestone":{` +
 				`"missedStreams":[{"broadcastIdentifiers":"nope"}]}}}}}`,
 			want: map[string]string{
-				"missedStreamsPresence":     "VALID",
-				"missedStreamsCount":        "1",
-				"broadcastIdentifierCount":  "0",
-				"broadcastIdentifierArrays": "MALFORMED:1",
-				"broadcastIdentifierIds":    "none",
+				"missedStreamsPresence":       "VALID",
+				"missedStreamsCount":          "1",
+				"broadcastIdentifierValidIds": "0",
+				"broadcastIdentifierArrays":   "MALFORMED:1",
+				"broadcastIdentifierIds":      "none",
 			},
 		},
 		{
@@ -595,9 +626,9 @@ func TestObservationRecordDistinguishesNullMalformedAndEmpty(t *testing.T) {
 			body: `{"data":{"channel":{"id":"1","self":{"watchStreakMilestone":{` +
 				`"missedStreams":[{"broadcastIdentifiers":[]}]}}}}}`,
 			want: map[string]string{
-				"broadcastIdentifierCount":  "0",
-				"broadcastIdentifierArrays": "EMPTY:1",
-				"broadcastIdentifierIds":    "none",
+				"broadcastIdentifierValidIds": "0",
+				"broadcastIdentifierArrays":   "EMPTY:1",
+				"broadcastIdentifierIds":      "none",
 			},
 		},
 		{
@@ -614,13 +645,17 @@ func TestObservationRecordDistinguishesNullMalformedAndEmpty(t *testing.T) {
 		},
 		{
 			name: "per-element id classes survive",
+			// Six elements covering every class, INCLUDING a null element,
+			// which is distinct from an element whose id is null: a well-formed
+			// id, a null id, an absent id, a wrong-typed id, a non-object
+			// element, and a null element.
 			body: `{"data":{"channel":{"id":"1","self":{"watchStreakMilestone":{` +
-				`"missedStreams":[{"broadcastIdentifiers":[{"id":"keep"},{"id":null},{},{"id":9},"nope"]}]}}}}}`,
+				`"missedStreams":[{"broadcastIdentifiers":[{"id":"keep"},{"id":null},{},{"id":9},"nope",null]}]}}}}}`,
 			want: map[string]string{
-				"broadcastIdentifierCount":     "1",
-				"broadcastIdentifierMalformed": "4",
+				"broadcastIdentifierValidIds":  "1",
+				"broadcastIdentifierMalformed": "5",
 				"broadcastIdentifierArrays":    "MALFORMED:1",
-				"broadcastIdentifierIds":       "VALID:1,MISSING:1,NULL:1,MALFORMED:2",
+				"broadcastIdentifierIds":       "VALID:1,MISSING:1,NULL:2,MALFORMED:2",
 			},
 		},
 		{
@@ -1078,21 +1113,41 @@ func TestOfficialLadderConsistencyLabelsWithoutMeasuring(t *testing.T) {
 // authoritative evidence, so a silent edit to the table is a test failure
 // rather than a quiet change of a documented Twitch fact.
 func TestOfficialLadderMatchesTheDocumentedSource(t *testing.T) {
-	want := map[int]int{2: 300, 3: 350, 4: 400, 5: 450}
+	want := []watchStreakLadderRung{
+		{StreakCount: 2, RewardPoints: 300, Tier: ladderStreakCount2},
+		{StreakCount: 3, RewardPoints: 350, Tier: ladderStreakCount3},
+		{StreakCount: 4, RewardPoints: 400, Tier: ladderStreakCount4},
+		{StreakCount: 5, RewardPoints: 450, Tier: ladderStreakCount5Plus, FlatFromHere: true},
+	}
 	if len(officialWatchStreakLadder) != len(want) {
-		t.Fatalf("ladder has %d rungs, want %d", len(officialWatchStreakLadder), len(want))
+		t.Fatalf("ladder has %d rungs, want %d (Twitch Viewer Channel Point Guide)",
+			len(officialWatchStreakLadder), len(want))
 	}
-	for count, reward := range want {
-		if got := officialWatchStreakLadder[count]; got != reward {
-			t.Errorf("streak count %d -> %d, want %d (Twitch Viewer Channel Point Guide)", count, got, reward)
+	for i, rung := range want {
+		if officialWatchStreakLadder[i] != rung {
+			t.Errorf("rung %d = %+v, want %+v (Twitch Viewer Channel Point Guide)",
+				i, officialWatchStreakLadder[i], rung)
 		}
 	}
-	// Rung 5 is documented as "5 or more"; there must be no rung above it that
-	// would imply the ladder keeps climbing.
-	for count := range officialWatchStreakLadder {
-		if count > 5 {
-			t.Errorf("ladder carries a rung for streak count %d; the documented ladder is flat at 5 or more", count)
+	// Exactly one rung may be flat, and it must be the last: "5 or more" is the
+	// top of the documented ladder, and a rung above it would imply it keeps
+	// climbing.
+	for i, rung := range officialWatchStreakLadder {
+		if rung.FlatFromHere && i != len(officialWatchStreakLadder)-1 {
+			t.Errorf("rung %d is flat but is not the last rung", i)
 		}
+		if !rung.FlatFromHere && i == len(officialWatchStreakLadder)-1 {
+			t.Error("the top rung is not marked flat; the documented ladder is flat at 5 or more")
+		}
+	}
+	// Every rung must carry a DISTINCT reward, or a reward could not identify
+	// a rung at all and the consistency label would be arbitrary.
+	seen := map[int]bool{}
+	for _, rung := range officialWatchStreakLadder {
+		if seen[rung.RewardPoints] {
+			t.Errorf("reward %d appears on more than one rung; the label would be ambiguous", rung.RewardPoints)
+		}
+		seen[rung.RewardPoints] = true
 	}
 }
 
@@ -1474,13 +1529,16 @@ func TestCorrelationRecordIsWatchStreakOnly(t *testing.T) {
 }
 
 // TestUnsupportedQueryRecordStaysOffTheDashboardLogView pins the log LEVEL of
-// the unsupported-hash record.
+// every per-cycle diagnostic emitted by one observation cycle.
 //
-// internal/web/logclass.go hides unmatched INFO/DEBUG lines from the dashboard
-// log view and never hides a WARN or ERROR. The shared GQL transport already
-// raises its own ERROR for an exhausted persisted query, so this diagnostic
-// record must stay at INFO: raising it would add a second dashboard-visible
-// line per online streamer per bonus cycle without adding information.
+// Two different consumers, both of which must stay quiet. internal/logger's
+// console handler filters on level ALONE (no message allowlist) and defaults to
+// INFO, so anything at INFO or above prints to stdout/docker logs once per
+// online streamer per cycle, forever. internal/web/logclass.go additionally
+// never hides a WARN or ERROR from the dashboard log view. In this feature's
+// own expected steady state (an unaccepted RewardList hash) those lines carry
+// no observed data at all, so the whole cycle must stay at DEBUG — where the
+// retained file log, this feature's only persistence, still keeps them.
 func TestUnsupportedQueryRecordStaysOffTheDashboardLogView(t *testing.T) {
 	logs := captureLogs(t)
 	logins := milestoneLogins(t, 1)
@@ -1489,17 +1547,35 @@ func TestUnsupportedQueryRecordStaysOffTheDashboardLogView(t *testing.T) {
 	}
 	m, _ := newMilestoneMiner(t, rt, logins, logins)
 
+	// Miner construction logs its own setup lines; only the CYCLE is under test.
+	logs.Reset()
 	m.observeWatchStreakMilestones(context.Background())
 
 	lines := recordLines(logs.String(), milestoneObservationRecord)
 	if len(lines) != 1 {
 		t.Fatalf("observation records = %d, want 1", len(lines))
 	}
-	if got := attrValue(lines[0], "level"); got != "INFO" {
-		t.Fatalf("unsupported-hash record level = %q, want INFO\nline: %s", got, lines[0])
+	// DEBUG, not INFO: the console handler filters on level alone and defaults
+	// to INFO, so an INFO record here would print one line per online streamer
+	// per bonus cycle to stdout forever. DEBUG still reaches the retained file
+	// log, which is this feature's only persistence.
+	if got := attrValue(lines[0], "level"); got != "DEBUG" {
+		t.Fatalf("unsupported-hash record level = %q, want DEBUG — an INFO record floods the console "+
+			"every cycle in this feature's own expected steady state\nline: %s", got, lines[0])
 	}
 	if got := attrValue(lines[0], "outcome"); got != "UNSUPPORTED_QUERY" {
 		t.Fatalf("outcome = %q, want UNSUPPORTED_QUERY", got)
+	}
+	// A failed observation parsed nothing at all, so every observed field must
+	// render as the never-reached token — not as an empty value, and not as a
+	// presence classification that would imply the parser saw the node.
+	for _, key := range []string{
+		"milestoneId", "milestoneValue", "state", "shareStatus", "expiresAt",
+		"achievementTimestamp", "watchStreakThreshold", "watchStreakCopoBonus", "observedChannelId",
+	} {
+		if got := attrValue(lines[0], key); got != "<UNSET>" {
+			t.Errorf("%s = %q on a failed observation, want <UNSET>", key, got)
+		}
 	}
 
 	// And nothing else the cycle emitted may be dashboard-visible either. The
@@ -1511,8 +1587,9 @@ func TestUnsupportedQueryRecordStaysOffTheDashboardLogView(t *testing.T) {
 		if line == "" {
 			continue
 		}
-		if level := attrValue(line, "level"); level == "WARN" || level == "ERROR" {
-			t.Errorf("the observation cycle emitted a dashboard-visible %s line:\n%s", level, line)
+		if level := attrValue(line, "level"); level == "WARN" || level == "ERROR" || level == "INFO" {
+			t.Errorf("the observation cycle emitted a console-visible %s line; every per-cycle "+
+				"diagnostic must stay at DEBUG:\n%s", level, line)
 		}
 	}
 }
@@ -1597,4 +1674,55 @@ func TestWatchStreakCorrelationBindingIsExplicitWhenUnknown(t *testing.T) {
 	if got := grantBinding(models.WatchStreakGrantResult{}, "no-such-event"); got != "UNKNOWN" {
 		t.Errorf("grantBinding fallback = %q, want UNKNOWN (never a bare empty string)", got)
 	}
+}
+
+// TestCorrelationProvenBroadcastDistinguishesNoneFromUnknown covers the
+// defensive branch M36 exposed: "NONE" and "UNKNOWN" are different answers.
+//
+// NONE means the admitted grant fact was found and carries no proven broadcast
+// — a positive observation. UNKNOWN means no fact was found at all, so nothing
+// is known either way; printing NONE there would assert an absence this code
+// cannot see. Production always supplies a fact (the record is only emitted for
+// a newly accepted grant), so this is asserted directly at the seam.
+func TestCorrelationProvenBroadcastDistinguishesNoneFromUnknown(t *testing.T) {
+	logbuf := captureLogs(t)
+	m, s, _ := newMilestoneCorrelationMiner(t, &milestoneRoundTripper{})
+	msg := watchStreakFrame(t, s, 450, 5450, "2026-09-05T12:00:00Z")
+	gain := msg.Data["point_gain"].(map[string]interface{})
+
+	t.Run("no admitted fact is UNKNOWN, not NONE", func(t *testing.T) {
+		logbuf.Reset()
+		// An empty result: the fact for this event identity is not present.
+		m.logWatchStreakGrantCorrelation(msg, s, gain, models.WatchStreakGrantResult{}, ledgerCommitted)
+
+		line := singleCorrelationLine(t, logbuf.String())
+		if got := attrValue(line, "provenBroadcastId"); got != "UNKNOWN" {
+			t.Errorf("provenBroadcastId = %q with no admitted fact, want UNKNOWN — NONE would assert "+
+				"an absence this code cannot see", got)
+		}
+		if got := attrValue(line, "grantBinding"); got != "UNKNOWN" {
+			t.Errorf("grantBinding = %q with no admitted fact, want UNKNOWN", got)
+		}
+	})
+
+	t.Run("an admitted unbound fact is NONE", func(t *testing.T) {
+		logbuf.Reset()
+		grant := models.WatchStreakGrantResult{
+			Admission: models.WatchStreakGrantNewUnbound,
+			Persistence: models.WatchStreakPersistence{Grants: []models.WatchStreakGrantFact{{
+				EventID:    msg.EventFingerprint,
+				Binding:    models.WatchStreakGrantUnbound,
+				AcceptedAt: time.Now(),
+			}}},
+		}
+		m.logWatchStreakGrantCorrelation(msg, s, gain, grant, ledgerCommitted)
+
+		line := singleCorrelationLine(t, logbuf.String())
+		if got := attrValue(line, "provenBroadcastId"); got != "NONE" {
+			t.Errorf("provenBroadcastId = %q for an admitted unbound grant, want NONE", got)
+		}
+		if got := attrValue(line, "grantBinding"); got != "GRANTED_UNBOUND" {
+			t.Errorf("grantBinding = %q, want GRANTED_UNBOUND", got)
+		}
+	})
 }

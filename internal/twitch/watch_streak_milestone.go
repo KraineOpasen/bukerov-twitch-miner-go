@@ -220,8 +220,9 @@ const (
 // evidence of recency: an older request may finish after a newer one (slow
 // response, retry backoff, scheduler), and log-emission order follows
 // completion. Because the sequence is assigned before the request is sent, a
-// late-completing older observation can never be presented as newer evidence —
-// see NewerThan, which compares sequences and nothing else.
+// late-completing older observation cannot be presented as newer evidence: it
+// carries the lower sequence whatever order the records were written in, and
+// nothing in a record claims to be the latest.
 //
 // It is a counter, not a cache: it retains no milestone value, no channel and
 // no history.
@@ -481,10 +482,18 @@ func parseMilestoneBroadcastIdentifiers(entry map[string]interface{}) MilestoneB
 	}
 	out.Elements = make([]MilestoneStringField, 0, len(list))
 	for _, element := range list {
+		if element == nil {
+			// An explicitly null ELEMENT is a null, not a shape error. Folding
+			// it into MALFORMED would lose the same NULL/MALFORMED distinction
+			// this parser preserves everywhere else.
+			out.Elements = append(out.Elements, MilestoneStringField{Presence: MilestoneFieldNull})
+			out.MalformedCount++
+			continue
+		}
 		identifier, ok := element.(map[string]interface{})
 		if !ok || identifier == nil {
-			// The element itself is not an object, so its id cannot be
-			// classified as missing or null — only as malformed.
+			// The element is present, non-null and not an object, so its id
+			// cannot be classified as missing or null — only as malformed.
 			out.Elements = append(out.Elements, MilestoneStringField{Presence: MilestoneFieldMalformed})
 			out.MalformedCount++
 			continue

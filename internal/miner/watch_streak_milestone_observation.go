@@ -101,12 +101,29 @@ const milestoneLogIDSample = 8
 // credited total above the base, which is why the classifier below prefers the
 // frame's own baseline_points and says which basis it used — see
 // officialLadderConsistency.
-var officialWatchStreakLadder = map[int]int{
-	2: 300,
-	3: 350,
-	4: 400,
-	5: 450, // 5 OR MORE; the ladder is flat from here, so the amount cannot
-	//        distinguish a 5th streak from a 50th.
+// A slice, not a map, and each rung carries its own tier. A map plus a switch
+// with a default branch would silently label any future rung as the flat top
+// one — add a documented "6 -> 500" and +500 would be reported as consistent
+// with "5 or more", which is exactly the kind of quiet mislabel this feature
+// exists to avoid. Ordered iteration also keeps the lookup deterministic
+// regardless of what values the ladder ever holds.
+var officialWatchStreakLadder = []watchStreakLadderRung{
+	{StreakCount: 2, RewardPoints: 300, Tier: ladderStreakCount2},
+	{StreakCount: 3, RewardPoints: 350, Tier: ladderStreakCount3},
+	{StreakCount: 4, RewardPoints: 400, Tier: ladderStreakCount4},
+	// Flat: 450 is the documented reward for a 5th streak and every one after
+	// it, so the amount cannot distinguish a 5th from a 50th.
+	{StreakCount: 5, RewardPoints: 450, Tier: ladderStreakCount5Plus, FlatFromHere: true},
+}
+
+// watchStreakLadderRung is one documented rung. FlatFromHere marks a rung whose
+// reward also covers every higher streak count, which is why its tier names a
+// set rather than a number.
+type watchStreakLadderRung struct {
+	StreakCount  int
+	RewardPoints int
+	Tier         watchStreakLadderTier
+	FlatFromHere bool
 }
 
 // watchStreakLadderTier is how one observed amount relates to the documented
@@ -153,19 +170,9 @@ func officialLadderConsistency(totalPoints int, totalExact bool, basePoints int,
 	if !exact {
 		return ladderAmountUnknown, basis
 	}
-	for count, reward := range officialWatchStreakLadder {
-		if reward != amount {
-			continue
-		}
-		switch count {
-		case 2:
-			return ladderStreakCount2, basis
-		case 3:
-			return ladderStreakCount3, basis
-		case 4:
-			return ladderStreakCount4, basis
-		default:
-			return ladderStreakCount5Plus, basis
+	for _, rung := range officialWatchStreakLadder {
+		if rung.RewardPoints == amount {
+			return rung.Tier, basis
 		}
 	}
 	return ladderOffBase, basis
@@ -314,7 +321,10 @@ func logWatchStreakMilestoneObservation(obs twitch.WatchStreakMilestoneObservati
 
 	ids := milestoneBroadcastIdentifierSummary(snap.MissedStreams)
 	attrs = append(attrs,
-		"broadcastIdentifierCount", ids.Total,
+		// Named for what they actually count: missedStreamsCount counts every
+		// element, so an identically-named identifier "count" that silently
+		// counted only the well-formed ones would invite a wrong reading.
+		"broadcastIdentifierValidIds", ids.Total,
 		"broadcastIdentifierMalformed", ids.Malformed,
 		// The nested presence tallies: without these a malformed, null or
 		// missing broadcastIdentifiers array is indistinguishable from a
@@ -332,23 +342,31 @@ func logWatchStreakMilestoneObservation(obs twitch.WatchStreakMilestoneObservati
 		"streakCountField", unknownLink,
 	)
 
-	switch obs.Outcome {
-	case twitch.MilestoneObserved, twitch.MilestoneGraphQLError, twitch.MilestoneUnsupported:
-		// INFO, including UNSUPPORTED_QUERY. That outcome does need an owner
-		// decision, but it is NOT this record's job to raise it: the shared GQL
-		// transport already logs its own ERROR naming the operation and
-		// pointing at internal/constants/gql.go once every candidate client ID
-		// has returned PersistedQueryNotFound. Since internal/web/logclass.go
-		// keeps unmatched INFO/DEBUG lines off the dashboard log view and never
-		// hides a WARN or ERROR, raising this one to WARN would put a SECOND
-		// dashboard-visible line next to that ERROR for every online streamer
-		// on every bonus cycle — volume, not information. The diagnostic record
-		// stays in the retained log, which is where this feature's evidence
-		// lives.
-		slog.Info("Watch Streak milestone observation", attrs...)
-	default:
-		slog.Debug("Watch Streak milestone observation unavailable", attrs...)
-	}
+	// DEBUG for EVERY outcome, including OBSERVED.
+	//
+	// This record is emitted once per online streamer per bonus cycle, forever.
+	// internal/logger's console handler filters on level alone — it has no
+	// message allowlist — and ConsoleLevel defaults to INFO, so an INFO record
+	// here would print N long lines per minute to stdout/docker logs for as
+	// long as the miner runs, drowning a console that is deliberately kept
+	// sparse. In the outcome this feature currently expects most
+	// (UNSUPPORTED_QUERY, until the RewardList hash's live acceptance is
+	// evidenced) every observed field is unset, so those lines would carry no
+	// information at all.
+	//
+	// DEBUG loses nothing this feature needs: FileLevel defaults to DEBUG, so
+	// the records still reach the retained log — the only persistence this
+	// feature has and the only place its evidence was ever meant to live. An
+	// operator who raises FileLevel above DEBUG turns the feature off, which is
+	// the honest trade for not owning a settings surface.
+	//
+	// Not WARN or ERROR either: those are never hidden from the dashboard log
+	// view, and an outcome that repeats every cycle and that the operator
+	// cannot act on is not an alert. The stale-hash question is raised once, by
+	// the transport, for BUSINESS reads only — a diagnostic read's own
+	// PersistedQueryNotFound is deliberately DEBUG there too (see
+	// logStaleHashExhausted), so nothing here is counting on it.
+	slog.Debug("Watch Streak milestone observation", attrs...)
 }
 
 // milestoneBroadcastIdentifiers is the bounded rendering of every observed
@@ -542,9 +560,16 @@ func (m *Miner) logWatchStreakGrantCorrelation(
 	if s.Stream != nil {
 		localBroadcast = s.Stream.GetBroadcastID()
 	}
-	provenBroadcast := "NONE"
-	if fact, ok := admittedGrantFact(grant, msg.EventFingerprint); ok && fact.BroadcastID != "" {
-		provenBroadcast = fact.BroadcastID
+	// NONE and UNKNOWN are different answers. NONE means the admitted grant fact
+	// was found and carries no proven broadcast — a positive observation.
+	// UNKNOWN means no fact was found at all, so nothing is known either way;
+	// printing NONE there would assert an absence this code cannot see.
+	provenBroadcast := unknownLink
+	if fact, ok := admittedGrantFact(grant, msg.EventFingerprint); ok {
+		provenBroadcast = "NONE"
+		if fact.BroadcastID != "" {
+			provenBroadcast = fact.BroadcastID
+		}
 	}
 
 	slog.Info("Watch Streak grant correlation",

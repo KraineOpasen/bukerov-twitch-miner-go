@@ -984,9 +984,16 @@ func TestBusinessReadStillRecoversOnUnauthorized(t *testing.T) {
 	}
 }
 
-// TestObserveWatchStreakMilestoneDeadlineExceeded covers the remaining failure
-// classification.
-func TestObserveWatchStreakMilestoneDeadlineExceeded(t *testing.T) {
+// TestObserveWatchStreakMilestoneCancelledThroughADerivedTimeoutContext proves
+// cancellation is honoured through a derived (timeout-carrying) context, not
+// only through a bare cancel.
+//
+// It does NOT produce a real deadline expiry — the parent is cancelled while
+// the request is in flight, so the error is context.Canceled. Forcing a genuine
+// DeadlineExceeded here would mean racing a wall-clock timer; the
+// DeadlineExceeded classification is proven deterministically instead by
+// TestClassifyMilestoneRequestErrorVocabularyIsClosed.
+func TestObserveWatchStreakMilestoneCancelledThroughADerivedTimeoutContext(t *testing.T) {
 	var (
 		once    sync.Once
 		entered = make(chan struct{})
@@ -1014,8 +1021,39 @@ func TestObserveWatchStreakMilestoneDeadlineExceeded(t *testing.T) {
 	if obs.Outcome != MilestoneCancelled {
 		t.Fatalf("outcome = %q, want CANCELLED", obs.Outcome)
 	}
-	if obs.FailureClass != MilestoneFailureCancelled && obs.FailureClass != MilestoneFailureDeadline {
-		t.Fatalf("failureClass = %q, want a cancellation class", obs.FailureClass)
+	// Precisely what this fixture produces: a cancelled parent, so CANCELLED.
+	// Accepting either class here would have made the assertion vacuous.
+	if obs.FailureClass != MilestoneFailureCancelled {
+		t.Fatalf("failureClass = %q, want CANCELLED", obs.FailureClass)
+	}
+}
+
+// TestObserveWatchStreakMilestoneExpiredDeadlineIsSkippedNotSent proves an
+// already-expired deadline is honoured before the request is built, and is
+// classified as a context-done skip rather than a transport failure.
+func TestObserveWatchStreakMilestoneExpiredDeadlineIsSkippedNotSent(t *testing.T) {
+	var requests int
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, `{"data":{}}`)
+	})
+
+	// An already-past deadline: ctx.Err() is DeadlineExceeded immediately, with
+	// no timer to race.
+	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Hour))
+	defer cancel()
+	if !errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		t.Fatalf("fixture context error = %v, want DeadlineExceeded", ctx.Err())
+	}
+
+	obs := c.ObserveWatchStreakMilestone(ctx, "12345", "somestreamer")
+
+	if obs.Outcome != MilestoneSkipped || obs.FailureClass != MilestoneFailureContextDone {
+		t.Fatalf("outcome = %q/%q, want SKIPPED/CONTEXT_ALREADY_DONE", obs.Outcome, obs.FailureClass)
+	}
+	if requests != 0 {
+		t.Fatalf("requests = %d, want 0", requests)
 	}
 }
 

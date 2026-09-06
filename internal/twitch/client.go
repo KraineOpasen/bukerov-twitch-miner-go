@@ -355,12 +355,20 @@ func isAuthError(statusCode int, result map[string]interface{}) bool {
 // constants.RewardList) would otherwise pin that gate closed forever on an
 // outcome that says nothing about whether Twitch is reachable.
 //
-// The suppression is SYMMETRIC and total: a diagnostic request contributes
-// neither failure nor success to the accounting, never escalates to the
-// operator reauth path, and never raises an operator-facing WARN/ERROR of its
-// own. It must not be able to mask a real outage any more than it can invent
-// one. It changes nothing else — the request itself, its client-ID candidates,
-// its retries and its returned error are identical.
+// The suppression is SYMMETRIC: a diagnostic request contributes neither
+// failure nor success to the accounting, and never escalates to the operator
+// reauth path. It must not be able to mask a real outage any more than it can
+// invent one.
+//
+// Scope, stated precisely rather than generously: no WARN or ERROR is raised
+// for the request's own OUTCOME (stale hash, retries, exhaustion — all DEBUG).
+// One shared-transport line is NOT suppressed: rememberWorkingClientID's WARN
+// when a fallback client ID rotates the process-wide default. That is a
+// property of the client-ID pool rather than of this request, it fires at most
+// once per process because the promoted ID is then cached, and suppressing it
+// would hide a genuine rotation from the operator. Everything else about the
+// request — its client-ID candidates, its retries and its returned error — is
+// identical to a business read.
 type diagnosticRequestKey struct{}
 
 // withDiagnosticRequest marks ctx as a diagnostic-only read. Cancellation and
