@@ -1,0 +1,788 @@
+package twitch
+
+import (
+	"context"
+	"io"
+	"math"
+	"net/http"
+	"reflect"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/constants"
+)
+
+// fullRewardListResponse is a complete, well-formed RewardList response with
+// every audited field present. Values are arbitrary observed data: this file
+// asserts that they are REPORTED, never that they mean anything.
+func fullRewardListResponse() map[string]interface{} {
+	return map[string]interface{}{
+		"data": map[string]interface{}{
+			"channel": map[string]interface{}{
+				"id": "12345",
+				"self": map[string]interface{}{
+					"watchStreakMilestone": map[string]interface{}{
+						"watchStreakThreshold": float64(3),
+						"watchStreakCopoBonus": float64(450),
+						"state":                "ACTIVE",
+						"expiresAt":            "2026-09-10T00:00:00Z",
+						"missedStreams": []interface{}{
+							map[string]interface{}{
+								"broadcastIdentifiers": []interface{}{
+									map[string]interface{}{"id": "b-1"},
+									map[string]interface{}{"id": "b-2"},
+								},
+							},
+						},
+						"watchStreakMilestone": map[string]interface{}{
+							"id":                   "milestone-7",
+							"value":                float64(4),
+							"achievementTimestamp": "2026-09-05T12:00:00Z",
+							"shareStatus":          "UNSHARED",
+						},
+					},
+				},
+			},
+		},
+	}
+}
+
+// selfNode reaches into a response fixture and returns data.channel.self so a
+// test can mutate exactly one node.
+func selfNode(t *testing.T, resp map[string]interface{}) map[string]interface{} {
+	t.Helper()
+	return resp["data"].(map[string]interface{})["channel"].(map[string]interface{})["self"].(map[string]interface{})
+}
+
+// sNode reaches into a response fixture and returns
+// data.channel.self.watchStreakMilestone (S).
+func sNode(t *testing.T, resp map[string]interface{}) map[string]interface{} {
+	t.Helper()
+	return selfNode(t, resp)["watchStreakMilestone"].(map[string]interface{})
+}
+
+func TestParseWatchStreakMilestoneFullSnapshot(t *testing.T) {
+	snap := parseWatchStreakMilestone(fullRewardListResponse())
+
+	for _, tc := range []struct {
+		name string
+		got  MilestoneFieldPresence
+	}{
+		{"data", snap.DataPresence},
+		{"channel", snap.ChannelPresence},
+		{"self", snap.SelfPresence},
+		{"S", snap.SelfMilestonePresence},
+		{"V", snap.MilestoneNodePresence},
+	} {
+		if tc.got != MilestoneFieldValid {
+			t.Errorf("%s presence = %q, want VALID", tc.name, tc.got)
+		}
+	}
+
+	if snap.ChannelID.Presence != MilestoneFieldValid || snap.ChannelID.Value != "12345" {
+		t.Errorf("channel id = %+v, want VALID/12345", snap.ChannelID)
+	}
+	if snap.MilestoneID.Presence != MilestoneFieldValid || snap.MilestoneID.Value != "milestone-7" {
+		t.Errorf("milestone id = %+v", snap.MilestoneID)
+	}
+	if snap.MilestoneValue.Presence != MilestoneFieldValid || snap.MilestoneValue.Value != 4 {
+		t.Errorf("milestone value = %+v", snap.MilestoneValue)
+	}
+	if snap.AchievementTimestamp.Presence != MilestoneFieldValid ||
+		snap.AchievementTimestamp.Value != "2026-09-05T12:00:00Z" {
+		t.Errorf("achievementTimestamp = %+v", snap.AchievementTimestamp)
+	}
+	if snap.ShareStatus.Presence != MilestoneFieldValid || snap.ShareStatus.Value != "UNSHARED" {
+		t.Errorf("shareStatus = %+v", snap.ShareStatus)
+	}
+	if snap.WatchStreakThreshold.Presence != MilestoneFieldValid || snap.WatchStreakThreshold.Value != 3 {
+		t.Errorf("watchStreakThreshold = %+v", snap.WatchStreakThreshold)
+	}
+	if snap.WatchStreakCopoBonus.Presence != MilestoneFieldValid || snap.WatchStreakCopoBonus.Value != 450 {
+		t.Errorf("watchStreakCopoBonus = %+v", snap.WatchStreakCopoBonus)
+	}
+	if snap.State.Presence != MilestoneFieldValid || snap.State.Value != "ACTIVE" {
+		t.Errorf("state = %+v", snap.State)
+	}
+	if snap.ExpiresAt.Presence != MilestoneFieldValid || snap.ExpiresAt.Value != "2026-09-10T00:00:00Z" {
+		t.Errorf("expiresAt = %+v", snap.ExpiresAt)
+	}
+	if snap.MissedStreams.Presence != MilestoneFieldValid || snap.MissedStreams.Count != 1 {
+		t.Fatalf("missedStreams = %+v, want VALID/1", snap.MissedStreams)
+	}
+	ids := snap.MissedStreams.Entries[0].BroadcastIdentifiers
+	if ids.Presence != MilestoneFieldValid || ids.Count != 2 || ids.MalformedCount != 0 ||
+		strings.Join(ids.IDs, ",") != "b-1,b-2" {
+		t.Errorf("broadcastIdentifiers = %+v", ids)
+	}
+}
+
+// TestParseWatchStreakMilestoneNodeAbsence covers the required distinction that
+// MISSING, NULL, VALID and MALFORMED are four different observations at every
+// node on the path — including S itself and the nested achievement node V.
+func TestParseWatchStreakMilestoneNodeAbsence(t *testing.T) {
+	tests := []struct {
+		name    string
+		mutate  func(t *testing.T, resp map[string]interface{})
+		wantS   MilestoneFieldPresence
+		wantV   MilestoneFieldPresence
+		wantSub MilestoneFieldPresence // presence every S/V child must report
+	}{
+		{
+			name:    "S missing",
+			mutate:  func(t *testing.T, r map[string]interface{}) { delete(selfNode(t, r), "watchStreakMilestone") },
+			wantS:   MilestoneFieldMissing,
+			wantV:   MilestoneFieldMissing,
+			wantSub: MilestoneFieldMissing,
+		},
+		{
+			name:    "S null",
+			mutate:  func(t *testing.T, r map[string]interface{}) { selfNode(t, r)["watchStreakMilestone"] = nil },
+			wantS:   MilestoneFieldNull,
+			wantV:   MilestoneFieldMissing,
+			wantSub: MilestoneFieldMissing,
+		},
+		{
+			name:    "S malformed scalar",
+			mutate:  func(t *testing.T, r map[string]interface{}) { selfNode(t, r)["watchStreakMilestone"] = "nope" },
+			wantS:   MilestoneFieldMalformed,
+			wantV:   MilestoneFieldMissing,
+			wantSub: MilestoneFieldMissing,
+		},
+		{
+			name:    "V missing",
+			mutate:  func(t *testing.T, r map[string]interface{}) { delete(sNode(t, r), "watchStreakMilestone") },
+			wantS:   MilestoneFieldValid,
+			wantV:   MilestoneFieldMissing,
+			wantSub: MilestoneFieldMissing,
+		},
+		{
+			name:    "V null",
+			mutate:  func(t *testing.T, r map[string]interface{}) { sNode(t, r)["watchStreakMilestone"] = nil },
+			wantS:   MilestoneFieldValid,
+			wantV:   MilestoneFieldNull,
+			wantSub: MilestoneFieldMissing,
+		},
+		{
+			name:    "V malformed array",
+			mutate:  func(t *testing.T, r map[string]interface{}) { sNode(t, r)["watchStreakMilestone"] = []interface{}{} },
+			wantS:   MilestoneFieldValid,
+			wantV:   MilestoneFieldMalformed,
+			wantSub: MilestoneFieldMissing,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			resp := fullRewardListResponse()
+			tc.mutate(t, resp)
+			snap := parseWatchStreakMilestone(resp)
+
+			if snap.SelfMilestonePresence != tc.wantS {
+				t.Errorf("S presence = %q, want %q", snap.SelfMilestonePresence, tc.wantS)
+			}
+			if snap.MilestoneNodePresence != tc.wantV {
+				t.Errorf("V presence = %q, want %q", snap.MilestoneNodePresence, tc.wantV)
+			}
+			// Every child of an absent node must report the child's own absence
+			// classification and carry NO fabricated value.
+			if tc.wantS != MilestoneFieldValid {
+				assertNoFabricatedValues(t, snap)
+				if snap.State.Presence != tc.wantSub {
+					t.Errorf("state presence = %q, want %q", snap.State.Presence, tc.wantSub)
+				}
+			}
+			if snap.MilestoneID.Presence != tc.wantSub {
+				t.Errorf("milestone id presence = %q, want %q", snap.MilestoneID.Presence, tc.wantSub)
+			}
+			if snap.MilestoneValue.Presence != tc.wantSub {
+				t.Errorf("milestone value presence = %q, want %q", snap.MilestoneValue.Presence, tc.wantSub)
+			}
+			if snap.MilestoneValue.Value != 0 && snap.MilestoneValue.Presence != MilestoneFieldValid {
+				t.Errorf("non-valid milestone value carried a value: %+v", snap.MilestoneValue)
+			}
+		})
+	}
+}
+
+// assertNoFabricatedValues proves the parser never coerces an unobserved node
+// into a usable-looking zero/empty value: every non-VALID field must carry the
+// zero value AND a presence that says it was not observed.
+func assertNoFabricatedValues(t *testing.T, snap WatchStreakMilestoneSnapshot) {
+	t.Helper()
+	for name, f := range map[string]MilestoneStringField{
+		"milestoneId":          snap.MilestoneID,
+		"achievementTimestamp": snap.AchievementTimestamp,
+		"shareStatus":          snap.ShareStatus,
+		"state":                snap.State,
+		"expiresAt":            snap.ExpiresAt,
+	} {
+		if f.Presence != MilestoneFieldValid && f.Value != "" {
+			t.Errorf("%s: non-valid field carries value %q", name, f.Value)
+		}
+	}
+	for name, f := range map[string]MilestoneIntField{
+		"milestoneValue":       snap.MilestoneValue,
+		"watchStreakThreshold": snap.WatchStreakThreshold,
+		"watchStreakCopoBonus": snap.WatchStreakCopoBonus,
+	} {
+		if f.Presence != MilestoneFieldValid && f.Value != 0 {
+			t.Errorf("%s: non-valid field carries value %d", name, f.Value)
+		}
+	}
+}
+
+// assertEmptySnapshot proves a non-parsing outcome carried NO snapshot at all:
+// a failed observation must not leave behind a zero-valued record that could be
+// misread as "Twitch said the milestone is empty".
+func assertEmptySnapshot(t *testing.T, snap WatchStreakMilestoneSnapshot) {
+	t.Helper()
+	if !reflect.DeepEqual(snap, WatchStreakMilestoneSnapshot{}) {
+		t.Fatalf("failed observation carried a snapshot: %+v", snap)
+	}
+}
+
+// TestParseWatchStreakMilestoneMalformedScalars proves a wrong-typed or
+// non-integral scalar is MALFORMED, never truncated, rounded or defaulted.
+func TestParseWatchStreakMilestoneMalformedScalars(t *testing.T) {
+	tests := []struct {
+		name  string
+		key   string
+		value interface{}
+	}{
+		{"value as string", "value", "450"},
+		{"value as bool", "value", true},
+		{"value as object", "value", map[string]interface{}{}},
+		{"value fractional", "value", 450.5},
+		{"value NaN", "value", math.NaN()},
+		{"value +Inf", "value", math.Inf(1)},
+		{"value beyond exact integer range", "value", math.Pow(2, 53)},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			resp := fullRewardListResponse()
+			sNode(t, resp)["watchStreakMilestone"].(map[string]interface{})[tc.key] = tc.value
+			snap := parseWatchStreakMilestone(resp)
+			if snap.MilestoneValue.Presence != MilestoneFieldMalformed {
+				t.Fatalf("presence = %q, want MALFORMED (%v)", snap.MilestoneValue.Presence, tc.value)
+			}
+			if snap.MilestoneValue.Value != 0 {
+				t.Fatalf("malformed value was coerced to %d", snap.MilestoneValue.Value)
+			}
+		})
+	}
+
+	// A string field given a non-string is MALFORMED, not an empty observed
+	// string.
+	resp := fullRewardListResponse()
+	sNode(t, resp)["watchStreakMilestone"].(map[string]interface{})["shareStatus"] = float64(1)
+	if got := parseWatchStreakMilestone(resp).ShareStatus; got.Presence != MilestoneFieldMalformed || got.Value != "" {
+		t.Fatalf("shareStatus = %+v, want MALFORMED/empty", got)
+	}
+
+	// A genuinely observed empty string stays VALID: it is data, not absence.
+	resp = fullRewardListResponse()
+	sNode(t, resp)["watchStreakMilestone"].(map[string]interface{})["shareStatus"] = ""
+	if got := parseWatchStreakMilestone(resp).ShareStatus; got.Presence != MilestoneFieldValid || got.Value != "" {
+		t.Fatalf("observed empty string = %+v, want VALID/empty", got)
+	}
+}
+
+// TestParseWatchStreakMilestoneMissedStreams covers the required
+// missing/null/empty/valid/malformed matrix for the container, keeping EMPTY
+// distinct from MISSING and NULL.
+func TestParseWatchStreakMilestoneMissedStreams(t *testing.T) {
+	tests := []struct {
+		name          string
+		value         interface{}
+		absent        bool
+		wantPresence  MilestoneFieldPresence
+		wantCount     int
+		wantMalformed int
+	}{
+		{name: "missing", absent: true, wantPresence: MilestoneFieldMissing},
+		{name: "null", value: nil, wantPresence: MilestoneFieldNull},
+		{name: "empty", value: []interface{}{}, wantPresence: MilestoneFieldEmpty},
+		{name: "not an array", value: "nope", wantPresence: MilestoneFieldMalformed},
+		{
+			name:          "malformed element",
+			value:         []interface{}{"nope", map[string]interface{}{}},
+			wantPresence:  MilestoneFieldMalformed,
+			wantCount:     2,
+			wantMalformed: 1,
+		},
+		{
+			name: "valid",
+			value: []interface{}{map[string]interface{}{
+				"broadcastIdentifiers": []interface{}{map[string]interface{}{"id": "x"}},
+			}},
+			wantPresence: MilestoneFieldValid,
+			wantCount:    1,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			resp := fullRewardListResponse()
+			if tc.absent {
+				delete(sNode(t, resp), "missedStreams")
+			} else {
+				sNode(t, resp)["missedStreams"] = tc.value
+			}
+			got := parseWatchStreakMilestone(resp).MissedStreams
+			if got.Presence != tc.wantPresence {
+				t.Errorf("presence = %q, want %q", got.Presence, tc.wantPresence)
+			}
+			if got.Count != tc.wantCount {
+				t.Errorf("count = %d, want %d", got.Count, tc.wantCount)
+			}
+			if got.MalformedCount != tc.wantMalformed {
+				t.Errorf("malformed = %d, want %d", got.MalformedCount, tc.wantMalformed)
+			}
+		})
+	}
+}
+
+// TestParseWatchStreakMilestoneBroadcastIdentifiers covers the nested array,
+// including partial data: well-formed ids survive, malformed elements are
+// counted, and the container is flagged MALFORMED so nobody reads a partial
+// list as complete.
+func TestParseWatchStreakMilestoneBroadcastIdentifiers(t *testing.T) {
+	tests := []struct {
+		name          string
+		entry         map[string]interface{}
+		wantPresence  MilestoneFieldPresence
+		wantIDs       string
+		wantCount     int
+		wantMalformed int
+	}{
+		{
+			name:         "missing",
+			entry:        map[string]interface{}{},
+			wantPresence: MilestoneFieldMissing,
+		},
+		{
+			name:         "null",
+			entry:        map[string]interface{}{"broadcastIdentifiers": nil},
+			wantPresence: MilestoneFieldNull,
+		},
+		{
+			name:         "empty",
+			entry:        map[string]interface{}{"broadcastIdentifiers": []interface{}{}},
+			wantPresence: MilestoneFieldEmpty,
+		},
+		{
+			name:         "not an array",
+			entry:        map[string]interface{}{"broadcastIdentifiers": float64(3)},
+			wantPresence: MilestoneFieldMalformed,
+		},
+		{
+			name: "partially malformed keeps the well-formed ids and counts the rest",
+			entry: map[string]interface{}{"broadcastIdentifiers": []interface{}{
+				map[string]interface{}{"id": "keep-1"},
+				"not-an-object",
+				map[string]interface{}{"id": float64(9)},
+				map[string]interface{}{},
+				map[string]interface{}{"id": "keep-2"},
+			}},
+			wantPresence:  MilestoneFieldMalformed,
+			wantIDs:       "keep-1,keep-2",
+			wantCount:     5,
+			wantMalformed: 3,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			resp := fullRewardListResponse()
+			sNode(t, resp)["missedStreams"] = []interface{}{tc.entry}
+			got := parseWatchStreakMilestone(resp).MissedStreams.Entries[0].BroadcastIdentifiers
+			if got.Presence != tc.wantPresence {
+				t.Errorf("presence = %q, want %q", got.Presence, tc.wantPresence)
+			}
+			if strings.Join(got.IDs, ",") != tc.wantIDs {
+				t.Errorf("ids = %v, want %q", got.IDs, tc.wantIDs)
+			}
+			if got.Count != tc.wantCount {
+				t.Errorf("count = %d, want %d", got.Count, tc.wantCount)
+			}
+			if got.MalformedCount != tc.wantMalformed {
+				t.Errorf("malformed = %d, want %d", got.MalformedCount, tc.wantMalformed)
+			}
+		})
+	}
+}
+
+// TestParseWatchStreakMilestoneStructuralAbsence covers a response with no data
+// node at all and one whose channel node is absent/null — neither may produce a
+// fabricated snapshot.
+func TestParseWatchStreakMilestoneStructuralAbsence(t *testing.T) {
+	tests := []struct {
+		name        string
+		resp        map[string]interface{}
+		wantData    MilestoneFieldPresence
+		wantChannel MilestoneFieldPresence
+	}{
+		{"nil response", nil, MilestoneFieldMissing, MilestoneFieldMissing},
+		{"empty response", map[string]interface{}{}, MilestoneFieldMissing, MilestoneFieldMissing},
+		{"data null", map[string]interface{}{"data": nil}, MilestoneFieldNull, MilestoneFieldMissing},
+		{
+			"channel null",
+			map[string]interface{}{"data": map[string]interface{}{"channel": nil}},
+			MilestoneFieldValid, MilestoneFieldNull,
+		},
+		{
+			"channel malformed",
+			map[string]interface{}{"data": map[string]interface{}{"channel": []interface{}{}}},
+			MilestoneFieldValid, MilestoneFieldMalformed,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			snap := parseWatchStreakMilestone(tc.resp)
+			if snap.DataPresence != tc.wantData {
+				t.Errorf("data presence = %q, want %q", snap.DataPresence, tc.wantData)
+			}
+			if snap.ChannelPresence != tc.wantChannel {
+				t.Errorf("channel presence = %q, want %q", snap.ChannelPresence, tc.wantChannel)
+			}
+			if snap.SelfMilestonePresence != MilestoneFieldMissing {
+				t.Errorf("S presence = %q, want MISSING", snap.SelfMilestonePresence)
+			}
+			assertNoFabricatedValues(t, snap)
+		})
+	}
+}
+
+// TestObserveWatchStreakMilestoneSendsAuditedRequest proves the observation
+// sends exactly one RewardList request carrying the recorded persisted-query
+// evidence and both audited variables, and parses the result.
+func TestObserveWatchStreakMilestoneSendsAuditedRequest(t *testing.T) {
+	var (
+		mu       sync.Mutex
+		requests int
+		bodies   []string
+	)
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		mu.Lock()
+		requests++
+		bodies = append(bodies, string(body))
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, `{"data":{"channel":{"id":"12345","self":{"watchStreakMilestone":{`+
+			`"state":"ACTIVE","watchStreakThreshold":3,"watchStreakCopoBonus":450,"missedStreams":[],`+
+			`"watchStreakMilestone":{"id":"m-1","value":4,"achievementTimestamp":"2026-09-05T12:00:00Z","shareStatus":"UNSHARED"}}}}}}`)
+	})
+
+	obs := c.ObserveWatchStreakMilestone(context.Background(), "12345", "somestreamer")
+
+	if obs.Outcome != MilestoneObserved {
+		t.Fatalf("outcome = %q, want OBSERVED (failure %q)", obs.Outcome, obs.FailureClass)
+	}
+	if requests != 1 {
+		t.Fatalf("RewardList requests = %d, want exactly 1", requests)
+	}
+	body := bodies[0]
+	for _, want := range []string{
+		`"operationName":"RewardList"`,
+		constants.RewardList.Extensions.PersistedQuery.SHA256Hash,
+		`"channelID":"12345"`,
+		`"shouldIncludeAllSuspendedStreaks":false`,
+		`"version":1`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("request body missing %q; body: %s", want, body)
+		}
+	}
+	if obs.Snapshot.MilestoneValue.Value != 4 || obs.Snapshot.WatchStreakCopoBonus.Value != 450 {
+		t.Errorf("parsed snapshot = %+v", obs.Snapshot)
+	}
+	if obs.Snapshot.MissedStreams.Presence != MilestoneFieldEmpty {
+		t.Errorf("empty missedStreams presence = %q, want EMPTY", obs.Snapshot.MissedStreams.Presence)
+	}
+	if obs.RequestStart.IsZero() || obs.RequestEnd.Before(obs.RequestStart) {
+		t.Errorf("request window is not ordered: %v -> %v", obs.RequestStart, obs.RequestEnd)
+	}
+	// achievementTimestamp is the ACHIEVEMENT's field, never the sampling time.
+	achieved, err := time.Parse(time.RFC3339, obs.Snapshot.AchievementTimestamp.Value)
+	if err != nil {
+		t.Fatalf("achievementTimestamp not parseable: %v", err)
+	}
+	if !achieved.Before(obs.RequestStart) {
+		t.Errorf("fixture achievement time %v should predate the sample window %v", achieved, obs.RequestStart)
+	}
+}
+
+// TestObserveWatchStreakMilestoneTopLevelGraphQLError proves a top-level errors
+// array yields GRAPHQL_ERROR with nothing parsed — a service error is never
+// presented as an observed milestone.
+func TestObserveWatchStreakMilestoneTopLevelGraphQLError(t *testing.T) {
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		// Data is present alongside the errors array on purpose: it still must
+		// not be parsed.
+		_, _ = io.WriteString(w, `{"errors":[{"message":"service error"}],`+
+			`"data":{"channel":{"id":"12345","self":{"watchStreakMilestone":{"watchStreakMilestone":{"value":450}}}}}}`)
+	})
+
+	obs := c.ObserveWatchStreakMilestone(context.Background(), "12345", "somestreamer")
+
+	if obs.Outcome != MilestoneGraphQLError || obs.FailureClass != MilestoneFailureGraphQLTopLevel {
+		t.Fatalf("outcome = %q/%q, want GRAPHQL_ERROR/GRAPHQL_TOP_LEVEL_ERRORS", obs.Outcome, obs.FailureClass)
+	}
+	// Nothing is parsed at all: the data node alongside the errors array must
+	// not reach the snapshot, not even as a presence classification.
+	assertEmptySnapshot(t, obs.Snapshot)
+}
+
+// TestObserveWatchStreakMilestoneUnsupportedQuery proves a stale persisted-query
+// hash is reported as UNSUPPORTED_QUERY evidence and nothing else. This is the
+// outcome that would falsify the RewardList protocol premise.
+func TestObserveWatchStreakMilestoneUnsupportedQuery(t *testing.T) {
+	var (
+		mu       sync.Mutex
+		attempts int
+	)
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		attempts++
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, persistedQueryNotFoundBody)
+	})
+
+	obs := c.ObserveWatchStreakMilestone(context.Background(), "12345", "somestreamer")
+
+	if obs.Outcome != MilestoneUnsupported || obs.FailureClass != MilestoneFailureQueryNotFound {
+		t.Fatalf("outcome = %q/%q, want UNSUPPORTED_QUERY/PERSISTED_QUERY_NOT_FOUND", obs.Outcome, obs.FailureClass)
+	}
+	assertEmptySnapshot(t, obs.Snapshot)
+
+	// Amplification bound: the worst case is the SHARED read transport's
+	// existing client-ID fallback (one HTTP attempt per candidate ID, since an
+	// APQ-not-found answer is HTTP 200 and is never retried) and nothing this
+	// observation adds on top.
+	mu.Lock()
+	got := attempts
+	mu.Unlock()
+	want := len(c.candidateClientIDs(constants.RewardList.OperationName))
+	if got != want {
+		t.Fatalf("HTTP attempts = %d, want exactly %d (one per candidate client ID); "+
+			"the observation must add no retry of its own", got, want)
+	}
+}
+
+// TestObserveWatchStreakMilestoneSingleRequestOnSuccess pins the steady-state
+// amplification: one observation is exactly one HTTP round trip.
+func TestObserveWatchStreakMilestoneSingleRequestOnSuccess(t *testing.T) {
+	var (
+		mu       sync.Mutex
+		attempts int
+	)
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		attempts++
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, `{"data":{"channel":{"id":"12345","self":{"watchStreakMilestone":{`+
+			`"watchStreakMilestone":{"value":4}}}}}}`)
+	})
+
+	if obs := c.ObserveWatchStreakMilestone(context.Background(), "12345", "somestreamer"); obs.Outcome != MilestoneObserved {
+		t.Fatalf("outcome = %q, want OBSERVED", obs.Outcome)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if attempts != 1 {
+		t.Fatalf("HTTP attempts = %d, want exactly 1", attempts)
+	}
+}
+
+// TestObserveWatchStreakMilestoneRequestFailure proves a non-transient
+// transport rejection is UNAVAILABLE evidence carrying only a bounded class —
+// never the raw error text.
+func TestObserveWatchStreakMilestoneRequestFailure(t *testing.T) {
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		// 403 is a permission rejection: returned immediately, no retries.
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = io.WriteString(w, `{"message":"forbidden"}`)
+	})
+
+	obs := c.ObserveWatchStreakMilestone(context.Background(), "12345", "somestreamer")
+
+	if obs.Outcome != MilestoneUnavailable || obs.FailureClass != MilestoneFailureTransport {
+		t.Fatalf("outcome = %q/%q, want UNAVAILABLE/TRANSPORT", obs.Outcome, obs.FailureClass)
+	}
+	assertEmptySnapshot(t, obs.Snapshot)
+}
+
+// TestObserveWatchStreakMilestoneNoChannelIDSkips proves an unscopeable target
+// produces a SKIPPED record and sends nothing.
+func TestObserveWatchStreakMilestoneNoChannelIDSkips(t *testing.T) {
+	var requests int
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, `{"data":{}}`)
+	})
+
+	obs := c.ObserveWatchStreakMilestone(context.Background(), "", "somestreamer")
+
+	if obs.Outcome != MilestoneSkipped || obs.FailureClass != MilestoneFailureNoChannelID {
+		t.Fatalf("outcome = %q/%q, want SKIPPED/NO_CHANNEL_ID", obs.Outcome, obs.FailureClass)
+	}
+	if requests != 0 {
+		t.Fatalf("requests = %d, want 0", requests)
+	}
+}
+
+// TestObserveWatchStreakMilestoneAlreadyCancelledSendsNothing proves a cancelled
+// owner produces a SKIPPED record with no request at all.
+func TestObserveWatchStreakMilestoneAlreadyCancelledSendsNothing(t *testing.T) {
+	var requests int
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, `{"data":{}}`)
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	obs := c.ObserveWatchStreakMilestone(ctx, "12345", "somestreamer")
+
+	if obs.Outcome != MilestoneSkipped || obs.FailureClass != MilestoneFailureContextDone {
+		t.Fatalf("outcome = %q/%q, want SKIPPED/CONTEXT_ALREADY_DONE", obs.Outcome, obs.FailureClass)
+	}
+	if requests != 0 {
+		t.Fatalf("requests = %d, want 0", requests)
+	}
+}
+
+// TestObserveWatchStreakMilestoneCancellationReleasesInFlightRequest proves
+// cancelling the owner mid-request releases it deterministically — the handler
+// is still blocked when the observation returns, so nothing here waits on a
+// sleep or a timeout.
+func TestObserveWatchStreakMilestoneCancellationReleasesInFlightRequest(t *testing.T) {
+	var (
+		once     sync.Once
+		entered  = make(chan struct{})
+		release  = make(chan struct{})
+		requests int
+		mu       sync.Mutex
+	)
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		requests++
+		mu.Unlock()
+		once.Do(func() { close(entered) })
+		<-release
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		<-entered
+		cancel()
+	}()
+
+	obs := c.ObserveWatchStreakMilestone(ctx, "12345", "somestreamer")
+	close(release) // let the (still-blocked) handler finish so the server can close
+
+	if obs.Outcome != MilestoneCancelled || obs.FailureClass != MilestoneFailureCancelled {
+		t.Fatalf("outcome = %q/%q, want CANCELLED/CANCELLED", obs.Outcome, obs.FailureClass)
+	}
+	mu.Lock()
+	got := requests
+	mu.Unlock()
+	if got != 1 {
+		t.Fatalf("requests = %d, want exactly 1 (cancellation must not retry)", got)
+	}
+	assertEmptySnapshot(t, obs.Snapshot)
+}
+
+// TestObserveWatchStreakMilestoneOrderingIsByRequestStart is the reverse-
+// completion falsifier: an observation that STARTED first but FINISHED last
+// must never be presentable as the newer evidence.
+//
+// Deterministic by construction — the older request is held open by a barrier
+// until the newer one has completed. No sleeps.
+func TestObserveWatchStreakMilestoneOrderingIsByRequestStart(t *testing.T) {
+	var (
+		once    sync.Once
+		entered = make(chan struct{})
+		release = make(chan struct{})
+		mu      sync.Mutex
+		seen    int
+	)
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		seen++
+		first := seen == 1
+		mu.Unlock()
+		if first {
+			once.Do(func() { close(entered) })
+			<-release // the older request is held open
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, `{"data":{"channel":{"id":"12345","self":{"watchStreakMilestone":{`+
+			`"watchStreakMilestone":{"value":4}}}}}}`)
+	})
+
+	var older WatchStreakMilestoneObservation
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		older = c.ObserveWatchStreakMilestone(context.Background(), "12345", "somestreamer")
+	}()
+
+	<-entered // the older request is in flight and pinned
+	newer := c.ObserveWatchStreakMilestone(context.Background(), "12345", "somestreamer")
+	close(release)
+	<-done
+
+	if !(older.Sequence < newer.Sequence) {
+		t.Fatalf("sequences = %d then %d; the earlier-started request must hold the lower sequence",
+			older.Sequence, newer.Sequence)
+	}
+	if !older.RequestEnd.After(newer.RequestEnd) {
+		t.Fatalf("fixture did not reverse completion: older ended %v, newer ended %v",
+			older.RequestEnd, newer.RequestEnd)
+	}
+	if older.NewerThan(newer) {
+		t.Fatal("an older request that completed last was presented as newer evidence")
+	}
+	if !newer.NewerThan(older) {
+		t.Fatal("the later-started request was not recognized as newer evidence")
+	}
+}
+
+// TestObserveWatchStreakMilestoneRepeatedIdenticalValuesStayDistinct proves
+// temporal evidence is never deduped away: two samples with identical milestone
+// content are two distinct observations.
+func TestObserveWatchStreakMilestoneRepeatedIdenticalValuesStayDistinct(t *testing.T) {
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, `{"data":{"channel":{"id":"12345","self":{"watchStreakMilestone":{`+
+			`"watchStreakMilestone":{"id":"m-1","value":4,"achievementTimestamp":"2026-09-05T12:00:00Z"}}}}}}`)
+	})
+
+	first := c.ObserveWatchStreakMilestone(context.Background(), "12345", "somestreamer")
+	second := c.ObserveWatchStreakMilestone(context.Background(), "12345", "somestreamer")
+
+	if !reflect.DeepEqual(first.Snapshot, second.Snapshot) {
+		t.Fatalf("fixture did not produce identical content:\n%+v\n%+v", first.Snapshot, second.Snapshot)
+	}
+	if first.Sequence == second.Sequence {
+		t.Fatal("identical observations collapsed onto one sequence")
+	}
+	if !second.NewerThan(first) {
+		t.Fatal("the second identical observation is not ordered after the first")
+	}
+	// Identical content, identical achievement time, DIFFERENT sampling times.
+	if first.Snapshot.AchievementTimestamp.Value != second.Snapshot.AchievementTimestamp.Value {
+		t.Fatal("fixture achievement timestamps differ")
+	}
+	if !second.RequestStart.After(first.RequestStart) && second.RequestStart.Equal(first.RequestStart) {
+		t.Log("sampling clock resolution collapsed the two starts; sequence still separates them")
+	}
+}

@@ -1481,8 +1481,10 @@ func IsJoinTimeoutError(err error) bool {
 }
 
 // bonusPollInterval is how often the GQL polling fallback re-checks each online
-// streamer for an unclaimed channel-points bonus chest.
-const bonusPollInterval = 60 * time.Second
+// streamer for an unclaimed channel-points bonus chest. Package variable so
+// tests can shrink it (the loopJoinTimeout/watcher/drops precedent); production
+// never reassigns it.
+var bonusPollInterval = 60 * time.Second
 
 // bonusPollLoop is the GQL polling fallback for channel-points bonus chests.
 // The primary claim path reacts to the community-points-user PubSub
@@ -1501,6 +1503,12 @@ func (m *Miner) bonusPollLoop(ctx context.Context) {
 			return
 		case <-ticker.C:
 			m.pollBonuses()
+			// Optional, read-only observation stage. It runs only AFTER this
+			// cycle's business pass has fully returned, so it is never
+			// interleaved with bonus claiming or auto-redeem, and it owns no
+			// ticker, goroutine or retry subsystem of its own. See
+			// watch_streak_milestone_observation.go.
+			m.observeWatchStreakMilestones(ctx)
 		}
 	}
 }
@@ -1642,8 +1650,17 @@ func (m *Miner) handlePubSubMessage(msg *pubsub.PubSubMessage, s *models.Streame
 							}
 						}
 
+						// The ledger outcome is READ, never assumed: a
+						// WATCH_STREAK correlation record must be able to say
+						// COMMITTED / DUPLICATE / FAILED / TIMELINE_ONLY /
+						// ANALYTICS_UNAVAILABLE from what actually happened,
+						// not from the domain having accepted the grant.
+						ledger := ledgerAnalyticsUnavailable
 						if m.analyticsSvc != nil {
-							m.recordPointsEarned(msg, s, pointGain, reasonCode)
+							ledger = m.recordPointsEarned(msg, s, pointGain, reasonCode)
+						}
+						if reasonCode == "WATCH_STREAK" {
+							m.logWatchStreakGrantCorrelation(msg, s, pointGain, outcome.WatchStreak, ledger)
 						}
 					}
 				}
@@ -1705,7 +1722,12 @@ func (m *Miner) handlePubSubMessage(msg *pubsub.PubSubMessage, s *models.Streame
 // NOT coerced to a zero earning: it is logged and recorded on the balance
 // timeline only, where the Statistics page estimates it from balance deltas
 // and labels it as such.
-func (m *Miner) recordPointsEarned(msg *pubsub.PubSubMessage, s *models.Streamer, pointGain map[string]interface{}, reasonCode string) {
+//
+// It returns what the exact ledger did with the frame — the value the
+// WATCH_STREAK correlation record reports. Returning it changes nothing about
+// the accounting itself: every write, guard, log and ordering below is exactly
+// as before; the outcome was previously discarded and is now reported.
+func (m *Miner) recordPointsEarned(msg *pubsub.PubSubMessage, s *models.Streamer, pointGain map[string]interface{}, reasonCode string) pointLedgerOutcome {
 	total, exact := exactWirePoints(pointGain["total_points"])
 	balanceAfter, balanceKnown := 0, false
 	if balance, ok := msg.Data["balance"].(map[string]interface{}); ok {
@@ -1735,7 +1757,7 @@ func (m *Miner) recordPointsEarned(msg *pubsub.PubSubMessage, s *models.Streamer
 		if exact {
 			m.analyticsSvc.RecordPointMarker(s, reasonCode, total)
 		}
-		return
+		return ledgerTimelineOnly
 	}
 
 	ev := analytics.PointEvent{
@@ -1750,9 +1772,15 @@ func (m *Miner) recordPointsEarned(msg *pubsub.PubSubMessage, s *models.Streamer
 	// teardown race and a deleted streamer, error otherwise); this trace adds
 	// the event identity, which the service does not log, so a replay can be
 	// matched against the ledger.
-	if _, err := m.analyticsSvc.RecordPointEvent(s, ev); err != nil {
+	recorded, err := m.analyticsSvc.RecordPointEvent(s, ev)
+	if err != nil {
 		slog.Debug("Exact point event not recorded", "streamer", s.GetUsername(), "reason", reasonCode, "eventId", msg.EventFingerprint, "error", err)
+		return ledgerFailed
 	}
+	if !recorded {
+		return ledgerDuplicate
+	}
+	return ledgerCommitted
 }
 
 // exactWirePoints converts a decoded JSON number to an exact integer point

@@ -190,4 +190,35 @@ var (
 		"DirectoryGameRedirect",
 		"1f0300090caceec51f33c5e20647aceff9017f740f223c3c532ba6fa59f6b6cc",
 	)
+
+	// RewardList reads the viewer's per-channel reward context. This project
+	// uses it for ONE purpose only: a read-only, diagnostic observation of the
+	// Watch Streak milestone node Twitch exposes under
+	// data.channel.self.watchStreakMilestone (see
+	// internal/twitch/watch_streak_milestone.go). It grants nothing, claims
+	// nothing and controls no pursuit, selection or reward decision.
+	//
+	// Provenance: the operation name, persisted-query version (1), SHA-256 hash
+	// and the two variables below are PROTOCOL evidence captured clean-room
+	// from mpforce1/Twitch-Channel-Points-Miner
+	// (ref f1dda17ad61562ca2e93d975ee0a24e8b2f7ea0c, tree
+	// 650ddd7ed974f78fab1956e41c0849ea177545b2, GPL-3.0). No donor code text
+	// was copied; only the wire facts a persisted query is made of.
+	//
+	// The hash being recorded here is NOT proof that Twitch still accepts it.
+	// Live acceptance is PENDING separately authorized runtime evidence; until
+	// then a PersistedQueryNotFound outcome is the expected, honestly reported
+	// result and no replacement hash may be invented. On a confirmed rotation
+	// the stale-hash handling in client.go applies exactly as it does to every
+	// other operation here.
+	//
+	// Both variables are required and are supplied per call (there is no
+	// preset: WithVariables replaces the whole map, so presetting one here
+	// would be silently dropped by the call site that supplies the other):
+	//   channelID                        - the channel to read
+	//   shouldIncludeAllSuspendedStreaks - false (observed default)
+	RewardList = NewGQLOperation(
+		"RewardList",
+		"0b1471876d7647993731b9e3c6a13bf304c67fb31d07f06a945d42286ee377c4",
+	)
 )
