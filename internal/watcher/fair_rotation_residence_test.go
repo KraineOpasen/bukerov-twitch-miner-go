@@ -39,7 +39,11 @@ func openFairRotationResidence(w *MinuteWatcher) {
 func newResidenceWatcher(t *testing.T, n int) (*MinuteWatcher, []*models.Streamer, []int, *WatchTimeStore) {
 	t.Helper()
 	store, sqlDB := openWatchTimeStore(t, filepath.Join(t.TempDir(), "watch.db"))
-	t.Cleanup(func() { _ = sqlDB.Close() })
+	t.Cleanup(func() {
+		if err := sqlDB.Close(); err != nil {
+			t.Errorf("close watch-time database: %v", err)
+		}
+	})
 	w, streamers, online := newRotationRetirementWatcher(n, store)
 	for _, streamer := range streamers {
 		streamer.Settings.WatchStreak = false
