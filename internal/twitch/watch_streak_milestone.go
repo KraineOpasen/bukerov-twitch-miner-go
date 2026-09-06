@@ -15,11 +15,20 @@ package twitch
 //   - assigns NO meaning to the values it reads.
 //
 // The field names below (value, watchStreakThreshold, watchStreakCopoBonus,
-// state, milestone IDs, ...) are OBSERVED TWITCH FACTS. This package
-// deliberately does not interpret them: there is no milestone->points truth
-// table here, no numeric ladder, and no inference from a received amount to an
-// "expected" tier. Whether 300/350/400/450 form an official ladder is UNKNOWN
-// and stays UNKNOWN until separately evidenced.
+// state, milestone IDs, ...) are OBSERVED TWITCH FACTS, and this package
+// deliberately does not interpret them.
+//
+// That restraint is now the ONLY thing left unknown here, and the distinction
+// is sharp. Twitch's Viewer Channel Point Guide documents the reward ladder
+// itself — streak count 2 -> +300, 3 -> +350, 4 -> +400, 5 or more -> +450 —
+// so the ladder is a current official fact, recorded with its source and
+// retrieval date in internal/miner/watch_streak_milestone_observation.go.
+//
+// What remains UNKNOWN is which RewardList field, if any, carries the
+// authoritative STREAK COUNT in the live response. Nothing here may assume
+// that value, watchStreakThreshold or watchStreakCopoBonus is that field: they
+// keep their raw observed meanings until source or runtime evidence proves
+// otherwise. Knowing the ladder is not knowing where the rung number lives.
 //
 // Provenance: the RewardList wire facts (operation name, persisted-query
 // version and hash, and the two variable names) are clean-room protocol

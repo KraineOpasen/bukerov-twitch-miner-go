@@ -20,9 +20,17 @@ package miner
 //
 // What these records deliberately do NOT do:
 //
-//   - They never synthesize a Watch Streak reward, and never assert a
-//     milestone->points truth table. Whether 300/350/400/450 form an official
-//     Twitch ladder is UNKNOWN. A received +450 implies no expected tier.
+//   - They never synthesize a Watch Streak reward and never change one. The
+//     documented reward ladder IS known (see officialWatchStreakLadder), but
+//     knowing it changes nothing about what this code does to an amount: every
+//     valid integer still passes through the accounting path untouched, and an
+//     amount that does not match the ladder is reported as off-ladder, never
+//     filtered, rewritten, promoted or rejected.
+//   - They never infer a streak COUNT. Which RewardList field, if any, carries
+//     the authoritative streak count is still UNKNOWN, so a received +450 is
+//     recorded as CONSISTENT WITH the documented 5-or-more tier and nothing
+//     more — never as an established streak count, and never as a historical
+//     binding.
 //   - They never bind a grant to a broadcast. The WATCH_STREAK PubSub frame
 //     carries no provable BroadcastID, so the currently observed
 //     Stream.BroadcastID is logged as LOCAL CONTEXT ONLY and never as
@@ -69,6 +77,99 @@ const milestoneLogStringCap = 128
 // milestoneLogIDSample bounds how many observed broadcast identifiers a single
 // record prints. Counts are always exact; the identifier list is a sample.
 const milestoneLogIDSample = 8
+
+// officialWatchStreakLadder is Twitch's DOCUMENTED Watch Streak reward ladder,
+// keyed by streak count.
+//
+// Source: Twitch, "Viewer Channel Point Guide"
+// (https://help.twitch.tv/s/article/viewer-channel-point-guide), supplied as
+// owner evidence and recorded 2026-09-06. Independently corroborated by the
+// already-audited donor mpforce1/Twitch-Channel-Points-Miner (ref
+// f1dda17ad61562ca2e93d975ee0a24e8b2f7ea0c, README blob
+// d5b60c22c5e6387cbe69c3e7e951b32d946672f6), which states the same
+// progression. The same guide documents that a qualifying stream must run at
+// least 10 minutes and that at least 30 minutes must have elapsed since the
+// previous stream ended — recorded here as Twitch's stated rule only; this
+// miner's pursuit semantics are unchanged and are NOT derived from it.
+//
+// The guide states earn rates are SUBJECT TO CHANGE. This is therefore a
+// current-official fact carrying a retrieval date, not a permanent invariant,
+// and it is used for ONE thing: labelling a diagnostic record. Nothing reads it
+// to decide, filter, expect, or synthesize a reward.
+//
+// The ladder describes BASE amounts. A channel-points multiplier scales the
+// credited total above the base, which is why the classifier below prefers the
+// frame's own baseline_points and says which basis it used — see
+// officialLadderConsistency.
+var officialWatchStreakLadder = map[int]int{
+	2: 300,
+	3: 350,
+	4: 400,
+	5: 450, // 5 OR MORE; the ladder is flat from here, so the amount cannot
+	//        distinguish a 5th streak from a 50th.
+}
+
+// watchStreakLadderTier is how one observed amount relates to the documented
+// ladder. It is a CONSISTENCY label, never a measurement: the ladder maps a
+// streak count to an amount, and reading it backwards is many-to-one at the top
+// rung, so no tier here establishes an actual streak count.
+type watchStreakLadderTier string
+
+const (
+	ladderStreakCount2 watchStreakLadderTier = "CONSISTENT_WITH_STREAK_COUNT_2"
+	ladderStreakCount3 watchStreakLadderTier = "CONSISTENT_WITH_STREAK_COUNT_3"
+	ladderStreakCount4 watchStreakLadderTier = "CONSISTENT_WITH_STREAK_COUNT_4"
+	// ladderStreakCount5Plus is a SET, not a count: +450 is the documented
+	// reward for a 5th streak and for every streak after it.
+	ladderStreakCount5Plus watchStreakLadderTier = "CONSISTENT_WITH_STREAK_COUNT_5_OR_MORE"
+	// ladderOffBase: a real, valid, fully accounted amount that does not equal
+	// a documented BASE rung. A points multiplier produces exactly this, as
+	// would a Twitch rate change. It is a label on the amount, never a
+	// rejection of it.
+	ladderOffBase watchStreakLadderTier = "OFF_DOCUMENTED_BASE_LADDER"
+	// ladderAmountUnknown: the frame carried no exactly representable amount,
+	// so there is nothing to compare.
+	ladderAmountUnknown watchStreakLadderTier = "AMOUNT_UNKNOWN"
+)
+
+// officialLadderConsistency labels an observed amount against the documented
+// ladder and reports which wire field it compared.
+//
+// basePoints is the frame's own baseline_points when that field was present and
+// exactly representable — the pre-multiplier amount the ladder actually
+// describes — and totalPoints is the credited amount #303 accounts. Preferring
+// the baseline is what keeps a subscriber's multiplied +675 from being reported
+// as "off-ladder" when it is a perfectly ordinary 5-or-more streak; when no
+// baseline is available the comparison falls back to the total and SAYS SO, so
+// nobody reads a multiplied total as evidence of a rate change.
+//
+// It makes no decision. Its only consumer is a log attribute.
+func officialLadderConsistency(totalPoints int, totalExact bool, basePoints int, baseExact bool) (watchStreakLadderTier, string) {
+	amount, basis := totalPoints, "TOTAL_POINTS"
+	exact := totalExact
+	if baseExact {
+		amount, basis, exact = basePoints, "BASELINE_POINTS", true
+	}
+	if !exact {
+		return ladderAmountUnknown, basis
+	}
+	for count, reward := range officialWatchStreakLadder {
+		if reward != amount {
+			continue
+		}
+		switch count {
+		case 2:
+			return ladderStreakCount2, basis
+		case 3:
+			return ladderStreakCount3, basis
+		case 4:
+			return ladderStreakCount4, basis
+		default:
+			return ladderStreakCount5Plus, basis
+		}
+	}
+	return ladderOffBase, basis
+}
 
 // pointLedgerOutcome is what the EXACT points ledger actually did with one
 // accepted points-earned frame.
@@ -222,10 +323,13 @@ func logWatchStreakMilestoneObservation(obs twitch.WatchStreakMilestoneObservati
 		"broadcastIdentifierIds", ids.IDs,
 		"broadcastIdentifierSample", ids.Sample,
 
-		// The two relationships this feature cannot prove, printed explicitly.
+		// The relationships this feature cannot prove, printed explicitly. The
+		// reward ladder is documented (officialWatchStreakLadder), but WHICH of
+		// the fields above carries the authoritative streak count is not — so
+		// no observation here may be read as a streak-count measurement.
 		"localBroadcastContextOnly", truncateForLog(localBroadcast),
 		"grantLink", unknownLink,
-		"expectedMilestone", unknownLink,
+		"streakCountField", unknownLink,
 	)
 
 	switch obs.Outcome {
@@ -385,8 +489,15 @@ func presenceTally(counts map[twitch.MilestoneFieldPresence]int) string {
 //
 // Amount invariants: the exact total_points is copied through unchanged. No
 // amount is filtered, rewritten, promoted or rejected here — 300, 350, 400, 450
-// and every other valid integer amount are reported exactly as received, and
-// none of them implies an expected milestone.
+// and every other valid integer amount are reported exactly as received.
+//
+// The record additionally LABELS the amount against Twitch's documented ladder
+// (officialWatchStreakLadder). That label is a consistency statement about the
+// amount, not a measurement of the streak: the ladder is flat at 5-or-more, no
+// RewardList field is proven to carry the streak count, and an amount that
+// matches no documented base rung is reported as off-ladder and otherwise
+// treated exactly like any other. provenStreakCount therefore stays UNKNOWN on
+// every record, including a +450 one.
 func (m *Miner) logWatchStreakGrantCorrelation(
 	msg *pubsub.PubSubMessage,
 	s *models.Streamer,
@@ -403,6 +514,16 @@ func (m *Miner) logWatchStreakGrantCorrelation(
 	if exact {
 		exactPoints = strconv.Itoa(total)
 	}
+
+	// baseline_points is the frame's PRE-MULTIPLIER amount. It is read here for
+	// the ladder label only — the exact ledger still accounts total_points, and
+	// #303's accounting is untouched.
+	baseline, baselineExact := exactWirePoints(pointGain["baseline_points"])
+	baselinePoints := unknownLink
+	if baselineExact {
+		baselinePoints = strconv.Itoa(baseline)
+	}
+	ladderTier, ladderBasis := officialLadderConsistency(total, exact, baseline, baselineExact)
 
 	wireTimestamp := unknownLink
 	if ts, ok := msg.Data["timestamp"].(string); ok && ts != "" {
@@ -441,6 +562,14 @@ func (m *Miner) logWatchStreakGrantCorrelation(
 		"eventId", truncateForLog(msg.EventFingerprint),
 		"exactTotalPoints", exactPoints,
 		"exactAmount", exact,
+		"baselinePoints", baselinePoints,
+
+		// The amount's relationship to Twitch's DOCUMENTED ladder. A label on
+		// the amount, never a streak-count measurement: provenStreakCount stays
+		// UNKNOWN because no RewardList field is proven to carry it.
+		"officialLadderConsistency", string(ladderTier),
+		"officialLadderBasis", ladderBasis,
+		"provenStreakCount", unknownLink,
 
 		// Three distinct clocks, kept distinct.
 		"wireTimestamp", wireTimestamp,
@@ -454,7 +583,6 @@ func (m *Miner) logWatchStreakGrantCorrelation(
 		"provenBroadcastId", truncateForLog(provenBroadcast),
 		"localBroadcastContextOnly", truncateForLog(localBroadcast),
 		"milestoneLink", unknownLink,
-		"expectedMilestone", unknownLink,
 	)
 }
 

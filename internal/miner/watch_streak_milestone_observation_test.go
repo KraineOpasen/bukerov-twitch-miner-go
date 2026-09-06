@@ -495,7 +495,7 @@ func TestObservationRecordCarriesBoundedProvenance(t *testing.T) {
 		"broadcastIdentifierIds":       "VALID:1",
 		"localBroadcastContextOnly":    "broadcast-local-1",
 		"grantLink":                    "UNKNOWN",
-		"expectedMilestone":            "UNKNOWN",
+		"streakCountField":             "UNKNOWN",
 	} {
 		if got := attrValue(line, key); got != want {
 			t.Errorf("%s = %q, want %q\nline: %s", key, got, want, line)
@@ -915,7 +915,7 @@ func TestWatchStreakCorrelationReportsWhatTheLedgerActuallyDid(t *testing.T) {
 		"provenBroadcastId":         "NONE",
 		"localBroadcastContextOnly": "broadcast-live-1",
 		"milestoneLink":             "UNKNOWN",
-		"expectedMilestone":         "UNKNOWN",
+		"provenStreakCount":         "UNKNOWN",
 	} {
 		if got := attrValue(line, key); got != want {
 			t.Errorf("%s = %q, want %q\nline: %s", key, got, want, line)
@@ -961,14 +961,16 @@ func TestWatchStreakCorrelationReportsWhatTheLedgerActuallyDid(t *testing.T) {
 	}
 }
 
-// TestWatchStreakCorrelationExactAmountsPassThroughUnchanged is the 300/350/
-// 400/450 invariant: every valid integer amount reaches the ledger, History and
-// the record EXACTLY as received. Nothing is filtered, rewritten, promoted or
-// rejected for failing to match a presumed ladder, and no amount implies an
-// expected milestone.
+// TestWatchStreakCorrelationExactAmountsPassThroughUnchanged is the amount
+// invariant: every valid integer reaches the ledger, History and the record
+// EXACTLY as received.
 //
-// The amounts below are FIXTURE DATA, not an assertion that Twitch uses this
-// ladder. 137 and 451 are included precisely so no ladder can be inferred.
+// Twitch's documented ladder (2 -> 300, 3 -> 350, 4 -> 400, 5+ -> 450) is a
+// current official fact, and the record LABELS an amount against it — but the
+// ladder is never a filter. 137 and 451 are included precisely because they
+// match no documented rung: they must still pass through untouched and be
+// reported as off-ladder rather than rejected, rewritten or promoted. And
+// whatever the amount, the record must never claim a proven streak count.
 func TestWatchStreakCorrelationExactAmountsPassThroughUnchanged(t *testing.T) {
 	for _, amount := range []int{300, 350, 400, 450, 137, 451} {
 		t.Run(fmt.Sprintf("plus-%d", amount), func(t *testing.T) {
@@ -982,8 +984,9 @@ func TestWatchStreakCorrelationExactAmountsPassThroughUnchanged(t *testing.T) {
 			if got := attrValue(line, "exactTotalPoints"); got != fmt.Sprint(amount) {
 				t.Errorf("exactTotalPoints = %q, want %d", got, amount)
 			}
-			if got := attrValue(line, "expectedMilestone"); got != "UNKNOWN" {
-				t.Errorf("a +%d grant produced expectedMilestone=%q; it must stay UNKNOWN", amount, got)
+			if got := attrValue(line, "provenStreakCount"); got != "UNKNOWN" {
+				t.Errorf("a +%d grant produced provenStreakCount=%q; no RewardList field is proven "+
+					"to carry the streak count, so it must stay UNKNOWN", amount, got)
 			}
 
 			exact := mustExactEarnings(t, svc.Repository(), s.GetUsername(), time.Time{}, time.Time{})
@@ -995,6 +998,151 @@ func TestWatchStreakCorrelationExactAmountsPassThroughUnchanged(t *testing.T) {
 			}
 			if gained != amount {
 				t.Errorf("ledger recorded %d for a +%d grant", gained, amount)
+			}
+		})
+	}
+}
+
+// TestOfficialLadderConsistencyLabelsWithoutMeasuring pins the corrected
+// evidence model at its seam.
+//
+// KNOWN (Twitch Viewer Channel Point Guide, recorded 2026-09-06): streak count
+// 2 -> +300, 3 -> +350, 4 -> +400, 5 or more -> +450.
+//
+// STILL UNKNOWN: which RewardList field, if any, carries the authoritative
+// streak count. So the ladder may only ever produce a CONSISTENCY label, and
+// the 5-or-more rung must never collapse to "the streak count is 5".
+func TestOfficialLadderConsistencyLabelsWithoutMeasuring(t *testing.T) {
+	tests := []struct {
+		name       string
+		total      int
+		totalExact bool
+		base       int
+		baseExact  bool
+		wantTier   watchStreakLadderTier
+		wantBasis  string
+	}{
+		{"300 is the documented second streak", 300, true, 300, true, ladderStreakCount2, "BASELINE_POINTS"},
+		{"350 is the documented third", 350, true, 350, true, ladderStreakCount3, "BASELINE_POINTS"},
+		{"400 is the documented fourth", 400, true, 400, true, ladderStreakCount4, "BASELINE_POINTS"},
+		{"450 is the documented fifth OR LATER", 450, true, 450, true, ladderStreakCount5Plus, "BASELINE_POINTS"},
+		{"an off-ladder amount is labelled, not rejected", 451, true, 451, true, ladderOffBase, "BASELINE_POINTS"},
+		{"zero is off the documented ladder", 0, true, 0, true, ladderOffBase, "BASELINE_POINTS"},
+		{"a negative amount is off the ladder", -450, true, -450, true, ladderOffBase, "BASELINE_POINTS"},
+		{
+			// A points multiplier scales the credited total above the base. The
+			// ladder documents BASE amounts, so comparing the total would call
+			// an ordinary 5-or-more streak "off-ladder".
+			"a multiplied total is judged on its baseline",
+			675, true, 450, true, ladderStreakCount5Plus, "BASELINE_POINTS",
+		},
+		{
+			"without a baseline the total is used and the basis says so",
+			450, true, 0, false, ladderStreakCount5Plus, "TOTAL_POINTS",
+		},
+		{
+			"a multiplied total with no baseline is off-ladder on the total",
+			675, true, 0, false, ladderOffBase, "TOTAL_POINTS",
+		},
+		{"an inexact amount cannot be compared", 0, false, 0, false, ladderAmountUnknown, "TOTAL_POINTS"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			tier, basis := officialLadderConsistency(tc.total, tc.totalExact, tc.base, tc.baseExact)
+			if tier != tc.wantTier {
+				t.Errorf("tier = %q, want %q", tier, tc.wantTier)
+			}
+			if basis != tc.wantBasis {
+				t.Errorf("basis = %q, want %q", basis, tc.wantBasis)
+			}
+		})
+	}
+
+	// Every label is a CONSISTENCY statement. None of them may read as a count.
+	for _, tier := range []watchStreakLadderTier{
+		ladderStreakCount2, ladderStreakCount3, ladderStreakCount4, ladderStreakCount5Plus,
+	} {
+		if !strings.HasPrefix(string(tier), "CONSISTENT_WITH_") {
+			t.Errorf("tier %q does not read as a consistency statement", tier)
+		}
+	}
+	// The top rung is a SET, not a number: the amount cannot tell a 5th streak
+	// from a 50th, and the label must not pretend otherwise.
+	if string(ladderStreakCount5Plus) == "CONSISTENT_WITH_STREAK_COUNT_5" {
+		t.Error("the flat top rung was rendered as an exact count")
+	}
+}
+
+// TestOfficialLadderMatchesTheDocumentedSource pins the ladder to the owner's
+// authoritative evidence, so a silent edit to the table is a test failure
+// rather than a quiet change of a documented Twitch fact.
+func TestOfficialLadderMatchesTheDocumentedSource(t *testing.T) {
+	want := map[int]int{2: 300, 3: 350, 4: 400, 5: 450}
+	if len(officialWatchStreakLadder) != len(want) {
+		t.Fatalf("ladder has %d rungs, want %d", len(officialWatchStreakLadder), len(want))
+	}
+	for count, reward := range want {
+		if got := officialWatchStreakLadder[count]; got != reward {
+			t.Errorf("streak count %d -> %d, want %d (Twitch Viewer Channel Point Guide)", count, got, reward)
+		}
+	}
+	// Rung 5 is documented as "5 or more"; there must be no rung above it that
+	// would imply the ladder keeps climbing.
+	for count := range officialWatchStreakLadder {
+		if count > 5 {
+			t.Errorf("ladder carries a rung for streak count %d; the documented ladder is flat at 5 or more", count)
+		}
+	}
+}
+
+// TestWatchStreakCorrelationLadderLabelInTheRecord proves the label reaches the
+// record on the real delivery path, with the streak count still UNKNOWN.
+func TestWatchStreakCorrelationLadderLabelInTheRecord(t *testing.T) {
+	tests := []struct {
+		name     string
+		total    int
+		baseline int
+		wantTier string
+		wantBase string
+	}{
+		{"documented second streak", 300, 300, "CONSISTENT_WITH_STREAK_COUNT_2", "BASELINE_POINTS"},
+		{"documented fifth or later", 450, 450, "CONSISTENT_WITH_STREAK_COUNT_5_OR_MORE", "BASELINE_POINTS"},
+		{"multiplied fifth or later", 675, 450, "CONSISTENT_WITH_STREAK_COUNT_5_OR_MORE", "BASELINE_POINTS"},
+		{"off the documented ladder", 451, 451, "OFF_DOCUMENTED_BASE_LADDER", "BASELINE_POINTS"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			logbuf := captureLogs(t)
+			m, s, svc := newMilestoneCorrelationMiner(t, &milestoneRoundTripper{})
+
+			msg := watchStreakFrame(t, s, tc.total, 9000, "2026-09-05T12:00:00Z")
+			msg.Data["point_gain"].(map[string]interface{})["baseline_points"] = float64(tc.baseline)
+			deliverPointsEarned(t, m, s, msg)
+
+			line := singleCorrelationLine(t, logbuf.String())
+			for key, want := range map[string]string{
+				"officialLadderConsistency": tc.wantTier,
+				"officialLadderBasis":       tc.wantBase,
+				"baselinePoints":            fmt.Sprint(tc.baseline),
+				"exactTotalPoints":          fmt.Sprint(tc.total),
+				"provenStreakCount":         "UNKNOWN",
+				"milestoneLink":             "UNKNOWN",
+			} {
+				if got := attrValue(line, key); got != want {
+					t.Errorf("%s = %q, want %q\nline: %s", key, got, want, line)
+				}
+			}
+			// The label changed nothing about the accounting.
+			exact := mustExactEarnings(t, svc.Repository(), s.GetUsername(), time.Time{}, time.Time{})
+			gained := 0
+			for _, share := range exact.Breakdown {
+				if share.Reason == "WATCH_STREAK" {
+					gained = share.Gained
+				}
+			}
+			if gained != tc.total {
+				t.Errorf("ledger recorded %d, want the credited total %d", gained, tc.total)
 			}
 		})
 	}
@@ -1216,17 +1364,25 @@ func TestPreviousEventFollowingObservationLinksStayUnknown(t *testing.T) {
 		if got := attrValue(line, "grantLink"); got != "UNKNOWN" {
 			t.Errorf("observation grantLink = %q, want UNKNOWN", got)
 		}
-		if got := attrValue(line, "expectedMilestone"); got != "UNKNOWN" {
-			t.Errorf("observation expectedMilestone = %q, want UNKNOWN", got)
+		// The ladder is documented, but which observed field carries the streak
+		// count is not — so no observation may read as a count measurement.
+		if got := attrValue(line, "streakCountField"); got != "UNKNOWN" {
+			t.Errorf("observation streakCountField = %q, want UNKNOWN", got)
 		}
 	}
 	if got := attrValue(correlation, "milestoneLink"); got != "UNKNOWN" {
 		t.Errorf("correlation milestoneLink = %q, want UNKNOWN", got)
 	}
-	// No record may assert causality or expectation.
+	// No record may assert causality, or turn the documented ladder into a
+	// measured streak count.
+	if got := attrValue(correlation, "provenStreakCount"); got != "UNKNOWN" {
+		t.Errorf("correlation provenStreakCount = %q, want UNKNOWN", got)
+	}
 	for _, phrase := range []string{
 		"expected at grant", "changed because of grant", "expectedAtGrant", "changedByGrant",
-		"causedBy", "milestoneLink=OBSERVED", "expectedMilestone=450",
+		"causedBy", "milestoneLink=OBSERVED",
+		// The flat top rung must never be rendered as an exact count.
+		"provenStreakCount=5", "streakCount=5", "CONSISTENT_WITH_STREAK_COUNT_5 ",
 	} {
 		if strings.Contains(full, phrase) {
 			t.Errorf("a record asserted an unproven relationship: %q", phrase)
