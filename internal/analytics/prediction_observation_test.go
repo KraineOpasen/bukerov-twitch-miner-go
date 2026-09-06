@@ -4934,3 +4934,99 @@ func TestDirectDeletionLeavesUndeletableIdentitiesAlone(t *testing.T) {
 		t.Fatal("the drops bucket's observation identity was fenced by a no-op deletion")
 	}
 }
+
+// TestADirectDeletionThatDeletesNothingLeavesNoBarrier is the regression for a
+// defect CodeRabbit found in the barrier this method had just gained.
+//
+// Arming InvalidateIdentity and Tombstone before the transaction is right, but
+// they are only half a contract: the lifecycle path may hold that barrier
+// across a failure because it first persists a durable pending-deletion record
+// and reconciles later. This convenience method has no such record. So a
+// transaction that fails leaves the rows intact — the rollback saw to that —
+// and the login permanently unwritable, with no caller who knows to lift it.
+// The same happened when the call succeeded having deleted nothing at all: a
+// deletion of a login that never existed poisoned it.
+//
+// A barrier is only honest while it guards something that was actually erased.
+func TestADirectDeletionThatDeletesNothingLeavesNoBarrier(t *testing.T) {
+	t.Run("a failed transaction lifts what it armed", func(t *testing.T) {
+		svc, repo := newObservationService(t)
+		if err := repo.RecordPoints("victim", 100, "WATCH"); err != nil {
+			t.Fatal(err)
+		}
+
+		// A cancelled context fails the transaction, so nothing is deleted.
+		cancelled, cancel := context.WithCancel(context.Background())
+		cancel()
+		if _, err := repo.DeleteStreamer(cancelled, "victim"); err == nil {
+			t.Fatal("the deletion reported success on a cancelled context")
+		}
+
+		// The rows survived the rollback, so the identity must still be usable.
+		if err := repo.RecordPoints("victim", 200, "WATCH"); err != nil {
+			t.Fatalf("a write after a FAILED deletion returned %v: the rollback kept every "+
+				"row, but the tombstone armed before the transaction was never lifted, so "+
+				"the identity is undeletable and unwritable at once", err)
+		}
+		// Asked the way captureState asks it: would a fact captured NOW be
+		// refused? A zero-position probe would match the erasure watermark
+		// that the lift legitimately leaves behind and prove nothing.
+		if got := svc.observations.captureState("chan-victim", "victim"); got != "" {
+			t.Fatalf("capture for the identity reports %q after a deletion that FAILED: the "+
+				"fence armed before the transaction is still up, so a streamer whose data "+
+				"was never erased is unobservable forever", got)
+		}
+	})
+
+	t.Run("deleting a login that never existed leaves it usable", func(t *testing.T) {
+		svc, repo := newObservationService(t)
+
+		existed, err := repo.DeleteStreamer(context.Background(), "never-existed")
+		if err != nil || existed {
+			t.Fatalf("delete of an unknown login: existed=%v err=%v, want (false, nil)", existed, err)
+		}
+		if err := repo.RecordPoints("never-existed", 100, "WATCH"); err != nil {
+			t.Fatalf("a write after deleting a login that never existed returned %v: nothing "+
+				"was erased, so nothing needs guarding", err)
+		}
+		if got := svc.observations.captureState("chan-new", "never-existed"); got != "" {
+			t.Fatalf("capture reports %q after a deletion that erased nothing", got)
+		}
+	})
+
+	t.Run("a real deletion keeps its barrier", func(t *testing.T) {
+		svc, repo := newObservationService(t)
+		if err := repo.RecordPoints("victim", 100, "WATCH"); err != nil {
+			t.Fatal(err)
+		}
+		existed, err := repo.DeleteStreamer(context.Background(), "victim")
+		if err != nil || !existed {
+			t.Fatalf("delete: existed=%v err=%v", existed, err)
+		}
+		// This is the property the barrier exists for and must not be lost
+		// while fixing the two cases above.
+		if err := repo.RecordPoints("victim", 200, "WATCH"); !errors.Is(err, ErrStreamerDeleted) {
+			t.Fatalf("a write after a REAL deletion returned %v, want ErrStreamerDeleted", err)
+		}
+		if got := svc.observations.captureState("chan-victim", "victim"); got != "IDENTITY_FENCE" {
+			t.Fatalf("capture reports %q after a REAL deletion, want IDENTITY_FENCE", got)
+		}
+	})
+
+	t.Run("a barrier this call did not arm is left alone", func(t *testing.T) {
+		_, repo := newObservationService(t)
+
+		// Someone else — the lifecycle path — armed the barrier first and is
+		// holding it across its own durable retry. A no-op delete must not
+		// clear it out from under them.
+		repo.Tombstone("held")
+		existed, err := repo.DeleteStreamer(context.Background(), "held")
+		if err != nil || existed {
+			t.Fatalf("delete of an unknown but tombstoned login: existed=%v err=%v", existed, err)
+		}
+		if err := repo.RecordPoints("held", 100, "WATCH"); !errors.Is(err, ErrStreamerDeleted) {
+			t.Fatalf("a write returned %v, want ErrStreamerDeleted: this call armed nothing, so "+
+				"it must not lift a barrier another owner is holding", err)
+		}
+	})
+}

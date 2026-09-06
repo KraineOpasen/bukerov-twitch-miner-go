@@ -532,6 +532,17 @@ func (r *SQLiteRepository) DeleteStreamer(ctx context.Context, login string) (bo
 	// — it bumps the capture generation and arms the fence — and the tombstone
 	// is what stops a later point or annotation write from recreating the
 	// streamers row this is about to delete.
+	//
+	// Whether the barrier was ALREADY up decides who may lift it. The
+	// lifecycle path arms one and holds it across a failure because it first
+	// persists a durable pending-deletion record and reconciles later; this
+	// method has no such record, so a barrier it armed and did not use is a
+	// barrier nobody will ever come back for. Only what this call raised is
+	// this call's to lower.
+	r.mu.Lock()
+	heldByAnotherOwner := r.tombstonedLocked(login)
+	r.mu.Unlock()
+
 	r.InvalidateIdentity("", login)
 	r.Tombstone(login)
 
@@ -548,6 +559,17 @@ func (r *SQLiteRepository) DeleteStreamer(ctx context.Context, login string) (bo
 		existed, e = r.DeleteStreamerIdentityTx(ctx, tx, "", login)
 		return e
 	})
+	// A barrier is only honest while it guards something that was actually
+	// erased. The transaction failing means the rollback kept every row, and
+	// `existed == false` means there was nothing to keep — either way nothing
+	// was deleted, so leaving the barrier up would make the identity
+	// unwritable AND undeletable, with no durable record to reconcile it. The
+	// capture generation stays bumped: it cannot be un-bumped, and dropping
+	// facts that were in flight during an attempted erasure is the safe
+	// direction.
+	if !heldByAnotherOwner && (err != nil || !existed) {
+		r.Reinstate(login)
+	}
 	return existed, err
 }
 
