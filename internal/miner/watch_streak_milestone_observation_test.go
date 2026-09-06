@@ -1726,3 +1726,132 @@ func TestCorrelationProvenBroadcastDistinguishesNoneFromUnknown(t *testing.T) {
 		}
 	})
 }
+
+// TestObservationSkipsTargetsWithoutAChannelIdentity covers the second
+// eligibility guard: online is not enough, the request must be scopeable.
+func TestObservationSkipsTargetsWithoutAChannelIdentity(t *testing.T) {
+	logs := captureLogs(t)
+	logins := milestoneLogins(t, 2)
+	rt := &milestoneRoundTripper{}
+	m, streamers := newMilestoneMiner(t, rt, logins, logins)
+
+	// Online, but with no channel identity to scope a request to.
+	streamers[logins[0]].ChannelID = ""
+	logs.Reset()
+
+	m.observeWatchStreakMilestones(context.Background())
+
+	_, reward := rt.counts()
+	if len(reward) != 1 {
+		t.Fatalf("distinct observation targets = %d, want 1 (%v)", len(reward), reward)
+	}
+	if got := reward[streamers[logins[1]].ChannelID]; got != 1 {
+		t.Errorf("the identifiable streamer was observed %d times, want 1", got)
+	}
+	// The unscopeable target is skipped silently rather than emitting a record
+	// that would claim an observation was attempted.
+	lines := recordLines(logs.String(), milestoneObservationRecord)
+	if len(lines) != 1 {
+		t.Fatalf("observation records = %d, want 1", len(lines))
+	}
+	if got := attrValue(lines[0], "streamer"); got != logins[1] {
+		t.Errorf("record is for %q, want the identifiable streamer %q", got, logins[1])
+	}
+}
+
+// TestObservationRecordBoundsTheIdentifierSample covers the record's last
+// unbounded-growth vector: a response with many broadcast identifiers must
+// print a bounded SAMPLE while still reporting the exact count.
+func TestObservationRecordBoundsTheIdentifierSample(t *testing.T) {
+	logs := captureLogs(t)
+	logins := milestoneLogins(t, 1)
+
+	const identifiers = milestoneLogIDSample * 5
+	ids := make([]string, 0, identifiers)
+	for i := 0; i < identifiers; i++ {
+		ids = append(ids, fmt.Sprintf(`{"id":"b-%02d"}`, i))
+	}
+	body := `{"data":{"channel":{"id":"1","self":{"watchStreakMilestone":{"missedStreams":[` +
+		`{"broadcastIdentifiers":[` + strings.Join(ids, ",") + `]}]}}}}}`
+
+	m, _ := newMilestoneMiner(t, &milestoneRoundTripper{rewardListBody: body}, logins, logins)
+	logs.Reset()
+	m.observeWatchStreakMilestones(context.Background())
+
+	lines := recordLines(logs.String(), milestoneObservationRecord)
+	if len(lines) != 1 {
+		t.Fatalf("observation records = %d, want 1", len(lines))
+	}
+	// The COUNT is exact — bounding the sample must not bound the truth.
+	if got := attrValue(lines[0], "broadcastIdentifierValidIds"); got != fmt.Sprint(identifiers) {
+		t.Errorf("broadcastIdentifierValidIds = %q, want the exact %d", got, identifiers)
+	}
+	// The printed sample is not.
+	printed := strings.Count(lines[0], "b-")
+	if printed > milestoneLogIDSample {
+		t.Errorf("record printed %d identifiers, want at most the %d-entry sample",
+			printed, milestoneLogIDSample)
+	}
+	if printed == 0 {
+		t.Error("record printed no identifier sample at all")
+	}
+}
+
+// TestCorrelationLadderAmountUnknownReachesTheRecord proves the AMOUNT_UNKNOWN
+// tier is not only a pure-function outcome: a frame whose amount the ledger
+// cannot represent exactly must carry it into the emitted record.
+func TestCorrelationLadderAmountUnknownReachesTheRecord(t *testing.T) {
+	logbuf := captureLogs(t)
+	m, s, _ := newMilestoneCorrelationMiner(t, &milestoneRoundTripper{})
+
+	msg := watchStreakFrame(t, s, 450, 5450, "2026-09-05T12:00:00Z")
+	gain := msg.Data["point_gain"].(map[string]interface{})
+	gain["total_points"] = 450.5
+	gain["baseline_points"] = 450.5
+	deliverPointsEarned(t, m, s, msg)
+
+	line := singleCorrelationLine(t, logbuf.String())
+	for key, want := range map[string]string{
+		"officialLadderConsistency": "AMOUNT_UNKNOWN",
+		"exactTotalPoints":          "UNKNOWN",
+		"baselinePoints":            "UNKNOWN",
+		"provenStreakCount":         "UNKNOWN",
+	} {
+		if got := attrValue(line, key); got != want {
+			t.Errorf("%s = %q, want %q\nline: %s", key, got, want, line)
+		}
+	}
+}
+
+// TestCorrelationProvenBroadcastReportsAProvenBinding covers the remaining
+// branch: when an independent source HAS proved a binding, the record reports
+// that broadcast rather than NONE or UNKNOWN.
+func TestCorrelationProvenBroadcastReportsAProvenBinding(t *testing.T) {
+	logbuf := captureLogs(t)
+	m, s, _ := newMilestoneCorrelationMiner(t, &milestoneRoundTripper{})
+	msg := watchStreakFrame(t, s, 450, 5450, "2026-09-05T12:00:00Z")
+	gain := msg.Data["point_gain"].(map[string]interface{})
+
+	grant := models.WatchStreakGrantResult{
+		Admission: models.WatchStreakGrantNewBound,
+		Persistence: models.WatchStreakPersistence{Grants: []models.WatchStreakGrantFact{{
+			EventID:     msg.EventFingerprint,
+			Binding:     models.WatchStreakGrantBound,
+			BroadcastID: "proven-broadcast-9",
+			AcceptedAt:  time.Now(),
+		}}},
+	}
+	m.logWatchStreakGrantCorrelation(msg, s, gain, grant, ledgerCommitted)
+
+	line := singleCorrelationLine(t, logbuf.String())
+	if got := attrValue(line, "provenBroadcastId"); got != "proven-broadcast-9" {
+		t.Fatalf("provenBroadcastId = %q, want the proven binding", got)
+	}
+	if got := attrValue(line, "grantBinding"); got != "GRANTED" {
+		t.Errorf("grantBinding = %q, want GRANTED", got)
+	}
+	// Even with a proven broadcast, the streak count remains unmeasured.
+	if got := attrValue(line, "provenStreakCount"); got != "UNKNOWN" {
+		t.Errorf("provenStreakCount = %q, want UNKNOWN", got)
+	}
+}

@@ -1002,15 +1002,19 @@ func (c *TwitchClient) doGQLRequestWithClientIDFallback(ctx context.Context, bod
 		}
 
 		// A diagnostic read of an operation whose live acceptance is not
-		// established fails this way BY DESIGN and on every cycle. Reporting it
-		// at WARN/ERROR would put an unactionable operator alert on the
-		// dashboard for every target on every poll; the caller records the
-		// outcome as its own diagnostic fact instead.
-		logStaleHash(diagnostic, "GQL request returned PersistedQueryNotFound; trying next client ID",
-			"operation", operationLabel,
-			"clientID", clientID,
-			"remainingCandidates", len(candidates)-i-1,
-		)
+		// established fails this way BY DESIGN, for every candidate, on every
+		// cycle. At WARN/ERROR it would be an unactionable operator alert; even
+		// at DEBUG, one line per candidate per target per cycle is volume the
+		// retained log does not need, and the exhausted summary below already
+		// reports how many candidates were tried. A business read keeps the
+		// full per-candidate WARN, where the specific client ID is actionable.
+		if !diagnostic {
+			slog.Warn("GQL request returned PersistedQueryNotFound; trying next client ID",
+				"operation", operationLabel,
+				"clientID", clientID,
+				"remainingCandidates", len(candidates)-i-1,
+			)
+		}
 	}
 
 	logStaleHashExhausted(diagnostic, operationLabel, len(candidates))
@@ -1019,21 +1023,6 @@ func (c *TwitchClient) doGQLRequestWithClientIDFallback(ctx context.Context, bod
 		c.connAcct.markFunctionalFailure(time.Now())
 	}
 	return respBody, statusCode, fmt.Errorf("%w: operation %s (tried %d client IDs)", ErrPersistedQueryNotFound, operationLabel, len(candidates))
-}
-
-// logStaleHash reports one candidate's PersistedQueryNotFound. A business read
-// keeps the historical WARN; a diagnostic read drops to DEBUG (see
-// diagnosticRequestKey).
-func logStaleHash(diagnostic bool, msg string, args ...any) {
-	if diagnostic {
-		// Distinct wording, not just a distinct level: a DEBUG line reading
-		// identically to the operator WARN invites a reader scanning the
-		// retained log to treat a routine diagnostic outcome as the real
-		// stale-hash alert.
-		slog.Debug("Diagnostic "+msg, args...)
-		return
-	}
-	slog.Warn(msg, args...)
 }
 
 // logStaleHashExhausted reports that every candidate client ID returned
@@ -1073,7 +1062,13 @@ func (c *TwitchClient) doGQLRequestWithRetry(ctx context.Context, body []byte, o
 
 		respBody, statusCode, retryAfter, err := c.doGQLOnce(req)
 		if err == nil {
-			slog.Debug("GQL response", "operation", operationLabel, "status", statusCode)
+			// A diagnostic read repeats for every target on every cycle, so its
+			// per-attempt trace is pure volume in the retained log; the caller
+			// records the outcome as its own structured fact instead. A
+			// business read keeps the trace.
+			if !isDiagnosticRequest(ctx) {
+				slog.Debug("GQL response", "operation", operationLabel, "status", statusCode)
+			}
 			return respBody, statusCode, nil
 		}
 

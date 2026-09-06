@@ -277,6 +277,39 @@ func TestParseWatchStreakMilestoneMalformedScalars(t *testing.T) {
 		})
 	}
 
+	// An explicitly NULL integer is NULL, not MISSING and not MALFORMED: the
+	// three are different observations for every integer field.
+	for _, key := range []string{"value"} {
+		resp := fullRewardListResponse()
+		sNode(t, resp)["watchStreakMilestone"].(map[string]interface{})[key] = nil
+		if got := parseWatchStreakMilestone(resp).MilestoneValue; got.Presence != MilestoneFieldNull || got.Value != 0 {
+			t.Fatalf("null %s = %+v, want NULL/0", key, got)
+		}
+	}
+	for _, key := range []string{"watchStreakThreshold", "watchStreakCopoBonus"} {
+		resp := fullRewardListResponse()
+		sNode(t, resp)[key] = nil
+		snap := parseWatchStreakMilestone(resp)
+		got := snap.WatchStreakThreshold
+		if key == "watchStreakCopoBonus" {
+			got = snap.WatchStreakCopoBonus
+		}
+		if got.Presence != MilestoneFieldNull || got.Value != 0 {
+			t.Fatalf("null %s = %+v, want NULL/0", key, got)
+		}
+		// And NULL must stay distinct from MISSING on the same field.
+		missing := fullRewardListResponse()
+		delete(sNode(t, missing), key)
+		msnap := parseWatchStreakMilestone(missing)
+		mgot := msnap.WatchStreakThreshold
+		if key == "watchStreakCopoBonus" {
+			mgot = msnap.WatchStreakCopoBonus
+		}
+		if mgot.Presence != MilestoneFieldMissing {
+			t.Fatalf("missing %s = %+v, want MISSING", key, mgot)
+		}
+	}
+
 	// A string field given a non-string is MALFORMED, not an empty observed
 	// string.
 	resp := fullRewardListResponse()
@@ -1184,5 +1217,73 @@ func TestObserveWatchStreakMilestoneNonGraphQLBodyIsUnavailable(t *testing.T) {
 	}
 	if obs.Snapshot.ChannelPresence != MilestoneFieldNull {
 		t.Errorf("channel presence = %q, want NULL", obs.Snapshot.ChannelPresence)
+	}
+}
+
+// TestObserveWatchStreakMilestoneTransientFailureLeavesTransportHealthAlone
+// closes the second half of the connection-health isolation.
+//
+// The earlier isolation test asserts RecentTransportFailures is unchanged, but
+// none of its fixtures uses a transient status, so it compares 0 to 0. Only an
+// exhausted retry ladder reaches gqlFailures.mark, and that counter drives
+// classifyAPI's transportFailing/degradedEvidence branches exactly as the
+// functional counter does — so an unguarded diagnostic retry storm would close
+// the auto-bet gate through the other door.
+//
+// This exercises the real ladder, so it pays the real backoff.
+func TestObserveWatchStreakMilestoneTransientFailureLeavesTransportHealthAlone(t *testing.T) {
+	var (
+		mu       sync.Mutex
+		attempts int
+	)
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		attempts++
+		mu.Unlock()
+		// Transient: retried, and the ladder is exhausted.
+		w.Header().Set("Retry-After", "0")
+		w.WriteHeader(http.StatusServiceUnavailable)
+	})
+
+	before := c.ConnHealth(time.Now(), time.Hour)
+
+	obs := c.ObserveWatchStreakMilestone(context.Background(), "12345", "somestreamer")
+	if obs.Outcome != MilestoneUnavailable || obs.FailureClass != MilestoneFailureTransport {
+		t.Fatalf("outcome = %q/%q, want UNAVAILABLE/TRANSPORT", obs.Outcome, obs.FailureClass)
+	}
+
+	mu.Lock()
+	got := attempts
+	mu.Unlock()
+	if got != gqlMaxRetries+1 {
+		t.Fatalf("attempts = %d, want %d — the fixture did not exhaust the retry ladder, so the "+
+			"assertion below would be vacuous", got, gqlMaxRetries+1)
+	}
+
+	after := c.ConnHealth(time.Now(), time.Hour)
+	if after.RecentTransportFailures != before.RecentTransportFailures {
+		t.Errorf("transport failures %d -> %d: an exhausted DIAGNOSTIC retry ladder must not degrade "+
+			"GQL health — that closes the auto-bet gate through classifyAPI's transport branch",
+			before.RecentTransportFailures, after.RecentTransportFailures)
+	}
+	if !after.LastSuccess.Equal(before.LastSuccess) || !after.LastAttempt.Equal(before.LastAttempt) {
+		t.Errorf("accounting moved: attempt %v -> %v, success %v -> %v",
+			before.LastAttempt, after.LastAttempt, before.LastSuccess, after.LastSuccess)
+	}
+}
+
+// TestBusinessTransientFailureStillRecordsTransportHealth is its counterpart:
+// the isolation must not leak onto a business read.
+func TestBusinessTransientFailureStillRecordsTransportHealth(t *testing.T) {
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Retry-After", "0")
+		w.WriteHeader(http.StatusServiceUnavailable)
+	})
+
+	if err := c.LoadChannelPointsContext(newTestStreamer("somestreamer")); err == nil {
+		t.Fatal("expected the business read to fail")
+	}
+	if h := c.ConnHealth(time.Now(), time.Hour); h.RecentTransportFailures == 0 {
+		t.Error("business read no longer records a transport failure; the diagnostic isolation leaked")
 	}
 }

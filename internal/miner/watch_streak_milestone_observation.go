@@ -79,7 +79,7 @@ const milestoneLogStringCap = 128
 const milestoneLogIDSample = 8
 
 // officialWatchStreakLadder is Twitch's DOCUMENTED Watch Streak reward ladder,
-// keyed by streak count.
+// in ascending streak-count order.
 //
 // Source: Twitch, "Viewer Channel Point Guide"
 // (https://help.twitch.tv/s/article/viewer-channel-point-guide), supplied as
@@ -554,8 +554,10 @@ func (m *Miner) logWatchStreakGrantCorrelation(
 	}
 
 	// The currently observed broadcast is LOCAL CONTEXT. The WATCH_STREAK frame
-	// carries no provable BroadcastID, so provenBroadcastId is reported as NONE
-	// and the current Stream.BroadcastID is never promoted into that role.
+	// carries no provable BroadcastID, so provenBroadcastId reports what the
+	// admitted grant fact actually says — NONE when the fact exists and carries
+	// no binding, UNKNOWN when no fact was found — and the current
+	// Stream.BroadcastID is never promoted into that role.
 	localBroadcast := ""
 	if s.Stream != nil {
 		localBroadcast = s.Stream.GetBroadcastID()
