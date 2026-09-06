@@ -172,6 +172,7 @@ internal/
 │   ├── service.go              # Point/annotation recording service
 │   ├── repository.go           # SQLite data access
 │   ├── models.go               # Data models (StreamerData, ChatMessage)
+│   ├── prediction_observation.go # Immutable Prediction observation trail (v6)
 │   └── chat_adapter.go         # Adapter for chat message logging
 │
 ├── web/                        # Web dashboard server
@@ -2191,6 +2192,121 @@ CREATE TABLE point_events (
     points_id     INTEGER NOT NULL     -- the timeline sample this event produced
 );
 
+-- Immutable Prediction observation trail (migration v6) — an append-only
+-- record of what the Prediction subsystem SAW and DECIDED, in two tables: one
+-- control row per collector run and one immutable fact per observation. It is
+-- a pure observer. The trail never places, modifies, gates or delays a bet,
+-- never changes a Twitch call's count, arguments or result, and never feeds
+-- the points ledger or any dashboard figure; a fact that cannot be captured or
+-- written is dropped and its session is finalized INCOMPLETE, so a failure is
+-- always borne by the trail alone.
+--
+-- A fact is recorded WHOLE or not at all. Every frozen ceiling -- identifier
+-- length, outcomes per fact, predictor cohort, payload bytes, rows and bytes
+-- per round, per deletion identity and per store -- refuses the observation
+-- rather than shortening it, because a shortened fact is not a smaller truth:
+-- a truncated channel id names a different channel, and a round stored with 64
+-- of its 70 outcomes is indistinguishable from one that had 64. The ceilings
+-- are checked BEFORE the insert, against current usage plus the incoming fact,
+-- and the per-identity ones are what bound the cost of a privacy erasure in
+-- advance. Every refusal is counted, which is what makes the session
+-- INCOMPLETE and says so.
+--
+-- collector_sequence is reserved when a fact is CAPTURED, not when it is
+-- written, so a loss leaves a gap: committed_count + dropped_count accounts for
+-- every position the session handed out, and a reader that finds otherwise
+-- treats the session as an integrity error rather than as authoritative.
+--
+-- One collector session exists per process run. collector_epoch is allocated
+-- by a committed INSERT and LastInsertId — never MAX(epoch)+1, which would
+-- reuse an epoch after a deletion and silently merge two runs — and the row is
+-- finalized exactly once, by a single compare-and-set from OPEN.
+CREATE TABLE prediction_observation_sessions (
+    collector_epoch                   INTEGER PRIMARY KEY AUTOINCREMENT,
+    collector_session_id              TEXT NOT NULL UNIQUE,
+    producer_revision                 TEXT NOT NULL,   -- producer contract the rows were written under
+    started_at_ms                     INTEGER NOT NULL,
+    closed_at_ms                      INTEGER,         -- NULL iff still OPEN
+    close_state                       TEXT NOT NULL,   -- OPEN | COMPLETE | INCOMPLETE | ABANDONED
+    last_assigned_sequence            INTEGER,
+    committed_count                   INTEGER NOT NULL,
+    dropped_count                     INTEGER NOT NULL,
+    unsettled_obligation_count        INTEGER NOT NULL,
+    post_fence_producer_count         INTEGER NOT NULL,
+    producer_shutdown_uncertain_count INTEGER NOT NULL
+);
+
+-- One immutable fact per observation. Facts are INSERT-only: there is no
+-- UPDATE, REPLACE or upsert anywhere on this table, and the only deletions are
+-- retention and an explicit privacy erasure. UNIQUE(collector_epoch,
+-- collector_sequence) makes one session's causal order total and
+-- gap-detectable. Every parent id requires its corresponding channel id, so no
+-- row can exist that a channel-scoped erasure cannot reach, and
+-- round_incarnation_id exists exactly when retention_group_owner_channel_id
+-- does, which is what makes whole-round retention well defined. It names one
+-- LOCAL ADMISSION -- the pool instance that admitted the round plus that
+-- pool's admission counter -- not a Twitch event: a round cleaned up and
+-- created again, or admitted by a rebuilt pool, is a different local round,
+-- and the retention unit is the compound (collector_epoch, pool_instance_id,
+-- round_incarnation_id) that retention groups and deletes by. event_id and
+-- source_fingerprint are deliberately NOT unique: one round produces many
+-- facts, and a duplicate delivery is itself a fact worth keeping. No FOREIGN
+-- KEY (same reasoning as v4 and v5); parents are resolved lookup-only, so an
+-- observation never creates a `streamers` row. payload_json holds a closed,
+-- typed, sanitized projection — never a raw PubSub/GraphQL body, a
+-- Topic.String(), the transport EventFingerprint, a token, a raw error or a
+-- predictor identity — and observation_sha256 digests that projection.
+-- Additive only: no ALTER of existing tables and no backfill.
+CREATE TABLE prediction_observations (
+    id                                INTEGER PRIMARY KEY AUTOINCREMENT,
+    observation_id                    TEXT NOT NULL UNIQUE,
+    collector_session_id              TEXT NOT NULL,
+    collector_epoch                   INTEGER NOT NULL,
+    collector_sequence                INTEGER NOT NULL,
+    pool_instance_id                  TEXT NOT NULL,   -- producing pool instance
+    round_incarnation_id              TEXT,            -- this pool's LOCAL admission of a round
+    routed_streamer_id                INTEGER,
+    routed_channel_id                 TEXT,
+    round_owner_streamer_id           INTEGER,         -- provenance; never expands deletion
+    round_owner_channel_id            TEXT,
+    retention_group_owner_streamer_id INTEGER,
+    retention_group_owner_channel_id  TEXT,
+    round_capture_origin              TEXT,            -- ACTIVE_AT_ADMISSION or
+                                                       -- PREFIX_UNOBSERVED_AT_ADMISSION, FROZEN when
+                                                       -- the round was admitted and repeated on
+                                                       -- every fact about it
+    round_capture_gap_cause           TEXT,            -- closed enum, set exactly when the prefix
+                                                       -- went unobserved: STARTING, DISABLED,
+                                                       -- NO_SINK, IDENTITY_FENCE, CLOSING, CLOSED
+    event_id                          TEXT,            -- NOT unique: many facts per round; only
+                                                       -- ever set on a fact a channel-scoped
+                                                       -- erasure can reach (routed or retention
+                                                       -- group channel), never on one it cannot
+    kind                              TEXT NOT NULL,   -- one of the nine closed kinds
+    source_topic_type                 TEXT,            -- topic TYPE only; closed enum over the two
+                                                       -- proved Prediction classes, with no UNKNOWN
+                                                       -- member: an unrecognized class is stored as
+                                                       -- no claim at all
+    source_message_type               TEXT,            -- closed enum: the four Prediction message
+                                                       -- types, or the wire state that says why
+                                                       -- none is there (ABSENT_ON_WIRE,
+                                                       -- NULL_ON_WIRE, INVALID, UNKNOWN_PRESENT);
+                                                       -- the unrecognized value is never stored
+    source_fingerprint                TEXT,            -- own digest, NOT the transport one
+    producer_at_ms                    INTEGER,
+    producer_time_source              TEXT NOT NULL,   -- where producer_at_ms came from; a frame
+                                                       -- timed by the receiver's own clock records
+                                                       -- RECEIVER and no producer time at all
+    received_at_ms                    INTEGER NOT NULL,
+    connection_index                  INTEGER,
+    connection_generation             INTEGER,
+    connection_sequence               INTEGER,
+    payload_version                   INTEGER NOT NULL,
+    payload_json                      TEXT NOT NULL,   -- closed sanitized projection
+    observation_sha256                TEXT NOT NULL,
+    UNIQUE (collector_epoch, collector_sequence)
+);
+
 -- Indexes for performance
 CREATE INDEX idx_points_streamer_time ON points(streamer_id, timestamp);
 CREATE INDEX idx_annotations_streamer_time ON annotations(streamer_id, timestamp);
@@ -2198,13 +2314,37 @@ CREATE INDEX idx_chat_streamer_time ON chat_messages(streamer_id, timestamp);
 CREATE INDEX idx_predbets_streamer_time ON prediction_bets(streamer_id, timestamp);
 CREATE INDEX idx_point_events_streamer_time ON point_events(streamer_id, timestamp);
 CREATE INDEX idx_point_events_points_id ON point_events(points_id);
+-- Every role identity is indexed BOTH by its resolved parent id and by its
+-- channel id, and each of those carries the round coordinates after the
+-- identity, so identity work is scoped to an epoch, a pool and a round rather
+-- than answered globally.
+CREATE INDEX idx_predobs_exact_pair ON prediction_observations(collector_epoch, collector_session_id, collector_sequence);
+CREATE INDEX idx_predobs_routed_parent ON prediction_observations(routed_streamer_id, event_id, pool_instance_id, round_incarnation_id, collector_epoch, collector_sequence);
+CREATE INDEX idx_predobs_routed_identity ON prediction_observations(routed_channel_id, collector_epoch, pool_instance_id, round_incarnation_id);
+CREATE INDEX idx_predobs_round_owner_parent ON prediction_observations(round_owner_streamer_id, event_id, pool_instance_id, round_incarnation_id, collector_epoch, collector_sequence);
+CREATE INDEX idx_predobs_round_owner_identity ON prediction_observations(round_owner_channel_id, collector_epoch, pool_instance_id, round_incarnation_id);
+CREATE INDEX idx_predobs_retention_parent ON prediction_observations(retention_group_owner_streamer_id, collector_epoch, pool_instance_id, round_incarnation_id);
+CREATE INDEX idx_predobs_retention_identity ON prediction_observations(retention_group_owner_channel_id, collector_epoch, pool_instance_id, round_incarnation_id);
+CREATE INDEX idx_predobs_round_unit ON prediction_observations(collector_epoch, pool_instance_id, round_incarnation_id, received_at_ms);
+CREATE INDEX idx_predobs_null_round_epoch ON prediction_observations(collector_epoch, received_at_ms, id)
+    WHERE round_incarnation_id IS NULL;
+CREATE INDEX idx_predobs_received_at ON prediction_observations(received_at_ms);
+-- Three indexes beyond that list, each for a reader this build ships:
+-- ObservationsBySession looks a session up by its id alone; ObservationsByRound
+-- looks an incarnation up by its id alone; and the bounded NULL-round prune
+-- filters collector_epoch with an INEQUALITY before ordering by received_at_ms.
+CREATE INDEX idx_predobs_session ON prediction_observations(collector_session_id, collector_sequence);
+CREATE INDEX idx_predobs_round ON prediction_observations(round_incarnation_id, id);
+CREATE INDEX idx_predobs_null_round_retention ON prediction_observations(received_at_ms, id)
+    WHERE round_incarnation_id IS NULL;
+CREATE INDEX idx_predobs_fingerprint ON prediction_observations(source_fingerprint);
 ```
 
 `prediction_bets` is deliberately **excluded** from the retention sweep
 (`PruneBefore` prunes `points`, `point_events` and `annotations`), so lifetime
-ROI stays exact; it grows by one row per resolved prediction. Migrations v4 and
-v5 are additive (no `ALTER` of existing tables, no data rewrite), so they are
-safe to apply to a populated database, and a pre-v5 binary opening a v5
+ROI stays exact; it grows by one row per resolved prediction. Migrations v4, v5
+and v6 are additive (no `ALTER` of existing tables, no data rewrite), so they
+are safe to apply to a populated database, and a pre-v5 binary opening a v5
 database skips the higher version, never touches `point_events`, and keeps
 working on the tables it knows (its own `points` rows then read back as
 legacy, not exact-backed). Its retention sweep and streamer purge do not know
@@ -2215,6 +2355,55 @@ orphan of a purged streamer is unreachable by login (ids are never reused)
 until retention sweeps it. `DeleteStreamerTx` purges `point_events` together
 with the other tables in the same transaction; a rename preserves them through
 the stable `streamer_id`.
+
+The v6 observation tables are **excluded** from `PruneBefore`. Their retention
+is owned by the collector's own worker, which removes exactly one bounded unit
+per transaction — one whole eligible round, at most 128 NULL-round facts, or
+at most 128 factless finalized sessions — reusing the same
+`Analytics.RetentionDays` setting rather than adding one. The active epoch is
+never pruned, and a crash-left `OPEN` session is never pruned automatically:
+it is the only durable evidence of an unclean shutdown. A privacy erasure runs
+inside the existing streamer-purge transaction and is identity-scoped: a
+retention-group-owner match removes the **whole round**, a routed-only match
+removes **only** the matching fact, and `round_owner_*` never expands
+deletion. A rename performs **zero** `UPDATE` on a fact — the trail is
+immutable — and relies on the same stable `streamer_id` everything else does.
+
+Downgrade below v6 is **not** symmetric with v5's. A pre-v6 binary reads and
+writes a v6 database correctly (it skips the higher version and never
+references either table), but its streamer purge and retention sweep do not
+know these tables, so it **cannot complete a privacy erasure** of observations
+already recorded: the facts survive the purge that removed the login's other
+rows. Rolling back below v6 once observation data exists is therefore a policy
+decision requiring a separate scrub or forward-only choice, not a safe default.
+
+Readers must classify a session before drawing any conclusion from its facts:
+`UNFINALIZED` (the session never wrote its accounting — `OPEN`, so live or
+crash-left, or `ABANDONED`, meaning a later startup reclaimed a crash-left
+row — so no absence may be inferred), `INTEGRITY_ERROR` (the row contradicts
+itself), `ADMINISTRATIVELY_TRUNCATED` (finalized coherently, but facts were
+removed afterwards by retention or an erasure), or `AS_FINALIZED` (the facts
+present are exactly those the session committed).
+
+`AS_FINALIZED` is a statement about the DATASET, not about completeness: an
+`INCOMPLETE` session reads `AS_FINALIZED` too, because the facts it did commit
+are still exactly present and exactly right. The absence of a fact is evidence
+only when the reading is `AS_FINALIZED` **and** `close_state` is `COMPLETE`.
+
+A session that dropped anything, left an obligation unsettled, or never opened
+intake at all finalizes `INCOMPLETE`; its committed facts are still exact, but
+the SET of facts is not provably whole. A session written under a different
+producer contract is **not** an integrity failure — its rows are exactly what
+that contract wrote, so the reading stands and the caller is told which
+contract produced them; classifying it as an error would make the whole trail
+unreadable the moment the revision is bumped.
+
+A crashed process leaves its counters at the zeros they were inserted with,
+because they are written only at finalization. Those zeros are not evidence,
+so the startup reconciliation records the run `ABANDONED` and neither presents
+them as the dead process's accounting nor reconstructs a replacement from the
+surviving facts: that run's facts are a LOWER BOUND on what it observed, and
+nothing about loss follows either way.
 
 #### Notifications Module Schema
 
@@ -2515,6 +2704,52 @@ bets (WIN + LOSE); refunds return the stake and are counted separately. Net
 profit is the sum of `gained`; ROI = net profit ÷ total wagered × 100. Maximum
 drawdown is the largest peak-to-trough drop of the cumulative net-profit curve.
 The report never places, modifies, or auto-disables a bet or strategy.
+
+### Immutable Prediction Observations
+
+An append-only trail of what the Prediction subsystem **saw** and **decided**,
+stored in `prediction_observations` and `prediction_observation_sessions`
+(analytics migration v6, see *Analytics Module Schema*). It answers "what did
+the bot observe, and what did it do about it?" — a question neither
+`prediction_bets` (settled bets only) nor `point_events` (awarded points only)
+can answer, because neither records a decision that produced no bet.
+
+The trail is a **pure observer**. It never places, modifies, gates or delays a
+bet, never changes a Twitch call's count, arguments or result, and never feeds
+the points ledger, the ROI report or any dashboard figure. Producers do only a
+bounded copy and one nonblocking hand-off onto a capacity-512 private queue;
+one collector goroutine performs every write, one row per transaction, under a
+hard 5 ms deadline with no retry. A low-priority gate lets every analytics
+write path preempt it: a business write cancels the single in-flight
+observation transaction and waits only for it to settle. Any capture or write
+failure — a full queue, a cancelled transaction, a disabled collector — is a
+DROP recorded in the session's `dropped_count`, never an error a producer
+could act on.
+
+Nine closed kinds are recorded: `source_unknown` (a Prediction frame whose
+shape could not be read), `channel_event` (a round lifecycle frame as it
+arrived), `schedule_decision` (whether a new round was scheduled, and why
+not), `auto_decision` (the automated due/decided/skipped outcome),
+`manual_control` (an operator action's root and each phase it passed through),
+`placement` (`CALL_STARTED` immediately before the single Twitch placement
+call and `CALL_RETURNED` immediately after it), `user_prediction_made` (the
+placement confirmation — outside terminal admission, exactly as the betting
+code treats it), `user_terminal` (the terminal delivery and the admission
+verdict the betting code already reached, read and never re-decided), and
+`round_cleanup`. Exactly one manual root exists per operator action:
+`MANUAL_MINER_ROOT` when the miner relays a dashboard action into a resolved
+pool, `MANUAL_DIRECT_ROOT` for a direct pool call, never both. A nil-pool
+failure never reached the subsystem and opens neither, so the absence of a
+fact is not evidence that no attempt was made.
+
+Only closed, typed, sanitized projections are stored or hashed. An
+unrecognized value becomes `UNKNOWN` rather than being persisted verbatim, and
+there is no free-text field at all — so raw PubSub or GraphQL bodies,
+`Topic.String()`, the transport `EventFingerprint`, tokens, headers, Twitch
+transaction identifiers, raw errors and predictor identities have no
+representable path into a row. Outcome projections carry aggregate figures and
+the *count* of top predictors examined; **zero** predictor identities are
+retained.
 
 ### Event Types for Series
 

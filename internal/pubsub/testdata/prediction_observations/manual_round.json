@@ -1,0 +1,110 @@
+[
+  {
+    "kind": "manual_control",
+    "phase": "MANUAL_MINER_ROOT",
+    "reasonCode": "OK",
+    "manual": true,
+    "eventId": "e1",
+    "routedChannelId": "chan-1",
+    "retentionGroupOwnerChannelId": "chan-1",
+    "roundIncarnationId": "round:pool-test:1",
+    "manualActionId": 1
+  },
+  {
+    "kind": "manual_control",
+    "phase": "MANUAL_POOL_LOOKUP",
+    "reasonCode": "OK",
+    "manual": true,
+    "eventId": "e1",
+    "routedChannelId": "chan-1",
+    "retentionGroupOwnerChannelId": "chan-1",
+    "roundIncarnationId": "round:pool-test:1",
+    "manualActionId": 1
+  },
+  {
+    "kind": "manual_control",
+    "phase": "MANUAL_ELIGIBILITY",
+    "reasonCode": "OK",
+    "manual": true,
+    "eventId": "e1",
+    "routedChannelId": "chan-1",
+    "retentionGroupOwnerChannelId": "chan-1",
+    "roundIncarnationId": "round:pool-test:1",
+    "manualActionId": 1
+  },
+  {
+    "kind": "manual_control",
+    "phase": "MANUAL_ARGUMENTS",
+    "reasonCode": "OK",
+    "manual": true,
+    "eventId": "e1",
+    "routedChannelId": "chan-1",
+    "retentionGroupOwnerChannelId": "chan-1",
+    "roundIncarnationId": "round:pool-test:1",
+    "manualActionId": 1
+  },
+  {
+    "kind": "manual_control",
+    "phase": "MANUAL_RESERVATION",
+    "reasonCode": "OK",
+    "manual": true,
+    "eventId": "e1",
+    "routedChannelId": "chan-1",
+    "retentionGroupOwnerChannelId": "chan-1",
+    "roundIncarnationId": "round:pool-test:1",
+    "manualActionId": 1
+  },
+  {
+    "kind": "manual_control",
+    "phase": "MANUAL_VALIDATION",
+    "reasonCode": "OK",
+    "manual": true,
+    "eventId": "e1",
+    "routedChannelId": "chan-1",
+    "retentionGroupOwnerChannelId": "chan-1",
+    "roundIncarnationId": "round:pool-test:1",
+    "manualActionId": 1
+  },
+  {
+    "kind": "placement",
+    "phase": "CALL_STARTED",
+    "reasonCode": "OK",
+    "errorClass": "NONE",
+    "eventId": "e1",
+    "routedChannelId": "chan-1",
+    "retentionGroupOwnerChannelId": "chan-1",
+    "roundIncarnationId": "round:pool-test:1",
+    "manualActionId": 1
+  },
+  {
+    "kind": "placement",
+    "phase": "CALL_RETURNED",
+    "reasonCode": "OK",
+    "errorClass": "NONE",
+    "eventId": "e1",
+    "routedChannelId": "chan-1",
+    "retentionGroupOwnerChannelId": "chan-1",
+    "roundIncarnationId": "round:pool-test:1",
+    "manualActionId": 1
+  },
+  {
+    "kind": "manual_control",
+    "phase": "MANUAL_EXECUTION",
+    "reasonCode": "OK",
+    "manual": true,
+    "eventId": "e1",
+    "routedChannelId": "chan-1",
+    "retentionGroupOwnerChannelId": "chan-1",
+    "roundIncarnationId": "round:pool-test:1",
+    "manualActionId": 1
+  },
+  {
+    "kind": "round_cleanup",
+    "phase": "CLEANUP_APPLIED",
+    "reasonCode": "OK",
+    "eventId": "e1",
+    "routedChannelId": "chan-1",
+    "retentionGroupOwnerChannelId": "chan-1",
+    "roundIncarnationId": "round:pool-test:1"
+  }
+]

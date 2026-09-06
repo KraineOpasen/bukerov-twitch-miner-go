@@ -75,6 +75,48 @@ type Fencer interface {
 	Reinstate(login string)
 }
 
+// IdentityPurger is the OPTIONAL extension of Purger for a store that also
+// holds rows keyed by the stable Twitch channel identity rather than the
+// login alone. When a purger implements it, the coordinator calls this
+// instead of DeleteStreamerTx and hands it the LEDGER-PROVEN (channelID,
+// login) pair — the same identity the durable deletion ledger recorded — so a
+// channel-keyed store can complete its erasure. The same contract otherwise
+// applies: operate only on the passed *sql.Tx, never commit or roll it back.
+//
+// Neither half is ever guessed. An empty channel id means the ledger genuinely
+// recorded none, and the store must fall back to what it can PROVE from the
+// login, or erase nothing.
+//
+// It takes the coordinator's context so its erasure is cancelled with the
+// transaction it runs inside, rather than under a detached one.
+type IdentityPurger interface {
+	Purger
+	DeleteStreamerIdentityTx(ctx context.Context, tx *sql.Tx, channelID, login string) (bool, error)
+}
+
+// IdentityFencer is the OPTIONAL extension of Fencer for a store that holds
+// identity-bearing work IN FLIGHT — queued but not yet written. The
+// coordinator calls it OUTSIDE and strictly BEFORE the purge transaction, so
+// work already accepted for the identity can be invalidated before anything is
+// deleted; otherwise a queued item could commit after the purge and resurrect
+// what was just erased. A store with no in-flight work simply does not
+// implement it.
+type IdentityFencer interface {
+	InvalidateIdentity(channelID, login string)
+}
+
+// TxPriority is the OPTIONAL outside-transaction priority hook. When set, the
+// coordinator claims it around every one of its own transactions on the shared
+// connection, so a low-priority background writer yields the connection
+// instead of making a lifecycle transaction wait behind it. Claim returns the
+// release function the coordinator invokes once its transaction has ended.
+//
+// The hook is always claimed OUTSIDE the transaction: claiming inside one
+// would invert the lock order between the gate and the database handle.
+type TxPriority interface {
+	Claim() func()
+}
+
 // Renamer repoints one login's rows to a new login within the caller's
 // transaction, so several stores can rename atomically. Same fail-closed /
 // idempotent contract each store already documents.
@@ -170,6 +212,40 @@ type Coordinator struct {
 	fencers  []Fencer
 	renamers []Renamer
 	now      func() time.Time
+
+	// priority is the optional outside-transaction hook every transaction
+	// below is wrapped in. nil means "no background writer to yield", which
+	// is the behaviour this package had before the hook existed.
+	priority TxPriority
+}
+
+// SetTxPriority installs the optional outside-transaction priority hook. It is
+// called once, at wiring time, before any transaction runs.
+func (c *Coordinator) SetTxPriority(p TxPriority) {
+	c.priority = p
+}
+
+// withTx is the ONE place this package opens a transaction on the shared
+// handle. It claims the optional priority hook first, runs the transaction,
+// and releases the claim after the transaction has fully ended — so the hook
+// is always held strictly OUTSIDE the transaction and can never participate in
+// the database's own lock order.
+func (c *Coordinator) withTx(ctx context.Context, fn func(*sql.Tx) error) error {
+	if c.priority != nil {
+		defer c.priority.Claim()()
+	}
+	return c.db.WithTx(ctx, fn)
+}
+
+// invalidateIdentity runs every identity fencer OUTSIDE and strictly before a
+// purge transaction, so in-flight work for the identity can never commit after
+// the purge.
+func (c *Coordinator) invalidateIdentity(channelID, login string) {
+	for _, f := range c.fencers {
+		if idf, ok := f.(IdentityFencer); ok {
+			idf.InvalidateIdentity(channelID, login)
+		}
+	}
 }
 
 // New builds a coordinator over the shared handle and the stores to
@@ -178,7 +254,24 @@ type Coordinator struct {
 // can); nil entries are ignored so a coordinator degrades gracefully when a
 // subsystem (e.g. analytics) is disabled.
 func New(db *database.DB, purgers []Purger, fencers []Fencer, renamers []Renamer) (*Coordinator, error) {
-	if err := db.RegisterModule(lifecycleModule{}); err != nil {
+	return NewWithPriority(db, purgers, fencers, renamers, nil)
+}
+
+// NewWithPriority is New plus the optional outside-transaction priority hook.
+// The hook is claimed around the constructor's OWN RegisterModule too, not
+// just around the nine transactions below: a coordinator is rebuilt once per
+// miner generation, and from the second generation onward the process-level
+// background writer is already running, so the constructor's migration would
+// otherwise be the one schema path able to queue behind it.
+func NewWithPriority(db *database.DB, purgers []Purger, fencers []Fencer, renamers []Renamer, priority TxPriority) (*Coordinator, error) {
+	if priority != nil {
+		release := priority.Claim()
+		err := db.RegisterModule(lifecycleModule{})
+		release()
+		if err != nil {
+			return nil, fmt.Errorf("streamerlifecycle: register ledger: %w", err)
+		}
+	} else if err := db.RegisterModule(lifecycleModule{}); err != nil {
 		return nil, fmt.Errorf("streamerlifecycle: register ledger: %w", err)
 	}
 	return &Coordinator{
@@ -187,6 +280,7 @@ func New(db *database.DB, purgers []Purger, fencers []Fencer, renamers []Renamer
 		fencers:  compactFencers(fencers),
 		renamers: compactRenamers(renamers),
 		now:      time.Now,
+		priority: priority,
 	}, nil
 }
 
@@ -263,7 +357,7 @@ func (c *Coordinator) AdmitRemovals(ctx context.Context, removals []Removal) err
 	}
 
 	now := c.now().Unix()
-	return c.db.WithTx(ctx, func(tx *sql.Tx) error {
+	return c.withTx(ctx, func(tx *sql.Tx) error {
 		for _, r := range rows {
 			if _, err := tx.Exec(`
 				INSERT INTO streamer_deletion_admissions (login, channel_id, requested_at)
@@ -297,7 +391,7 @@ func (c *Coordinator) AbortAdmission(ctx context.Context, logins []string) error
 	if len(canon) == 0 {
 		return nil
 	}
-	return c.db.WithTx(ctx, func(tx *sql.Tx) error {
+	return c.withTx(ctx, func(tx *sql.Tx) error {
 		for _, l := range canon {
 			if _, err := tx.Exec(`DELETE FROM streamer_deletion_admissions WHERE login = ?`, l); err != nil {
 				return fmt.Errorf("abort admission for %q: %w", l, err)
@@ -348,7 +442,7 @@ func (c *Coordinator) CommitRemoval(ctx context.Context, channelID, login string
 		return res, fmt.Errorf("streamerlifecycle: move %q (channel %q) to the pending-purge ledger: %w", login, channelID, err)
 	}
 
-	existed, err := c.purgeAndClearTx(ctx, login)
+	existed, err := c.purgeAndClearTx(ctx, channelID, login)
 	if err != nil {
 		return res, fmt.Errorf("streamerlifecycle: purge streamer %q (channel %q): %w", login, channelID, err)
 	}
@@ -368,7 +462,7 @@ func (c *Coordinator) CommitRemoval(ctx context.Context, channelID, login string
 // the durable record from both tables simultaneously.
 func (c *Coordinator) movePendingTx(ctx context.Context, channelID, login string) error {
 	now := c.now().Unix()
-	return c.db.WithTx(ctx, func(tx *sql.Tx) error {
+	return c.withTx(ctx, func(tx *sql.Tx) error {
 		if _, err := tx.Exec(`
 			INSERT INTO pending_streamer_deletions (login, channel_id, requested_at, attempts)
 			VALUES (?, ?, ?, 0)
@@ -483,11 +577,26 @@ func (c *Coordinator) Delete(ctx context.Context, channelID, login string) (Resu
 // row that only ever existed in the pending table, so clearing an
 // already-absent admissions row here is simply a no-op DELETE, never a
 // correctness requirement.
-func (c *Coordinator) purgeAndClearTx(ctx context.Context, login string) (bool, error) {
+func (c *Coordinator) purgeAndClearTx(ctx context.Context, channelID, login string) (bool, error) {
+	// Fence in-flight, identity-bearing work BEFORE the transaction opens, so
+	// nothing already accepted for this identity can commit after the purge.
+	c.invalidateIdentity(channelID, login)
+
 	existed := false
-	err := c.db.WithTx(ctx, func(tx *sql.Tx) error {
+	err := c.withTx(ctx, func(tx *sql.Tx) error {
 		for _, p := range c.purgers {
-			e, perr := p.DeleteStreamerTx(tx, login)
+			var (
+				e    bool
+				perr error
+			)
+			// A store that also keys rows by the stable channel identity gets
+			// the LEDGER-PROVEN pair; every other store keeps the login-only
+			// contract it has always had.
+			if idp, ok := p.(IdentityPurger); ok {
+				e, perr = idp.DeleteStreamerIdentityTx(ctx, tx, channelID, login)
+			} else {
+				e, perr = p.DeleteStreamerTx(tx, login)
+			}
 			if perr != nil {
 				return perr
 			}
@@ -531,7 +640,7 @@ func (c *Coordinator) Reconcile(ctx context.Context) (int, error) {
 		for _, f := range c.fencers {
 			f.Tombstone(rec.login)
 		}
-		if _, err := c.purgeAndClearTx(ctx, rec.login); err != nil {
+		if _, err := c.purgeAndClearTx(ctx, rec.channelID, rec.login); err != nil {
 			_ = c.bumpAttempts(ctx, rec.login)
 			if firstErr == nil {
 				firstErr = fmt.Errorf("reconcile %q (channel %q): %w", rec.login, rec.channelID, err)
@@ -556,18 +665,24 @@ func (c *Coordinator) Reconcile(ctx context.Context) (int, error) {
 // knows the purge succeeded.
 //
 // CALLER CONTRACT: only ever call this for a login being (re-)ADDED, never
-// for one that is currently tracked/configured. HasPending (which this uses)
-// now also reports a merely-PREPARED row (streamer_deletion_admissions) —
+// for one that is currently tracked/configured. The pending lookup it uses
+// also reports a merely-PREPARED row (streamer_deletion_admissions) —
 // intent recorded, not yet confirmed committed — so calling this for a
 // login whose prepared row leaked from an aborted or still-uncommitted apply
 // would tombstone and purge a LIVE streamer's history. Today's only caller
 // (applyStreamerDeletions' added-loop) satisfies this by construction.
+//
+// It deliberately resolves the pending record's OWN channel id rather than
+// asking HasPending for a bool: the purge it performs is identity-scoped, and
+// reducing the ledger's proven identity to "something is pending" would leave
+// a channel-keyed store unable to complete its erasure. HasPending itself is
+// unchanged for callers that only need the boolean.
 func (c *Coordinator) ReconcileLogin(ctx context.Context, login string) (bool, error) {
 	login = canonicalLogin(login)
 	if login == "" {
 		return false, nil
 	}
-	has, err := c.HasPending(ctx, login)
+	channelID, has, err := c.pendingIdentity(ctx, login)
 	if err != nil {
 		return false, err
 	}
@@ -577,11 +692,48 @@ func (c *Coordinator) ReconcileLogin(ctx context.Context, login string) (bool, e
 	for _, f := range c.fencers {
 		f.Tombstone(login)
 	}
-	if _, err := c.purgeAndClearTx(ctx, login); err != nil {
+	if _, err := c.purgeAndClearTx(ctx, channelID, login); err != nil {
 		_ = c.bumpAttempts(ctx, login)
 		return true, fmt.Errorf("streamerlifecycle: reconcile re-added %q: %w", login, err)
 	}
 	return true, nil
+}
+
+// pendingIdentity resolves the LEDGER-PROVEN identity of a durable removal
+// record for login, from EITHER ledger — the pending-purge table (a committed
+// removal still owed a purge) or the admissions table (a prepared removal).
+// It returns the channel id the ledger recorded, which may legitimately be
+// empty: an empty channel means the ledger genuinely holds none, and callers
+// must fall back to what they can prove from the login rather than guess.
+// The pending table wins when both hold a row, because it is the record of a
+// removal already committed.
+//
+// Routed through the same transaction wrapper as every other read here, so a
+// call after Close returns the typed database.ErrClosed.
+func (c *Coordinator) pendingIdentity(ctx context.Context, login string) (string, bool, error) {
+	login = canonicalLogin(login)
+	if login == "" {
+		return "", false, nil
+	}
+	var channelID string
+	var found bool
+	err := c.withTx(ctx, func(tx *sql.Tx) error {
+		e := tx.QueryRow(`
+			SELECT channel_id FROM (
+				SELECT channel_id, 0 AS rank FROM pending_streamer_deletions   WHERE login = ?
+				UNION ALL
+				SELECT channel_id, 1 AS rank FROM streamer_deletion_admissions WHERE login = ?
+			) ORDER BY rank LIMIT 1`, login, login).Scan(&channelID)
+		if e == sql.ErrNoRows {
+			return nil
+		}
+		if e != nil {
+			return e
+		}
+		found = true
+		return nil
+	})
+	return channelID, found, err
 }
 
 // HasPending reports whether a durable removal record exists for login in
@@ -589,31 +741,17 @@ func (c *Coordinator) ReconcileLogin(ctx context.Context, login string) (bool, e
 // purge) OR the admissions table (a prepared removal whose caller's commit
 // point has not yet been confirmed reached). Checking only one table would
 // leave a same-process re-add window open across the other. Routed through
-// WithTx (not a bare QueryRowContext) so a call after the database has been
-// closed returns the typed database.ErrClosed instead of a raw driver error.
+// the same transaction wrapper as every other read here (not a bare
+// QueryRowContext) so a call after the database has been closed returns the
+// typed database.ErrClosed instead of a raw driver error.
+//
+// Its contract is unchanged. It is expressed over pendingIdentity — which
+// answers the same question and ALSO returns the ledger's proven channel id —
+// so this package keeps exactly one lookup, and one transaction, for "is a
+// removal recorded for this login". Callers that need the identity call
+// pendingIdentity; callers that only need the boolean call this.
 func (c *Coordinator) HasPending(ctx context.Context, login string) (bool, error) {
-	login = canonicalLogin(login)
-	if login == "" {
-		return false, nil
-	}
-	var has bool
-	err := c.db.WithTx(ctx, func(tx *sql.Tx) error {
-		var one int
-		e := tx.QueryRow(`
-			SELECT 1 FROM pending_streamer_deletions WHERE login = ?
-			UNION ALL
-			SELECT 1 FROM streamer_deletion_admissions WHERE login = ?
-			LIMIT 1`, login, login).Scan(&one)
-		if e == sql.ErrNoRows {
-			has = false
-			return nil
-		}
-		if e != nil {
-			return e
-		}
-		has = true
-		return nil
-	})
+	_, has, err := c.pendingIdentity(ctx, login)
 	return has, err
 }
 
@@ -622,7 +760,7 @@ func (c *Coordinator) HasPending(ctx context.Context, login string) (bool, error
 // database.ErrClosed.
 func (c *Coordinator) listPending(ctx context.Context) ([]pendingRecord, error) {
 	var out []pendingRecord
-	err := c.db.WithTx(ctx, func(tx *sql.Tx) error {
+	err := c.withTx(ctx, func(tx *sql.Tx) error {
 		rows, err := tx.Query(`SELECT login, channel_id FROM pending_streamer_deletions ORDER BY requested_at`)
 		if err != nil {
 			return err
@@ -645,7 +783,7 @@ func (c *Coordinator) listPending(ctx context.Context) ([]pendingRecord, error) 
 // database.ErrClosed.
 func (c *Coordinator) listAdmissions(ctx context.Context) ([]pendingRecord, error) {
 	var out []pendingRecord
-	err := c.db.WithTx(ctx, func(tx *sql.Tx) error {
+	err := c.withTx(ctx, func(tx *sql.Tx) error {
 		rows, err := tx.Query(`SELECT login, channel_id FROM streamer_deletion_admissions ORDER BY requested_at`)
 		if err != nil {
 			return err
@@ -667,7 +805,7 @@ func (c *Coordinator) listAdmissions(ctx context.Context) ([]pendingRecord, erro
 // through WithTx so a call after Close returns the typed database.ErrClosed
 // instead of silently no-op'ing on a raw driver error.
 func (c *Coordinator) bumpAttempts(ctx context.Context, login string) error {
-	return c.db.WithTx(ctx, func(tx *sql.Tx) error {
+	return c.withTx(ctx, func(tx *sql.Tx) error {
 		_, err := tx.Exec(`UPDATE pending_streamer_deletions SET attempts = attempts + 1 WHERE login = ?`, login)
 		return err
 	})
@@ -703,7 +841,7 @@ func (c *Coordinator) RenameStreamer(oldLogin, newLogin string) error {
 	if oldLogin == "" || newLogin == "" || oldLogin == newLogin {
 		return nil
 	}
-	return c.db.WithTx(context.Background(), func(tx *sql.Tx) error {
+	return c.withTx(context.Background(), func(tx *sql.Tx) error {
 		for _, r := range c.renamers {
 			if err := r.RenameStreamerTx(tx, oldLogin, newLogin); err != nil {
 				return err

@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/config"
@@ -200,6 +201,18 @@ type channelActor interface {
 // prediction in the pool and is removed together with it, so the state can
 // never outlive its round.
 type roundControl struct {
+	// incarnation is THIS local admission's round identity: the pool instance
+	// that admitted the round plus a pool-local admission counter. It is set
+	// once, before this struct is published into p.control, and never mutated,
+	// so any goroutine holding the pointer may read it lock-free.
+	//
+	// It is deliberately NOT derived from the channel and event id. Two
+	// separate local admissions of the same Twitch event — a re-admission
+	// after cleanup, a rebuilt pool, or a race between two successful
+	// admissions — are different local rounds, and a derived id would collapse
+	// them into one. Observation only: nothing in the betting path reads it.
+	incarnation string
+
 	// placeMu serializes the *entire* place-a-bet operation for this one round
 	// (revalidation + the Twitch call + local bookkeeping). It is what makes a
 	// manual bet and the scheduled auto-bet mutually exclusive so Twitch can
@@ -273,6 +286,30 @@ type WebSocketPool struct {
 	// shutdown drain — once Close has run. Guarded by p.mu.
 	closed bool
 
+	// manualActions mints the sealed correlation token for one operator
+	// action. Observation-only: nothing in the placement path reads it.
+	manualActions atomic.Uint64
+
+	// roundAdmissions counts the rounds THIS pool instance has admitted. It is
+	// the second half of a round incarnation and is never reset, so a counter
+	// value is used once per pool instance.
+	roundAdmissions atomic.Uint64
+
+	// roundProvenances holds each live round's FROZEN admission provenance,
+	// keyed by its incarnation. Read on the emit path — which sometimes runs
+	// under this pool's write lock — so it must be lock-free; written once at
+	// admission and dropped once the round's cleanup fact has been emitted, so
+	// it is bounded by the tracked rounds.
+	roundProvenances sync.Map
+
+	// instanceID identifies THIS pool instance in the immutable Prediction
+	// observation trail. Immutable after construction.
+	instanceID string
+	// observationSink is the P1 sink, read lock-free on every observed path.
+	// Nil (the zero value) whenever nothing is observing, which is the case
+	// for every pool built without analytics.
+	observationSink atomic.Pointer[PredictionObservationSink]
+
 	mu sync.RWMutex
 }
 
@@ -290,6 +327,7 @@ func NewWebSocketPool(twitchClient *twitch.TwitchClient, tokenFn AuthTokenProvid
 		settings:    settings,
 		predictions: make(map[string]*models.EventPrediction),
 		control:     make(map[string]*roundControl),
+		instanceID:  newPoolInstanceID(),
 	}
 }
 
@@ -1022,16 +1060,23 @@ func (p *WebSocketPool) handleMoment(msg *PubSubMessage, streamer *models.Stream
 
 func (p *WebSocketPool) handlePredictionChannel(msg *PubSubMessage, streamer *models.Streamer) {
 	if msg.Data == nil {
+		// No data envelope at all: the key was never looked at, which is not
+		// the same as being absent from one.
+		p.observeUnclassifiedFrame(msg, streamer, "event", ObsNotObserved)
 		return
 	}
 
 	eventData, ok := msg.Data["event"].(map[string]interface{})
 	if !ok {
+		p.observeUnclassifiedFrame(msg, streamer, "event", wirePresence(msg.Data, "event", isObject))
 		return
 	}
 
 	eventID, _ := eventData["id"].(string)
 	eventStatus, _ := eventData["status"].(string)
+
+	// Observe the frame as it arrived, before any decision is taken about it.
+	p.observeChannelEvent(msg, streamer, eventID, eventStatus, eventData)
 
 	switch msg.Type {
 	case "event-created":
@@ -1042,6 +1087,7 @@ func (p *WebSocketPool) handlePredictionChannel(msg *PubSubMessage, streamer *mo
 		// already-tracked round must keep its bookkeeping and terminal cleanup
 		// (result/refund correlation) working across a mid-round disable.
 		if !streamer.GetSettings().MakePredictions {
+			p.observeScheduleDecision(msg, streamer, eventID, eventStatus, "SCHEDULE_SKIPPED", "SKIP", "TOGGLE_OFF", nil)
 			return
 		}
 
@@ -1050,6 +1096,11 @@ func (p *WebSocketPool) handlePredictionChannel(msg *PubSubMessage, streamer *mo
 		p.mu.RUnlock()
 
 		if exists || eventStatus != "ACTIVE" {
+			reason := "NOT_ACTIVE"
+			if exists {
+				reason = "ALREADY_TRACKED"
+			}
+			p.observeScheduleDecision(msg, streamer, eventID, eventStatus, "SCHEDULE_SKIPPED", "SKIP", reason, nil)
 			return
 		}
 
@@ -1077,11 +1128,13 @@ func (p *WebSocketPool) handlePredictionChannel(msg *PubSubMessage, streamer *mo
 		// Disabled/unknown capability never starts a new bet.
 		if d := pointsEligibility.EvaluatePointsTask(streamer, eligibility.TaskPrediction); !d.Eligible {
 			logSkippedPointsAction(streamer, "auto prediction", d)
+			p.observeScheduleDecision(msg, streamer, eventID, eventStatus, "SCHEDULE_SKIPPED", "SKIP", "NOT_ELIGIBLE", nil)
 			return
 		}
 
 		closingBetAfter := event.ClosingBetAfter(time.Now())
 		if closingBetAfter <= 0 {
+			p.observeScheduleDecision(msg, streamer, eventID, eventStatus, "SCHEDULE_SKIPPED", "SKIP", "WINDOW_ELAPSED", nil)
 			return
 		}
 
@@ -1092,13 +1145,21 @@ func (p *WebSocketPool) handlePredictionChannel(msg *PubSubMessage, streamer *mo
 				"points", streamer.GetChannelPoints(),
 				"minimum", minPoints,
 			)
+			p.observeScheduleDecision(msg, streamer, eventID, eventStatus, "SCHEDULE_SKIPPED", "SKIP", "BELOW_MINIMUM_POINTS",
+				map[string]int64{"minimumPoints": int64(minPoints), "balance": int64(streamer.GetChannelPoints())})
 			return
 		}
 
 		p.mu.Lock()
 		p.sweepStaleLocked()
 		p.predictions[eventID] = event
-		p.control[eventID] = &roundControl{}
+		control := &roundControl{incarnation: p.newRoundIncarnation()}
+		p.control[eventID] = control
+		// Frozen HERE, at the admission itself, because that is the only
+		// instant the answer is about: capture may start, or stop, a moment
+		// later, and a round admitted with an unobserved prefix does not
+		// acquire one retroactively.
+		p.freezeRoundProvenance(control.incarnation, streamer.ChannelID, streamer.GetUsername())
 		p.mu.Unlock()
 
 		slog.Info("Prediction event scheduled",
@@ -1106,10 +1167,27 @@ func (p *WebSocketPool) handlePredictionChannel(msg *PubSubMessage, streamer *mo
 			"event", title,
 			"placeIn", closingBetAfter,
 		)
+		p.observeScheduleDecisionOfRound(msg, streamer, eventID, control.incarnation, eventStatus,
+			"SCHEDULE_ACCEPTED", "PLACE", "OK",
+			map[string]int64{"closingBetAfterSeconds": int64(closingBetAfter)})
 
+		// The timer is a producer episode of its own: the pool's Close joins
+		// its connections, not this goroutine. Registering BEFORE it starts
+		// is what lets the collector's shutdown fence see that a producer was
+		// still alive; settling after placeAutoBet returns is what lets an
+		// undisturbed run finalize as complete.
+		settleEpisode := p.beginEpisode()
+		scheduled := control.incarnation
 		go func() {
+			defer settleEpisode()
 			time.Sleep(time.Duration(closingBetAfter) * time.Second)
-			p.placeAutoBet(eventID)
+			// The incarnation this timer was SCHEDULED for travels with it.
+			// A round can be cleaned up and the same Twitch event admitted
+			// again while this goroutine sleeps, and the lookup below would
+			// then find the NEW round — so without the scheduled coordinate
+			// the trail would show an auto decision on an incarnation nothing
+			// ever scheduled, and nothing could tell.
+			p.placeAutoBetScheduled(eventID, scheduled)
 		}()
 
 	case "event-updated":
@@ -1157,11 +1235,21 @@ func chosenOutcomeOdds(event *models.EventPrediction) float64 {
 func (p *WebSocketPool) handlePredictionUser(msg *PubSubMessage, streamer *models.Streamer) MessageOutcome {
 	var outcome MessageOutcome
 	if msg.Data == nil {
+		p.observeUnclassifiedFrame(msg, streamer, "prediction", ObsNotObserved)
 		return outcome
 	}
 
 	prediction, ok := msg.Data["prediction"].(map[string]interface{})
 	if !ok {
+		// Symmetric with handlePredictionChannel: an unreadable frame stays
+		// visible as a fact. Returning silently here would let a COMPLETE
+		// session license the inference that nothing arrived, when in truth
+		// something arrived and could not be read.
+		//
+		// The key is "prediction", which is what this path reads. It used to
+		// report "event" — a field this path never inspects — so the trail
+		// named the wrong thing as unreadable.
+		p.observeUnclassifiedFrame(msg, streamer, "prediction", wirePresence(msg.Data, "prediction", isObject))
 		return outcome
 	}
 
@@ -1174,6 +1262,12 @@ func (p *WebSocketPool) handlePredictionUser(msg *PubSubMessage, streamer *model
 		p.mu.RUnlock()
 
 		if !exists {
+			// The event key WAS on the wire and was read; what is absent is a
+			// round this pool tracks. Recording it as ABSENT_ON_WIRE said the
+			// frame had not carried an event id, which is a statement about
+			// Twitch rather than about us, and it is false.
+			p.observeUserFrame(msg, streamer, eventID, ObsKindUserPredictionMade, "PLACEMENT_CONFIRMED", "NO_ROUND",
+				nil, map[string]string{"event": wirePresence(prediction, "event_id", isString)})
 			return outcome
 		}
 		p.mu.Lock()
@@ -1182,6 +1276,10 @@ func (p *WebSocketPool) handlePredictionUser(msg *PubSubMessage, streamer *model
 		p.mu.Unlock()
 		slog.Info("Prediction confirmed", "event", event.Title)
 		events.Record(events.TypeBetPlaced, streamer.GetUsername(), fmt.Sprintf("bet %d points on %q", amount, event.Title))
+		// PREDICTION_MADE is observed in its own right and stays outside the
+		// terminal admission verdict, exactly as the betting code treats it.
+		p.observeUserFrame(msg, streamer, eventID, ObsKindUserPredictionMade, "PLACEMENT_CONFIRMED", "ACCEPTED",
+			map[string]int64{"stake": int64(amount)}, map[string]string{"event": ObsPresent})
 
 	case "prediction-result":
 		// Validate the terminal envelope BEFORE taking the admission lock: an
@@ -1191,13 +1289,19 @@ func (p *WebSocketPool) handlePredictionUser(msg *PubSubMessage, streamer *model
 		// terminal result can still win. ParseResult below therefore only
 		// ever receives already-validated terminal data.
 		if eventID == "" {
+			p.observeUserFrame(msg, streamer, eventID, ObsKindUserTerminal, "TERMINAL_REJECTED", "NO_ROUND",
+				nil, map[string]string{"event": ObsAbsentOnWire})
 			return outcome
 		}
 		result, ok := prediction["result"].(map[string]interface{})
 		if !ok {
+			p.observeUserFrame(msg, streamer, eventID, ObsKindUserTerminal, "TERMINAL_REJECTED", "REJECTED",
+				nil, map[string]string{"result": wirePresence(prediction, "result", isObject)})
 			return outcome
 		}
 		if !models.ValidateTerminalResult(result) {
+			p.observeUserFrame(msg, streamer, eventID, ObsKindUserTerminal, "TERMINAL_REJECTED", "REJECTED",
+				nil, map[string]string{"result": ObsInvalid})
 			return outcome
 		}
 
@@ -1214,6 +1318,33 @@ func (p *WebSocketPool) handlePredictionUser(msg *PubSubMessage, streamer *model
 		p.mu.Lock()
 		event, exists := p.predictions[eventID]
 		if !exists || !event.BetConfirmed || event.ResultAccepted {
+			// Three DISTINCT causes refuse here, and the trail has to say
+			// which. Reporting a tracked-but-unconfirmed round as NO_ROUND
+			// put a false statement on a row that names that very round's
+			// incarnation and event id — the record contradicting itself.
+			// Each cause is read inside the same critical section that
+			// decided it; nothing is re-decided below.
+			alreadyAccepted := exists && event.ResultAccepted
+			unconfirmed := exists && !event.BetConfirmed
+			rc := p.control[eventID]
+			reason := "NO_ROUND"
+			switch {
+			case alreadyAccepted:
+				reason = "DUPLICATE"
+			case unconfirmed:
+				// The round is ours and it is live; no bet of ours was ever
+				// confirmed on it, so there is no placement for this terminal
+				// to be about.
+				reason = "NOT_CONFIRMED"
+			}
+			// Emitted INSIDE the critical section that reached this verdict.
+			// After the unlock, the goroutine that WON admission is still
+			// parsing its result, so a duplicate refused here would routinely
+			// be recorded before the admission it duplicates — a replay
+			// showing the duplicate first.
+			p.observeUserFrameOfRound(msg, streamer, eventID, incarnationOf(rc),
+				ObsKindUserTerminal, "TERMINAL_DELIVERED", reason,
+				nil, map[string]string{"terminalVerdict": ObsPresent})
 			p.mu.Unlock()
 			return outcome
 		}
@@ -1223,13 +1354,22 @@ func (p *WebSocketPool) handlePredictionUser(msg *PubSubMessage, streamer *model
 		strategy := string(event.Bet.Settings.Strategy)
 		odds := chosenOutcomeOdds(event)
 		manual := false
+		incarnation := ""
 		if rc := p.control[eventID]; rc != nil {
 			manual = rc.manualBet
+			incarnation = rc.incarnation
 		}
 		title := event.Title
 		placed, won, gained := event.ParseResult(result)
 		event.ResultAccepted = true
 		resultType := event.Result.Type
+		// The ADMISSION is what this lock decided, and it is recorded here, at
+		// that instant — so a duplicate refused by a later holder of the lock
+		// can never be recorded before it. The parsed verdict below is a
+		// different event, and it is honestly later.
+		p.observeUserFrameOfRound(msg, streamer, eventID, incarnation,
+			ObsKindUserTerminal, "TERMINAL_DELIVERED", "ACCEPTED",
+			nil, map[string]string{"terminalVerdict": ObsPresent})
 		p.mu.Unlock()
 
 		outcome.PredictionResultAccepted = true
@@ -1237,6 +1377,22 @@ func (p *WebSocketPool) handlePredictionUser(msg *PubSubMessage, streamer *model
 		if manual {
 			strategy = "MANUAL"
 		}
+
+		// The admitted terminal delivery, with the reason the existing code
+		// already settled on. MessageOutcome.PredictionResultAccepted remains
+		// the sole A3 verdict; this only records it.
+		terminalReason := "REJECTED"
+		switch resultType {
+		case models.ResultWin:
+			terminalReason = "WON"
+		case models.ResultLose:
+			terminalReason = "LOST"
+		case models.ResultRefund:
+			terminalReason = "REFUNDED"
+		}
+		p.observeUserFrameOfRound(msg, streamer, eventID, incarnation, ObsKindUserTerminal, "TERMINAL_ADMITTED", terminalReason,
+			map[string]int64{"stake": int64(stake), "payout": int64(won), "odds1e4": int64(odds * 10000)},
+			map[string]string{"terminalVerdict": ObsPresent, "result": ObsPresent})
 
 		slog.Info("Prediction result",
 			"event", title,
@@ -1285,17 +1441,67 @@ func (p *WebSocketPool) handlePredictionUser(msg *PubSubMessage, streamer *model
 // honours the per-round suppression set by a manual bet or the manual skip
 // toggle. The betting *strategy* is unchanged from before: Calculate + Skip
 // from models, the same 10-point minimum, the same logs.
+// placeAutoBet is the entry point for a caller with no scheduled coordinate to
+// carry — it makes no claim about which admission the decision was scheduled
+// for.
 func (p *WebSocketPool) placeAutoBet(eventID string) {
+	p.placeAutoBetScheduled(eventID, "")
+}
+
+// placeAutoBetScheduled is placeAutoBet for the timer, which knows the round
+// incarnation it was scheduled for. `scheduled` is observation-only: nothing
+// below branches on it, and the lookup is exactly the one it always was.
+func (p *WebSocketPool) placeAutoBetScheduled(eventID, scheduled string) {
 	p.mu.RLock()
 	event := p.predictions[eventID]
 	rc := p.control[eventID]
 	p.mu.RUnlock()
 	if event == nil || rc == nil {
+		// The round this timer was scheduled for is gone. Recording that is
+		// the point: a scheduled auto decision that never happened was
+		// otherwise indistinguishable from one that was never scheduled, and
+		// the fact can still name the round it was about because the timer
+		// carried its incarnation.
+		if scheduled != "" {
+			p.observeRoundFactOf(eventID, "", "", scheduled, ObsKindAutoDecision, ObservationPayload{
+				Phase: "AUTO_SKIPPED", Decision: "SKIP", ReasonCode: "NO_ROUND",
+				Manual: boolPtr(false),
+			})
+		}
 		return
 	}
 
 	rc.placeMu.Lock()
 	defer rc.placeMu.Unlock()
+
+	// Round identity for every fact below. Read once, outside the pool lock:
+	// the event pointer is stable and its streamer has its own mutex. Guarded
+	// like PlaceManualBet's own read — a scheduled round always carries a
+	// streamer, but an observation must never be the first thing in this
+	// function to dereference it.
+	var obsLogin, obsChannel string
+	if event.Streamer != nil {
+		obsLogin, obsChannel = event.Streamer.GetUsername(), event.Streamer.ChannelID
+	}
+	// The AUTO_DUE fact is filed under the incarnation the LOOKUP resolved,
+	// and says whether that is the one this decision was scheduled for. A
+	// mismatch means the round was cleaned up and the same Twitch event
+	// admitted again while the timer slept, so the decision is about a round
+	// nobody scheduled — a reader has to be able to see that rather than
+	// infer it. A caller that carried no scheduled coordinate makes no claim
+	// either way.
+	dueReason := ""
+	switch scheduled {
+	case "":
+		// No scheduled coordinate was carried, so no claim is made.
+	case rc.incarnation:
+		dueReason = "OK"
+	default:
+		dueReason = "CONFLICT"
+	}
+	p.observeRoundFact(eventID, obsChannel, obsLogin, ObsKindAutoDecision, ObservationPayload{
+		Phase: "AUTO_DUE", ReasonCode: dueReason, Manual: boolPtr(false),
+	})
 
 	// Placement-time gate: re-evaluate the CURRENT user settings and eligibility
 	// immediately before the Twitch mutation. The event-created gate ran when the
@@ -1306,6 +1512,7 @@ func (p *WebSocketPool) placeAutoBet(eventID string) {
 	// untouched, and nothing re-schedules the skipped placement on re-enable.
 	if d := pointsEligibility.EvaluatePointsTask(event.Streamer, eligibility.TaskPrediction); !d.Eligible {
 		logSkippedPointsAction(event.Streamer, "auto prediction placement", d)
+		p.observeAutoSkip(eventID, obsChannel, obsLogin, "NOT_ELIGIBLE", nil)
 		return
 	}
 
@@ -1313,7 +1520,19 @@ func (p *WebSocketPool) placeAutoBet(eventID string) {
 	// outside it (serialized instead by placeMu).
 	p.mu.Lock()
 	if rc.autoBetSkip || event.BetPlaced || event.Status != models.PredictionActive {
+		skipped, placed := rc.autoBetSkip, event.BetPlaced
+		state := string(event.Status)
 		p.mu.Unlock()
+		reason := "NOT_ACTIVE"
+		switch {
+		case skipped:
+			// The operator suppressed auto-bet for THIS round. Not a strategy
+			// filter rejecting it, and not the global toggle.
+			reason = "ROUND_SUPPRESSED"
+		case placed:
+			reason = "ALREADY_PLACED"
+		}
+		p.observeAutoSkipState(eventID, obsChannel, obsLogin, reason, state)
 		return
 	}
 	balance := event.Streamer.GetChannelPoints()
@@ -1333,6 +1552,11 @@ func (p *WebSocketPool) placeAutoBet(eventID string) {
 			slog.Warn("Auto-bet gated",
 				"reason", string(d.Reason),
 				"limit", 0, "proposed", decision.Amount, "allowed", 0, "streamer", streamer)
+			// The account-wide betting health gate, not this round's strategy.
+			// The two used to emit byte-identical facts, so a reader could not
+			// tell why the bet did not happen.
+			p.observeAutoSkip(eventID, obsChannel, obsLogin, "HEALTH_GATED",
+				map[string]int64{"stake": int64(decision.Amount)})
 			return
 		}
 	}
@@ -1343,6 +1567,8 @@ func (p *WebSocketPool) placeAutoBet(eventID string) {
 		slog.Warn("Auto-bet gated",
 			"reason", string(reason),
 			"limit", limit, "proposed", decision.Amount, "allowed", 0, "streamer", streamer)
+		p.observeAutoSkip(eventID, obsChannel, obsLogin, "RESERVE_VIOLATION",
+			map[string]int64{"stake": int64(decision.Amount), "balance": int64(balance)})
 		return
 	case models.GatePercent:
 		slog.Info("Auto-bet gated",
@@ -1353,10 +1579,14 @@ func (p *WebSocketPool) placeAutoBet(eventID string) {
 
 	if decision.Amount < minPredictionBet {
 		slog.Info("Bet amount too low", "amount", decision.Amount)
+		p.observeAutoSkip(eventID, obsChannel, obsLogin, "BELOW_MINIMUM_POINTS",
+			map[string]int64{"stake": int64(decision.Amount)})
 		return
 	}
 	if skip {
 		slog.Info("Skipping bet", "filter", settings.FilterCondition, "value", comparedValue)
+		p.observeAutoSkip(eventID, obsChannel, obsLogin, "FILTER_REJECTED",
+			map[string]int64{"stake": int64(decision.Amount)})
 		return
 	}
 
@@ -1374,7 +1604,21 @@ func (p *WebSocketPool) placeAutoBet(eventID string) {
 	event.Bet.Decision.Amount = decision.Amount
 	p.mu.Unlock()
 
-	if err := p.placer.PlacePredictionBet(event, decision.ID, decision.Amount); err != nil {
+	p.observeRoundFact(eventID, obsChannel, obsLogin, ObsKindAutoDecision, ObservationPayload{
+		Phase: "AUTO_DECIDED", Decision: "PLACE", ReasonCode: "OK", Manual: boolPtr(false),
+		OutcomeSlot: intPtr(decision.Choice),
+		Counters:    map[string]int64{"stake": int64(decision.Amount), "balance": int64(balance)},
+	})
+	// CALL_STARTED immediately before the ONE existing placement call, and
+	// CALL_RETURNED immediately after it. Neither adds, removes, retries or
+	// reorders a call, and neither inspects its arguments beyond the stake and
+	// outcome slot already decided above.
+	p.observePlacementCall(eventID, obsChannel, obsLogin, "CALL_STARTED", false, "NONE",
+		decision.Choice, decision.Amount)
+	err := p.placer.PlacePredictionBet(event, decision.ID, decision.Amount)
+	p.observePlacementCall(eventID, obsChannel, obsLogin, "CALL_RETURNED", err == nil, placementErrorClass(err),
+		decision.Choice, decision.Amount)
+	if err != nil {
 		slog.Error("Failed to make prediction", "error", err)
 		return
 	}
@@ -1392,49 +1636,135 @@ func (p *WebSocketPool) placeAutoBet(eventID string) {
 // placement lock. On success the round is marked so auto-bet skips it. Returns
 // the chosen outcome's title for the confirmation message.
 func (p *WebSocketPool) PlaceManualBet(eventID, outcomeID string, amount int) (string, error) {
+	// A direct call opens its own root, so it mints its own correlation token.
+	return p.placeManualBet(eventID, outcomeID, amount, "MANUAL_DIRECT_ROOT", p.NextManualActionToken())
+}
+
+// NextManualActionToken mints the sealed correlation token for ONE operator
+// action. A relaying caller takes it before delegating, so the root it opens
+// and every fact the pool produces for that action carry the same token.
+//
+// It is a process-local monotonic number: it identifies an action within one
+// run and says nothing about the account, the channel or the operator.
+func (p *WebSocketPool) NextManualActionToken() uint64 {
+	return p.manualActions.Add(1)
+}
+
+// PlaceManualBetRelayed is PlaceManualBet for a caller that has ALREADY
+// resolved this pool on the operator's behalf and opened the manual-control
+// root for the action — today, the miner's dashboard provider. It is
+// byte-for-byte the same placement: the ONLY difference is that the manual
+// root was opened by the relaying caller, so this entry point does not open a
+// second one. Exactly one root exists per operator action.
+func (p *WebSocketPool) PlaceManualBetRelayed(eventID, outcomeID string, amount int, token uint64) (string, error) {
+	return p.placeManualBet(eventID, outcomeID, amount, "MANUAL_MINER_ROOT", token)
+}
+
+// placeManualBet is the shared body. `root` names the manual-control root
+// phase this action is recorded under; it affects nothing else.
+func (p *WebSocketPool) placeManualBet(eventID, outcomeID string, amount int, root string, token uint64) (string, error) {
+	// A manual bet is a PRODUCER EPISODE like the two fire-and-forget timers,
+	// and for the same reason: it emits observations from a goroutine the
+	// pool's Close does not join. Close joins the WebSocket clients, so a
+	// nil result proves no CONNECTION is still delivering — it proves nothing
+	// about an operator's bet still in flight on someone else's goroutine.
+	// Without the episode, that bet could emit its first fact after the
+	// collector had already finalized the session as COMPLETE, and the
+	// session's claim to have observed everything would be false.
+	settle := p.beginEpisode()
+	defer settle()
+
+	act := manualAction{pool: p, id: token}
 	p.mu.RLock()
 	event := p.predictions[eventID]
 	rc := p.control[eventID]
 	p.mu.RUnlock()
+
+	// The root, and then one fact per phase the existing code already passes
+	// through. Every one of them is emitted AFTER the decision it records.
+	var obsChannel, obsLogin string
+	if event != nil && event.Streamer != nil {
+		obsLogin, obsChannel = event.Streamer.GetUsername(), event.Streamer.ChannelID
+	}
+	// An UNTRACKED round yields no identity at all. Recording the caller's
+	// event id on such a fact would write a Twitch identifier onto a row with
+	// no channel and no login — a row no channel-scoped privacy erasure could
+	// ever reach. The action is still recorded (that a manual bet was
+	// attempted, and that the round was unknown, is exactly the audit value
+	// here); only the unreachable identifier is withheld.
+	obsEventID := eventID
+	if obsChannel == "" {
+		obsEventID = ""
+	}
+	act.phase(obsEventID, obsChannel, obsLogin, root, "OK",
+		map[string]int64{"stake": int64(amount)})
+
 	if event == nil || rc == nil {
+		act.phase(obsEventID, obsChannel, obsLogin, "MANUAL_POOL_LOOKUP", "NO_ROUND", nil)
 		return "", ErrPredictionNotFound
 	}
+	act.phase(eventID, obsChannel, obsLogin, "MANUAL_POOL_LOOKUP", "OK", nil)
 
 	// Centralized capability gate for a manual bet — the same policy as auto-bets,
 	// with a user-safe reason (unknown is distinct from disabled/offline; no raw
 	// Twitch/Go error is surfaced).
 	if event.Streamer != nil {
 		if d := pointsEligibility.EvaluatePointsTask(event.Streamer, eligibility.TaskPrediction); !d.Eligible {
+			act.phase(eventID, obsChannel, obsLogin, "MANUAL_ELIGIBILITY", "NOT_ELIGIBLE", nil)
 			return "", manualBetGateError(d)
 		}
 	}
+	act.phase(eventID, obsChannel, obsLogin, "MANUAL_ELIGIBILITY", "OK", nil)
 
 	if amount <= 0 {
+		act.phase(eventID, obsChannel, obsLogin, "MANUAL_ARGUMENTS", "REJECTED", nil)
 		return "", ErrInvalidAmount
 	}
 	if amount < minPredictionBet {
+		act.phase(eventID, obsChannel, obsLogin, "MANUAL_ARGUMENTS", "BELOW_MINIMUM_POINTS",
+			map[string]int64{"stake": int64(amount)})
 		return "", ErrAmountTooLow
 	}
 
 	outcomeIdx, outcomeTitle := p.findOutcome(event, outcomeID)
 	if outcomeIdx < 0 {
+		act.phase(eventID, obsChannel, obsLogin, "MANUAL_ARGUMENTS", "REJECTED", nil)
 		return "", ErrOutcomeNotFound
 	}
+	act.phase(eventID, obsChannel, obsLogin, "MANUAL_ARGUMENTS", "OK",
+		map[string]int64{"stake": int64(amount)})
 
 	// Fast pre-check + double-submit guard, holding no lock across the network.
+	//
+	// Every reservation fact is emitted INSIDE this critical section, using
+	// the incarnation already in hand. Emitting after the unlock would let two
+	// callers whose decisions this lock serialized reach the collector in the
+	// opposite order — the loser's CONFLICT recorded before the winner's
+	// reservation, so a replay by causal position shows the conflict before
+	// the thing it conflicted with. The emit is a bounded copy and one
+	// nonblocking hand-off, which the sink contract requires to be safe under
+	// exactly this lock.
 	p.mu.Lock()
+	incarnation := ""
+	if rc != nil {
+		incarnation = rc.incarnation
+	}
 	switch {
 	case event.BetPlaced && rc.manualBet:
+		act.phaseOf(eventID, obsChannel, obsLogin, incarnation, "MANUAL_RESERVATION", "ALREADY_PLACED", nil)
 		p.mu.Unlock()
 		return "", ErrAlreadyBet
 	case event.BetPlaced:
+		act.phaseOf(eventID, obsChannel, obsLogin, incarnation, "MANUAL_RESERVATION", "ALREADY_PLACED", nil)
 		p.mu.Unlock()
 		return "", ErrAutoBetPlaced
 	case rc.manualPending:
+		act.phaseOf(eventID, obsChannel, obsLogin, incarnation, "MANUAL_RESERVATION", "CONFLICT", nil)
 		p.mu.Unlock()
 		return "", ErrManualBetInFlight
 	}
 	rc.manualPending = true
+	act.phaseOf(eventID, obsChannel, obsLogin, incarnation, "MANUAL_RESERVATION", "OK", nil)
 	p.mu.Unlock()
 	defer func() {
 		p.mu.Lock()
@@ -1458,24 +1788,39 @@ func (p *WebSocketPool) PlaceManualBet(eventID, outcomeID string, amount int) (s
 
 	switch {
 	case betPlaced && manualByUs:
+		act.phase(eventID, obsChannel, obsLogin, "MANUAL_VALIDATION", "ALREADY_PLACED", nil)
 		return "", ErrAlreadyBet
 	case betPlaced:
+		act.phase(eventID, obsChannel, obsLogin, "MANUAL_VALIDATION", "ALREADY_PLACED", nil)
 		return "", ErrAutoBetPlaced
 	case status != models.PredictionActive:
+		act.skip(eventID, obsChannel, obsLogin, "NOT_ACTIVE", string(status))
 		return "", ErrRoundClosed
 	case closing <= 0:
+		act.skip(eventID, obsChannel, obsLogin, "WINDOW_ELAPSED", string(status))
 		return "", ErrRoundClosed
 	case !online:
+		act.skip(eventID, obsChannel, obsLogin, "NOT_ELIGIBLE", string(status))
 		return "", ErrStreamerOffline
 	case amount > balance:
+		act.phase(eventID, obsChannel, obsLogin, "MANUAL_VALIDATION", "BELOW_MINIMUM_POINTS",
+			map[string]int64{"stake": int64(amount), "balance": int64(balance)})
 		return "", ErrInsufficientPoints
 	}
+	act.phase(eventID, obsChannel, obsLogin, "MANUAL_VALIDATION", "OK",
+		map[string]int64{"stake": int64(amount), "balance": int64(balance)})
 
-	if err := p.placer.PlacePredictionBet(event, outcomeID, amount); err != nil {
+	// CALL_STARTED immediately before the ONE existing placement call, and
+	// CALL_RETURNED immediately after it.
+	act.placementCall(eventID, obsChannel, obsLogin, "CALL_STARTED", false, "NONE", outcomeIdx, amount)
+	err := p.placer.PlacePredictionBet(event, outcomeID, amount)
+	act.placementCall(eventID, obsChannel, obsLogin, "CALL_RETURNED", err == nil, placementErrorClass(err), outcomeIdx, amount)
+	if err != nil {
 		human := humanizeBetError(err)
 		p.mu.Lock()
 		rc.manualErr = human
 		p.mu.Unlock()
+		act.phase(eventID, obsChannel, obsLogin, "MANUAL_EXECUTION", "REJECTED", nil)
 		return "", errors.New(human)
 	}
 
@@ -1493,6 +1838,8 @@ func (p *WebSocketPool) PlaceManualBet(eventID, outcomeID string, amount int) (s
 		"event", event.Title,
 		"amount", amount,
 	)
+	act.phase(eventID, obsChannel, obsLogin, "MANUAL_EXECUTION", "OK",
+		map[string]int64{"stake": int64(amount)})
 	return outcomeTitle, nil
 }
 
@@ -1541,7 +1888,21 @@ func (p *WebSocketPool) findOutcome(event *models.EventPrediction, outcomeID str
 // grace delay. Fire-and-forget, matching the existing auto-bet timer pattern;
 // removePrediction is idempotent so overlapping schedules are harmless.
 func (p *WebSocketPool) scheduleCleanup(eventID string, after time.Duration) {
+	p.mu.RLock()
+	var channelID, login string
+	if e := p.predictions[eventID]; e != nil && e.Streamer != nil {
+		login, channelID = e.Streamer.GetUsername(), e.Streamer.ChannelID
+	}
+	incarnation := ""
+	if rc := p.control[eventID]; rc != nil {
+		incarnation = rc.incarnation
+	}
+	p.mu.RUnlock()
+	p.observeRoundCleanup(eventID, channelID, login, incarnation, "CLEANUP_SCHEDULED", "OK")
+
+	settleEpisode := p.beginEpisode()
 	go func() {
+		defer settleEpisode()
 		time.Sleep(after)
 		p.removePrediction(eventID)
 	}()
@@ -1551,8 +1912,30 @@ func (p *WebSocketPool) scheduleCleanup(eventID string, after time.Duration) {
 // Idempotent.
 func (p *WebSocketPool) removePrediction(eventID string) {
 	p.mu.Lock()
+	// Capture the round identity BEFORE the delete, so the cleanup fact can
+	// still name the round it is about. Reads two fields off an object this
+	// map already owns; nothing else changes.
+	var channelID, login string
+	if e := p.predictions[eventID]; e != nil && e.Streamer != nil {
+		login, channelID = e.Streamer.GetUsername(), e.Streamer.ChannelID
+	}
+	incarnation := ""
+	if rc := p.control[eventID]; rc != nil {
+		incarnation = rc.incarnation
+	}
 	delete(p.predictions, eventID)
 	delete(p.control, eventID)
+	// Emitted INSIDE the lock that performed the removal, with the incarnation
+	// captured above. After the unlock, a re-admission of the same Twitch
+	// event could take the lock, mint a new incarnation and emit its
+	// SCHEDULE_ACCEPTED first — so a replay by causal position would show the
+	// new round beginning before the old one ended. It is a bounded copy and
+	// one nonblocking hand-off, which is what the sink contract requires to be
+	// safe under this lock; sweepStaleLocked already emits the same fact from
+	// inside it.
+	p.observeRoundCleanup(eventID, channelID, login, incarnation, "CLEANUP_APPLIED", "OK")
+	// After the fact, so the cleanup still carries the round's provenance.
+	p.releaseRoundProvenance(incarnation)
 	p.mu.Unlock()
 }
 
@@ -1562,11 +1945,29 @@ func (p *WebSocketPool) removePrediction(eventID string) {
 // scheduleCleanup on resolve/cancel.
 func (p *WebSocketPool) sweepStaleLocked() {
 	now := time.Now()
+	type swept struct{ id, channelID, login, incarnation string }
+	var reaped []swept
 	for id, e := range p.predictions {
 		if now.Sub(e.CreatedAt) > maxPredictionAge {
+			var channelID, login string
+			if e.Streamer != nil {
+				login, channelID = e.Streamer.GetUsername(), e.Streamer.ChannelID
+			}
+			incarnation := ""
+			if rc := p.control[id]; rc != nil {
+				incarnation = rc.incarnation
+			}
+			reaped = append(reaped, swept{id: id, channelID: channelID, login: login, incarnation: incarnation})
 			delete(p.predictions, id)
 			delete(p.control, id)
 		}
+	}
+	// Emitted from inside the pool lock this function is documented to run
+	// under: each call is a bounded copy plus one nonblocking hand-off, and
+	// the common case reaps nothing at all.
+	for _, r := range reaped {
+		p.observeRoundCleanup(r.id, r.channelID, r.login, r.incarnation, "CLEANUP_APPLIED", "WINDOW_ELAPSED")
+		p.releaseRoundProvenance(r.incarnation)
 	}
 }
 

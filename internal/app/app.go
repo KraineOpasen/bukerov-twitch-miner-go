@@ -296,9 +296,21 @@ func buildWith(ctx context.Context, cfg *config.Config, rc runtimeconfig.Runtime
 			return nil, fmt.Errorf("app: build analytics service: %w", aerr)
 		}
 		app.analytics = svc
+		// Start brings the immutable Prediction observation collector up. It
+		// is NONBLOCKING and always returns nil — a collector that cannot
+		// bootstrap disables that capture alone and never fails startup — so
+		// adding it here cannot make a previously-successful boot fail.
+		//
+		// The step is appended BEFORE the web step, which is what fixes the
+		// order at both ends: Run starts analytics then web, and Shutdown
+		// (reverse order) stops web, then analytics, then the shared database
+		// last. The collector's own Close fences intake, drains, cancels and
+		// JOINS its writer before returning, so by the time the database step
+		// runs no P1 goroutine can still reach the handle.
 		app.steps = append(app.steps, lifecycleStep{
-			name: "analytics",
-			stop: closer(svc.Close),
+			name:  "analytics",
+			start: fromError(svc.Start),
+			stop:  closer(svc.Close),
 		})
 
 		// The web server is built "early" (no streamer roster yet) so its
