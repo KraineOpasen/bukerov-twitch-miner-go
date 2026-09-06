@@ -326,7 +326,10 @@ func TestSessionConverge_RapidReplacementFinalOwnerConverges(t *testing.T) {
 	requireCommittedPair(t, w, 1, a.GetUsername(), b.GetUsername())
 
 	// Tick 2: push A above C -> {C, B}. C's convergence attempt is staged and
-	// FAILS (perLoginFailRefresher), so C never delivers this tick.
+	// FAILS (perLoginFailRefresher), so C never delivers this tick. Ticks here
+	// model broker evaluations spaced past the base pair's minimum residence,
+	// so the seeded weights are what drive the replacement under test.
+	openFairRotationResidence(w)
 	seed(a.GetUsername(), 6000)
 	w.processWatching(tickCtx(w))
 	requireCommittedPair(t, w, 2, c.GetUsername(), b.GetUsername())
@@ -334,6 +337,7 @@ func TestSessionConverge_RapidReplacementFinalOwnerConverges(t *testing.T) {
 	// Tick 3: push C above D -> {D, B}. C is displaced BEFORE its convergence
 	// ever succeeded; D's own (independent) convergence now stages and,
 	// unlike C's, SUCCEEDS.
+	openFairRotationResidence(w)
 	seed(c.GetUsername(), 6000)
 	w.processWatching(tickCtx(w))
 	requireCommittedPair(t, w, 3, d.GetUsername(), b.GetUsername())
@@ -605,10 +609,22 @@ func TestSessionConverge_RaceSafety(t *testing.T) {
 
 	var stop atomic.Bool
 	var wdDone sync.WaitGroup
+	// writerEpoch is odd only while a processWatching call is in flight, with a
+	// unique value per call, and wdOverlap counts the watchdog iterations whose
+	// refresh + RecordMinutes ran wholly inside one exact call. Without this,
+	// every tick could finish before the watchdog was first scheduled and the
+	// send assertion below would still pass on the loop goroutine's own work
+	// alone; and an in-flight boolean would additionally accept an iteration
+	// split across two adjacent calls (see insideOneWriterCall).
+	var writerEpoch atomic.Int64
+	var wdOverlap atomic.Int64
+
 	wdDone.Add(1)
 	go func() {
 		defer wdDone.Done()
+		acked := false
 		for !stop.Load() {
+			before := writerEpoch.Load()
 			_ = w.BrokerSnapshot()
 			_ = w.GetDebugState()
 			_, _ = w.ReportStats(c.GetUsername())
@@ -621,16 +637,39 @@ func TestSessionConverge_RaceSafety(t *testing.T) {
 			w.RequestSessionRefresh(SessionRefreshRequest{Login: c.GetUsername(), Mode: RefreshStreamInfo})
 			// Perturb rotation ranking concurrently with the loop's ticks.
 			_ = w.store.RecordMinutes(a.GetUsername(), 1, time.Now())
+			if !acked && insideOneWriterCall(before, writerEpoch.Load()) {
+				acked = true
+				wdOverlap.Add(1)
+			}
 			time.Sleep(time.Millisecond)
 		}
 	}()
 
-	for tick := 0; tick < 6; tick++ {
+	// Ticks model broker evaluations spaced past the base pair's minimum
+	// residence, so the watchdog's concurrent RecordMinutes really does churn
+	// the rotation ranking under the loop - the stressor this race test exists
+	// for. Keep ticking past the nominal count until the watchdog has provably
+	// staged a refresh and perturbed the ranking wholly inside one
+	// processWatching call, bounded so a starved run fails loudly.
+	const nominalTicks, maxTicks = 6, 5000
+	ticks := 0
+	for ; ticks < maxTicks && (ticks < nominalTicks || wdOverlap.Load() == 0); ticks++ {
+		openFairRotationResidence(w)
+		enterWriterCall(&writerEpoch)
 		w.processWatching(tickCtx(w))
+		leaveWriterCall(&writerEpoch)
 	}
 
 	stop.Store(true)
 	wdDone.Wait()
+
+	// Placed after the join, so a failure here cannot strand the watchdog on
+	// the fixture's closed database handle.
+	requireWriterCallsBracketed(t, &writerEpoch, ticks)
+
+	if wdOverlap.Load() == 0 {
+		t.Fatalf("no watchdog refresh/RecordMinutes iteration ran wholly inside one processWatching call after %d ticks", ticks)
+	}
 
 	if len(adapter.allCalls()) == 0 {
 		t.Fatal("expected at least one send during the race window")
@@ -814,10 +853,13 @@ func TestSessionConverge_Guard9ReleaseInvalidatesTrackedState(t *testing.T) {
 		t.Fatalf("expected %s to have one staged (failed) convergence attempt while slotted, got %+v", cLogin, st)
 	}
 
-	// Evict C: push its accumulated weight far above A's so A re-enters.
+	// Evict C: push its accumulated weight far above A's so A re-enters, at a
+	// broker evaluation past the base pair's minimum residence (what is under
+	// test is the convergence bookkeeping around the eviction, not its timing).
 	if err := w.store.RecordMinutes(cLogin, 100000, time.Now()); err != nil {
 		t.Fatalf("failed to reseed watch time: %v", err)
 	}
+	openFairRotationResidence(w)
 	w.processWatching(tickCtx(w))
 	requireCommittedPair(t, w, 1, aLogin, bLogin)
 
@@ -830,6 +872,7 @@ func TestSessionConverge_Guard9ReleaseInvalidatesTrackedState(t *testing.T) {
 	if err := w.store.RecordMinutes(aLogin, 100000, time.Now()); err != nil {
 		t.Fatalf("failed to reseed watch time: %v", err)
 	}
+	openFairRotationResidence(w)
 	w.processWatching(tickCtx(w))
 	requireCommittedPair(t, w, 2, cLogin, bLogin)
 

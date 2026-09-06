@@ -76,6 +76,11 @@ func TestOrdinaryBrokerEvaluationReconcilesPersistedFairness(t *testing.T) {
 		}
 	}
 
+	// This asserts persisted-deficit reconciliation itself, not how soon it may
+	// happen: model a later broker evaluation, past the pair's minimum
+	// residence. The residence floor has its own dedicated coverage in
+	// fair_rotation_residence_test.go.
+	openFairRotationResidence(w)
 	runSelectionTick(w, online)
 	secondState := w.GetDebugState()
 	second := watchedLogins(secondState)
@@ -137,6 +142,10 @@ func TestBoostContinuitySurvivesBasePairReconciliation(t *testing.T) {
 
 	basePairs := make(map[string]bool)
 	for tick := 0; tick < 6; tick++ {
+		// Ticks model broker evaluations spaced past the base pair's minimum
+		// residence, so the base pair really does reconcile and the continuity
+		// claim under test is actually exercised.
+		openFairRotationResidence(w)
 		runSelectionTick(w, online)
 		state := w.GetDebugState()
 		basePairs[strings.Join(sortedPair(state.ActivePair), ",")] = true
@@ -186,6 +195,10 @@ func TestEqualActiveDropLatchYieldsToFairPairAfterReconciliation(t *testing.T) {
 			t.Fatalf("advance fairness for %s: %v", streamers[idx].GetUsername(), err)
 		}
 	}
+	// A later broker evaluation, past the base pair's minimum residence: what is
+	// under test is where an equal-class drop latch ends up once the base pair
+	// reconciles, not how soon that reconciliation is allowed.
+	openFairRotationResidence(w)
 	runSelectionTick(w, online)
 	second := w.GetDebugState()
 	if got := sortedPair(second.ActivePair); len(got) != 2 || got[0] != "streamerd" || got[1] != "streamere" {
@@ -262,6 +275,14 @@ func TestStreakDeferralHasOneNonExtendingDeadline(t *testing.T) {
 		}
 	}
 
+	// The bounded streak deferral is only reachable once the pair's minimum
+	// residence has expired (before that there is no replacement to defer, and
+	// the one-shot approach must not be consumed). Model that later evaluation.
+	openFairRotationResidence(w)
+	// The residence anchor IS DebugState.PairSince, so record the value now in
+	// effect: the assertions below are that neither the deferral nor an ordinary
+	// re-evaluation advances it.
+	residentSince := w.rotation.lastSwitch
 	before := time.Now()
 	runSelectionTick(w, online)
 	first := w.GetDebugState()
@@ -269,8 +290,8 @@ func TestStreakDeferralHasOneNonExtendingDeadline(t *testing.T) {
 	if got := sortedPair(first.ActivePair); strings.Join(got, ",") != strings.Join(sortedPair(initial.ActivePair), ",") {
 		t.Fatalf("bounded deferral did not preserve the approached pair: initial=%v got=%v", initial.ActivePair, first.ActivePair)
 	}
-	if !first.PairSince.Equal(initial.PairSince) {
-		t.Fatalf("deferral falsified PairSince: initial=%v got=%v", initial.PairSince, first.PairSince)
+	if !first.PairSince.Equal(residentSince) {
+		t.Fatalf("deferral falsified PairSince: resident=%v got=%v", residentSince, first.PairSince)
 	}
 	if len(first.PostponedSwapOuts) != 1 || first.PostponedSwapOuts[0].Username != "streamera" {
 		t.Fatalf("diagnostics do not expose the active explicit deferral: %+v", first.PostponedSwapOuts)
@@ -285,8 +306,8 @@ func TestStreakDeferralHasOneNonExtendingDeadline(t *testing.T) {
 	if len(second.PostponedSwapOuts) != 1 || !second.PostponedSwapOuts[0].Until.Equal(deadline) {
 		t.Fatalf("ordinary re-evaluation extended the one-shot deadline: first=%v second=%+v", deadline, second.PostponedSwapOuts)
 	}
-	if !second.PairSince.Equal(initial.PairSince) {
-		t.Fatalf("re-evaluation changed PairSince without a pair change: initial=%v got=%v", initial.PairSince, second.PairSince)
+	if !second.PairSince.Equal(residentSince) {
+		t.Fatalf("re-evaluation changed PairSince without a pair change: resident=%v got=%v", residentSince, second.PairSince)
 	}
 }
 
@@ -332,6 +353,10 @@ func TestDeferredStreamerLeavesImmediatelyWhenOfflineOrIneligible(t *testing.T) 
 					t.Fatalf("seed incumbent watch time for %s: %v", login, err)
 				}
 			}
+			// Arm the deferral at a later broker evaluation: the bounded streak
+			// deferral is only consulted once the pair's minimum residence has
+			// expired.
+			openFairRotationResidence(w)
 			runSelectionTick(w, online)
 			if len(w.GetDebugState().PostponedSwapOuts) != 1 {
 				t.Fatalf("precondition: explicit deferral was not armed: %+v", w.GetDebugState())

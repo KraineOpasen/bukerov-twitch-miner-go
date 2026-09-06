@@ -309,7 +309,10 @@ type rotationState struct {
 	activePair [2]int // streamer indexes currently occupying the watch slots
 	hasPair    bool   // whether activePair has been initialized yet
 
-	lastSwitch time.Time // when activePair last actually changed
+	// lastSwitch is when activePair last actually changed. It is also the
+	// residence anchor fairRotationResidence is measured from, and the value
+	// published as DebugState.PairSince.
+	lastSwitch time.Time
 
 	lastWatched map[int]time.Time // last tick each streamer index was actually watched (fairness tie-break + boost victim selection)
 
@@ -1355,6 +1358,9 @@ func (w *MinuteWatcher) isPreferred(idx int) bool {
 // Whoever is watched accumulates minutes and becomes less owed, so every valid
 // contender progresses without a separate timer or queue.
 //
+// A complete pair whose members are both still valid candidates keeps its seats
+// for fairRotationResidence before an ordinary challenger may take one.
+//
 // On top of that fair pair, one strictly stronger DROPS/STREAK candidate may
 // take one seat. Hard restricted/streak/drop classes come first; active-drop
 // candidates inside the same hard class use Campaign Policy's unitless bounded
@@ -1388,9 +1394,44 @@ func (w *MinuteWatcher) selectRotating(onlineIndexes []int) []int {
 	return []int{pair[0], pair[1]}
 }
 
+// fairRotationResidence is the minimum time a COMPLETE, still-valid ordinary
+// fair-rotation pair keeps its two base seats before an ordinary
+// persisted-deficit challenger may take one.
+//
+// It is a MINIMUM RESIDENCE, not a switching cadence: nothing schedules or
+// forces a switch when it elapses. Reaching it only re-opens ordinary
+// reconciliation, which then keeps the same pair whenever the incumbents are
+// still the two most owed. There is no goroutine, timer, store, ledger, cache
+// or setting behind it — the loop derives elapsed residence from
+// rotationState.lastSwitch on the broker tick it already runs. That anchor is
+// stamped only on initialization or an unordered membership change, so seat
+// ordering, candidate permutation and re-evaluating the same pair never
+// refresh it, and hasPair == false leaves it inert.
+//
+// Every stronger cause bypasses it structurally rather than by exception,
+// because the guard lives inside the `hasPair && containsPair(...)` branch and
+// only runs when the incoming pair actually differs: an incumbent that is
+// removed, offline, ineligible, avoided or otherwise no longer a candidate is
+// not in onlineIndexes (so containsPair is false and the pair is recomputed at
+// once, which is also why an incomplete pair is never protected and an empty
+// seat refills immediately); DROPS/STREAK and stronger-priority arbitration
+// happen in applyPriorityBoost, which runs AFTER this decision unguarded; and
+// Phase-B / unified-broker arbitration happens after Phase A entirely.
+//
+// It does apply to the ordinary ranking's own inputs — persisted deficit, the
+// preferenceWeightBiasMinutes handicap and the recency/login tie-break — since
+// a change driven by any of those IS an ordinary fair-rotation replacement.
+// Switching a channel to "prefer" therefore takes effect at the next ordinary
+// reconciliation, unlike "avoid", which removes it from the candidate set and
+// so takes effect on the next tick.
+const fairRotationResidence = 15 * time.Minute
+
 // streakDeferDelay bounds the one explicit deferral used when an immediate
 // fairness replacement would interrupt a streamer actively pursuing its watch
-// streak. It is completion protection, not a scheduler cadence.
+// streak. It is completion protection, not a scheduler cadence. It is reached
+// only once fairRotationResidence has expired: while the pair is still resident
+// there is no replacement to defer, so the one-shot deferral is neither armed
+// nor consumed.
 const streakDeferDelay = 2 * time.Minute
 
 // preferenceWeightBiasMinutes is the fixed handicap (in accumulated watch
@@ -1401,7 +1442,11 @@ const streakDeferDelay = 2 * time.Minute
 const preferenceWeightBiasMinutes = 5.0
 
 // reconcileLeastWatchedPair evaluates the persisted fairness ranking on every
-// broker tick, unless the one bounded streak-completion deferral is active.
+// broker tick. A complete, still-valid pair is only replaced by an ordinary
+// challenger once it has been resident for fairRotationResidence, and after
+// that the one bounded streak-completion deferral may still hold it briefly.
+// Neither guard applies when a pair member is no longer a valid candidate:
+// that pair is recomputed immediately.
 func (w *MinuteWatcher) reconcileLeastWatchedPair(onlineIndexes []int, now time.Time) {
 	weights := w.watchWeights(onlineIndexes, now)
 
@@ -1436,6 +1481,20 @@ func (w *MinuteWatcher) reconcileLeastWatchedPair(onlineIndexes []int, now time.
 	if w.rotation.hasPair && containsPair(onlineIndexes, w.rotation.activePair) {
 		if samePair(newPair, w.rotation.activePair) {
 			w.rotation.clearActiveDeferral()
+			w.captureDeficitMinutes(onlineIndexes, weights)
+			return
+		}
+
+		// Minimum residence of the ordinary configured pair: both incumbents
+		// are still valid candidates and only the ordinary ranking wants a
+		// different pair, which is the one case fairRotationResidence covers.
+		// Deferral state is deliberately left untouched — there is no
+		// replacement to defer yet, so the one-shot approach must not be
+		// consumed here.
+		if now.Sub(w.rotation.lastSwitch) < fairRotationResidence {
+			for _, idx := range w.rotation.activePair {
+				w.noteSelection(idx, "watched: keeps its fair slot for the minimum residence of the current rotation pair")
+			}
 			w.captureDeficitMinutes(onlineIndexes, weights)
 			return
 		}
@@ -1607,14 +1666,22 @@ func samePair(a, b [2]int) bool {
 // state. An ordinary drop has no continuity exception: it may hold a seat only
 // while its current hard/semantic facts win, and a full tie returns to persisted
 // fairness. That does not starve the other online streamers:
-//   - the OTHER slot is reconciled from persisted deficit on every broker
-//     evaluation, so the most-owed non-boosted channel keeps surfacing;
+//   - the OTHER slot is reconciled from persisted deficit whenever the base
+//     pair is reconcilable, so the most-owed non-boosted channel keeps
+//     surfacing;
 //   - the boosted channel records its own watch time (RecordMinutes), so the
 //     fair-rotation ranking naturally keeps it OUT of the base pair — no
 //     double-dipping — which de-starves the rest;
 //   - the only channel not watched while the latch holds is the current victim,
 //     deliberately the LESS-owed of the two base-pair members, and its identity
 //     moves as the base pair recomputes, so no single channel is locked out.
+//
+// fairRotationResidence bounds how fast that last point can act: while the base
+// pair is still resident it does not recompute, so a latch held across a whole
+// residence keeps displacing the same victim for up to that long. The exposure
+// is bounded by the residence itself and by the Stream-owned pursuit cap, and
+// it is the deliberate cost of the minimum residence — an ordinary challenger
+// waiting is exactly what the rule buys.
 //
 // The bounded cost is throughput while a real streak pursuit holds one seat:
 // the remaining channels temporarily share the other rotating slot.

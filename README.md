@@ -766,9 +766,19 @@ decides who gets a slot and why. Priority order when they compete
 an in-progress watch streak → an active drop → a fair-rotation/priority pick.
 A strictly stronger class may replace a weaker one; otherwise continuity is
 preserved. Persisted least-watched fairness is evaluated on every ordinary
-broker tick, without a configurable rotation dwell timer. One channel can
-never hold both slots. The Overview "Now watching" block, the Drops page, and
-`/debug/snapshot` show which channel holds each slot and the reason.
+broker tick, without a configurable rotation dwell timer. Once the fair pair is
+complete and both its channels are still valid, it keeps its two slots for a
+minimum of 15 minutes before an *ordinary* fairness challenger may take one —
+a floor on how often ordinary swaps happen, not a schedule: nothing switches
+merely because the 15 minutes elapsed, and nothing stronger waits for it (a
+channel that goes offline, is removed, becomes ineligible or is set to "avoid"
+leaves its slot at once, an empty slot refills at once, and restricted drops,
+active drops and watch streaks still take a slot the moment they qualify).
+Setting a channel to "prefer" is the one preference that only re-ranks fair
+rotation, so it takes effect at the next ordinary reconciliation rather than
+immediately. One channel can never hold both slots. The Overview "Now
+watching" block, the Drops page, and `/debug/snapshot` show which channel holds
+each slot and the reason.
 
 The one documented exception is the health canary (see *Health Center*): a rare,
 opt-in diagnostic beacon that never holds a slot and is not a candidate source.
