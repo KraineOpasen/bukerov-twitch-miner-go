@@ -609,12 +609,14 @@ func TestSessionConverge_RaceSafety(t *testing.T) {
 
 	var stop atomic.Bool
 	var wdDone sync.WaitGroup
-	// inFlight is raised only for the duration of a processWatching call, and
-	// wdOverlap counts the watchdog iterations whose refresh + RecordMinutes
-	// ran wholly inside one. Without this, every tick could finish before the
-	// watchdog was first scheduled and the send assertion below would still
-	// pass on the loop goroutine's own work alone.
-	var inFlight atomic.Bool
+	// writerEpoch is odd only while a processWatching call is in flight, with a
+	// unique value per call, and wdOverlap counts the watchdog iterations whose
+	// refresh + RecordMinutes ran wholly inside one exact call. Without this,
+	// every tick could finish before the watchdog was first scheduled and the
+	// send assertion below would still pass on the loop goroutine's own work
+	// alone; and an in-flight boolean would additionally accept an iteration
+	// split across two adjacent calls (see insideOneWriterCall).
+	var writerEpoch atomic.Int64
 	var wdOverlap atomic.Int64
 
 	wdDone.Add(1)
@@ -622,7 +624,7 @@ func TestSessionConverge_RaceSafety(t *testing.T) {
 		defer wdDone.Done()
 		acked := false
 		for !stop.Load() {
-			during := inFlight.Load()
+			before := writerEpoch.Load()
 			_ = w.BrokerSnapshot()
 			_ = w.GetDebugState()
 			_, _ = w.ReportStats(c.GetUsername())
@@ -635,7 +637,7 @@ func TestSessionConverge_RaceSafety(t *testing.T) {
 			w.RequestSessionRefresh(SessionRefreshRequest{Login: c.GetUsername(), Mode: RefreshStreamInfo})
 			// Perturb rotation ranking concurrently with the loop's ticks.
 			_ = w.store.RecordMinutes(a.GetUsername(), 1, time.Now())
-			if !acked && during && inFlight.Load() {
+			if !acked && insideOneWriterCall(before, writerEpoch.Load()) {
 				acked = true
 				wdOverlap.Add(1)
 			}
@@ -653,16 +655,20 @@ func TestSessionConverge_RaceSafety(t *testing.T) {
 	ticks := 0
 	for ; ticks < maxTicks && (ticks < nominalTicks || wdOverlap.Load() == 0); ticks++ {
 		openFairRotationResidence(w)
-		inFlight.Store(true)
+		enterWriterCall(&writerEpoch)
 		w.processWatching(tickCtx(w))
-		inFlight.Store(false)
+		leaveWriterCall(&writerEpoch)
 	}
 
 	stop.Store(true)
 	wdDone.Wait()
 
+	// Placed after the join, so a failure here cannot strand the watchdog on
+	// the fixture's closed database handle.
+	requireWriterCallsBracketed(t, &writerEpoch, ticks)
+
 	if wdOverlap.Load() == 0 {
-		t.Fatalf("no watchdog refresh/RecordMinutes iteration ran inside a processWatching call after %d ticks", ticks)
+		t.Fatalf("no watchdog refresh/RecordMinutes iteration ran wholly inside one processWatching call after %d ticks", ticks)
 	}
 
 	if len(adapter.allCalls()) == 0 {

@@ -31,6 +31,100 @@ func openFairRotationResidence(w *MinuteWatcher) {
 	w.rotation.lastSwitch = time.Now().Add(-fairRotationResidence)
 }
 
+// writerEpoch is a seqlock-style generation counter for a test writer call:
+// even means no call is in flight, odd means one is. Entering increments to a
+// unique odd value and leaving increments to the following even value, so the
+// value never repeats within a run. The parity encoding assumes ONE writer
+// goroutine per epoch, which is how both callers use it; two writers sharing an
+// epoch would read as "no call in flight" while both were inside one.
+//
+// insideOneWriterCall reports whether an observation that sampled the epoch
+// before and after its COMPLETE operation ran wholly inside one exact writer
+// call. It requires an odd `before` and `before == after`, which together mean
+// both samples are the same odd value: because every entry and every exit
+// increments, an equal odd pair cannot span an exit followed by a re-entry. A
+// plain "a call is in flight" boolean cannot express this — the writer may
+// leave call N and enter call N+1 between the two loads, so both read true
+// while the operation actually straddled the gap between them. That ABA case is
+// exactly what this predicate rejects; see
+// TestInsideOneWriterCallRejectsSplitObservations.
+func insideOneWriterCall(before, after int64) bool {
+	return before&1 == 1 && before == after
+}
+
+// enterWriterCall / leaveWriterCall move the epoch across one writer call, and
+// writerCallsIn converts a final epoch back into the number of complete calls it
+// brackets. Callers assert that count so a dropped enter or leave — the one
+// mutation that could make the predicate accept an observation taken outside
+// any call — fails instead of silently weakening the proof.
+func enterWriterCall(epoch *atomic.Int64) { epoch.Add(1) }
+func leaveWriterCall(epoch *atomic.Int64) { epoch.Add(1) }
+
+func requireWriterCallsBracketed(t *testing.T, epoch *atomic.Int64, calls int) {
+	t.Helper()
+	if got := epoch.Load(); got != int64(2*calls) {
+		t.Fatalf("writer epoch is %d after %d calls, want %d: every call must increment exactly twice (one enter, one leave)",
+			got, calls, 2*calls)
+	}
+}
+
+// TestInsideOneWriterCallRejectsSplitObservations is the bounded falsifier for
+// the overlap predicate the two race tests rely on. It pins that an observation
+// split across two adjacent writer calls — the ABA case an in-flight boolean
+// would wrongly accept — cannot satisfy it.
+func TestInsideOneWriterCallRejectsSplitObservations(t *testing.T) {
+	tests := []struct {
+		name          string
+		before, after int64
+		want          bool
+	}{
+		{"wholly inside the first call", 1, 1, true},
+		{"wholly inside a later call", 7, 7, true},
+		{"split across two adjacent calls (the ABA case)", 1, 3, false},
+		{"split across several calls", 1, 5, false},
+		{"writer left during the operation", 1, 2, false},
+		{"writer entered during the operation", 2, 3, false},
+		{"no call in flight at either sample", 2, 2, false},
+		{"writer never entered", 0, 0, false},
+		{"epoch moved backwards (must never be accepted)", 3, 1, false},
+		// Unreachable in practice (the bounded loops move the epoch a few
+		// thousand times, int64 wrap needs ~9e18), but it pins that the
+		// parity test is sign-safe. Parity alternation survives the wrap —
+		// max int64 is odd and +1 lands on an even min int64 — so an odd
+		// negative epoch still means a call is in flight, and rejecting it
+		// would silently stop counting overlaps. This row is what
+		// distinguishes `before&1 == 1` from `before%2 == 1`, since Go's %
+		// takes the sign of the dividend.
+		{"in flight after an int64 wrap", -3, -3, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := insideOneWriterCall(tt.before, tt.after); got != tt.want {
+				t.Fatalf("insideOneWriterCall(%d, %d) = %v, want %v", tt.before, tt.after, got, tt.want)
+			}
+		})
+	}
+
+	// A correctly bracketed call moves the epoch by exactly two, so the values
+	// the table calls "wholly inside" are the ones the harness actually
+	// produces, and the ABA pair (1, 3) is what a leave followed by an enter
+	// looks like from the observer's side.
+	var epoch atomic.Int64
+	enterWriterCall(&epoch)
+	inFirst := epoch.Load()
+	leaveWriterCall(&epoch)
+	enterWriterCall(&epoch)
+	inSecond := epoch.Load()
+	leaveWriterCall(&epoch)
+	requireWriterCallsBracketed(t, &epoch, 2)
+	if !insideOneWriterCall(inFirst, inFirst) || !insideOneWriterCall(inSecond, inSecond) {
+		t.Fatalf("an observation inside one bracketed call must be accepted (epochs %d, %d)", inFirst, inSecond)
+	}
+	if insideOneWriterCall(inFirst, inSecond) {
+		t.Fatalf("an observation split across two adjacent bracketed calls must be rejected (epochs %d -> %d)", inFirst, inSecond)
+	}
+}
+
 // newResidenceWatcher builds a rotation fixture of n online candidates with
 // watch streaks off and a real WatchTimeStore, so persisted deficit is the only
 // thing ranking the base pair. Tests drive reconcileLeastWatchedPair directly
@@ -683,7 +777,7 @@ func TestFairRotationResidenceConcurrentDiagnosticsReader(t *testing.T) {
 
 	const readers = 4
 	var wg, ready sync.WaitGroup
-	var writing atomic.Bool
+	var writerEpoch atomic.Int64
 	var overlapped atomic.Int64
 	stop := make(chan struct{})
 
@@ -708,15 +802,15 @@ func TestFairRotationResidenceConcurrentDiagnosticsReader(t *testing.T) {
 				case <-stop:
 					return
 				default:
-					// Record the read only when a selection tick was in flight
-					// both BEFORE and AFTER it, which places the whole read
-					// inside that tick. A flag that merely spans the loop, or
-					// one sampled on only one side of the read, would certify
-					// reads that never overlapped a tick at all.
-					during := writing.Load()
+					// Record the read only when the SAME odd writer epoch is
+					// observed on both sides of it, which places the whole read
+					// inside one exact selection tick. Sampling an in-flight
+					// boolean instead would accept a read split across two
+					// adjacent ticks (see insideOneWriterCall).
+					before := writerEpoch.Load()
 					_ = w.GetDebugState()
 					_ = w.BrokerSnapshot()
-					if !reported && during && writing.Load() {
+					if !reported && insideOneWriterCall(before, writerEpoch.Load()) {
 						reported = true
 						overlapped.Add(1)
 					}
@@ -727,25 +821,30 @@ func TestFairRotationResidenceConcurrentDiagnosticsReader(t *testing.T) {
 
 	ready.Wait()
 
-	// writing is raised only for the duration of the selection tick itself, so
-	// it means "a tick is executing", not "the loop is somewhere in progress".
-	// Keep ticking past the nominal count until every reader has recorded an
+	// The epoch is odd only for the duration of the selection tick itself, and
+	// every tick gets its own value, so "same odd epoch on both sides" means
+	// one exact tick rather than "the loop is somewhere in progress". Keep
+	// ticking past the nominal count until every reader has recorded an
 	// overlapping read, bounded so a starved run fails loudly instead of
 	// hanging. Nothing blocks inside the window, so this cannot deadlock.
 	const nominalTicks, maxTicks = 500, 20000
 	ticks := 0
 	for ; ticks < maxTicks && (ticks < nominalTicks || overlapped.Load() < readers); ticks++ {
 		openFairRotationResidence(w)
-		writing.Store(true)
+		enterWriterCall(&writerEpoch)
 		runSelectionTick(w, online)
-		writing.Store(false)
+		leaveWriterCall(&writerEpoch)
 	}
 
 	close(stop)
 	wg.Wait()
 
+	// Placed after the join, so a failure here cannot strand a spinning reader
+	// on the fixture's closed database handle.
+	requireWriterCallsBracketed(t, &writerEpoch, ticks)
+
 	if got := overlapped.Load(); got != readers {
-		t.Fatalf("only %d of %d readers took a diagnostics read wholly inside a selection tick after %d ticks",
+		t.Fatalf("only %d of %d readers took a diagnostics read wholly inside one selection tick after %d ticks",
 			got, readers, ticks)
 	}
 
