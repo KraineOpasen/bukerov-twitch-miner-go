@@ -37,6 +37,7 @@ type milestoneRoundTripper struct {
 	rewardBy     map[string]int
 	contextBy    map[string]int
 	contextOrder []string
+	opLogins     []string
 
 	// onRewardList runs (outside the lock) after each RewardList request is
 	// recorded. It is the deterministic seam a cancellation test uses to stop
@@ -69,11 +70,11 @@ func (rt *milestoneRoundTripper) counts() (ops []string, reward map[string]int) 
 	return ops, reward
 }
 
-// businessTargets returns the logins the business pass read, in wire order.
-func (rt *milestoneRoundTripper) businessTargets() []string {
+// opLoginsSnapshot returns the per-op login attribution, aligned with ops().
+func (rt *milestoneRoundTripper) opLoginsSnapshot() []string {
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
-	return append([]string(nil), rt.contextOrder...)
+	return append([]string(nil), rt.opLogins...)
 }
 
 const defaultRewardListBody = `{"data":{"channel":{"id":"12345","self":{"watchStreakMilestone":{` +
@@ -96,14 +97,16 @@ func (rt *milestoneRoundTripper) RoundTrip(req *http.Request) (*http.Response, e
 
 	rt.mu.Lock()
 	rt.ops = append(rt.ops, operation.Name)
-	if operation.Name == "ChannelPointsContext" {
-		if login, ok := operation.Variables["channelLogin"].(string); ok {
-			if rt.contextBy == nil {
-				rt.contextBy = map[string]int{}
-			}
-			rt.contextBy[login]++
-			rt.contextOrder = append(rt.contextOrder, login)
+	// The login this op targeted, positionally aligned with ops, so a prefix of
+	// ops can be attributed exactly. Empty when the op carries no login.
+	login, _ := operation.Variables["channelLogin"].(string)
+	rt.opLogins = append(rt.opLogins, login)
+	if operation.Name == "ChannelPointsContext" && login != "" {
+		if rt.contextBy == nil {
+			rt.contextBy = map[string]int{}
 		}
+		rt.contextBy[login]++
+		rt.contextOrder = append(rt.contextOrder, login)
 	}
 	rewardCount := 0
 	if operation.Name == "RewardList" {
@@ -220,6 +223,12 @@ func recordLines(logs string, record string) []string {
 		}
 	}
 	return out
+}
+
+// hasAttr reports whether a line carries the attribute at all, which attrValue
+// cannot distinguish from a present-but-empty value.
+func hasAttr(line, key string) bool {
+	return strings.Contains(line, " "+key+"=")
 }
 
 // attrValue extracts a slog text-handler attribute value from one line.
@@ -361,16 +370,21 @@ func TestObservationRunsAfterTheBusinessPassOfTheSameCycle(t *testing.T) {
 	if claims == 0 {
 		t.Fatalf("the business pass performed no claim, so the fixture cannot prove non-interleaving; ops=%v", ops)
 	}
+	// Attribute the prefix EXACTLY: only ops that actually precede the first
+	// observation count. Walking a separate per-login list and taking its first
+	// len(prefix) entries would count context reads from a LATER cycle and pass
+	// on an implementation that interleaved mid-roster.
+	opLogins := rt.opLoginsSnapshot()
 	covered := map[string]bool{}
-	for i, login := range rt.businessTargets() {
-		if i >= len(prefix) {
-			break
+	for i := 0; i < firstReward && i < len(opLogins); i++ {
+		if opLogins[i] != "" {
+			covered[opLogins[i]] = true
 		}
-		covered[login] = true
 	}
 	for _, login := range logins {
 		if !covered[login] {
-			t.Errorf("the observation ran before the business pass reached %s; ops=%v", login, ops)
+			t.Errorf("the first observation ran before the business pass reached %s; ops=%v logins=%v",
+				login, ops, opLogins[:firstReward])
 		}
 	}
 	// The observation block that follows is contiguous: no business operation
@@ -503,9 +517,16 @@ func TestObservationRecordCarriesBoundedProvenance(t *testing.T) {
 	}
 	line := lines[0]
 
+	// failureClass must be PRESENT and empty, not absent: attrValue cannot tell
+	// those apart on its own.
+	if !hasAttr(line, "failureClass") {
+		t.Error("record does not emit failureClass at all")
+	}
 	for key, want := range map[string]string{
 		"outcome":                      "OBSERVED",
 		"failureClass":                 "",
+		"observedChannelId":            "12345",
+		"expiresAt":                    "2026-09-10T00:00:00Z",
 		"streamer":                     logins[0],
 		"channelId":                    streamers[logins[0]].ChannelID,
 		"selfMilestonePresence":        "<VALID>",
@@ -738,10 +759,41 @@ func TestTruncateForLogBoundsTwitchStrings(t *testing.T) {
 		}
 	})
 
+	t.Run("non-printable runes are replaced, so rendered size tracks bounded size", func(t *testing.T) {
+		// slog's TextHandler escapes control characters on render, so a raw
+		// byte can become four rendered ones. Bounding the RAW length alone
+		// would let a control-character response render several times larger
+		// than the size this feature publishes.
+		control := strings.Repeat("\x00\x07\x1b", milestoneLogStringCap)
+		got := truncateForLog(control)
+		if strings.ContainsAny(got, "\x00\x07\x1b") {
+			t.Errorf("control characters survived sanitization: %q", got)
+		}
+		if !utf8.ValidString(got) {
+			t.Error("sanitized value is not valid UTF-8")
+		}
+		// A newline or terminal escape must never reach an operator console
+		// through a Twitch-controlled value.
+		if strings.ContainsAny(truncateForLog("a\nb\rc\x1b[31m"), "\n\r\x1b") {
+			t.Error("a newline or terminal escape survived sanitization")
+		}
+		// Ordinary text, including non-ASCII, is untouched.
+		for _, ok := range []string{"m-1", "ACTIVE", "2026-09-10T00:00:00Z", "ünïcodé ✓"} {
+			if truncateForLog(ok) != ok {
+				t.Errorf("sanitization altered printable text %q -> %q", ok, truncateForLog(ok))
+			}
+		}
+	})
+
 	t.Run("a hostile response cannot make the record unbounded", func(t *testing.T) {
 		logs := captureLogs(t)
 		logins := milestoneLogins(t, 1)
-		hostile := strings.Repeat("Z", 200000)
+		// Control characters, not benign letters: this is what would blow the
+		// rendered size past the bound if only raw bytes were capped. They are
+		// JSON-ESCAPED here because a raw control byte inside a JSON string is
+		// invalid JSON — the body has to decode to control characters, not
+		// contain them literally.
+		hostile := strings.Repeat(`\u001b\u0000Z`, 70000)
 		body := `{"data":{"channel":{"id":"` + hostile + `","self":{"watchStreakMilestone":{` +
 			`"state":"` + hostile + `","missedStreams":[{"broadcastIdentifiers":[{"id":"` + hostile + `"}]}],` +
 			`"watchStreakMilestone":{"id":"` + hostile + `","achievementTimestamp":"` + hostile + `"}}}}}}`
@@ -756,8 +808,8 @@ func TestTruncateForLogBoundsTwitchStrings(t *testing.T) {
 		if len(lines[0]) > 4096 {
 			t.Fatalf("a hostile response produced a %d-byte record; it must stay bounded", len(lines[0]))
 		}
-		if strings.Contains(lines[0], strings.Repeat("Z", milestoneLogStringCap+1)) {
-			t.Error("an unbounded Twitch string reached the record")
+		if strings.ContainsAny(lines[0], "\x00\x1b") {
+			t.Error("raw control characters from the response reached the record")
 		}
 		if !strings.Contains(lines[0], "...(truncated)") {
 			t.Error("the record does not mark the values it cut")

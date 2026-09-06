@@ -50,6 +50,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/models"
@@ -447,11 +448,25 @@ func presenceToken(p twitch.MilestoneFieldPresence) string {
 	return "<" + string(p) + ">"
 }
 
-// truncateForLog bounds one observed string. It cuts on a RUNE boundary — a
-// byte-offset cut can split a multi-byte UTF-8 sequence and put an invalid rune
-// into the operator's log — and marks the truncation so a reader never mistakes
-// a cut value for a complete one.
+// truncateForLog makes one observed Twitch string safe and bounded for a log
+// record.
+//
+// It does two things, in this order, and both matter:
+//
+// It first replaces every non-printable rune (and every invalid byte) with a
+// single U+FFFD. slog's TextHandler escapes control characters on render, so a
+// raw byte can become four rendered ones — bounding the RAW length alone would
+// let a control-character-laden response render several times larger than the
+// measured record size this feature publishes. Replacing first makes the
+// rendered size track the bounded size. It also removes any question of a
+// newline or terminal escape reaching an operator's console through a value
+// Twitch controls.
+//
+// It then bounds the result, cutting on a RUNE boundary — a byte-offset cut can
+// split a multi-byte UTF-8 sequence — and marks the truncation so a reader
+// never mistakes a cut value for a complete one.
 func truncateForLog(v string) string {
+	v = sanitizeForLog(v)
 	if len(v) <= milestoneLogStringCap {
 		return v
 	}
@@ -460,6 +475,32 @@ func truncateForLog(v string) string {
 		cut--
 	}
 	return v[:cut] + "...(truncated)"
+}
+
+// sanitizeForLog replaces non-printable and invalid runes with U+FFFD, leaving
+// ordinary text untouched. A string that is already printable is returned as-is
+// so the common path allocates nothing.
+func sanitizeForLog(v string) string {
+	safe := true
+	for _, r := range v {
+		if r == utf8.RuneError || !unicode.IsPrint(r) {
+			safe = false
+			break
+		}
+	}
+	if safe {
+		return v
+	}
+	var b strings.Builder
+	b.Grow(len(v))
+	for _, r := range v {
+		if r == utf8.RuneError || !unicode.IsPrint(r) {
+			b.WriteRune('\uFFFD')
+			continue
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
 }
 
 // milestonePresenceOrder is the stable order presence tallies are rendered in,

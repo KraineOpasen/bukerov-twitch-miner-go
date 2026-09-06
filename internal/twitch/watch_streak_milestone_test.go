@@ -350,6 +350,22 @@ func TestParseWatchStreakMilestoneMissedStreams(t *testing.T) {
 			wantMalformed: 1,
 		},
 		{
+			// A null ELEMENT is a null, not a shape error — the same rule the
+			// nested broadcastIdentifiers loop applies. It must not make the
+			// container MALFORMED.
+			name:         "null element is not a shape error",
+			value:        []interface{}{nil, map[string]interface{}{}},
+			wantPresence: MilestoneFieldValid,
+			wantCount:    2,
+		},
+		{
+			name:          "null element alongside a malformed one",
+			value:         []interface{}{nil, "nope"},
+			wantPresence:  MilestoneFieldMalformed,
+			wantCount:     2,
+			wantMalformed: 1,
+		},
+		{
 			name: "valid",
 			value: []interface{}{map[string]interface{}{
 				"broadcastIdentifiers": []interface{}{map[string]interface{}{"id": "x"}},
@@ -1097,11 +1113,12 @@ func TestObserveWatchStreakMilestoneExpiredDeadlineIsSkippedNotSent(t *testing.T
 // reaches a record as a bounded class, never as raw error text.
 func TestClassifyMilestoneRequestErrorVocabularyIsClosed(t *testing.T) {
 	allowed := map[MilestoneFailureClass]bool{
-		MilestoneFailureCancelled:     true,
-		MilestoneFailureDeadline:      true,
-		MilestoneFailureQueryNotFound: true,
-		MilestoneFailureUnauthorized:  true,
-		MilestoneFailureTransport:     true,
+		MilestoneFailureCancelled:        true,
+		MilestoneFailureDeadline:         true,
+		MilestoneFailureQueryNotFound:    true,
+		MilestoneFailureUnauthorized:     true,
+		MilestoneFailureTransport:        true,
+		MilestoneFailureTransportTimeout: true,
 	}
 	secret := "OAuth super-secret-token Authorization: Bearer abc"
 	tests := []error{
@@ -1112,8 +1129,9 @@ func TestClassifyMilestoneRequestErrorVocabularyIsClosed(t *testing.T) {
 		errors.New(secret),
 		fmt.Errorf("request failed: %s", secret),
 	}
+	// A LIVE owner: nothing here may be reported as a cancellation.
 	for _, err := range tests {
-		outcome, class := classifyMilestoneRequestError(err)
+		outcome, class := classifyMilestoneRequestError(context.Background(), err)
 		if !allowed[class] {
 			t.Errorf("error %q produced class %q, outside the closed vocabulary", err, class)
 		}
@@ -1123,6 +1141,63 @@ func TestClassifyMilestoneRequestErrorVocabularyIsClosed(t *testing.T) {
 		if outcome == MilestoneObserved {
 			t.Errorf("error %q classified as OBSERVED", err)
 		}
+	}
+}
+
+// TestClassifyMilestoneRequestErrorSeparatesShutdownFromStall pins the
+// distinction the error alone cannot make.
+//
+// net/http's Client.Timeout produces an error satisfying
+// errors.Is(err, context.DeadlineExceeded) even when the owner's context is
+// perfectly healthy. Classifying on the error alone would report a stalled
+// Twitch as CANCELLED — whose own definition is "the owning context was
+// cancelled" — turning a remote fault into an apparent local shutdown.
+func TestClassifyMilestoneRequestErrorSeparatesShutdownFromStall(t *testing.T) {
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	expired, stop := context.WithDeadline(context.Background(), time.Now().Add(-time.Hour))
+	defer stop()
+
+	tests := []struct {
+		name        string
+		ctx         context.Context
+		err         error
+		wantOutcome WatchStreakMilestoneOutcome
+		wantClass   MilestoneFailureClass
+	}{
+		{
+			"owner cancelled", cancelled, context.Canceled,
+			MilestoneCancelled, MilestoneFailureCancelled,
+		},
+		{
+			"owner deadline expired", expired, context.DeadlineExceeded,
+			MilestoneCancelled, MilestoneFailureDeadline,
+		},
+		{
+			// The load-bearing case: a live owner and an http.Client timeout.
+			"http client timeout with a live owner", context.Background(), context.DeadlineExceeded,
+			MilestoneUnavailable, MilestoneFailureTransportTimeout,
+		},
+		{
+			"inner cancellation with a live owner", context.Background(), context.Canceled,
+			MilestoneUnavailable, MilestoneFailureTransport,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			outcome, class := classifyMilestoneRequestError(tc.ctx, tc.err)
+			if outcome != tc.wantOutcome || class != tc.wantClass {
+				t.Fatalf("classified as %q/%q, want %q/%q", outcome, class, tc.wantOutcome, tc.wantClass)
+			}
+		})
+	}
+
+	// And the real wrapped shape net/http actually produces.
+	wrapped := fmt.Errorf(`request failed: Get "http://x": %w (Client.Timeout exceeded while awaiting headers)`,
+		context.DeadlineExceeded)
+	if outcome, class := classifyMilestoneRequestError(context.Background(), wrapped); outcome != MilestoneUnavailable ||
+		class != MilestoneFailureTransportTimeout {
+		t.Fatalf("a wrapped client timeout classified as %q/%q, want UNAVAILABLE/TRANSPORT_TIMEOUT", outcome, class)
 	}
 }
 

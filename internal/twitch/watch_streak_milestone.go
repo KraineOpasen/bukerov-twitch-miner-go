@@ -18,8 +18,8 @@ package twitch
 // state, milestone IDs, ...) are OBSERVED TWITCH FACTS, and this package
 // deliberately does not interpret them.
 //
-// That restraint is now the ONLY thing left unknown here, and the distinction
-// is sharp. Twitch's Viewer Channel Point Guide documents the reward ladder
+// Two things remain unknown here, and the distinction between them and the
+// ladder is sharp. Twitch's Viewer Channel Point Guide documents the reward ladder
 // itself — streak count 2 -> +300, 3 -> +350, 4 -> +400, 5 or more -> +450 —
 // so the ladder is a current official fact, recorded with its source and
 // retrieval date in internal/miner/watch_streak_milestone_observation.go.
@@ -29,6 +29,9 @@ package twitch
 // that value, watchStreakThreshold or watchStreakCopoBonus is that field: they
 // keep their raw observed meanings until source or runtime evidence proves
 // otherwise. Knowing the ladder is not knowing where the rung number lives.
+//
+// The second unknown is the RewardList persisted query's live acceptance, which
+// stays PENDING runtime evidence (see the provenance note below).
 //
 // Provenance: the RewardList wire facts (operation name, persisted-query
 // version and hash, and the two variable names) are clean-room protocol
@@ -209,15 +212,22 @@ const (
 type MilestoneFailureClass string
 
 const (
-	MilestoneFailureNone            MilestoneFailureClass = ""
-	MilestoneFailureCancelled       MilestoneFailureClass = "CANCELLED"
-	MilestoneFailureDeadline        MilestoneFailureClass = "DEADLINE_EXCEEDED"
-	MilestoneFailureQueryNotFound   MilestoneFailureClass = "PERSISTED_QUERY_NOT_FOUND"
-	MilestoneFailureUnauthorized    MilestoneFailureClass = "UNAUTHORIZED"
-	MilestoneFailureTransport       MilestoneFailureClass = "TRANSPORT"
-	MilestoneFailureGraphQLTopLevel MilestoneFailureClass = "GRAPHQL_TOP_LEVEL_ERRORS"
-	MilestoneFailureNoChannelID     MilestoneFailureClass = "NO_CHANNEL_ID"
-	MilestoneFailureContextDone     MilestoneFailureClass = "CONTEXT_ALREADY_DONE"
+	MilestoneFailureNone      MilestoneFailureClass = ""
+	MilestoneFailureCancelled MilestoneFailureClass = "CANCELLED"
+	MilestoneFailureDeadline  MilestoneFailureClass = "DEADLINE_EXCEEDED"
+	// MilestoneFailureTransportTimeout: the HTTP client's OWN timeout expired
+	// while the owner's context was still healthy. net/http reports that as an
+	// error satisfying errors.Is(err, context.DeadlineExceeded), so without
+	// consulting the owner it is indistinguishable from an operator shutdown —
+	// and a stalled Twitch would be recorded as "we cancelled", which is the
+	// opposite of what happened.
+	MilestoneFailureTransportTimeout MilestoneFailureClass = "TRANSPORT_TIMEOUT"
+	MilestoneFailureQueryNotFound    MilestoneFailureClass = "PERSISTED_QUERY_NOT_FOUND"
+	MilestoneFailureUnauthorized     MilestoneFailureClass = "UNAUTHORIZED"
+	MilestoneFailureTransport        MilestoneFailureClass = "TRANSPORT"
+	MilestoneFailureGraphQLTopLevel  MilestoneFailureClass = "GRAPHQL_TOP_LEVEL_ERRORS"
+	MilestoneFailureNoChannelID      MilestoneFailureClass = "NO_CHANNEL_ID"
+	MilestoneFailureContextDone      MilestoneFailureClass = "CONTEXT_ALREADY_DONE"
 	// MilestoneFailureNoDataNode: the response carried no top-level GraphQL
 	// errors AND no data object. A GraphQL data response always has one, so
 	// this is an edge/proxy rejection body (a 4xx or a gateway page with a JSON
@@ -352,7 +362,7 @@ func (c *TwitchClient) ObserveWatchStreakMilestone(ctx context.Context, channelI
 	obs.RequestEnd = time.Now()
 
 	if err != nil {
-		obs.Outcome, obs.FailureClass = classifyMilestoneRequestError(err)
+		obs.Outcome, obs.FailureClass = classifyMilestoneRequestError(ctx, err)
 		return obs
 	}
 
@@ -384,12 +394,27 @@ func (c *TwitchClient) ObserveWatchStreakMilestone(ctx context.Context, channelI
 // classifyMilestoneRequestError maps a transport error to the bounded outcome
 // and failure-class vocabulary. The error's own text is never retained: only
 // the class survives, so no unvetted string can reach a log record.
-func classifyMilestoneRequestError(err error) (WatchStreakMilestoneOutcome, MilestoneFailureClass) {
+//
+// ctx is consulted, not just err, because net/http's Client.Timeout produces an
+// error that satisfies errors.Is(err, context.DeadlineExceeded) even when the
+// owner's context is perfectly healthy. Classifying on the error alone would
+// report a stalled Twitch as CANCELLED — an outcome whose own definition is
+// "the owning context was cancelled" — and quietly turn a remote fault into an
+// apparent local shutdown.
+func classifyMilestoneRequestError(ctx context.Context, err error) (WatchStreakMilestoneOutcome, MilestoneFailureClass) {
+	ownerDone := ctx != nil && ctx.Err() != nil
 	switch {
-	case errors.Is(err, context.Canceled):
+	case errors.Is(err, context.Canceled) && ownerDone:
 		return MilestoneCancelled, MilestoneFailureCancelled
-	case errors.Is(err, context.DeadlineExceeded):
+	case errors.Is(err, context.DeadlineExceeded) && ownerDone:
 		return MilestoneCancelled, MilestoneFailureDeadline
+	case errors.Is(err, context.DeadlineExceeded):
+		// The owner is alive: this is the HTTP client's own timeout.
+		return MilestoneUnavailable, MilestoneFailureTransportTimeout
+	case errors.Is(err, context.Canceled):
+		// Cancellation with a live owner: an inner scope gave up, which is a
+		// transport fault from this observation's point of view.
+		return MilestoneUnavailable, MilestoneFailureTransport
 	case errors.Is(err, ErrPersistedQueryNotFound):
 		return MilestoneUnsupported, MilestoneFailureQueryNotFound
 	case errors.Is(err, ErrUnauthorized):
@@ -464,6 +489,16 @@ func parseMilestoneMissedStreams(parent map[string]interface{}) MilestoneMissedS
 	}
 	out.Entries = make([]MilestoneMissedStream, 0, len(list))
 	for _, element := range list {
+		if element == nil {
+			// An explicitly null ELEMENT is a null, not a shape error — the
+			// same rule parseMilestoneBroadcastIdentifiers applies one level
+			// down. Counting it as malformed would collapse the distinction
+			// this parser preserves everywhere else.
+			out.Entries = append(out.Entries, MilestoneMissedStream{
+				BroadcastIdentifiers: MilestoneBroadcastIdentifiers{Presence: MilestoneFieldNull},
+			})
+			continue
+		}
 		entry, ok := element.(map[string]interface{})
 		if !ok || entry == nil {
 			out.MalformedCount++
