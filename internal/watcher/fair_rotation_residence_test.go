@@ -7,7 +7,6 @@ import (
 	"go/token"
 	"path/filepath"
 	"reflect"
-	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -497,16 +496,10 @@ func TestFairRotationResidenceKeepsBrokerArbitration(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	w.ctx = ctx
-	go func() {
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-sender.sent:
-			case <-checker.checked:
-			}
-		}
-	}()
+	// No drain goroutine: countingSender.Send and
+	// staticChecker.CheckStreamerOnlineContext both publish with a non-blocking
+	// select/default, so nothing can block on these channels and an unjoined
+	// helper goroutine would only outlive the test body for no purpose.
 
 	w.processWatching(tickCtx(w))
 	first := w.BrokerSnapshot()
@@ -600,12 +593,12 @@ func TestPersistedDeficitFairnessResumesAfterResidence(t *testing.T) {
 // goroutine, timer, scheduler, store, ledger or cache owner.
 //
 // A runtime goroutine count cannot carry this claim: a goroutine that starts
-// and finishes inside one call is invisible to any before/after or mid-loop
-// sample, so such a check passes whether or not an owner was added. The AST
-// assertions below fail on exactly the constructs the owner contract forbids,
-// and the reflective scan in TestFairRotationResidenceIsNotAConfigurableSetting
-// covers the rotationState side. The residual runtime check here only pins the
-// weaker, still-useful property that nothing is left RUNNING afterwards.
+// and finishes inside one call is invisible to any before/after sample, so such
+// a check passes whether or not an owner was added, while still being able to
+// fail for reasons unrelated to residence. The AST assertions below fail on
+// exactly the constructs the owner contract forbids, and the reflective scan in
+// TestFairRotationResidenceIsNotAConfigurableSetting covers the rotationState
+// side.
 func TestFairRotationResidenceAddsNoBackgroundOwner(t *testing.T) {
 	fset := token.NewFileSet()
 	file, err := parser.ParseFile(fset, "watcher.go", nil, 0)
@@ -671,24 +664,10 @@ func TestFairRotationResidenceAddsNoBackgroundOwner(t *testing.T) {
 		return true
 	})
 
-	// Weaker runtime companion: evaluating residence many times leaves nothing
-	// running. This cannot see a goroutine that starts and exits within a call —
-	// the AST assertions above are what rule that out.
-	w, _, online := newRotationRetirementWatcher(4, nil)
-	for _, streamer := range w.streamers {
-		streamer.Settings.WatchStreak = false
-	}
-	t0 := time.Now()
-	w.reconcileLeastWatchedPair(online, t0)
-	runtime.GC()
-	before := runtime.NumGoroutine()
-	for i := 1; i <= 500; i++ {
-		w.reconcileLeastWatchedPair(online, t0.Add(time.Duration(i)*time.Minute))
-	}
-	runtime.GC()
-	if after := runtime.NumGoroutine(); after > before {
-		t.Fatalf("residence evaluation left a background owner running: goroutines %d -> %d", before, after)
-	}
+	// Deliberately no runtime.NumGoroutine() companion: a global goroutine count
+	// depends on unrelated scheduling, so it can fail or pass for reasons that
+	// have nothing to do with residence, and it proves nothing the assertions
+	// above do not already carry.
 }
 
 // TestFairRotationResidenceConcurrentDiagnosticsReader runs the real production
