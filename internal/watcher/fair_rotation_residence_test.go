@@ -2,11 +2,15 @@ package watcher
 
 import (
 	"context"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"path/filepath"
 	"reflect"
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -591,32 +595,99 @@ func TestPersistedDeficitFairnessResumesAfterResidence(t *testing.T) {
 	}
 }
 
-// TestFairRotationResidenceAddsNoBackgroundOwner checks the rule is derived on
-// the broker tick the loop already runs: repeatedly evaluating residence starts
-// no goroutine (which is what a timer, scheduler or background store owner
-// would need). It is a necessary condition, not a proof of absence — the
-// structural claim is carried by fairRotationResidence being a plain constant
-// read from the loop, which TestFairRotationResidenceIsNotAConfigurableSetting
-// pins.
+// TestFairRotationResidenceAddsNoBackgroundOwner proves structurally — by
+// reading the source of the decision path itself — that residence introduces no
+// goroutine, timer, scheduler, store, ledger or cache owner.
+//
+// A runtime goroutine count cannot carry this claim: a goroutine that starts
+// and finishes inside one call is invisible to any before/after or mid-loop
+// sample, so such a check passes whether or not an owner was added. The AST
+// assertions below fail on exactly the constructs the owner contract forbids,
+// and the reflective scan in TestFairRotationResidenceIsNotAConfigurableSetting
+// covers the rotationState side. The residual runtime check here only pins the
+// weaker, still-useful property that nothing is left RUNNING afterwards.
 func TestFairRotationResidenceAddsNoBackgroundOwner(t *testing.T) {
-	// No store, no context, no loop: the reconciliation path and nothing else.
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "watcher.go", nil, 0)
+	if err != nil {
+		t.Fatalf("parse watcher.go: %v", err)
+	}
+
+	// No package-level owner may back residence: the anchor lives in the
+	// loop-owned rotationState and nowhere else.
+	for _, decl := range file.Decls {
+		gen, ok := decl.(*ast.GenDecl)
+		if !ok || gen.Tok != token.VAR {
+			continue
+		}
+		for _, spec := range gen.Specs {
+			value, ok := spec.(*ast.ValueSpec)
+			if !ok {
+				continue
+			}
+			for _, name := range value.Names {
+				lowered := strings.ToLower(name.Name)
+				if strings.Contains(lowered, "residence") || strings.Contains(lowered, "resident") {
+					t.Fatalf("residence gained a package-level owner: var %s at %s", name.Name, fset.Position(name.Pos()))
+				}
+			}
+		}
+	}
+
+	// The decision path itself must start nothing and schedule nothing.
+	var decision *ast.FuncDecl
+	for _, decl := range file.Decls {
+		fn, ok := decl.(*ast.FuncDecl)
+		if ok && fn.Name.Name == "reconcileLeastWatchedPair" {
+			decision = fn
+			break
+		}
+	}
+	if decision == nil {
+		t.Fatal("reconcileLeastWatchedPair not found: this test no longer guards the residence decision path")
+	}
+	banned := map[string]bool{
+		"time.NewTimer": true, "time.NewTicker": true, "time.AfterFunc": true,
+		"time.Tick": true, "time.Sleep": true,
+		"context.WithTimeout": true, "context.WithDeadline": true,
+	}
+	ast.Inspect(decision.Body, func(n ast.Node) bool {
+		switch node := n.(type) {
+		case *ast.GoStmt:
+			t.Fatalf("residence decision path spawns a goroutine at %s", fset.Position(node.Pos()))
+		case *ast.CallExpr:
+			sel, ok := node.Fun.(*ast.SelectorExpr)
+			if !ok {
+				return true
+			}
+			pkg, ok := sel.X.(*ast.Ident)
+			if !ok {
+				return true
+			}
+			if name := pkg.Name + "." + sel.Sel.Name; banned[name] {
+				t.Fatalf("residence decision path schedules work via %s at %s", name, fset.Position(node.Pos()))
+			}
+		}
+		return true
+	})
+
+	// Weaker runtime companion: evaluating residence many times leaves nothing
+	// running. This cannot see a goroutine that starts and exits within a call —
+	// the AST assertions above are what rule that out.
 	w, _, online := newRotationRetirementWatcher(4, nil)
 	for _, streamer := range w.streamers {
 		streamer.Settings.WatchStreak = false
 	}
 	t0 := time.Now()
-
 	w.reconcileLeastWatchedPair(online, t0)
 	runtime.GC()
 	before := runtime.NumGoroutine()
-
 	for i := 1; i <= 500; i++ {
 		w.reconcileLeastWatchedPair(online, t0.Add(time.Duration(i)*time.Minute))
 	}
-
 	runtime.GC()
 	if after := runtime.NumGoroutine(); after > before {
-		t.Fatalf("residence evaluation started a background owner: goroutines %d -> %d", before, after)
+		t.Fatalf("residence evaluation left a background owner running: goroutines %d -> %d", before, after)
 	}
 }
 
@@ -627,12 +698,27 @@ func TestFairRotationResidenceAddsNoBackgroundOwner(t *testing.T) {
 func TestFairRotationResidenceConcurrentDiagnosticsReader(t *testing.T) {
 	w, _, online, _ := newResidenceWatcher(t, 4)
 
-	var wg sync.WaitGroup
+	const readers = 4
+	var wg, ready sync.WaitGroup
+	var barrierReads, loopReads atomic.Int64
 	stop := make(chan struct{})
-	for reader := 0; reader < 4; reader++ {
+
+	ready.Add(readers)
+	for reader := 0; reader < readers; reader++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			// Read once and report ready BEFORE the writer loop starts, so the
+			// concurrent window is entered deterministically instead of being
+			// left to the scheduler. Without this barrier every reader could
+			// first be scheduled after close(stop), take the return arm on its
+			// first select, and let the test pass having exercised no
+			// concurrent access at all.
+			_ = w.GetDebugState()
+			_ = w.BrokerSnapshot()
+			barrierReads.Add(1)
+			ready.Done()
+
 			for {
 				select {
 				case <-stop:
@@ -640,9 +726,15 @@ func TestFairRotationResidenceConcurrentDiagnosticsReader(t *testing.T) {
 				default:
 					_ = w.GetDebugState()
 					_ = w.BrokerSnapshot()
+					loopReads.Add(1)
 				}
 			}
 		}()
+	}
+
+	ready.Wait()
+	if got := barrierReads.Load(); got != readers {
+		t.Fatalf("start barrier observed %d reads, want exactly one per reader (%d)", got, readers)
 	}
 
 	for tick := 0; tick < 500; tick++ {
@@ -652,6 +744,9 @@ func TestFairRotationResidenceConcurrentDiagnosticsReader(t *testing.T) {
 	close(stop)
 	wg.Wait()
 
+	if loopReads.Load() == 0 {
+		t.Fatal("no diagnostics read overlapped the writer loop: the concurrent window was never exercised")
+	}
 	if !w.rotation.hasPair {
 		t.Fatal("concurrent diagnostics reads disturbed the loop-owned rotation state")
 	}
