@@ -508,8 +508,8 @@ func TestObservationRecordCarriesBoundedProvenance(t *testing.T) {
 		"failureClass":                 "",
 		"streamer":                     logins[0],
 		"channelId":                    streamers[logins[0]].ChannelID,
-		"selfMilestonePresence":        "VALID",
-		"milestoneNodePresence":        "VALID",
+		"selfMilestonePresence":        "<VALID>",
+		"milestoneNodePresence":        "<VALID>",
 		"milestoneId":                  "m-1",
 		"milestoneValue":               "4",
 		"watchStreakThreshold":         "3",
@@ -517,7 +517,7 @@ func TestObservationRecordCarriesBoundedProvenance(t *testing.T) {
 		"state":                        "ACTIVE",
 		"shareStatus":                  "UNSHARED",
 		"achievementTimestamp":         "2026-09-05T12:00:00Z",
-		"missedStreamsPresence":        "VALID",
+		"missedStreamsPresence":        "<VALID>",
 		"missedStreamsCount":           "1",
 		"missedStreamsMalformed":       "0",
 		"broadcastIdentifierValidIds":  "1",
@@ -574,15 +574,15 @@ func TestObservationRecordNeverFabricatesAbsentFields(t *testing.T) {
 	}
 	line := lines[0]
 	for key, want := range map[string]string{
-		"selfMilestonePresence":     "NULL",
-		"milestoneNodePresence":     "MISSING",
+		"selfMilestonePresence":     "<NULL>",
+		"milestoneNodePresence":     "<MISSING>",
 		"milestoneValue":            "<MISSING>",
 		"state":                     "<MISSING>",
 		"achievementTimestamp":      "<MISSING>",
 		"shareStatus":               "<MISSING>",
 		"expiresAt":                 "<MISSING>",
 		"watchStreakThreshold":      "<MISSING>",
-		"missedStreamsPresence":     "MISSING",
+		"missedStreamsPresence":     "<MISSING>",
 		"broadcastIdentifierArrays": "none",
 		"broadcastIdentifierIds":    "none",
 	} {
@@ -614,7 +614,7 @@ func TestObservationRecordDistinguishesNullMalformedAndEmpty(t *testing.T) {
 			body: `{"data":{"channel":{"id":"1","self":{"watchStreakMilestone":{` +
 				`"missedStreams":[{"broadcastIdentifiers":"nope"}]}}}}}`,
 			want: map[string]string{
-				"missedStreamsPresence":       "VALID",
+				"missedStreamsPresence":       "<VALID>",
 				"missedStreamsCount":          "1",
 				"broadcastIdentifierValidIds": "0",
 				"broadcastIdentifierArrays":   "MALFORMED:1",
@@ -653,7 +653,7 @@ func TestObservationRecordDistinguishesNullMalformedAndEmpty(t *testing.T) {
 				`"missedStreams":[{"broadcastIdentifiers":[{"id":"keep"},{"id":null},{},{"id":9},"nope",null]}]}}}}}`,
 			want: map[string]string{
 				"broadcastIdentifierValidIds":  "1",
-				"broadcastIdentifierMalformed": "5",
+				"broadcastIdentifierMalformed": "2",
 				"broadcastIdentifierArrays":    "MALFORMED:1",
 				"broadcastIdentifierIds":       "VALID:1,MISSING:1,NULL:2,MALFORMED:2",
 			},

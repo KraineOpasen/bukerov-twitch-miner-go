@@ -1026,7 +1026,11 @@ func (c *TwitchClient) doGQLRequestWithClientIDFallback(ctx context.Context, bod
 // diagnosticRequestKey).
 func logStaleHash(diagnostic bool, msg string, args ...any) {
 	if diagnostic {
-		slog.Debug(msg, args...)
+		// Distinct wording, not just a distinct level: a DEBUG line reading
+		// identically to the operator WARN invites a reader scanning the
+		// retained log to treat a routine diagnostic outcome as the real
+		// stale-hash alert.
+		slog.Debug("Diagnostic "+msg, args...)
 		return
 	}
 	slog.Warn(msg, args...)

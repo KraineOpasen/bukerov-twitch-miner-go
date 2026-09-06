@@ -98,10 +98,17 @@ type MilestoneIntField struct {
 // broadcastIdentifiers array.
 //
 // Partial data is reported as partial: IDs holds the identifiers that were
-// well-formed, MalformedCount holds how many elements were not, and Presence
-// is MALFORMED whenever MalformedCount is non-zero — so a reader can never
-// mistake a partially parsed array for a complete one, and a malformed element
-// never silently disappears.
+// well-formed and Elements carries every element's own classification, so a
+// reader can never mistake a partially parsed array for a complete one and no
+// element silently disappears.
+//
+// MalformedCount and Presence are about SHAPE only. An id that is absent or
+// explicitly null is a null/missing observation, not a shape error, so it does
+// not make the array MALFORMED — it appears in Elements as MISSING or NULL.
+// Presence goes MALFORMED only when an element is genuinely the wrong shape (a
+// non-object element, or an id of the wrong JSON type). Collapsing the two
+// would lose the same NULL/MALFORMED distinction this parser preserves
+// everywhere else.
 //
 // Elements carries the PER-ELEMENT classification of each element's id, in wire
 // order. It exists because a single MalformedCount would collapse four
@@ -211,6 +218,13 @@ const (
 	MilestoneFailureGraphQLTopLevel MilestoneFailureClass = "GRAPHQL_TOP_LEVEL_ERRORS"
 	MilestoneFailureNoChannelID     MilestoneFailureClass = "NO_CHANNEL_ID"
 	MilestoneFailureContextDone     MilestoneFailureClass = "CONTEXT_ALREADY_DONE"
+	// MilestoneFailureNoDataNode: the response carried no top-level GraphQL
+	// errors AND no data object. A GraphQL data response always has one, so
+	// this is an edge/proxy rejection body (a 4xx or a gateway page with a JSON
+	// payload) that the shared transport returns verbatim for statuses it does
+	// not special-case. Reporting it as OBSERVED would record "Twitch answered
+	// and there is no milestone" when the request was in fact rejected.
+	MilestoneFailureNoDataNode MilestoneFailureClass = "NO_DATA_NODE"
 )
 
 // milestoneObservationSequence is the process-wide monotonic counter stamped on
@@ -287,10 +301,12 @@ func (o WatchStreakMilestoneObservation) Duration() time.Duration {
 // The request is marked DIAGNOSTIC (see diagnosticRequestKey), so its outcome
 // is invisible to the shared connectivity accounting in both directions: it
 // records no functional failure, refreshes no success timestamp, drives no
-// credential recovery or operator reauth escalation, and raises no
-// operator-facing WARN/ERROR. That is what keeps a failed observation from
-// degrading health.SignalGQLAPI and closing the auto-bet gate — and equally
-// keeps a succeeding observation from masking a real business-path outage.
+// credential recovery or operator reauth escalation, and raises no WARN/ERROR
+// for its own outcome. That is what keeps a failed observation from degrading
+// health.SignalGQLAPI and closing the auto-bet gate — and equally keeps a
+// succeeding observation from masking a real business-path outage. The one
+// shared-transport line that is NOT suppressed is the client-ID promotion WARN;
+// diagnosticRequestKey documents why.
 //
 // ctx is the caller's existing loop context. Cancellation is honored before the
 // request is built and, through http.NewRequestWithContext and the
@@ -349,8 +365,19 @@ func (c *TwitchClient) ObserveWatchStreakMilestone(ctx context.Context, channelI
 		return obs
 	}
 
+	// Only 401 and 403 are special-cased by the shared transport; any other
+	// non-2xx body that happens to be JSON is returned verbatim as a result. A
+	// GraphQL data response always carries a data object, so its absence here
+	// means this was not one — record it as UNAVAILABLE rather than as an
+	// observation in which every field happened to be missing.
+	snap := parseWatchStreakMilestone(resp)
+	if snap.DataPresence != MilestoneFieldValid {
+		obs.Outcome, obs.FailureClass = MilestoneUnavailable, MilestoneFailureNoDataNode
+		return obs
+	}
+
 	obs.Outcome = MilestoneObserved
-	obs.Snapshot = parseWatchStreakMilestone(resp)
+	obs.Snapshot = snap
 	return obs
 }
 
@@ -483,11 +510,8 @@ func parseMilestoneBroadcastIdentifiers(entry map[string]interface{}) MilestoneB
 	out.Elements = make([]MilestoneStringField, 0, len(list))
 	for _, element := range list {
 		if element == nil {
-			// An explicitly null ELEMENT is a null, not a shape error. Folding
-			// it into MALFORMED would lose the same NULL/MALFORMED distinction
-			// this parser preserves everywhere else.
+			// An explicitly null ELEMENT is a null, not a shape error.
 			out.Elements = append(out.Elements, MilestoneStringField{Presence: MilestoneFieldNull})
-			out.MalformedCount++
 			continue
 		}
 		identifier, ok := element.(map[string]interface{})
@@ -500,11 +524,14 @@ func parseMilestoneBroadcastIdentifiers(entry map[string]interface{}) MilestoneB
 		}
 		id := milestoneString(identifier, "id")
 		out.Elements = append(out.Elements, id)
-		if id.Presence != MilestoneFieldValid {
+		switch id.Presence {
+		case MilestoneFieldValid:
+			out.IDs = append(out.IDs, id.Value)
+		case MilestoneFieldMalformed:
 			out.MalformedCount++
-			continue
 		}
-		out.IDs = append(out.IDs, id.Value)
+		// MISSING and NULL ids yield no identifier and no shape error; they are
+		// carried by Elements alone.
 	}
 	if out.MalformedCount > 0 {
 		out.Presence = MilestoneFieldMalformed

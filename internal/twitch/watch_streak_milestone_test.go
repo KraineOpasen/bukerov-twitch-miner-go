@@ -389,10 +389,13 @@ func TestParseWatchStreakMilestoneBroadcastIdentifiers(t *testing.T) {
 				map[string]interface{}{},
 				map[string]interface{}{"id": "keep-2"},
 			}},
+			// MalformedCount is SHAPE errors only: the non-object element and
+			// the wrong-typed id. The element with no id at all is a MISSING
+			// observation, not a shape error, and is carried by Elements.
 			wantPresence:  MilestoneFieldMalformed,
 			wantIDs:       "keep-1,keep-2",
 			wantCount:     5,
-			wantMalformed: 3,
+			wantMalformed: 2,
 		},
 	}
 	for _, tc := range tests {
@@ -1124,5 +1127,62 @@ func TestParseWatchStreakMilestoneSelfNodeAbsence(t *testing.T) {
 			}
 			assertNoFabricatedValues(t, snap)
 		})
+	}
+}
+
+// TestObserveWatchStreakMilestoneNonGraphQLBodyIsUnavailable proves an edge or
+// proxy rejection body is reported as UNAVAILABLE, not as an observation in
+// which every field happened to be missing.
+//
+// The shared transport special-cases only 401 and 403; any other non-2xx body
+// that parses as JSON is returned verbatim as a result. Without the data-node
+// check, a 404 or a gateway error page would be recorded as OBSERVED with every
+// node MISSING — indistinguishable in the retained log from Twitch genuinely
+// answering "this channel has no milestone", which is the exact confusion this
+// feature exists to prevent.
+func TestObserveWatchStreakMilestoneNonGraphQLBodyIsUnavailable(t *testing.T) {
+	tests := []struct {
+		name string
+		code int
+		body string
+	}{
+		{"4xx rejection with a JSON body", http.StatusNotFound, `{"error":"Not Found","status":404}`},
+		{"gateway body with no data node", http.StatusOK, `{"message":"upstream unavailable"}`},
+		{"explicit null data with no errors array", http.StatusOK, `{"data":null}`},
+		{"data of the wrong shape", http.StatusOK, `{"data":[]}`},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(tc.code)
+				_, _ = io.WriteString(w, tc.body)
+			})
+
+			obs := c.ObserveWatchStreakMilestone(context.Background(), "12345", "somestreamer")
+
+			if obs.Outcome != MilestoneUnavailable {
+				t.Fatalf("outcome = %q, want UNAVAILABLE — a rejected request must not read as an "+
+					"observation with everything missing", obs.Outcome)
+			}
+			if obs.FailureClass != MilestoneFailureNoDataNode {
+				t.Errorf("failureClass = %q, want NO_DATA_NODE", obs.FailureClass)
+			}
+			assertEmptySnapshot(t, obs.Snapshot)
+		})
+	}
+
+	// The counterpart: a real GraphQL response whose data node IS present stays
+	// OBSERVED even when everything under it is absent — that is a genuine
+	// observation of absence and must not be downgraded.
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, `{"data":{"channel":null}}`)
+	})
+	obs := c.ObserveWatchStreakMilestone(context.Background(), "12345", "somestreamer")
+	if obs.Outcome != MilestoneObserved {
+		t.Fatalf("outcome = %q, want OBSERVED for a real GraphQL response", obs.Outcome)
+	}
+	if obs.Snapshot.ChannelPresence != MilestoneFieldNull {
+		t.Errorf("channel presence = %q, want NULL", obs.Snapshot.ChannelPresence)
 	}
 }

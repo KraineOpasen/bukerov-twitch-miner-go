@@ -288,11 +288,11 @@ func logWatchStreakMilestoneObservation(obs twitch.WatchStreakMilestoneObservati
 		"failureClass", string(obs.FailureClass),
 
 		// Parser quality / presence classification, node by node.
-		"dataPresence", string(snap.DataPresence),
-		"channelPresence", string(snap.ChannelPresence),
-		"selfPresence", string(snap.SelfPresence),
-		"selfMilestonePresence", string(snap.SelfMilestonePresence),
-		"milestoneNodePresence", string(snap.MilestoneNodePresence),
+		"dataPresence", presenceToken(snap.DataPresence),
+		"channelPresence", presenceToken(snap.ChannelPresence),
+		"selfPresence", presenceToken(snap.SelfPresence),
+		"selfMilestonePresence", presenceToken(snap.SelfMilestonePresence),
+		"milestoneNodePresence", presenceToken(snap.MilestoneNodePresence),
 
 		// Observed channel identity as Twitch returned it, kept distinct from
 		// the identity we asked for. Every value below carries its own presence
@@ -314,7 +314,7 @@ func logWatchStreakMilestoneObservation(obs twitch.WatchStreakMilestoneObservati
 		// requestEnd above, and the two are never merged.
 		"achievementTimestamp", milestoneLogString(snap.AchievementTimestamp),
 
-		"missedStreamsPresence", string(snap.MissedStreams.Presence),
+		"missedStreamsPresence", presenceToken(snap.MissedStreams.Presence),
 		"missedStreamsCount", snap.MissedStreams.Count,
 		"missedStreamsMalformed", snap.MissedStreams.MalformedCount,
 	}
