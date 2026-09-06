@@ -609,10 +609,22 @@ func TestSessionConverge_RaceSafety(t *testing.T) {
 
 	var stop atomic.Bool
 	var wdDone sync.WaitGroup
+	// ticking marks the window in which processWatching is actually running, and
+	// wdAck is the watchdog's acknowledgement that it completed a full
+	// refresh + RecordMinutes iteration inside that window. Without the
+	// handshake every tick could finish before the watchdog was first
+	// scheduled, leaving the race window empty while the send assertion below
+	// still passed on the loop goroutine's own work alone.
+	var ticking atomic.Bool
+	var wdAck sync.WaitGroup
+	wdAck.Add(1)
+
 	wdDone.Add(1)
 	go func() {
 		defer wdDone.Done()
+		acked := false
 		for !stop.Load() {
+			inTick := ticking.Load()
 			_ = w.BrokerSnapshot()
 			_ = w.GetDebugState()
 			_, _ = w.ReportStats(c.GetUsername())
@@ -625,10 +637,15 @@ func TestSessionConverge_RaceSafety(t *testing.T) {
 			w.RequestSessionRefresh(SessionRefreshRequest{Login: c.GetUsername(), Mode: RefreshStreamInfo})
 			// Perturb rotation ranking concurrently with the loop's ticks.
 			_ = w.store.RecordMinutes(a.GetUsername(), 1, time.Now())
+			if !acked && inTick {
+				acked = true
+				wdAck.Done()
+			}
 			time.Sleep(time.Millisecond)
 		}
 	}()
 
+	ticking.Store(true)
 	for tick := 0; tick < 6; tick++ {
 		// Ticks model broker evaluations spaced past the base pair's minimum
 		// residence, so the watchdog's concurrent RecordMinutes really does
@@ -636,7 +653,14 @@ func TestSessionConverge_RaceSafety(t *testing.T) {
 		// this race test exists for.
 		openFairRotationResidence(w)
 		w.processWatching(tickCtx(w))
+		if tick == 0 {
+			// Block until the watchdog has provably staged a refresh and
+			// perturbed the ranking inside the tick window, so the remaining
+			// ticks really do run against a live concurrent caller.
+			wdAck.Wait()
+		}
 	}
+	ticking.Store(false)
 
 	stop.Store(true)
 	wdDone.Wait()

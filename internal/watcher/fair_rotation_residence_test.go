@@ -678,16 +678,17 @@ func TestFairRotationResidenceConcurrentDiagnosticsReader(t *testing.T) {
 	w, _, online, _ := newResidenceWatcher(t, 4)
 
 	const readers = 4
-	var wg, ready sync.WaitGroup
-	var barrierReads, loopReads atomic.Int64
+	var wg, ready, acked sync.WaitGroup
+	var writing atomic.Bool
 	stop := make(chan struct{})
 
 	ready.Add(readers)
+	acked.Add(readers)
 	for reader := 0; reader < readers; reader++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			// Read once and report ready BEFORE the writer loop starts, so the
+			// Read once and report ready BEFORE the writer phase starts, so the
 			// concurrent window is entered deterministically instead of being
 			// left to the scheduler. Without this barrier every reader could
 			// first be scheduled after close(stop), take the return arm on its
@@ -695,9 +696,9 @@ func TestFairRotationResidenceConcurrentDiagnosticsReader(t *testing.T) {
 			// concurrent access at all.
 			_ = w.GetDebugState()
 			_ = w.BrokerSnapshot()
-			barrierReads.Add(1)
 			ready.Done()
 
+			reported := false
 			for {
 				select {
 				case <-stop:
@@ -705,27 +706,42 @@ func TestFairRotationResidenceConcurrentDiagnosticsReader(t *testing.T) {
 				default:
 					_ = w.GetDebugState()
 					_ = w.BrokerSnapshot()
-					loopReads.Add(1)
+					// Acknowledge the first read taken WHILE the writer phase is
+					// active. Counting reads without this says nothing: every
+					// read could have happened between the barrier and the first
+					// selection tick, so a plain counter cannot distinguish real
+					// overlap from none.
+					if !reported && writing.Load() {
+						reported = true
+						acked.Done()
+					}
 				}
 			}
 		}()
 	}
 
 	ready.Wait()
-	if got := barrierReads.Load(); got != readers {
-		t.Fatalf("start barrier observed %d reads, want exactly one per reader (%d)", got, readers)
-	}
 
+	writing.Store(true)
 	for tick := 0; tick < 500; tick++ {
 		openFairRotationResidence(w)
 		runSelectionTick(w, online)
+		if tick == 0 {
+			// Block until every reader has acknowledged a read taken while the
+			// writer phase is open, with 499 ticks still to run. Waiting here
+			// rather than after the loop is what makes the overlap real: the
+			// phase flag stays set while this goroutine is parked, so a wait
+			// placed after the last tick could be satisfied by a reader that
+			// was descheduled for the whole loop and only ran once nothing was
+			// left to overlap.
+			acked.Wait()
+		}
 	}
+	writing.Store(false)
+
 	close(stop)
 	wg.Wait()
 
-	if loopReads.Load() == 0 {
-		t.Fatal("no diagnostics read overlapped the writer loop: the concurrent window was never exercised")
-	}
 	if !w.rotation.hasPair {
 		t.Fatal("concurrent diagnostics reads disturbed the loop-owned rotation state")
 	}
