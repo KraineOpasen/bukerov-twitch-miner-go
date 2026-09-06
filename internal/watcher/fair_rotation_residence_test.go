@@ -3,6 +3,7 @@ package watcher
 import (
 	"context"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"sync"
@@ -551,7 +552,25 @@ func TestPersistedDeficitFairnessResumesAfterResidence(t *testing.T) {
 	seen := make(map[string]int)
 	for round := 0; round < candidates*3; round++ {
 		at := t0.Add(time.Duration(round) * fairRotationResidence)
+		weights := w.watchWeights(online, at)
 		w.reconcileLeastWatchedPair(online, at)
+
+		// The pair really is the two least-watched: no off-pair candidate may
+		// have strictly less accumulated time than a seated one.
+		seated := map[int]bool{w.rotation.activePair[0]: true, w.rotation.activePair[1]: true}
+		for _, in := range w.rotation.activePair {
+			for _, out := range online {
+				if seated[out] {
+					continue
+				}
+				if weights[out] < weights[in] {
+					t.Fatalf("round %d: %s (%.0fm) held a seat while %s (%.0fm) was more owed",
+						round, streamers[in].GetUsername(), weights[in],
+						streamers[out].GetUsername(), weights[out])
+				}
+			}
+		}
+
 		for _, idx := range w.rotation.activePair {
 			login := streamers[idx].GetUsername()
 			seen[login]++
@@ -566,14 +585,19 @@ func TestPersistedDeficitFairnessResumesAfterResidence(t *testing.T) {
 			t.Fatalf("persisted-deficit fairness starved %s once residence expired: %v", streamer.GetUsername(), seen)
 		}
 	}
-	if len(w.rotation.activePair) != constants.MaxSimultaneousStreams {
-		t.Fatalf("slot cap changed: %v", w.rotation.activePair)
+	// The cap is a real allocation count, not the width of the activePair array.
+	if got := w.selectRotating(online); len(got) != constants.MaxSimultaneousStreams {
+		t.Fatalf("selection allocated %d slots, want exactly %d", len(got), constants.MaxSimultaneousStreams)
 	}
 }
 
-// TestFairRotationResidenceAddsNoBackgroundOwner proves the rule is derived on
-// the broker tick the loop already runs: no goroutine, timer, store, scheduler,
-// ledger or cache owner is created by evaluating residence.
+// TestFairRotationResidenceAddsNoBackgroundOwner checks the rule is derived on
+// the broker tick the loop already runs: repeatedly evaluating residence starts
+// no goroutine (which is what a timer, scheduler or background store owner
+// would need). It is a necessary condition, not a proof of absence — the
+// structural claim is carried by fairRotationResidence being a plain constant
+// read from the loop, which TestFairRotationResidenceIsNotAConfigurableSetting
+// pins.
 func TestFairRotationResidenceAddsNoBackgroundOwner(t *testing.T) {
 	// No store, no context, no loop: the reconciliation path and nothing else.
 	w, _, online := newRotationRetirementWatcher(4, nil)
@@ -634,22 +658,39 @@ func TestFairRotationResidenceConcurrentDiagnosticsReader(t *testing.T) {
 }
 
 // TestFairRotationResidenceIsNotAConfigurableSetting pins the shape the owner
-// required: one private constant, no runtime setting, no rotation-interval
-// surface, and no second residence owner in rotationState.
+// required: one private constant, no runtime setting, no revived
+// rotation-interval surface, and no second residence owner in rotationState.
 func TestFairRotationResidenceIsNotAConfigurableSetting(t *testing.T) {
 	if fairRotationResidence != 15*time.Minute {
 		t.Fatalf("fairRotationResidence = %v, want 15m", fairRotationResidence)
 	}
-	// The retired rotation-interval configuration surface stays retired: nothing
-	// about residence is configurable.
-	var limits config.RateLimitSettings
-	if got := limits.MinuteWatchedInterval; got != 0 {
-		t.Fatalf("unexpected rate-limit default: %v", got)
+
+	// The retired rotation-interval configuration surface stays retired: no
+	// rotation/residence/dwell knob may appear on the rate-limit settings the
+	// Settings page writes.
+	limits := reflect.TypeOf(config.RateLimitSettings{})
+	for i := 0; i < limits.NumField(); i++ {
+		name := strings.ToLower(limits.Field(i).Name)
+		for _, banned := range []string{"rotation", "residence", "dwell"} {
+			if strings.Contains(name, banned) {
+				t.Fatalf("residence became configurable: config.RateLimitSettings has field %q", limits.Field(i).Name)
+			}
+		}
 	}
+
+	// The anchor has exactly one owner, and diagnostics read that owner rather
+	// than a second copy.
 	w, _, online, _ := newResidenceWatcher(t, 4)
 	runSelectionTick(w, online)
 	if st := w.GetDebugState(); !st.PairSince.Equal(w.rotation.lastSwitch) {
 		t.Fatalf("residence is owned by something other than rotationState.lastSwitch: PairSince=%v anchor=%v",
 			st.PairSince, w.rotation.lastSwitch)
+	}
+	rotation := reflect.TypeOf(rotationState{})
+	for i := 0; i < rotation.NumField(); i++ {
+		name := strings.ToLower(rotation.Field(i).Name)
+		if name != "lastswitch" && (strings.Contains(name, "residence") || strings.Contains(name, "resident")) {
+			t.Fatalf("a second residence owner appeared in rotationState: field %q", rotation.Field(i).Name)
+		}
 	}
 }

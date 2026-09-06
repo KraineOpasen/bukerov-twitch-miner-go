@@ -630,6 +630,11 @@ func TestSessionConverge_RaceSafety(t *testing.T) {
 	}()
 
 	for tick := 0; tick < 6; tick++ {
+		// Ticks model broker evaluations spaced past the base pair's minimum
+		// residence, so the watchdog's concurrent RecordMinutes really does
+		// churn the rotation ranking under the loop - which is the stressor
+		// this race test exists for.
+		openFairRotationResidence(w)
 		w.processWatching(tickCtx(w))
 	}
 

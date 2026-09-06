@@ -213,6 +213,11 @@ func TestAvoidStillWatchedWhenOnlyOnlineChannel(t *testing.T) {
 // contract: all else being roughly equal, a preferred streamer should be
 // picked more often than an otherwise-equivalent non-preferred one - without
 // ever excluding the others outright (unlike avoid).
+//
+// Ticks model broker evaluations spaced past the base pair's minimum residence
+// (openFairRotationResidence). Without that the pair would be pinned from the
+// first tick and every count would be identical, which would let the prefer
+// handicap be removed entirely without failing this test.
 func TestPreferBiasesRotationTowardPreferredStreamer(t *testing.T) {
 	w, online := newTestWatcher(4)
 	for _, s := range w.streamers {
@@ -223,6 +228,7 @@ func TestPreferBiasesRotationTowardPreferredStreamer(t *testing.T) {
 	watchedCount := make(map[int]int)
 	const ticks = 20
 	for i := 0; i < ticks; i++ {
+		openFairRotationResidence(w)
 		pair := w.selectRotating(online)
 		for _, idx := range pair {
 			watchedCount[idx]++
@@ -234,6 +240,15 @@ func TestPreferBiasesRotationTowardPreferredStreamer(t *testing.T) {
 			t.Errorf("non-preferred streamer %d watched %d times, more than preferred streamer 0's %d", idx, watchedCount[idx], watchedCount[0])
 		}
 	}
+	// Guard the guard: without the prefer handicap every candidate would be
+	// watched equally often, so a test that cannot see a difference cannot see
+	// the feature being removed either.
+	for _, idx := range online[1:] {
+		if watchedCount[idx] < watchedCount[0] {
+			return
+		}
+	}
+	t.Fatalf("prefer weighting produced no measurable bias at all: %v", watchedCount)
 }
 
 func TestApplyPriorityBoostSwapsInDropsStreamer(t *testing.T) {
