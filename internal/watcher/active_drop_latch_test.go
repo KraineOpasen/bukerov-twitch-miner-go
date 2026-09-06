@@ -117,6 +117,11 @@ func TestProcessWatchingStreakTerminalReleasesUnrestrictedActiveDropLatch(t *tes
 						t.Fatalf("advance fairness for %s: %v", login, err)
 					}
 				}
+				// A later broker evaluation, past the base pair's minimum
+				// residence: what is under test is whether streak continuity
+				// survives a fair-pair replacement, not how soon that
+				// replacement may happen.
+				openFairRotationResidence(w)
 				w.processWatching(tickCtx(w))
 				pursuingBase := sortedPair(w.GetDebugState().ActivePair)
 				if len(pursuingBase) != 2 || pursuingBase[0] != "streamera" || pursuingBase[1] != "streamerd" {

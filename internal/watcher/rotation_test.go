@@ -66,12 +66,18 @@ func TestSelectRotatingNoRotationBelowLimit(t *testing.T) {
 // with no watch-time store configured (weights all equal at 0): the
 // in-memory recency tie-break alone should still cycle through every online
 // streamer, the same guarantee the old round-robin schedule provided.
+//
+// Each tick models a broker evaluation spaced further apart than
+// fairRotationResidence (openFairRotationResidence), so this asserts the
+// long-run fairness backbone rather than a per-tick cadence. Coverage within
+// one residence window is deliberately NOT claimed here.
 func TestSelectRotatingCoversEveryoneOverManyTicks(t *testing.T) {
 	for _, n := range []int{4, 5, 7, 8} {
 		w, online := newTestWatcher(n)
 
 		watchedCount := make(map[int]int)
 		for tick := 0; tick < n*2; tick++ {
+			openFairRotationResidence(w)
 			pair := w.selectRotating(online)
 			if len(pair) != 2 {
 				t.Fatalf("n=%d tick=%d: expected 2 streamers selected, got %d", n, tick, len(pair))
@@ -119,6 +125,9 @@ func TestWeightedSelectionPrefersLowerAccumulatedTime(t *testing.T) {
 	watchedCount := make(map[int]int)
 	const ticks = 10
 	for i := 0; i < ticks; i++ {
+		// Ticks model broker evaluations spaced past the minimum residence, so
+		// the weighting - not the residence floor - is what decides each pair.
+		openFairRotationResidence(w)
 		pair := w.selectRotating(online)
 		for _, idx := range pair {
 			watchedCount[idx]++

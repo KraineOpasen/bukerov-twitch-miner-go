@@ -326,7 +326,10 @@ func TestSessionConverge_RapidReplacementFinalOwnerConverges(t *testing.T) {
 	requireCommittedPair(t, w, 1, a.GetUsername(), b.GetUsername())
 
 	// Tick 2: push A above C -> {C, B}. C's convergence attempt is staged and
-	// FAILS (perLoginFailRefresher), so C never delivers this tick.
+	// FAILS (perLoginFailRefresher), so C never delivers this tick. Ticks here
+	// model broker evaluations spaced past the base pair's minimum residence,
+	// so the seeded weights are what drive the replacement under test.
+	openFairRotationResidence(w)
 	seed(a.GetUsername(), 6000)
 	w.processWatching(tickCtx(w))
 	requireCommittedPair(t, w, 2, c.GetUsername(), b.GetUsername())
@@ -334,6 +337,7 @@ func TestSessionConverge_RapidReplacementFinalOwnerConverges(t *testing.T) {
 	// Tick 3: push C above D -> {D, B}. C is displaced BEFORE its convergence
 	// ever succeeded; D's own (independent) convergence now stages and,
 	// unlike C's, SUCCEEDS.
+	openFairRotationResidence(w)
 	seed(c.GetUsername(), 6000)
 	w.processWatching(tickCtx(w))
 	requireCommittedPair(t, w, 3, d.GetUsername(), b.GetUsername())
@@ -814,10 +818,13 @@ func TestSessionConverge_Guard9ReleaseInvalidatesTrackedState(t *testing.T) {
 		t.Fatalf("expected %s to have one staged (failed) convergence attempt while slotted, got %+v", cLogin, st)
 	}
 
-	// Evict C: push its accumulated weight far above A's so A re-enters.
+	// Evict C: push its accumulated weight far above A's so A re-enters, at a
+	// broker evaluation past the base pair's minimum residence (what is under
+	// test is the convergence bookkeeping around the eviction, not its timing).
 	if err := w.store.RecordMinutes(cLogin, 100000, time.Now()); err != nil {
 		t.Fatalf("failed to reseed watch time: %v", err)
 	}
+	openFairRotationResidence(w)
 	w.processWatching(tickCtx(w))
 	requireCommittedPair(t, w, 1, aLogin, bLogin)
 
@@ -830,6 +837,7 @@ func TestSessionConverge_Guard9ReleaseInvalidatesTrackedState(t *testing.T) {
 	if err := w.store.RecordMinutes(aLogin, 100000, time.Now()); err != nil {
 		t.Fatalf("failed to reseed watch time: %v", err)
 	}
+	openFairRotationResidence(w)
 	w.processWatching(tickCtx(w))
 	requireCommittedPair(t, w, 2, cLogin, bLogin)
 

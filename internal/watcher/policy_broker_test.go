@@ -762,6 +762,11 @@ func TestCampaignPolicyKeepsFairSeatProgressingAcrossLowerClasses(t *testing.T) 
 	w.SetCampaignSemanticClasses(classes)
 	seen := make(map[string]int)
 	for tick := 0; tick < 40; tick++ {
+		// Ticks model broker evaluations spaced past the base pair's minimum
+		// residence: the claim under test is that the second deficit-fair seat
+		// keeps progressing across lower semantic classes over time, not that it
+		// moves on every single evaluation.
+		openFairRotationResidence(w)
 		pair := w.selectRotating([]int{0, 1, 2, 3})
 		if len(pair) != 2 {
 			t.Fatalf("tick %d allocated %d configured slots, want 2", tick, len(pair))

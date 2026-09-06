@@ -309,7 +309,15 @@ type rotationState struct {
 	activePair [2]int // streamer indexes currently occupying the watch slots
 	hasPair    bool   // whether activePair has been initialized yet
 
-	lastSwitch time.Time // when activePair last actually changed
+	// lastSwitch is when activePair last actually changed, and it doubles as
+	// the residence anchor for fairRotationResidence. It is stamped ONLY on
+	// initialization or an unordered full-pair membership change (see the
+	// `changed` branch in reconcileLeastWatchedPair), so re-evaluating the same
+	// pair — under any candidate permutation or seat ordering — never refreshes
+	// it. hasPair == false makes the stored value inert: the next complete pair
+	// is an initialization and re-stamps it. There is no second owner and no
+	// timer: elapsed residence is derived from this stamp on the broker tick.
+	lastSwitch time.Time
 
 	lastWatched map[int]time.Time // last tick each streamer index was actually watched (fairness tie-break + boost victim selection)
 
@@ -1355,6 +1363,14 @@ func (w *MinuteWatcher) isPreferred(idx int) bool {
 // Whoever is watched accumulates minutes and becomes less owed, so every valid
 // contender progresses without a separate timer or queue.
 //
+// A complete pair whose members are both still valid candidates keeps its
+// seats for a minimum residence (fairRotationResidence) before an ordinary
+// persisted-deficit challenger may take one. That is a floor on how soon an
+// ordinary swap can happen, not a cadence: nothing switches merely because the
+// residence elapsed, and no stronger cause waits for it — an invalid incumbent,
+// an empty seat, DROPS/STREAK, stronger priority, and Phase-B arbitration all
+// still act at once.
+//
 // On top of that fair pair, one strictly stronger DROPS/STREAK candidate may
 // take one seat. Hard restricted/streak/drop classes come first; active-drop
 // candidates inside the same hard class use Campaign Policy's unitless bounded
@@ -1388,9 +1404,40 @@ func (w *MinuteWatcher) selectRotating(onlineIndexes []int) []int {
 	return []int{pair[0], pair[1]}
 }
 
+// fairRotationResidence is the minimum time a COMPLETE, still-valid ordinary
+// fair-rotation pair keeps its two base seats before an ordinary
+// persisted-deficit challenger may take one.
+//
+// It is a MINIMUM RESIDENCE, not a switching cadence and not a dwell timer:
+// nothing schedules or forces a switch when it elapses. Reaching it only
+// re-opens ordinary fairness reconciliation, which then either keeps the same
+// pair (the common case, when the incumbents are still the two most owed) or
+// replaces it exactly as it would have without this rule. There is no
+// goroutine, timer, store, ledger or cache behind it — the loop derives
+// elapsed residence from rotationState.lastSwitch on the broker tick it
+// already runs.
+//
+// It deliberately guards ONE narrow case: an otherwise-ordinary replacement of
+// a complete pair whose members are both still valid candidates. Every
+// stronger cause bypasses it structurally rather than by exception, because
+// the guard lives inside the `hasPair && containsPair(...)` branch and only
+// runs when the incoming pair actually differs:
+//   - an incumbent that is removed, offline, ineligible, avoided or otherwise
+//     no longer a candidate is not in onlineIndexes, so containsPair is false
+//     and the pair is recomputed immediately;
+//   - an incomplete pair (one seat effectively empty) is likewise never
+//     protected, so an empty seat refills at once;
+//   - DROPS/STREAK and stronger-priority arbitration happen in
+//     applyPriorityBoost, which runs AFTER this decision and is not guarded;
+//   - Phase-B / unified-broker arbitration happens after Phase A entirely.
+const fairRotationResidence = 15 * time.Minute
+
 // streakDeferDelay bounds the one explicit deferral used when an immediate
 // fairness replacement would interrupt a streamer actively pursuing its watch
-// streak. It is completion protection, not a scheduler cadence.
+// streak. It is completion protection, not a scheduler cadence. It is reached
+// only once fairRotationResidence has expired: while the pair is still resident
+// there is no replacement to defer, so the one-shot deferral is neither armed
+// nor consumed.
 const streakDeferDelay = 2 * time.Minute
 
 // preferenceWeightBiasMinutes is the fixed handicap (in accumulated watch
@@ -1401,7 +1448,11 @@ const streakDeferDelay = 2 * time.Minute
 const preferenceWeightBiasMinutes = 5.0
 
 // reconcileLeastWatchedPair evaluates the persisted fairness ranking on every
-// broker tick, unless the one bounded streak-completion deferral is active.
+// broker tick. A complete, still-valid pair is only replaced by an ordinary
+// challenger once it has been resident for fairRotationResidence, and after
+// that the one bounded streak-completion deferral may still hold it briefly.
+// Neither guard applies when a pair member is no longer a valid candidate:
+// that pair is recomputed immediately.
 func (w *MinuteWatcher) reconcileLeastWatchedPair(onlineIndexes []int, now time.Time) {
 	weights := w.watchWeights(onlineIndexes, now)
 
@@ -1436,6 +1487,22 @@ func (w *MinuteWatcher) reconcileLeastWatchedPair(onlineIndexes []int, now time.
 	if w.rotation.hasPair && containsPair(onlineIndexes, w.rotation.activePair) {
 		if samePair(newPair, w.rotation.activePair) {
 			w.rotation.clearActiveDeferral()
+			w.captureDeficitMinutes(onlineIndexes, weights)
+			return
+		}
+
+		// Minimum residence of the ordinary configured pair. Reaching this
+		// point means both incumbents are still valid candidates and only the
+		// persisted-deficit ranking wants a different pair — the one ordinary
+		// case fairRotationResidence covers. Hold the pair until it has been
+		// resident that long, then fall through and let ordinary fairness (and
+		// only then the bounded streak deferral below) decide again. Deferral
+		// state is deliberately left untouched: there is no replacement to
+		// defer yet, so the one-shot approach must not be consumed here.
+		if now.Sub(w.rotation.lastSwitch) < fairRotationResidence {
+			for _, idx := range w.rotation.activePair {
+				w.noteSelection(idx, "watched: keeps its fair slot for the minimum residence of the current rotation pair")
+			}
 			w.captureDeficitMinutes(onlineIndexes, weights)
 			return
 		}
