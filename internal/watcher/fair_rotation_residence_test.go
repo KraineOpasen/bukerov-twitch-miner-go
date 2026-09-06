@@ -682,12 +682,12 @@ func TestFairRotationResidenceConcurrentDiagnosticsReader(t *testing.T) {
 	w, _, online, _ := newResidenceWatcher(t, 4)
 
 	const readers = 4
-	var wg, ready, acked sync.WaitGroup
+	var wg, ready sync.WaitGroup
 	var writing atomic.Bool
+	var overlapped atomic.Int64
 	stop := make(chan struct{})
 
 	ready.Add(readers)
-	acked.Add(readers)
 	for reader := 0; reader < readers; reader++ {
 		wg.Add(1)
 		go func() {
@@ -708,16 +708,17 @@ func TestFairRotationResidenceConcurrentDiagnosticsReader(t *testing.T) {
 				case <-stop:
 					return
 				default:
+					// Record the read only when a selection tick was in flight
+					// both BEFORE and AFTER it, which places the whole read
+					// inside that tick. A flag that merely spans the loop, or
+					// one sampled on only one side of the read, would certify
+					// reads that never overlapped a tick at all.
+					during := writing.Load()
 					_ = w.GetDebugState()
 					_ = w.BrokerSnapshot()
-					// Acknowledge the first read taken WHILE the writer phase is
-					// active. Counting reads without this says nothing: every
-					// read could have happened between the barrier and the first
-					// selection tick, so a plain counter cannot distinguish real
-					// overlap from none.
-					if !reported && writing.Load() {
+					if !reported && during && writing.Load() {
 						reported = true
-						acked.Done()
+						overlapped.Add(1)
 					}
 				}
 			}
@@ -726,25 +727,27 @@ func TestFairRotationResidenceConcurrentDiagnosticsReader(t *testing.T) {
 
 	ready.Wait()
 
-	writing.Store(true)
-	for tick := 0; tick < 500; tick++ {
+	// writing is raised only for the duration of the selection tick itself, so
+	// it means "a tick is executing", not "the loop is somewhere in progress".
+	// Keep ticking past the nominal count until every reader has recorded an
+	// overlapping read, bounded so a starved run fails loudly instead of
+	// hanging. Nothing blocks inside the window, so this cannot deadlock.
+	const nominalTicks, maxTicks = 500, 20000
+	ticks := 0
+	for ; ticks < maxTicks && (ticks < nominalTicks || overlapped.Load() < readers); ticks++ {
 		openFairRotationResidence(w)
+		writing.Store(true)
 		runSelectionTick(w, online)
-		if tick == 0 {
-			// Block until every reader has acknowledged a read taken while the
-			// writer phase is open, with 499 ticks still to run. Waiting here
-			// rather than after the loop is what makes the overlap real: the
-			// phase flag stays set while this goroutine is parked, so a wait
-			// placed after the last tick could be satisfied by a reader that
-			// was descheduled for the whole loop and only ran once nothing was
-			// left to overlap.
-			acked.Wait()
-		}
+		writing.Store(false)
 	}
-	writing.Store(false)
 
 	close(stop)
 	wg.Wait()
+
+	if got := overlapped.Load(); got != readers {
+		t.Fatalf("only %d of %d readers took a diagnostics read wholly inside a selection tick after %d ticks",
+			got, readers, ticks)
+	}
 
 	if !w.rotation.hasPair {
 		t.Fatal("concurrent diagnostics reads disturbed the loop-owned rotation state")

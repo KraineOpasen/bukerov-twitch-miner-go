@@ -609,22 +609,20 @@ func TestSessionConverge_RaceSafety(t *testing.T) {
 
 	var stop atomic.Bool
 	var wdDone sync.WaitGroup
-	// ticking marks the window in which processWatching is actually running, and
-	// wdAck is the watchdog's acknowledgement that it completed a full
-	// refresh + RecordMinutes iteration inside that window. Without the
-	// handshake every tick could finish before the watchdog was first
-	// scheduled, leaving the race window empty while the send assertion below
-	// still passed on the loop goroutine's own work alone.
-	var ticking atomic.Bool
-	var wdAck sync.WaitGroup
-	wdAck.Add(1)
+	// inFlight is raised only for the duration of a processWatching call, and
+	// wdOverlap counts the watchdog iterations whose refresh + RecordMinutes
+	// ran wholly inside one. Without this, every tick could finish before the
+	// watchdog was first scheduled and the send assertion below would still
+	// pass on the loop goroutine's own work alone.
+	var inFlight atomic.Bool
+	var wdOverlap atomic.Int64
 
 	wdDone.Add(1)
 	go func() {
 		defer wdDone.Done()
 		acked := false
 		for !stop.Load() {
-			inTick := ticking.Load()
+			during := inFlight.Load()
 			_ = w.BrokerSnapshot()
 			_ = w.GetDebugState()
 			_, _ = w.ReportStats(c.GetUsername())
@@ -637,33 +635,35 @@ func TestSessionConverge_RaceSafety(t *testing.T) {
 			w.RequestSessionRefresh(SessionRefreshRequest{Login: c.GetUsername(), Mode: RefreshStreamInfo})
 			// Perturb rotation ranking concurrently with the loop's ticks.
 			_ = w.store.RecordMinutes(a.GetUsername(), 1, time.Now())
-			if !acked && inTick {
+			if !acked && during && inFlight.Load() {
 				acked = true
-				wdAck.Done()
+				wdOverlap.Add(1)
 			}
 			time.Sleep(time.Millisecond)
 		}
 	}()
 
-	ticking.Store(true)
-	for tick := 0; tick < 6; tick++ {
-		// Ticks model broker evaluations spaced past the base pair's minimum
-		// residence, so the watchdog's concurrent RecordMinutes really does
-		// churn the rotation ranking under the loop - which is the stressor
-		// this race test exists for.
+	// Ticks model broker evaluations spaced past the base pair's minimum
+	// residence, so the watchdog's concurrent RecordMinutes really does churn
+	// the rotation ranking under the loop - the stressor this race test exists
+	// for. Keep ticking past the nominal count until the watchdog has provably
+	// staged a refresh and perturbed the ranking wholly inside one
+	// processWatching call, bounded so a starved run fails loudly.
+	const nominalTicks, maxTicks = 6, 5000
+	ticks := 0
+	for ; ticks < maxTicks && (ticks < nominalTicks || wdOverlap.Load() == 0); ticks++ {
 		openFairRotationResidence(w)
+		inFlight.Store(true)
 		w.processWatching(tickCtx(w))
-		if tick == 0 {
-			// Block until the watchdog has provably staged a refresh and
-			// perturbed the ranking inside the tick window, so the remaining
-			// ticks really do run against a live concurrent caller.
-			wdAck.Wait()
-		}
+		inFlight.Store(false)
 	}
-	ticking.Store(false)
 
 	stop.Store(true)
 	wdDone.Wait()
+
+	if wdOverlap.Load() == 0 {
+		t.Fatalf("no watchdog refresh/RecordMinutes iteration ran inside a processWatching call after %d ticks", ticks)
+	}
 
 	if len(adapter.allCalls()) == 0 {
 		t.Fatal("expected at least one send during the race window")
