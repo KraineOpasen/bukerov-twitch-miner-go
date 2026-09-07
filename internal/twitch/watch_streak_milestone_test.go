@@ -2623,6 +2623,36 @@ func TestTheAPQMarkerIsOnlyHonouredWhereARejectionPutsIt(t *testing.T) {
 			wantRequest: 3,
 		},
 		{
+			// Both spellings present and CONTRADICTORY: the machine-readable
+			// code decides, so this is the rejection the code names and not
+			// the one the prose beside it claims.
+			name: "a contradictory extensions code beats the message",
+			body: `{"errors":[{"message":"PersistedQueryNotFound",` +
+				`"extensions":{"code":"UNAUTHORIZED"}}]}`,
+			wantOutcome: MilestoneGraphQLError,
+			wantClass:   MilestoneFailureGraphQLTopLevel,
+			wantRequest: 1,
+		},
+		{
+			// Both spellings present and consistent: still a rejection.
+			name: "both spellings agreeing is still a rejection",
+			body: `{"errors":[{"message":"PersistedQueryNotFound",` +
+				`"extensions":{"code":"PERSISTED_QUERY_NOT_FOUND"}}]}`,
+			wantOutcome: MilestoneUnsupported,
+			wantClass:   MilestoneFailureQueryNotFound,
+			wantRequest: 3,
+		},
+		{
+			// Extensions present but carrying no code at all: the message is
+			// the only evidence there is, so it still decides.
+			name: "extensions without a code fall back to the message",
+			body: `{"errors":[{"message":"PersistedQueryNotFound",` +
+				`"extensions":{"tracingId":"abc"}}]}`,
+			wantOutcome: MilestoneUnsupported,
+			wantClass:   MilestoneFailureQueryNotFound,
+			wantRequest: 3,
+		},
+		{
 			// Usable data beside the rejection means it is not one.
 			name: "the marker beside usable data is not a rejection",
 			body: `{"errors":[{"message":"PersistedQueryNotFound"}],` +

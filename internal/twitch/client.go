@@ -836,11 +836,25 @@ func diagnosticPersistedQueryNotFound(body []byte) bool {
 		if !ok {
 			return false
 		}
-		if message, _ := object["message"].(string); message == "PersistedQueryNotFound" {
-			continue
+
+		// The two spellings are ALTERNATIVE evidence, not independent ones.
+		// Where both are present the code decides, because it is the machine-
+		// readable field and the message is prose beside it: an error reading
+		// {"message":"PersistedQueryNotFound","extensions":{"code":"UNAUTHORIZED"}}
+		// is an authorization rejection wearing an APQ message, and taking the
+		// message on its own would replay the authenticated request under every
+		// client ID and record the real rejection as UNSUPPORTED_QUERY.
+		if extensions, present := object["extensions"].(map[string]interface{}); present {
+			if code, carried := extensions["code"]; carried {
+				if code != "PERSISTED_QUERY_NOT_FOUND" {
+					return false
+				}
+				continue
+			}
 		}
-		extensions, ok := object["extensions"].(map[string]interface{})
-		if !ok || extensions["code"] != "PERSISTED_QUERY_NOT_FOUND" {
+
+		// No code to consult: the message is the only evidence there is.
+		if message, _ := object["message"].(string); message != "PersistedQueryNotFound" {
 			return false
 		}
 	}
