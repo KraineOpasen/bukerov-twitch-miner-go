@@ -2533,6 +2533,65 @@ func TestAnOversizedResponseIsRefusedBeforeItIsDecoded(t *testing.T) {
 	t.Logf("refused %d elements in %.1f MB", elements, allocatedMB)
 }
 
+// TestADecodeErrorCannotDisableTheValueBound pins that the size question stays
+// separate from the representability one.
+//
+// The value scan answers "within limit" for a body it cannot tokenise, because
+// malformed input is not its business. Taken with a Token that converts every
+// number to a float64, that made the bound SWITCHABLE OFF: one unrepresentable
+// number early in the document ended the scan, so the limit applied to nothing
+// after it. A 240 KB body — comfortably inside the byte cap — was reported
+// within limit and cost ~22 MB to refuse, because the duplicate scanner's
+// decode, the APQ decode and the final decode each materialised the tail.
+//
+// UseNumber keeps the token a string, so counting survives values the decoder
+// could never represent.
+func TestADecodeErrorCannotDisableTheValueBound(t *testing.T) {
+	var b strings.Builder
+	b.WriteString(`{"x":1e10000,"errors":[],"errors":[],"junk":[`)
+	for i := 0; i < 120000; i++ {
+		if i > 0 {
+			b.WriteString(",")
+		}
+		b.WriteString("0")
+	}
+	b.WriteString(`]}`)
+	body := b.String()
+
+	if len(body) >= maxDiagnosticResponseBytes {
+		t.Fatalf("fixture is %d bytes, at or over the %d-byte cap; this would test the wrong bound",
+			len(body), maxDiagnosticResponseBytes)
+	}
+	if diagnosticJSONValuesWithinLimit([]byte(body)) {
+		t.Fatalf("the value scan reported %d values as within the %d limit; an unrepresentable "+
+			"number switched the bound off", 120000, maxDiagnosticJSONValues)
+	}
+
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, body)
+	})
+
+	var before, after runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&before)
+	obs := c.ObserveWatchStreakMilestone(context.Background(), "12345", "somestreamer")
+	runtime.ReadMemStats(&after)
+
+	if obs.Outcome != MilestoneUnavailable {
+		t.Fatalf("outcome = %q, want UNAVAILABLE", obs.Outcome)
+	}
+
+	// Coarse on purpose, as elsewhere: the claim is an order of magnitude.
+	const budgetMB = 10
+	allocatedMB := float64(after.TotalAlloc-before.TotalAlloc) / (1 << 20)
+	if allocatedMB > budgetMB {
+		t.Fatalf("refusing a %d-byte body allocated %.1f MB (budget %d MB): the value bound was "+
+			"bypassed and the tail was materialised", len(body), allocatedMB, budgetMB)
+	}
+	t.Logf("refused in %.1f MB", allocatedMB)
+}
+
 // TestAContainerHeavyResponseIsAlsoRefusedBeforeDecoding pins the half of the
 // pre-decode bound that its first version missed.
 //

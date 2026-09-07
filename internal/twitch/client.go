@@ -750,6 +750,17 @@ const maxDiagnosticJSONValues = 8192
 // finishes rather than returning the moment the count is exceeded.
 func diagnosticJSONValuesWithinLimit(body []byte) bool {
 	decoder := json.NewDecoder(bytes.NewReader(body))
+
+	// UseNumber is what keeps this bound from being switchable off. Without it
+	// Token converts every number to a float64, so a single unrepresentable one
+	// - 1e10000 - fails the scan; and because a scan failure means "malformed,
+	// not my problem", the bound then applied to NOTHING after that point. A
+	// 240 KB body, well inside the byte cap, was reported within limit and cost
+	// 22 MB to refuse. json.Number keeps the token a string, so counting
+	// survives values the decoder could never represent, and the size question
+	// stays separate from the representability one.
+	decoder.UseNumber()
+
 	values := 0
 	for {
 		token, err := decoder.Token()
