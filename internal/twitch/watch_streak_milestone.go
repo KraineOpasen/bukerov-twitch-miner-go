@@ -129,12 +129,34 @@ type MilestoneBroadcastIdentifiers struct {
 }
 
 // MilestoneMissedStream is one observed missedStreams element.
+//
+// Presence is the ELEMENT's own classification, and it is deliberately separate
+// from BroadcastIdentifiers.Presence, which classifies the element's CHILD
+// array. Without it the two nodes collapse: a null element and a well-formed
+// element whose broadcastIdentifiers is explicitly null are different wire
+// facts, and writing the element's NULL into its child's slot would make them
+// indistinguishable — the same MISSING != NULL != EMPTY != VALID != MALFORMED
+// collapse this parser exists to prevent, one node up.
+//
+// When Presence is not VALID there was no element object to look inside, so
+// BroadcastIdentifiers is left at its zero value and its Presence renders as
+// "never reached" rather than as an observed classification. Nothing here
+// fabricates a child observation for a parent that does not exist.
 type MilestoneMissedStream struct {
+	Presence             MilestoneFieldPresence
 	BroadcastIdentifiers MilestoneBroadcastIdentifiers
 }
 
 // MilestoneMissedStreams is the missedStreams container. Count is the number of
-// elements Twitch sent; MalformedCount is how many of them were not objects.
+// elements Twitch sent.
+//
+// MalformedCount is about SHAPE only: it counts elements that were present,
+// non-null and NOT objects. An explicitly null element is a null observation
+// rather than a shape error, so it is recorded as Presence NULL on its own
+// entry and is NOT counted here — the same rule
+// MilestoneBroadcastIdentifiers applies to its own elements. Container
+// Presence follows MalformedCount: a list whose only irregularity is a null
+// element is still a VALID list that contains a null.
 type MilestoneMissedStreams struct {
 	Presence       MilestoneFieldPresence
 	Count          int
@@ -492,22 +514,22 @@ func parseMilestoneMissedStreams(parent map[string]interface{}) MilestoneMissedS
 		if element == nil {
 			// An explicitly null ELEMENT is a null, not a shape error — the
 			// same rule parseMilestoneBroadcastIdentifiers applies one level
-			// down. Counting it as malformed would collapse the distinction
-			// this parser preserves everywhere else.
-			out.Entries = append(out.Entries, MilestoneMissedStream{
-				BroadcastIdentifiers: MilestoneBroadcastIdentifiers{Presence: MilestoneFieldNull},
-			})
+			// down. The NULL belongs to the ELEMENT: there is no element object
+			// here, so its child array was never observed and is left unset
+			// rather than being given a fabricated NULL of its own.
+			out.Entries = append(out.Entries, MilestoneMissedStream{Presence: MilestoneFieldNull})
 			continue
 		}
 		entry, ok := element.(map[string]interface{})
 		if !ok || entry == nil {
+			// Present, non-null and the wrong shape: a genuine shape error, and
+			// again no child to look inside.
 			out.MalformedCount++
-			out.Entries = append(out.Entries, MilestoneMissedStream{
-				BroadcastIdentifiers: MilestoneBroadcastIdentifiers{Presence: MilestoneFieldMalformed},
-			})
+			out.Entries = append(out.Entries, MilestoneMissedStream{Presence: MilestoneFieldMalformed})
 			continue
 		}
 		out.Entries = append(out.Entries, MilestoneMissedStream{
+			Presence:             MilestoneFieldValid,
 			BroadcastIdentifiers: parseMilestoneBroadcastIdentifiers(entry),
 		})
 	}

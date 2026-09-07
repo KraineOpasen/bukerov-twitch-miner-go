@@ -327,9 +327,13 @@ func logWatchStreakMilestoneObservation(obs twitch.WatchStreakMilestoneObservati
 		// counted only the well-formed ones would invite a wrong reading.
 		"broadcastIdentifierValidIds", ids.Total,
 		"broadcastIdentifierMalformed", ids.Malformed,
-		// The nested presence tallies: without these a malformed, null or
-		// missing broadcastIdentifiers array is indistinguishable from a
-		// genuinely empty one.
+		// The nested presence tallies, one per NODE. missedStreamElements
+		// classifies the elements themselves; broadcastIdentifierArrays
+		// classifies the child array of each element that had one. Without
+		// both, a null element and an element whose child array is null render
+		// identically, and a malformed, null or missing array is
+		// indistinguishable from a genuinely empty one.
+		"missedStreamElements", ids.Elements,
 		"broadcastIdentifierArrays", ids.Arrays,
 		"broadcastIdentifierIds", ids.IDs,
 		"broadcastIdentifierSample", ids.Sample,
@@ -384,15 +388,29 @@ type milestoneBroadcastIdentifiers struct {
 	Sample    []string
 	Total     int
 	Malformed int
-	Arrays    string
-	IDs       string
+	// Elements is the tally over each missedStreams ELEMENT's own presence.
+	// It is what keeps a null element distinguishable from a well-formed
+	// element whose broadcastIdentifiers child is null: without it both render
+	// as a single NULL somewhere in the record and the two wire facts collapse.
+	Elements string
+	Arrays   string
+	IDs      string
 }
 
 func milestoneBroadcastIdentifierSummary(missed twitch.MilestoneMissedStreams) milestoneBroadcastIdentifiers {
 	out := milestoneBroadcastIdentifiers{}
+	elements := map[twitch.MilestoneFieldPresence]int{}
 	arrays := map[twitch.MilestoneFieldPresence]int{}
 	ids := map[twitch.MilestoneFieldPresence]int{}
 	for _, entry := range missed.Entries {
+		// The ELEMENT's own classification, always.
+		elements[entry.Presence]++
+		if entry.Presence != twitch.MilestoneFieldValid {
+			// No element object, so no child array was ever observed. Tallying
+			// its zero-valued presence here would invent a child observation
+			// for a parent that does not exist.
+			continue
+		}
 		arrays[entry.BroadcastIdentifiers.Presence]++
 		out.Total += len(entry.BroadcastIdentifiers.IDs)
 		out.Malformed += entry.BroadcastIdentifiers.MalformedCount
@@ -405,6 +423,7 @@ func milestoneBroadcastIdentifierSummary(missed twitch.MilestoneMissedStreams) m
 			}
 		}
 	}
+	out.Elements = presenceTally(elements)
 	out.Arrays = presenceTally(arrays)
 	out.IDs = presenceTally(ids)
 	return out

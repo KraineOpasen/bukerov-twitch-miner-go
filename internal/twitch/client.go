@@ -364,11 +364,18 @@ func isAuthError(statusCode int, result map[string]interface{}) bool {
 // for the request's own OUTCOME (stale hash, retries, exhaustion — all DEBUG).
 // One shared-transport line is NOT suppressed: rememberWorkingClientID's WARN
 // when a fallback client ID rotates the process-wide default. That is a
-// property of the client-ID pool rather than of this request, it fires at most
-// once per process because the promoted ID is then cached, and suppressing it
-// would hide a genuine rotation from the operator. Everything else about the
-// request — its client-ID candidates, its retries and its returned error — is
-// identical to a business read.
+// property of the client-ID pool rather than of this request, and suppressing
+// it would hide a genuine rotation from the operator.
+//
+// Its frequency, stated accurately: the WARN fires on every promotion where the
+// working ID differs from the THEN-CURRENT default, and there is no
+// once-per-process guard. Per-operation caching (opClientID) makes repeats
+// uncommon, because an operation that has resolved once tries its known-good ID
+// first and so never promotes again — but it does not make them impossible. A
+// later A->B->A transition, where one operation promotes B and another
+// subsequently resolves on A, warns again. Everything else about the request —
+// its client-ID candidates, its retries and its returned error — is identical
+// to a business read.
 type diagnosticRequestKey struct{}
 
 // withDiagnosticRequest marks ctx as a diagnostic-only read. Cancellation and

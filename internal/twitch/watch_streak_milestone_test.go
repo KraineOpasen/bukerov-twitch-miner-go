@@ -2,6 +2,7 @@ package twitch
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -1042,9 +1043,23 @@ func TestBusinessReadStillRecoversOnUnauthorized(t *testing.T) {
 //
 // It does NOT produce a real deadline expiry — the parent is cancelled while
 // the request is in flight, so the error is context.Canceled. Forcing a genuine
-// DeadlineExceeded here would mean racing a wall-clock timer; the
-// DeadlineExceeded classification is proven deterministically instead by
-// TestClassifyMilestoneRequestErrorVocabularyIsClosed.
+// in-flight deadline here would mean racing a wall-clock timer.
+//
+// The deadline classifications are proven deterministically elsewhere, and the
+// distinction matters, so both halves are named:
+//   - a CALLER-OWNED deadline (owner context already expired) classifies as
+//     CANCELLED/DEADLINE_EXCEEDED — TestClassifyMilestoneRequestErrorSeparatesShutdownFromStall,
+//     case "owner deadline expired", and end to end in
+//     TestObserveWatchStreakMilestoneExpiredDeadlineIsSkippedNotSent;
+//   - a TRANSPORT timeout with a still-live caller context (net/http's
+//     Client.Timeout, whose error also satisfies errors.Is(err,
+//     context.DeadlineExceeded)) classifies as UNAVAILABLE/TRANSPORT_TIMEOUT —
+//     same test, cases "http client timeout with a live owner" and the wrapped
+//     net/http shape.
+//
+// TestClassifyMilestoneRequestErrorVocabularyIsClosed does NOT prove either: it
+// passes a live context.Background() and only checks that the returned class is
+// inside the closed vocabulary.
 func TestObserveWatchStreakMilestoneCancelledThroughADerivedTimeoutContext(t *testing.T) {
 	var (
 		once    sync.Once
@@ -1361,4 +1376,231 @@ func TestBusinessTransientFailureStillRecordsTransportHealth(t *testing.T) {
 	if h := c.ConnHealth(time.Now(), time.Hour); h.RecentTransportFailures == 0 {
 		t.Error("business read no longer records a transport failure; the diagnostic isolation leaked")
 	}
+}
+
+// missedStreamsFrom decodes a missedStreams JSON array through the REAL JSON
+// decoder and returns the parsed container, so fixtures are wire text rather
+// than hand-built Go values.
+func missedStreamsFrom(t *testing.T, arrayJSON string) MilestoneMissedStreams {
+	t.Helper()
+	var resp map[string]interface{}
+	body := `{"data":{"channel":{"id":"1","self":{"watchStreakMilestone":{"missedStreams":` + arrayJSON + `}}}}}`
+	if err := json.Unmarshal([]byte(body), &resp); err != nil {
+		t.Fatalf("fixture is not valid JSON: %v", err)
+	}
+	return parseWatchStreakMilestone(resp).MissedStreams
+}
+
+// elementPresences / childPresences project the per-node classifications in
+// wire order so a test can assert each node separately.
+func elementPresences(m MilestoneMissedStreams) []MilestoneFieldPresence {
+	out := make([]MilestoneFieldPresence, 0, len(m.Entries))
+	for _, e := range m.Entries {
+		out = append(out, e.Presence)
+	}
+	return out
+}
+
+func childPresences(m MilestoneMissedStreams) []MilestoneFieldPresence {
+	out := make([]MilestoneFieldPresence, 0, len(m.Entries))
+	for _, e := range m.Entries {
+		out = append(out, e.BroadcastIdentifiers.Presence)
+	}
+	return out
+}
+
+// TestMissedStreamsElementAndChildPresenceAreIndependentNodes is the R1/R3
+// parser-level proof.
+//
+// Every expectation below is specified from the WIRE SHAPE alone — what Twitch
+// sent — not read off the implementation. An element and its broadcastIdentifiers
+// child are two different nodes and each carries its own classification; where
+// no element object exists there is no child to classify, so the child stays
+// unset ("") rather than borrowing the element's answer.
+func TestMissedStreamsElementAndChildPresenceAreIndependentNodes(t *testing.T) {
+	const unset = MilestoneFieldPresence("")
+
+	tests := []struct {
+		name          string
+		array         string
+		wantElements  []MilestoneFieldPresence
+		wantChildren  []MilestoneFieldPresence
+		wantContainer MilestoneFieldPresence
+		wantCount     int
+		wantMalformed int
+	}{
+		{
+			name:          "null element: the ELEMENT is null and has no child to classify",
+			array:         `[null]`,
+			wantElements:  []MilestoneFieldPresence{MilestoneFieldNull},
+			wantChildren:  []MilestoneFieldPresence{unset},
+			wantContainer: MilestoneFieldValid, wantCount: 1, wantMalformed: 0,
+		},
+		{
+			name:          "null child: the ELEMENT is valid and its child array is null",
+			array:         `[{"broadcastIdentifiers":null}]`,
+			wantElements:  []MilestoneFieldPresence{MilestoneFieldValid},
+			wantChildren:  []MilestoneFieldPresence{MilestoneFieldNull},
+			wantContainer: MilestoneFieldValid, wantCount: 1, wantMalformed: 0,
+		},
+		{
+			name:          "absent child: the ELEMENT is valid and its child key is missing",
+			array:         `[{}]`,
+			wantElements:  []MilestoneFieldPresence{MilestoneFieldValid},
+			wantChildren:  []MilestoneFieldPresence{MilestoneFieldMissing},
+			wantContainer: MilestoneFieldValid, wantCount: 1, wantMalformed: 0,
+		},
+		{
+			name:          "empty child: Twitch said there are none",
+			array:         `[{"broadcastIdentifiers":[]}]`,
+			wantElements:  []MilestoneFieldPresence{MilestoneFieldValid},
+			wantChildren:  []MilestoneFieldPresence{MilestoneFieldEmpty},
+			wantContainer: MilestoneFieldValid, wantCount: 1, wantMalformed: 0,
+		},
+		{
+			name:          "string element is the wrong shape",
+			array:         `["nope"]`,
+			wantElements:  []MilestoneFieldPresence{MilestoneFieldMalformed},
+			wantChildren:  []MilestoneFieldPresence{unset},
+			wantContainer: MilestoneFieldMalformed, wantCount: 1, wantMalformed: 1,
+		},
+		{
+			name:          "number element is the wrong shape",
+			array:         `[7]`,
+			wantElements:  []MilestoneFieldPresence{MilestoneFieldMalformed},
+			wantChildren:  []MilestoneFieldPresence{unset},
+			wantContainer: MilestoneFieldMalformed, wantCount: 1, wantMalformed: 1,
+		},
+		{
+			name:          "array element is the wrong shape",
+			array:         `[[]]`,
+			wantElements:  []MilestoneFieldPresence{MilestoneFieldMalformed},
+			wantChildren:  []MilestoneFieldPresence{unset},
+			wantContainer: MilestoneFieldMalformed, wantCount: 1, wantMalformed: 1,
+		},
+		{
+			name:          "valid entry from the existing fixture shape",
+			array:         `[{"broadcastIdentifiers":[{"id":"b-1"},{"id":"b-2"}]}]`,
+			wantElements:  []MilestoneFieldPresence{MilestoneFieldValid},
+			wantChildren:  []MilestoneFieldPresence{MilestoneFieldValid},
+			wantContainer: MilestoneFieldValid, wantCount: 1, wantMalformed: 0,
+		},
+		{
+			name:  "mixed list: every element keeps its own answer, in position",
+			array: `[null,{"broadcastIdentifiers":null},{"broadcastIdentifiers":[{"id":"x"}]},"nope",{}]`,
+			wantElements: []MilestoneFieldPresence{
+				MilestoneFieldNull, MilestoneFieldValid, MilestoneFieldValid,
+				MilestoneFieldMalformed, MilestoneFieldValid,
+			},
+			wantChildren: []MilestoneFieldPresence{
+				unset, MilestoneFieldNull, MilestoneFieldValid, unset, MilestoneFieldMissing,
+			},
+			wantContainer: MilestoneFieldMalformed, wantCount: 5, wantMalformed: 1,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := missedStreamsFrom(t, tc.array)
+			if !reflect.DeepEqual(elementPresences(got), tc.wantElements) {
+				t.Errorf("element presences = %v, want %v", elementPresences(got), tc.wantElements)
+			}
+			if !reflect.DeepEqual(childPresences(got), tc.wantChildren) {
+				t.Errorf("child presences = %v, want %v", childPresences(got), tc.wantChildren)
+			}
+			if got.Presence != tc.wantContainer {
+				t.Errorf("container presence = %q, want %q", got.Presence, tc.wantContainer)
+			}
+			if got.Count != tc.wantCount {
+				t.Errorf("count = %d, want %d", got.Count, tc.wantCount)
+			}
+			if got.MalformedCount != tc.wantMalformed {
+				t.Errorf("malformed = %d, want %d", got.MalformedCount, tc.wantMalformed)
+			}
+			// A non-VALID element has no child object, so nothing may be
+			// fabricated inside it.
+			for i, e := range got.Entries {
+				if e.Presence == MilestoneFieldValid {
+					continue
+				}
+				if e.BroadcastIdentifiers.Count != 0 || e.BroadcastIdentifiers.MalformedCount != 0 ||
+					len(e.BroadcastIdentifiers.IDs) != 0 || len(e.BroadcastIdentifiers.Elements) != 0 {
+					t.Errorf("entry %d (%s) fabricated child data: %+v", i, e.Presence, e.BroadcastIdentifiers)
+				}
+			}
+		})
+	}
+
+	// The independence claim, stated directly: the two fixtures the repair
+	// exists for must differ at the ELEMENT node and agree nowhere that would
+	// let them be confused.
+	nullElement := missedStreamsFrom(t, `[null]`)
+	nullChild := missedStreamsFrom(t, `[{"broadcastIdentifiers":null}]`)
+	if nullElement.Entries[0].Presence == nullChild.Entries[0].Presence {
+		t.Error("a null element and a null child share an element presence")
+	}
+	if reflect.DeepEqual(nullElement.Entries[0], nullChild.Entries[0]) {
+		t.Error("a null element and a null child produced identical entries")
+	}
+}
+
+// TestMissedStreamsClassificationStructuralProperties covers acceptance D:
+// properties that must hold across equivalent or rearranged wire text, using
+// only the standard library and fixed, reproducible inputs.
+func TestMissedStreamsClassificationStructuralProperties(t *testing.T) {
+	t.Run("whitespace and key order do not change classification", func(t *testing.T) {
+		compact := `[{"broadcastIdentifiers":[{"id":"x"}]},null,"nope"]`
+		spaced := "[ {\n \"broadcastIdentifiers\" : [ { \"id\" : \"x\" } ]\n } , null , \"nope\" ]"
+		if !reflect.DeepEqual(missedStreamsFrom(t, compact), missedStreamsFrom(t, spaced)) {
+			t.Error("whitespace changed the classification")
+		}
+		// Key order within an element object is likewise irrelevant.
+		a := `[{"broadcastIdentifiers":[{"id":"x"}],"other":1}]`
+		b := `[{"other":1,"broadcastIdentifiers":[{"id":"x"}]}]`
+		if !reflect.DeepEqual(missedStreamsFrom(t, a), missedStreamsFrom(t, b)) {
+			t.Error("key order changed the classification")
+		}
+	})
+
+	t.Run("reordering moves each element's classification with that element", func(t *testing.T) {
+		// Fixed, reproducible permutations — no randomness, no seed to drift.
+		parts := []string{`null`, `{"broadcastIdentifiers":null}`, `{"broadcastIdentifiers":[{"id":"x"}]}`, `"nope"`}
+		want := []MilestoneFieldPresence{
+			MilestoneFieldNull, MilestoneFieldValid, MilestoneFieldValid, MilestoneFieldMalformed,
+		}
+		for _, perm := range [][]int{{0, 1, 2, 3}, {3, 2, 1, 0}, {1, 3, 0, 2}, {2, 0, 3, 1}} {
+			elems := make([]string, 0, len(perm))
+			expect := make([]MilestoneFieldPresence, 0, len(perm))
+			for _, i := range perm {
+				elems = append(elems, parts[i])
+				expect = append(expect, want[i])
+			}
+			got := elementPresences(missedStreamsFrom(t, "["+strings.Join(elems, ",")+"]"))
+			if !reflect.DeepEqual(got, expect) {
+				t.Errorf("permutation %v: element presences = %v, want %v", perm, got, expect)
+			}
+		}
+	})
+
+	t.Run("inserting a null element does not rewrite its neighbours", func(t *testing.T) {
+		neighbours := `{"broadcastIdentifiers":[{"id":"a"}]},{"broadcastIdentifiers":null}`
+		before := missedStreamsFrom(t, `[`+neighbours+`]`)
+		for _, at := range []string{`[null,` + neighbours + `]`, `[{"broadcastIdentifiers":[{"id":"a"}]},null,{"broadcastIdentifiers":null}]`, `[` + neighbours + `,null]`} {
+			after := missedStreamsFrom(t, at)
+			// Pull out the non-null entries; they must be untouched.
+			kept := make([]MilestoneMissedStream, 0, 2)
+			for _, e := range after.Entries {
+				if e.Presence != MilestoneFieldNull {
+					kept = append(kept, e)
+				}
+			}
+			if !reflect.DeepEqual(kept, before.Entries) {
+				t.Errorf("inserting null at %s rewrote a neighbour:\n before %+v\n after  %+v", at, before.Entries, kept)
+			}
+			if after.MalformedCount != before.MalformedCount {
+				t.Errorf("inserting a null element changed MalformedCount %d -> %d",
+					before.MalformedCount, after.MalformedCount)
+			}
+		}
+	})
 }

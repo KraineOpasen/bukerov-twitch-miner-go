@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -808,9 +809,14 @@ func TestTruncateForLogBoundsTwitchStrings(t *testing.T) {
 		if len(lines[0]) > 4096 {
 			t.Fatalf("a hostile response produced a %d-byte record; it must stay bounded", len(lines[0]))
 		}
-		if strings.ContainsAny(lines[0], "\x00\x1b") {
-			t.Error("raw control characters from the response reached the record")
-		}
+		// NOTE: asserting on the RENDERED line cannot prove sanitization —
+		// slog's TextHandler escapes control bytes itself, so a raw NUL or ESC
+		// could never appear here even with the sanitizer removed. The real
+		// check is at the pre-format boundary, in
+		// TestObservationAttributesAreSanitizedBeforeFormatting below. What
+		// this subtest still proves is the SIZE bound, which the sanitizer IS
+		// load-bearing for: unsanitized control bytes expand about fourfold on
+		// render and would breach it.
 		if !strings.Contains(lines[0], "...(truncated)") {
 			t.Error("the record does not mark the values it cut")
 		}
@@ -1905,5 +1911,260 @@ func TestCorrelationProvenBroadcastReportsAProvenBinding(t *testing.T) {
 	// Even with a proven broadcast, the streak count remains unmeasured.
 	if got := attrValue(line, "provenStreakCount"); got != "UNKNOWN" {
 		t.Errorf("provenStreakCount = %q, want UNKNOWN", got)
+	}
+}
+
+// milestoneNodeFixture builds a RewardList body whose only variable is the
+// missedStreams payload, so two fixtures differ in nothing but the node under
+// test.
+func milestoneNodeFixture(missedStreams string) string {
+	return `{"data":{"channel":{"id":"12345","self":{"watchStreakMilestone":{` +
+		`"state":"ACTIVE","missedStreams":` + missedStreams + `}}}}}`
+}
+
+// nodeClassification extracts ONLY the node-presence attributes of one
+// observation record — never sequence, timestamps or identity — so two records
+// can be compared for the classification they actually assert. Acceptance C:
+// a difference in sequence or time is not evidence of a preserved distinction.
+func nodeClassification(line string) map[string]string {
+	out := map[string]string{}
+	for _, key := range []string{
+		"missedStreamsPresence", "missedStreamsCount", "missedStreamsMalformed",
+		"missedStreamElements",
+		"broadcastIdentifierArrays", "broadcastIdentifierIds",
+		"broadcastIdentifierValidIds", "broadcastIdentifierMalformed",
+	} {
+		out[key] = attrValue(line, key)
+	}
+	return out
+}
+
+// observeOnceWithMissedStreams runs one observation cycle against a fixture and
+// returns the single emitted record line.
+func observeOnceWithMissedStreams(t *testing.T, missedStreams string) string {
+	t.Helper()
+	logs := captureLogs(t)
+	logins := milestoneLogins(t, 1)
+	m, _ := newMilestoneMiner(t, &milestoneRoundTripper{
+		rewardListBody: milestoneNodeFixture(missedStreams),
+	}, logins, logins)
+	logs.Reset()
+	m.observeWatchStreakMilestones(context.Background())
+	lines := recordLines(logs.String(), milestoneObservationRecord)
+	if len(lines) != 1 {
+		t.Fatalf("observation records = %d, want 1; logs:\n%s", len(lines), logs.String())
+	}
+	return lines[0]
+}
+
+// TestObservationDistinguishesNullElementFromNullChild is the R1 fidelity
+// proof, asserted where it actually matters: the emitted observation record.
+//
+// Two DIFFERENT wire facts:
+//
+//	[null]                              — Twitch sent a null ELEMENT; that
+//	                                      element has no broadcastIdentifiers
+//	                                      node at all, so nothing about the
+//	                                      child was ever observed.
+//	[{"broadcastIdentifiers":null}]     — Twitch sent a well-formed element
+//	                                      whose broadcastIdentifiers CHILD is
+//	                                      explicitly null.
+//
+// They must not render identically. Encoding the element's own NULL into its
+// child's presence slot is exactly the MISSING != NULL != EMPTY != VALID !=
+// MALFORMED collapse this parser exists to prevent, moved one node up.
+//
+// This test is written against the record only — it names no struct field — so
+// it compiles on the pre-repair candidate and fails there behaviourally.
+func TestObservationDistinguishesNullElementFromNullChild(t *testing.T) {
+	nullElement := nodeClassification(observeOnceWithMissedStreams(t, `[null]`))
+	nullChild := nodeClassification(observeOnceWithMissedStreams(t, `[{"broadcastIdentifiers":null}]`))
+
+	if reflect.DeepEqual(nullElement, nullChild) {
+		t.Fatalf("a null ELEMENT and an element whose broadcastIdentifiers CHILD is null "+
+			"produced identical node classifications — the two wire facts collapsed:\n"+
+			"  [null]                          -> %v\n"+
+			"  [{\"broadcastIdentifiers\":null}] -> %v", nullElement, nullChild)
+	}
+}
+
+// TestObservationRecordCarriesPerNodeMissedStreamPresence is the consumer-side
+// half of R3: the element/child distinction must survive all the way into the
+// emitted record, not merely exist in a struct field.
+//
+// Expectations are specified from the WIRE SHAPE, independently of how the
+// summary is implemented.
+func TestObservationRecordCarriesPerNodeMissedStreamPresence(t *testing.T) {
+	tests := []struct {
+		name          string
+		missedStreams string
+		wantElements  string // tally over the ELEMENTS themselves
+		wantArrays    string // tally over the child arrays of elements that had one
+		wantIDs       string
+		wantCount     string
+		wantMalformed string
+	}{
+		{"null element", `[null]`, "NULL:1", "none", "none", "1", "0"},
+		{"null child", `[{"broadcastIdentifiers":null}]`, "VALID:1", "NULL:1", "none", "1", "0"},
+		{"absent child", `[{}]`, "VALID:1", "MISSING:1", "none", "1", "0"},
+		{"empty child", `[{"broadcastIdentifiers":[]}]`, "VALID:1", "EMPTY:1", "none", "1", "0"},
+		{"malformed element", `["nope"]`, "MALFORMED:1", "none", "none", "1", "1"},
+		{
+			"valid entry", `[{"broadcastIdentifiers":[{"id":"b-1"}]}]`,
+			"VALID:1", "VALID:1", "VALID:1", "1", "0",
+		},
+		{
+			"mixed list",
+			`[null,{"broadcastIdentifiers":null},{"broadcastIdentifiers":[{"id":"x"}]},"nope",{}]`,
+			"VALID:3,NULL:1,MALFORMED:1", "VALID:1,MISSING:1,NULL:1", "VALID:1", "5", "1",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := nodeClassification(observeOnceWithMissedStreams(t, tc.missedStreams))
+			for key, want := range map[string]string{
+				"missedStreamElements":      tc.wantElements,
+				"broadcastIdentifierArrays": tc.wantArrays,
+				"broadcastIdentifierIds":    tc.wantIDs,
+				"missedStreamsCount":        tc.wantCount,
+				"missedStreamsMalformed":    tc.wantMalformed,
+			} {
+				if got[key] != want {
+					t.Errorf("%s = %q, want %q\nfull: %v", key, got[key], want, got)
+				}
+			}
+		})
+	}
+
+	// Pairwise: no two of these distinct wire shapes may render alike.
+	seen := map[string]string{}
+	for _, tc := range tests {
+		key := fmt.Sprint(nodeClassification(observeOnceWithMissedStreams(t, tc.missedStreams)))
+		if prev, dup := seen[key]; dup {
+			t.Errorf("%q and %q render identical node classifications: %s", prev, tc.missedStreams, key)
+		}
+		seen[key] = tc.missedStreams
+	}
+}
+
+// attrCapture is a slog.Handler that keeps each record's attributes as VALUES,
+// before any TextHandler formatting or escaping. It is the pre-format
+// observation boundary named as a pre-agreed test seam: assertions made here
+// see exactly what the code put into the record, not what the renderer chose to
+// display.
+type attrCapture struct {
+	mu      sync.Mutex
+	records []map[string]string
+}
+
+func (h *attrCapture) Enabled(context.Context, slog.Level) bool { return true }
+func (h *attrCapture) WithAttrs([]slog.Attr) slog.Handler       { return h }
+func (h *attrCapture) WithGroup(string) slog.Handler            { return h }
+
+func (h *attrCapture) Handle(_ context.Context, r slog.Record) error {
+	rec := map[string]string{"msg": r.Message, "level": r.Level.String()}
+	r.Attrs(func(a slog.Attr) bool {
+		rec[a.Key] = a.Value.String()
+		return true
+	})
+	h.mu.Lock()
+	h.records = append(h.records, rec)
+	h.mu.Unlock()
+	return nil
+}
+
+// recordsFor returns the captured records whose "record" attribute matches.
+func (h *attrCapture) recordsFor(kind string) []map[string]string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	var out []map[string]string
+	for _, r := range h.records {
+		if r["record"] == kind {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+// captureAttrs redirects slog to an attrCapture for the duration of the test.
+func captureAttrs(t *testing.T) *attrCapture {
+	t.Helper()
+	previous := slog.Default()
+	h := &attrCapture{}
+	slog.SetDefault(slog.New(h))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+	return h
+}
+
+// TestObservationAttributesAreSanitizedBeforeFormatting is the R7 repair.
+//
+// The fixture is VALID JSON carrying \\u-escaped control characters, so the
+// values become hostile bytes only AFTER decoding — the state the record
+// builder actually sees. Assertions are made on the attribute VALUES before
+// slog formats them, because the TextHandler escapes control bytes on render
+// and would hide a removed sanitizer behind its own output encoding.
+func TestObservationAttributesAreSanitizedBeforeFormatting(t *testing.T) {
+	// Decodes to ESC, NUL, BEL, LF, CR, TAB followed by printable text.
+	const hostile = `\u001b\u0000\u0007\u000a\u000d\u0009hostile`
+	body := `{"data":{"channel":{"id":"` + hostile + `","self":{"watchStreakMilestone":{` +
+		`"state":"` + hostile + `","expiresAt":"` + hostile + `",` +
+		`"missedStreams":[{"broadcastIdentifiers":[{"id":"` + hostile + `"}]}],` +
+		`"watchStreakMilestone":{"id":"` + hostile + `","achievementTimestamp":"` + hostile + `",` +
+		`"shareStatus":"` + hostile + `"}}}}}}`
+
+	// The fixture must be valid JSON AND must actually decode to control bytes,
+	// or this test would prove nothing about sanitization.
+	var probe map[string]interface{}
+	if err := json.Unmarshal([]byte(body), &probe); err != nil {
+		t.Fatalf("fixture is not valid JSON: %v", err)
+	}
+	decoded := probe["data"].(map[string]interface{})["channel"].(map[string]interface{})["id"].(string)
+	if !strings.ContainsAny(decoded, "\x00\x1b\x07\n\r\t") {
+		t.Fatalf("fixture does not decode to control characters: %q", decoded)
+	}
+
+	attrs := captureAttrs(t)
+	logins := milestoneLogins(t, 1)
+	m, _ := newMilestoneMiner(t, &milestoneRoundTripper{rewardListBody: body}, logins, logins)
+	m.observeWatchStreakMilestones(context.Background())
+
+	records := attrs.recordsFor(milestoneObservationRecord)
+	if len(records) != 1 {
+		t.Fatalf("observation records = %d, want 1", len(records))
+	}
+	rec := records[0]
+
+	// The hostile values genuinely reached the record — otherwise the loop
+	// below would pass vacuously over a record that observed nothing.
+	if rec["outcome"] != "OBSERVED" || rec["observedChannelId"] == "" {
+		t.Fatalf("fixture did not produce an observed record: %v", rec)
+	}
+
+	// Every attribute VALUE the code produced is already free of control
+	// characters and valid UTF-8, proven pre-format so the renderer cannot mask
+	// a bypass.
+	const control = "\x00\x01\x02\x03\x04\x05\x06\x07\x08\t\n\v\f\r\x1b"
+	for key, value := range rec {
+		if strings.ContainsAny(value, control) {
+			t.Errorf("attribute %q reached the record with raw control characters: %q", key, value)
+		}
+		if !utf8.ValidString(value) {
+			t.Errorf("attribute %q reached the record as invalid UTF-8: %q", key, value)
+		}
+	}
+	// Sanitization REPLACES rather than deletes: printable content survives and
+	// the substituted bytes are visibly marked.
+	if !strings.Contains(rec["observedChannelId"], "hostile") {
+		t.Errorf("sanitization dropped printable content: %q", rec["observedChannelId"])
+	}
+	if !strings.Contains(rec["observedChannelId"], string(utf8.RuneError)) {
+		t.Errorf("sanitization did not mark the replaced bytes: %q", rec["observedChannelId"])
+	}
+	// The bound still holds on the decoded values, independently of render.
+	for _, key := range []string{"observedChannelId", "state", "expiresAt", "milestoneId", "achievementTimestamp"} {
+		if len(rec[key]) > milestoneLogStringCap+len("...(truncated)") {
+			t.Errorf("attribute %q exceeded the bound: %d bytes", key, len(rec[key]))
+		}
 	}
 }
