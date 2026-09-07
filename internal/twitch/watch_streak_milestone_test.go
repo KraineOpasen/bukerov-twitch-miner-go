@@ -598,41 +598,83 @@ func TestDiagnosticRetryTraceCarriesNoRawErrorText(t *testing.T) {
 }
 
 // TestDiagnosticResponseBodyIsCapped proves a diagnostic read will not pull an
-// unbounded body into memory.
+// unbounded body into memory, and will not record a partially-read response as a
+// whole observation.
 //
 // The HTTP status is only known once the response arrives, so refusing a non-2xx
 // on its status does not by itself stop the body being read first. A hostile
 // endpoint or proxy could answer a rejected diagnostic with an enormous body and
 // have it read in full, on the bonus poll goroutine, before anything classified
-// it. The read is capped for diagnostic requests; a body past the cap fails to
-// decode and is reported as a failure rather than as an observation.
+// it. A diagnostic read therefore refuses a body past maxDiagnosticResponseBytes
+// rather than trusting it.
+//
+// Both cases serve VALID JSON that would parse into a real observation, which is
+// what makes this a test of the bound: unbounded, each is read whole and the
+// observation succeeds. A body of junk bytes would fail either way and would
+// prove nothing.
+//
+// The second case is the one a plain io.LimitReader gets wrong. A limited reader
+// signals a truncated stream and a complete one identically - both end in a
+// clean EOF - so a document that is complete at exactly the limit, followed by
+// arbitrary bytes, decodes from its prefix and is recorded as OBSERVED even
+// though the response was never read whole. Reading limit+1 is what tells the
+// two apart.
 func TestDiagnosticResponseBodyIsCapped(t *testing.T) {
-	// The oversized body is VALID JSON that would parse into a real observation.
-	// That is what makes this a test of the bound: without the cap the whole
-	// document is read and the observation succeeds; with the cap the read is
-	// truncated mid-document, the JSON no longer decodes, and the request is
-	// reported as a failure instead. A body of junk bytes would fail either way
-	// and would prove nothing.
-	prefix := `{"data":{"channel":{"id":"12345","self":{"watchStreakMilestone":null}}},"pad":"`
-	suffix := `"}`
-	padding := strings.Repeat("A", 2*maxDiagnosticResponseBytes)
-
-	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		_, _ = io.WriteString(w, prefix)
-		_, _ = io.WriteString(w, padding)
-		_, _ = io.WriteString(w, suffix)
-	})
-
-	obs := c.ObserveWatchStreakMilestone(context.Background(), "12345", "somestreamer")
-
-	if obs.Outcome == MilestoneObserved {
-		t.Fatalf("a %d-byte body was read in full and recorded as OBSERVED; the diagnostic read "+
-			"pulled an unbounded response into memory on the poll goroutine",
-			len(prefix)+len(padding)+len(suffix))
+	const (
+		prefix = `{"data":{"channel":{"id":"12345","self":{"watchStreakMilestone":null}}},"pad":"`
+		suffix = `"}`
+	)
+	// A complete document of exactly n bytes.
+	docOfSize := func(t *testing.T, n int) string {
+		t.Helper()
+		doc := prefix + strings.Repeat("A", n-len(prefix)-len(suffix)) + suffix
+		if len(doc) != n {
+			t.Fatalf("built a %d-byte document, want exactly %d", len(doc), n)
+		}
+		return doc
 	}
-	assertEmptySnapshot(t, obs.Snapshot)
 
+	for _, tc := range []struct {
+		name string
+		body func(t *testing.T) string
+	}{
+		{
+			// Far past the limit: truncation lands mid-document.
+			name: "a document far past the limit",
+			body: func(t *testing.T) string { return docOfSize(t, 3*maxDiagnosticResponseBytes) },
+		},
+		{
+			// Exactly at the limit, then one more byte. The prefix is a complete,
+			// decodable document, so only a reader that can SEE the overflow
+			// refuses it.
+			name: "a document ending exactly at the limit, plus one byte",
+			body: func(t *testing.T) string { return docOfSize(t, maxDiagnosticResponseBytes) + "Z" },
+		},
+		{
+			// One byte over, and still whole. This case pins the SIZE CHECK
+			// rather than the extra byte of read: everything read decodes, so
+			// refusing it requires comparing the length against the limit.
+			name: "a whole document one byte over the limit",
+			body: func(t *testing.T) string { return docOfSize(t, maxDiagnosticResponseBytes+1) },
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body := tc.body(t)
+			c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusOK)
+				_, _ = io.WriteString(w, body)
+			})
+
+			obs := c.ObserveWatchStreakMilestone(context.Background(), "12345", "somestreamer")
+
+			if obs.Outcome == MilestoneObserved {
+				t.Fatalf("a %d-byte body (limit %d) was recorded as OBSERVED; a diagnostic read "+
+					"accepted a response it did not read whole",
+					len(body), maxDiagnosticResponseBytes)
+			}
+			assertEmptySnapshot(t, obs.Snapshot)
+		})
+	}
 }
 
 // TestParseWatchStreakMilestoneValueAcceptsBothObservedWireKinds is the MAJOR-3

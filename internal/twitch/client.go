@@ -1206,9 +1206,17 @@ func waitForRetry(ctx context.Context, wait time.Duration) error {
 	}
 }
 
-// maxDiagnosticResponseBytes caps the response body a DIAGNOSTIC read will pull
-// into memory. Chosen orders of magnitude above a real RewardList response so it
-// cannot truncate one, and far below anything that would matter to the process.
+// maxDiagnosticResponseBytes is the largest response body a DIAGNOSTIC read will
+// accept. Chosen orders of magnitude above a real RewardList response so it
+// cannot refuse one, and far below anything that would matter to the process.
+//
+// It is a limit, not a truncation point: a body past it is refused whole. The
+// read pulls one byte more than the limit precisely so overflow is DETECTABLE,
+// because io.LimitReader reports a truncated stream and a complete one the same
+// way - both end in a clean EOF. Truncating instead would let a hostile endpoint
+// send a complete document ending exactly at the limit followed by arbitrary
+// bytes: the prefix would decode and be recorded as a whole observation of a
+// response that was never read whole.
 const maxDiagnosticResponseBytes = 1 << 20 // 1 MiB
 
 // doGQLOnce performs a single HTTP round trip. It returns the response body on
@@ -1233,18 +1241,26 @@ func doGQLOnceWithClient(client *http.Client, req *http.Request) ([]byte, int, t
 	// it. Business reads stay unbounded as they were; this is a property of the
 	// diagnostic caller, not a change to the shared contract.
 	//
-	// The cap is orders of magnitude above a real RewardList response (~1-2 KB),
-	// so a legitimate body is never truncated; a body that exceeds it fails to
-	// decode and is reported as a transport failure, which is the honest outcome
-	// for a response this read refuses to trust.
+	// The limit is orders of magnitude above a real RewardList response (~1-2 KB),
+	// so a legitimate body is never refused; one that exceeds it is refused whole
+	// and reported as a transport failure, which is the honest outcome for a
+	// response this read declines to trust.
+	//
+	// Reading limit+1 is what makes the overflow visible - see
+	// maxDiagnosticResponseBytes. This is the same shape fetchSpadeBytes uses.
+	diagnostic := isDiagnosticRequest(req.Context())
 	body := io.Reader(resp.Body)
-	if isDiagnosticRequest(req.Context()) {
-		body = io.LimitReader(resp.Body, maxDiagnosticResponseBytes)
+	if diagnostic {
+		body = io.LimitReader(resp.Body, maxDiagnosticResponseBytes+1)
 	}
 
 	respBody, err := io.ReadAll(body)
 	if err != nil {
 		return nil, resp.StatusCode, 0, fmt.Errorf("failed to read response: %w", err)
+	}
+	if diagnostic && len(respBody) > maxDiagnosticResponseBytes {
+		return nil, resp.StatusCode, 0, fmt.Errorf(
+			"response body exceeded the %d-byte diagnostic limit", maxDiagnosticResponseBytes)
 	}
 
 	if gql.IsTransientStatus(resp.StatusCode) {
