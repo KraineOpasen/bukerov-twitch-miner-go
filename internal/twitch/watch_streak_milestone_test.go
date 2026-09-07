@@ -2532,3 +2532,132 @@ func TestAnOversizedResponseIsRefusedBeforeItIsDecoded(t *testing.T) {
 	}
 	t.Logf("refused %d elements in %.1f MB", elements, allocatedMB)
 }
+
+// TestTheAPQMarkerIsOnlyHonouredWhereARejectionPutsIt pins that a peer cannot
+// destroy a valid observation by writing a string.
+//
+// gql.IsPersistedQueryNotFound is bytes.Contains over the whole body. For a
+// business read that is defensible — those responses are not attacker-shaped
+// text. For this read the consequence is not a misclassification but a
+// DESTROYED observation: a perfectly valid response with the marker in an
+// unrelated field was resent under every candidate client ID and then reported
+// as UNSUPPORTED_QUERY, discarding the real milestone data it carried.
+//
+// The genuine rejection must still be recognised, in both attested spellings,
+// because it is the EXPECTED steady state for this operation until live hash
+// acceptance is evidenced.
+func TestTheAPQMarkerIsOnlyHonouredWhereARejectionPutsIt(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		body        string
+		wantOutcome WatchStreakMilestoneOutcome
+		wantClass   MilestoneFailureClass
+		wantRequest int
+	}{
+		{
+			// The destroyed-observation case.
+			name: "the marker in an unrelated field is not a rejection",
+			body: `{"data":{"channel":{"id":"12345","self":{"watchStreakMilestone":{` +
+				`"shareStatus":"PersistedQueryNotFound","watchStreakMilestone":{"value":"4"}}}}}}`,
+			wantOutcome: MilestoneObserved,
+			wantRequest: 1,
+		},
+		{
+			// Genuine, message spelling.
+			name:        "a structured rejection, message spelling",
+			body:        `{"errors":[{"message":"PersistedQueryNotFound"}]}`,
+			wantOutcome: MilestoneUnsupported,
+			wantClass:   MilestoneFailureQueryNotFound,
+			wantRequest: 3,
+		},
+		{
+			// Genuine, extensions spelling.
+			name: "a structured rejection, extensions spelling",
+			body: `{"errors":[{"message":"whatever","extensions":` +
+				`{"code":"PERSISTED_QUERY_NOT_FOUND"}}]}`,
+			wantOutcome: MilestoneUnsupported,
+			wantClass:   MilestoneFailureQueryNotFound,
+			wantRequest: 3,
+		},
+		{
+			// Usable data beside the rejection means it is not one.
+			name: "the marker beside usable data is not a rejection",
+			body: `{"errors":[{"message":"PersistedQueryNotFound"}],` +
+				`"data":{"channel":{"id":"12345","self":{"watchStreakMilestone":null}}}}`,
+			wantOutcome: MilestoneGraphQLError,
+			wantClass:   MilestoneFailureGraphQLTopLevel,
+			wantRequest: 1,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var requests int
+			clientIDs := map[string]struct{}{}
+			c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+				requests++
+				clientIDs[r.Header.Get("Client-Id")] = struct{}{}
+				w.WriteHeader(http.StatusOK)
+				_, _ = io.WriteString(w, tc.body)
+			})
+
+			obs := c.ObserveWatchStreakMilestone(context.Background(), "12345", "somestreamer")
+
+			if obs.Outcome != tc.wantOutcome || obs.FailureClass != tc.wantClass {
+				t.Errorf("outcome = %q/%q, want %q/%q", obs.Outcome, obs.FailureClass,
+					tc.wantOutcome, tc.wantClass)
+			}
+			if requests != tc.wantRequest {
+				t.Errorf("sent %d requests under %d client IDs, want %d", requests,
+					len(clientIDs), tc.wantRequest)
+			}
+		})
+	}
+}
+
+// TestMalformedJSONKeepsItsOwnFailureClass pins that AMBIGUOUS_JSON means what
+// it says.
+//
+// jsonObjectKeysAreUnique folds scanner errors into its "not unique" answer,
+// which is the right shape for its own callers and the wrong one here, where
+// the answer becomes a named class. Reporting a truncated body as
+// AMBIGUOUS_JSON tells an operator that Twitch sent duplicate members when it
+// sent no such thing — and lets a peer choose the recorded class with syntax
+// alone, which is the same defect as a body's SIZE choosing it.
+func TestMalformedJSONKeepsItsOwnFailureClass(t *testing.T) {
+	for _, tc := range []struct{ name, body string }{
+		{"a truncated document", `{"data":{"channel":`},
+		{"trailing bytes after the document", `{"data":{"channel":{"id":"1"}}} NOPE`},
+		{"an empty body", ``},
+		{"not JSON at all", `<html>go away</html>`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusOK)
+				_, _ = io.WriteString(w, tc.body)
+			})
+
+			obs := c.ObserveWatchStreakMilestone(context.Background(), "12345", "somestreamer")
+
+			if obs.FailureClass == MilestoneFailureAmbiguousJSON {
+				t.Fatalf("malformed input reported as %s, a class that means duplicate object members",
+					MilestoneFailureAmbiguousJSON)
+			}
+			if obs.Outcome == MilestoneObserved {
+				t.Fatalf("malformed input recorded as an observation")
+			}
+			assertEmptySnapshot(t, obs.Snapshot)
+		})
+	}
+
+	// The counterpart: real duplicates still get the class that names them.
+	t.Run("genuine duplicate members keep AMBIGUOUS_JSON", func(t *testing.T) {
+		c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+			_, _ = io.WriteString(w, `{"errors":[{"message":"denied"}],"errors":[],`+
+				`"data":{"channel":{"id":"12345","self":{"watchStreakMilestone":null}}}}`)
+		})
+		obs := c.ObserveWatchStreakMilestone(context.Background(), "12345", "somestreamer")
+		if obs.FailureClass != MilestoneFailureAmbiguousJSON {
+			t.Fatalf("failure class = %q, want %s", obs.FailureClass, MilestoneFailureAmbiguousJSON)
+		}
+	})
+}

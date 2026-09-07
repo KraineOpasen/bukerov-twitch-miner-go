@@ -758,6 +758,79 @@ func diagnosticJSONValuesWithinLimit(body []byte) bool {
 	}
 }
 
+// diagnosticJSONHasDuplicateMembers reports whether body carries duplicate
+// object members, and ONLY that.
+//
+// jsonObjectKeysAreUnique cannot answer this question, because it folds scanner
+// errors into its "not unique" answer: it returns false for a truncated body,
+// for trailing bytes after the document, and for anything else the decoder
+// dislikes. That is the right shape for its own callers, which want a single
+// "is this body trustworthy" verdict. It is the wrong shape here, where the
+// answer becomes a named failure class: malformed input reported as
+// AMBIGUOUS_JSON would tell an operator that Twitch sent duplicate members
+// when it sent no such thing, and would let a peer choose the recorded class
+// with syntax alone.
+//
+// Malformed input is therefore left to the decoder that follows, which reports
+// it honestly.
+func diagnosticJSONHasDuplicateMembers(body []byte) bool {
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	duplicate, err := scanJSONValueForDuplicateKeys(decoder)
+	if err != nil {
+		return false
+	}
+	return duplicate
+}
+
+// diagnosticPersistedQueryNotFound reports whether body is a STRUCTURED
+// PersistedQueryNotFound rejection.
+//
+// gql.IsPersistedQueryNotFound answers with bytes.Contains over the whole body.
+// For a business read that is defensible: the operations are ours and their
+// responses are not attacker-shaped text. For a diagnostic read it is not, and
+// the consequence is not a misclassification but a destroyed observation - any
+// valid response with the marker in an unrelated string is resent under every
+// candidate client ID and then reported as UNSUPPORTED_QUERY, discarding the
+// real milestone data it carried.
+//
+// So the marker must be where a rejection actually puts it: a top-level errors
+// array, every element an object carrying the APQ marker, with no usable data
+// beside it. Both attested spellings count - "message" and the extensions code
+// - because a genuine PersistedQueryNotFound is the EXPECTED steady state for
+// this operation, and failing to recognise one would replace an honest
+// UNSUPPORTED_QUERY with a confusing NO_DATA_NODE.
+//
+// Deliberately not strictPersistedQueryNotFound: that one authorizes a mutation
+// REPLAY and demands the extensions code specifically, so it would answer false
+// for the message-only spelling this read must still recognise.
+func diagnosticPersistedQueryNotFound(body []byte) bool {
+	var result map[string]interface{}
+	if err := json.Unmarshal(body, &result); err != nil {
+		return false
+	}
+	if data, present := result["data"]; present && data != nil {
+		return false
+	}
+	list, ok := result["errors"].([]interface{})
+	if !ok || len(list) == 0 {
+		return false
+	}
+	for _, raw := range list {
+		object, ok := raw.(map[string]interface{})
+		if !ok {
+			return false
+		}
+		if message, _ := object["message"].(string); message == "PersistedQueryNotFound" {
+			continue
+		}
+		extensions, ok := object["extensions"].(map[string]interface{})
+		if !ok || extensions["code"] != "PERSISTED_QUERY_NOT_FOUND" {
+			return false
+		}
+	}
+	return true
+}
+
 // jsonObjectKeysAreUnique validates the raw JSON token stream before decoding
 // into maps. encoding/json otherwise applies last-value-wins to duplicate
 // members, which is unsafe proof for a side-effect retry: a conflicting
@@ -1161,13 +1234,22 @@ func (c *TwitchClient) doGQLRequestWithClientIDFallback(ctx context.Context, bod
 					"%w: operation %s", errOversizedDiagnosticJSON, operationLabel)
 			}
 
-			if !jsonObjectKeysAreUnique(respBody) {
+			if diagnosticJSONHasDuplicateMembers(respBody) {
 				return nil, statusCode, fmt.Errorf(
 					"%w: operation %s", errAmbiguousDiagnosticJSON, operationLabel)
 			}
 		}
 
-		if !gql.IsPersistedQueryNotFound(respBody) {
+		// The two paths ask the same question of different evidence: a business
+		// read trusts the marker anywhere in its own operation's response, a
+		// diagnostic read requires it where a rejection actually puts it. See
+		// diagnosticPersistedQueryNotFound.
+		queryNotFound := gql.IsPersistedQueryNotFound(respBody)
+		if diagnostic {
+			queryNotFound = diagnosticPersistedQueryNotFound(respBody)
+		}
+
+		if !queryNotFound {
 			if diagnostic {
 				// A diagnostic read caches its own working ID but promotes
 				// nothing: see rememberDiagnosticClientID.
