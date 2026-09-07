@@ -744,7 +744,10 @@ const maxDiagnosticJSONValues = 8192
 //
 // Malformed JSON is NOT this function's business. It answers true and leaves
 // the shape to the decoder that follows, which reports it honestly. Saying
-// "too large" about a body that is merely broken would be a fabricated reason.
+// "too large" about a body that is merely broken would be a fabricated reason -
+// and, worse, one a peer could choose, by moving its syntax error to either
+// side of the limit boundary. Honouring that contract is precisely why the scan
+// finishes rather than returning the moment the count is exceeded.
 func diagnosticJSONValuesWithinLimit(body []byte) bool {
 	decoder := json.NewDecoder(bytes.NewReader(body))
 	values := 0
@@ -769,7 +772,19 @@ func diagnosticJSONValuesWithinLimit(body []byte) bool {
 		}
 		values++
 		if values > maxDiagnosticJSONValues {
-			return false
+			// Over the limit on the tokens seen so far - but "too large" is
+			// only the honest answer for a body that is otherwise WELL FORMED.
+			// A malformed one has no size verdict to give, only a shape one,
+			// and the decoder that follows owns that; answering "too large"
+			// here would let a peer choose between the two classes by moving
+			// its syntax error to either side of this boundary.
+			//
+			// json.Valid is the right way to settle that and the reason this
+			// is not simply "keep scanning": finishing the token loop boxes
+			// every value it reads, which measured 54 MB on a 1 MiB body -
+			// reintroducing the cost this scan exists to avoid. json.Valid
+			// walks the bytes without materialising anything.
+			return !json.Valid(body)
 		}
 	}
 }

@@ -2696,11 +2696,27 @@ func TestTheAPQMarkerIsOnlyHonouredWhereARejectionPutsIt(t *testing.T) {
 // sent no such thing — and lets a peer choose the recorded class with syntax
 // alone, which is the same defect as a body's SIZE choosing it.
 func TestMalformedJSONKeepsItsOwnFailureClass(t *testing.T) {
+	// A well-formed prefix long enough to cross the pre-decode value limit,
+	// then a syntax error. The size verdict is reached first; the shape verdict
+	// is the true one. Without the scan running to completion, a peer picks
+	// between the two classes by moving its syntax error across that boundary.
+	var malformedPastTheValueLimit strings.Builder
+	malformedPastTheValueLimit.WriteString(
+		`{"data":{"channel":{"id":"12345","self":{"watchStreakMilestone":{"missedStreams":[`)
+	for i := 0; i <= maxDiagnosticJSONValues; i++ {
+		if i > 0 {
+			malformedPastTheValueLimit.WriteString(",")
+		}
+		malformedPastTheValueLimit.WriteString("0")
+	}
+	malformedPastTheValueLimit.WriteString(`]}}}}} THIS IS NOT JSON`)
+
 	for _, tc := range []struct{ name, body string }{
 		{"a truncated document", `{"data":{"channel":`},
 		{"trailing bytes after the document", `{"data":{"channel":{"id":"1"}}} NOPE`},
 		{"an empty body", ``},
 		{"not JSON at all", `<html>go away</html>`},
+		{"malformed only past the value limit", malformedPastTheValueLimit.String()},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
@@ -2713,6 +2729,10 @@ func TestMalformedJSONKeepsItsOwnFailureClass(t *testing.T) {
 			if obs.FailureClass == MilestoneFailureAmbiguousJSON {
 				t.Fatalf("malformed input reported as %s, a class that means duplicate object members",
 					MilestoneFailureAmbiguousJSON)
+			}
+			if obs.FailureClass == MilestoneFailureOversizedCollection {
+				t.Fatalf("malformed input reported as %s, a class that means the response was too large",
+					MilestoneFailureOversizedCollection)
 			}
 			if obs.Outcome == MilestoneObserved {
 				t.Fatalf("malformed input recorded as an observation")
