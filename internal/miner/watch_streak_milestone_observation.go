@@ -87,6 +87,17 @@ const (
 // to prevent. It is SHORTER than bonusPollInterval (60s) so the stage alone can
 // never push the next business pass past its tick.
 //
+// "Alone" is the whole of that claim, and it is worth stating what it does not
+// cover. The budget starts when the stage does, not at the tick, so a business
+// pass that itself ran long leaves the two ADDING: a 30s pollBonuses followed
+// by a stage that spends its full budget returns at 70s, and the coalesced tick
+// fires 10s late. Budgeting from the time remaining until the next tick would
+// close that, at the price of a stage that yields entirely on exactly the
+// cycles where a slow Twitch makes the evidence most interesting; deciding
+// which of those matters more is a cadence question, not a bug fix. Note the
+// business pass is unbounded on this loop today and can overrun a tick with no
+// help from this stage.
+//
 // It is a var, not a const, so tests can shorten it; nothing at runtime writes
 // it, and it is deliberately not a settings surface.
 var milestoneObservationCycleBudget = 40 * time.Second

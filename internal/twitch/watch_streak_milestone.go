@@ -55,6 +55,7 @@ import (
 	"time"
 
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/constants"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/gql"
 )
 
 // MilestoneFieldPresence is the parser's quality/presence classification for
@@ -318,6 +319,12 @@ const (
 	// payload happens to contain a data object would otherwise satisfy the
 	// data-presence check and be recorded as evidence.
 	MilestoneFailureHTTPStatus MilestoneFailureClass = "HTTP_STATUS"
+
+	// MilestoneFailureAmbiguousJSON marks a response whose raw JSON carried
+	// duplicate object members. Decoding picks the last one, so an explicit
+	// rejection can be erased by a benign duplicate beside it; the two readings
+	// are not distinguishable after the fact, and neither is evidence.
+	MilestoneFailureAmbiguousJSON MilestoneFailureClass = "AMBIGUOUS_JSON"
 )
 
 // milestoneObservationSequence is the process-wide monotonic counter stamped on
@@ -447,6 +454,22 @@ func (c *TwitchClient) ObserveWatchStreakMilestone(ctx context.Context, channelI
 
 	if err != nil {
 		obs.Outcome, obs.FailureClass = classifyMilestoneRequestError(ctx, err)
+		// Refine ONLY the generic fallback. Every named class above it is a
+		// more specific fact than the status - a cancellation, the transport's
+		// own timeout, an exhausted hash, a token rejection, ambiguous JSON -
+		// and must survive untouched. What is left is the catch-all, which
+		// answers "transport" for failures that were in truth an HTTP refusal:
+		// a 4xx whose body did not parse reached the record as TRANSPORT even
+		// though the status alone had already settled it.
+		//
+		// Transient statuses keep TRANSPORT deliberately. A 429 or a 5xx here
+		// means the retry schedule ran and gave up, and that is the more
+		// useful fact than the last status seen.
+		if obs.FailureClass == MilestoneFailureTransport &&
+			statusCode != 0 && (statusCode < 200 || statusCode > 299) &&
+			!gql.IsTransientStatus(statusCode) {
+			obs.FailureClass = MilestoneFailureHTTPStatus
+		}
 		return obs
 	}
 
@@ -526,6 +549,8 @@ func classifyMilestoneRequestError(ctx context.Context, err error) (WatchStreakM
 		return MilestoneUnsupported, MilestoneFailureQueryNotFound
 	case errors.Is(err, ErrUnauthorized):
 		return MilestoneUnavailable, MilestoneFailureUnauthorized
+	case errors.Is(err, errAmbiguousDiagnosticJSON):
+		return MilestoneUnavailable, MilestoneFailureAmbiguousJSON
 	default:
 		return MilestoneUnavailable, MilestoneFailureTransport
 	}

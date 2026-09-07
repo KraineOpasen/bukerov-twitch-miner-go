@@ -64,6 +64,12 @@ var (
 	// internal/constants/gql.go (see the per-operation client-ID fallback below).
 	ErrPersistedQueryNotFound = errors.New("twitch: persisted query not found (stale query hash or client metadata)")
 
+	// errAmbiguousDiagnosticJSON marks a DIAGNOSTIC response whose raw JSON
+	// carries duplicate object members, so decoding it would silently pick one
+	// of two conflicting readings. Unexported: only the observation raises and
+	// classifies it, and no business path changes behaviour on it.
+	errAmbiguousDiagnosticJSON = errors.New("twitch: ambiguous diagnostic JSON response (duplicate object members)")
+
 	// ErrClaimNotAccepted is returned only when Twitch authoritatively rejected a
 	// bonus claim in the mutation's business-result node. Missing/null/malformed
 	// responses use ErrBonusClaimIndeterminate and are quarantined, never retried.
@@ -1050,8 +1056,44 @@ func (c *TwitchClient) doGQLRequestWithClientIDFallback(ctx context.Context, bod
 			return respBody, statusCode, err
 		}
 
+		// A DIAGNOSTIC read stops here on any non-2xx, before the body is
+		// treated as evidence of anything.
+		//
+		// gql.IsPersistedQueryNotFound is a raw substring test over the whole
+		// body and does not consult the status, so a rejected response that
+		// merely CONTAINS "PersistedQueryNotFound" would otherwise drive the
+		// candidate loop: the authenticated request would be re-sent under
+		// every client ID this project ships, and an endpoint answering each
+		// with the same marker would end the read as UNSUPPORTED_QUERY -
+		// amplifying the request threefold and naming the wrong cause. The
+		// status is the authority on whether a body is worth reading at all.
+		//
+		// Only the iteration stops: the body and status are handed back
+		// unchanged, so gqlSingleRoundTrip keeps deciding 401 and 403, and the
+		// observation classifies the rest on the status it now trusts. A
+		// non-2xx is not a working client ID, so nothing is cached for it.
+		// Transient statuses never arrive here - doGQLRequestWithRetry has
+		// already exhausted and returned them as an error above.
+		if diagnostic && (statusCode < 200 || statusCode > 299) {
+			return respBody, statusCode, nil
+		}
+
 		if !gql.IsPersistedQueryNotFound(respBody) {
 			if diagnostic {
+				// Duplicate JSON members are ambiguous evidence. encoding/json
+				// keeps the LAST value, so a response that carries an explicit
+				// rejection followed by a benign duplicate - say an "errors"
+				// array of real errors followed by an empty one - decodes with
+				// the rejection erased and would be recorded as a clean
+				// observation. The mutation path already refuses raw bodies
+				// like this (jsonObjectKeysAreUnique); an observation whose
+				// whole purpose is honest evidence has the same need, and the
+				// fail-closed checks downstream cannot help, because they only
+				// ever see the lossy decoded map.
+				if !jsonObjectKeysAreUnique(respBody) {
+					return nil, statusCode, fmt.Errorf(
+						"%w: operation %s", errAmbiguousDiagnosticJSON, operationLabel)
+				}
 				// A diagnostic read caches its own working ID but promotes
 				// nothing: see rememberDiagnosticClientID.
 				c.rememberDiagnosticClientID(operationLabel, clientID)

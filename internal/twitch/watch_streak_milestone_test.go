@@ -1195,22 +1195,55 @@ func TestObserveWatchStreakMilestoneSingleRequestOnSuccess(t *testing.T) {
 	}
 }
 
-// TestObserveWatchStreakMilestoneRequestFailure proves a non-transient
-// transport rejection is UNAVAILABLE evidence carrying only a bounded class —
-// never the raw error text.
+// TestObserveWatchStreakMilestoneRequestFailure proves a rejection is
+// UNAVAILABLE evidence carrying only a bounded class — never the raw error
+// text — and that the class names the STATUS when the status is what settled
+// it.
+//
+// The 403 case reported TRANSPORT until the status was made authoritative.
+// That was not false so much as vague: nothing about a 403 is a transport
+// fault, and answering "transport" for an HTTP refusal is the same imprecision
+// that let a 4xx whose body failed to parse arrive under a transport class.
+// TRANSPORT now means what its name says, and this test pins which of the two
+// a permission rejection is.
+//
+// Transient statuses are pinned the other way in the sibling case below: a 429
+// or a 5xx here means the retry schedule ran and gave up, which is the more
+// useful fact than the last status seen, so those keep TRANSPORT.
 func TestObserveWatchStreakMilestoneRequestFailure(t *testing.T) {
-	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
-		// 403 is a permission rejection: returned immediately, no retries.
-		w.WriteHeader(http.StatusForbidden)
-		_, _ = io.WriteString(w, `{"message":"forbidden"}`)
-	})
+	for _, tc := range []struct {
+		name      string
+		status    int
+		wantClass MilestoneFailureClass
+	}{
+		{
+			// A permission rejection: returned immediately, no retries.
+			name:      "a permission rejection names the status",
+			status:    http.StatusForbidden,
+			wantClass: MilestoneFailureHTTPStatus,
+		},
+		{
+			// Exhausted retries: the schedule ran, so the fact is the
+			// transport, not the last status.
+			name:      "an exhausted transient status stays TRANSPORT",
+			status:    http.StatusBadGateway,
+			wantClass: MilestoneFailureTransport,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(tc.status)
+				_, _ = io.WriteString(w, `{"message":"rejected"}`)
+			})
 
-	obs := c.ObserveWatchStreakMilestone(context.Background(), "12345", "somestreamer")
+			obs := c.ObserveWatchStreakMilestone(context.Background(), "12345", "somestreamer")
 
-	if obs.Outcome != MilestoneUnavailable || obs.FailureClass != MilestoneFailureTransport {
-		t.Fatalf("outcome = %q/%q, want UNAVAILABLE/TRANSPORT", obs.Outcome, obs.FailureClass)
+			if obs.Outcome != MilestoneUnavailable || obs.FailureClass != tc.wantClass {
+				t.Fatalf("outcome = %q/%q, want UNAVAILABLE/%s", obs.Outcome, obs.FailureClass, tc.wantClass)
+			}
+			assertEmptySnapshot(t, obs.Snapshot)
+		})
 	}
-	assertEmptySnapshot(t, obs.Snapshot)
 }
 
 // TestObserveWatchStreakMilestoneNoChannelIDSkips proves an unscopeable target
@@ -2155,6 +2188,133 @@ func TestMissedStreamsClassificationStructuralProperties(t *testing.T) {
 				t.Errorf("inserting a null element changed MalformedCount %d -> %d",
 					before.MalformedCount, after.MalformedCount)
 			}
+		}
+	})
+}
+
+// TestDiagnosticStopsAtANonSuccessStatusInsteadOfRotatingClientIDs pins the
+// status as the authority on whether a body is worth reading.
+//
+// gql.IsPersistedQueryNotFound is a raw substring test over the whole response
+// and never looks at the status. A rejected response that merely CONTAINS the
+// marker therefore used to drive the client-ID candidate loop: the
+// authenticated request went out under every client ID this project ships, and
+// because each answer carried the marker the read ended as UNSUPPORTED_QUERY -
+// the wrong cause, reached by three times the requests.
+func TestDiagnosticStopsAtANonSuccessStatusInsteadOfRotatingClientIDs(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		status    int
+		body      string
+		wantClass MilestoneFailureClass
+	}{
+		{
+			// The amplification-and-masking case.
+			name:      "a rejection whose body carries the APQ marker",
+			status:    http.StatusForbidden,
+			body:      `{"errors":[{"message":"PersistedQueryNotFound"}]}`,
+			wantClass: MilestoneFailureHTTPStatus,
+		},
+		{
+			// The classification case: refused on status, not on whether the
+			// payload happened to parse.
+			name:      "a rejection whose body is not JSON at all",
+			status:    http.StatusBadRequest,
+			body:      `<html>go away</html>`,
+			wantClass: MilestoneFailureHTTPStatus,
+		},
+		{
+			// 401 keeps its own, more specific class.
+			name:      "a token rejection",
+			status:    http.StatusUnauthorized,
+			body:      `{"errors":[{"message":"PersistedQueryNotFound"}]}`,
+			wantClass: MilestoneFailureUnauthorized,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var requests int
+			clientIDs := map[string]struct{}{}
+			c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+				requests++
+				clientIDs[r.Header.Get("Client-Id")] = struct{}{}
+				w.WriteHeader(tc.status)
+				_, _ = io.WriteString(w, tc.body)
+			})
+
+			obs := c.ObserveWatchStreakMilestone(context.Background(), "12345", "somestreamer")
+
+			if obs.Outcome != MilestoneUnavailable {
+				t.Errorf("outcome = %q, want %q", obs.Outcome, MilestoneUnavailable)
+			}
+			if obs.FailureClass != tc.wantClass {
+				t.Errorf("failure class = %q, want %q", obs.FailureClass, tc.wantClass)
+			}
+			if requests != 1 {
+				t.Errorf("sent %d requests under %d client IDs; a refused status must stop the "+
+					"candidate loop, not rotate through it", requests, len(clientIDs))
+			}
+			assertEmptySnapshot(t, obs.Snapshot)
+		})
+	}
+}
+
+// TestDiagnosticRefusesAmbiguousJSON pins duplicate object members as
+// non-evidence.
+//
+// encoding/json applies last-value-wins to duplicate members, so a response
+// carrying a real rejection followed by a benign duplicate decodes with the
+// rejection ERASED. The fail-closed checks on the errors node cannot catch it:
+// by the time they run they are looking at the lossy decoded map, in which only
+// one of the two readings survives. The mutation path already refuses raw
+// bodies like this; an observation has the same need.
+func TestDiagnosticRefusesAmbiguousJSON(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body string
+	}{
+		{
+			// The erasure case: an explicit rejection hidden behind an empty
+			// duplicate. Without the guard this records OBSERVED.
+			name: "a rejection erased by a duplicate errors member",
+			body: `{"errors":[{"message":"denied"}],"errors":[],` +
+				`"data":{"channel":{"id":"12345","self":{"watchStreakMilestone":null}}}}`,
+		},
+		{
+			// Duplicates nested inside data are just as ambiguous.
+			name: "a duplicate member nested inside data",
+			body: `{"data":{"channel":{"id":"12345","id":"99999",` +
+				`"self":{"watchStreakMilestone":null}}}}`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusOK)
+				_, _ = io.WriteString(w, tc.body)
+			})
+
+			obs := c.ObserveWatchStreakMilestone(context.Background(), "12345", "somestreamer")
+
+			if obs.Outcome != MilestoneUnavailable {
+				t.Errorf("outcome = %q, want %q", obs.Outcome, MilestoneUnavailable)
+			}
+			if obs.FailureClass != MilestoneFailureAmbiguousJSON {
+				t.Errorf("failure class = %q, want %q", obs.FailureClass, MilestoneFailureAmbiguousJSON)
+			}
+			assertEmptySnapshot(t, obs.Snapshot)
+		})
+	}
+
+	// The counterpart, so the guard cannot drift into refusing valid bodies: a
+	// response with no duplicate members is still a real observation.
+	t.Run("a unique-membered response is unaffected", func(t *testing.T) {
+		c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+			_, _ = io.WriteString(w, `{"data":{"channel":{"id":"12345",`+
+				`"self":{"watchStreakMilestone":null}}}}`)
+		})
+		obs := c.ObserveWatchStreakMilestone(context.Background(), "12345", "somestreamer")
+		if obs.Outcome != MilestoneObserved {
+			t.Fatalf("outcome = %q (%q), want %q", obs.Outcome, obs.FailureClass, MilestoneObserved)
 		}
 	})
 }
