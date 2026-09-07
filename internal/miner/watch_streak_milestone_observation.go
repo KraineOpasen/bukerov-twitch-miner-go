@@ -478,11 +478,21 @@ func milestoneLogInt(f twitch.MilestoneIntField) string {
 // milestoneLogWireKind renders which JSON encoding a validly observed integer
 // arrived in. A field that was not validly observed has no encoding to report
 // and reads as <UNSET>, never as a borrowed or defaulted one.
+//
+// The vocabulary is closed by CONSTRUCTION, not by convention: WireKind is an
+// exported string field, so anything outside the two known encodings renders as
+// <UNSET> rather than being passed through into a log attribute. That keeps the
+// unsanitized string() conversion safe no matter who fills the struct.
 func milestoneLogWireKind(f twitch.MilestoneIntField) string {
-	if f.Presence != twitch.MilestoneFieldValid || f.WireKind == twitch.MilestoneWireKindUnset {
+	if f.Presence != twitch.MilestoneFieldValid {
 		return "<UNSET>"
 	}
-	return string(f.WireKind)
+	switch f.WireKind {
+	case twitch.MilestoneWireKindNumber, twitch.MilestoneWireKindString:
+		return string(f.WireKind)
+	default:
+		return "<UNSET>"
+	}
 }
 
 // presenceToken renders a presence classification so it can never be confused

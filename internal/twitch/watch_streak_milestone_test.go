@@ -42,8 +42,13 @@ func fullRewardListResponse() map[string]interface{} {
 							},
 						},
 						"watchStreakMilestone": map[string]interface{}{
-							"id":                   "milestone-7",
-							"value":                float64(4),
+							"id": "milestone-7",
+							// String-encoded on purpose: the donor evidence says this
+							// is the form Twitch actually sends for this field, so the
+							// suite's "well-formed live response" must model it. The
+							// number form is real tolerance and is covered explicitly by
+							// TestParseWatchStreakMilestoneValueRecordsItsWireKind.
+							"value":                "4",
 							"achievementTimestamp": "2026-09-05T12:00:00Z",
 							"shareStatus":          "UNSHARED",
 						},
@@ -466,9 +471,25 @@ func TestParseWatchStreakMilestoneValueRecordsItsWireKind(t *testing.T) {
 // The asymmetry is a property of the encodings, not an oversight, and this test
 // exists so a later reader cannot "fix" one side into agreement with the other.
 func TestParseWatchStreakMilestoneValueExactnessFollowsTheEncoding(t *testing.T) {
-	const beyondFloat64Exact = "9007199254740993" // 2^53 + 1
-
+	// The same magnitude as a JSON number is not exactly observable on any
+	// platform: float64 has already lost its identity by the time it is decoded.
 	resp := fullRewardListResponse()
+	sNode(t, resp)["watchStreakMilestone"].(map[string]interface{})["value"] = float64(1 << 53)
+	if got := parseWatchStreakMilestone(resp).MilestoneValue; got.Presence != MilestoneFieldMalformed {
+		t.Fatalf("number-encoded 2^53 = %+v, want MALFORMED", got)
+	}
+
+	// The string path's ceiling is the PLATFORM int, not 2^53, so where the two
+	// encodings disagree depends on the build. On a 64-bit int the string is
+	// still exact at 2^53+1; on a 32-bit int the platform bound bites first and
+	// both encodings refuse. Asserting the 64-bit case unconditionally would
+	// fail a 32-bit build for doing the right thing.
+	if strconv.IntSize < 54 {
+		t.Skipf("int is %d bits: the platform bound refuses 2^53+1 before the "+
+			"exactness difference can show", strconv.IntSize)
+	}
+	const beyondFloat64Exact = "9007199254740993" // 2^53 + 1
+	resp = fullRewardListResponse()
 	sNode(t, resp)["watchStreakMilestone"].(map[string]interface{})["value"] = beyondFloat64Exact
 	got := parseWatchStreakMilestone(resp).MilestoneValue
 	if got.Presence != MilestoneFieldValid || got.WireKind != MilestoneWireKindString {
@@ -478,12 +499,56 @@ func TestParseWatchStreakMilestoneValueExactnessFollowsTheEncoding(t *testing.T)
 		t.Fatalf("string-encoded %s round-tripped to %d; a decimal string must be read exactly",
 			beyondFloat64Exact, got.Value)
 	}
+}
 
-	// The same magnitude as a JSON number is not exactly observable.
-	resp = fullRewardListResponse()
-	sNode(t, resp)["watchStreakMilestone"].(map[string]interface{})["value"] = float64(1 << 53)
-	if got := parseWatchStreakMilestone(resp).MilestoneValue; got.Presence != MilestoneFieldMalformed {
-		t.Fatalf("number-encoded 2^53 = %+v, want MALFORMED", got)
+// TestParseWatchStreakMilestoneValueRefusesAnOutOfRangeDigitRun pins the
+// string path's ceiling, on every platform.
+//
+// This is the one case where strconv.Atoi is actively dangerous: for a digit
+// run too large for the platform int it returns the SATURATED magnitude
+// alongside ErrRange, so dropping the error check would record MaxInt as an
+// observed milestone value. "A signed run of decimal digits" is therefore NOT
+// sufficient for VALID, and the parser must say MALFORMED rather than report a
+// number Twitch never sent.
+func TestParseWatchStreakMilestoneValueRefusesAnOutOfRangeDigitRun(t *testing.T) {
+	for _, digits := range []string{
+		strconv.FormatUint(uint64(math.MaxInt64)+1, 10), // 2^63, above a 64-bit int
+		"-9223372036854775809",                          // below a 64-bit int
+		"99999999999999999999999999999999",              // above any platform int
+	} {
+		resp := fullRewardListResponse()
+		sNode(t, resp)["watchStreakMilestone"].(map[string]interface{})["value"] = digits
+		got := parseWatchStreakMilestone(resp).MilestoneValue
+		if got != (MilestoneIntField{Presence: MilestoneFieldMalformed}) {
+			t.Fatalf("out-of-range digit run %s = %+v, want MALFORMED with no value "+
+				"and no wire kind; strconv.Atoi saturates, so a dropped error check "+
+				"would report a fabricated %d here", digits, got, got.Value)
+		}
+	}
+}
+
+// TestParseWatchStreakMilestoneSiblingsRecordTheNumberWireKind pins the wire
+// kind the number-encoded siblings carry.
+//
+// They are not rendered into any record today, which is exactly why they need
+// pinning: without this, a change that reported watchStreakThreshold as
+// STRING - a factually false encoding for a JSON number - would pass the whole
+// suite and only surface if someone later surfaced the field.
+func TestParseWatchStreakMilestoneSiblingsRecordTheNumberWireKind(t *testing.T) {
+	snap := parseWatchStreakMilestone(fullRewardListResponse())
+	for name, got := range map[string]MilestoneIntField{
+		"watchStreakThreshold": snap.WatchStreakThreshold,
+		"watchStreakCopoBonus": snap.WatchStreakCopoBonus,
+	} {
+		if got.Presence != MilestoneFieldValid || got.WireKind != MilestoneWireKindNumber {
+			t.Errorf("%s = %+v, want VALID with wire kind NUMBER", name, got)
+		}
+	}
+	// And the value node in the same canonical response is the string form,
+	// so the two encodings are exercised side by side in one live-shaped body.
+	if got := snap.MilestoneValue; got.Presence != MilestoneFieldValid ||
+		got.WireKind != MilestoneWireKindString || got.Value != 4 {
+		t.Errorf("milestone value = %+v, want VALID/4/STRING", got)
 	}
 }
 

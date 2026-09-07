@@ -33,12 +33,16 @@ package twitch
 // The second unknown is the RewardList persisted query's live acceptance, which
 // stays PENDING runtime evidence (see the provenance note below).
 //
-// Provenance: the RewardList wire facts (operation name, persisted-query
-// version and hash, and the two variable names) are clean-room protocol
-// evidence from mpforce1/Twitch-Channel-Points-Miner, ref
+// Provenance: the RewardList wire facts are clean-room protocol evidence from
+// mpforce1/Twitch-Channel-Points-Miner, ref
 // f1dda17ad61562ca2e93d975ee0a24e8b2f7ea0c, tree
-// 650ddd7ed974f78fab1956e41c0849ea177545b2, GPL-3.0. No donor code text was
-// copied. Live acceptance of that hash is PENDING runtime evidence; an
+// 650ddd7ed974f78fab1956e41c0849ea177545b2, GPL-3.0. Two classes of fact come
+// from there: the operation name, persisted-query version and hash and the two
+// variable names; and the PER-FIELD WIRE ENCODING below — that the nested
+// milestone node's value is string-encoded while watchStreakThreshold and
+// watchStreakCopoBonus are number-encoded. No donor code text was copied; the
+// donor identifiers named in comments are evidence attribution, not expression.
+// Live acceptance of that hash is PENDING runtime evidence; an
 // UNSUPPORTED_QUERY outcome is an honest, expected result, never a reason to
 // invent a replacement hash.
 
@@ -109,7 +113,8 @@ const (
 	MilestoneWireKindUnset MilestoneWireKind = ""
 	// MilestoneWireKindNumber: the value arrived as a JSON number.
 	MilestoneWireKindNumber MilestoneWireKind = "NUMBER"
-	// MilestoneWireKindString: the value arrived as a JSON string of digits.
+	// MilestoneWireKindString: the value arrived as a JSON string holding an
+	// optionally signed run of decimal digits.
 	MilestoneWireKindString MilestoneWireKind = "STRING"
 )
 
@@ -716,8 +721,15 @@ func milestoneInt(parent map[string]interface{}, key string) MilestoneIntField {
 // to any grant. Which field carries the authoritative streak count stays
 // UNKNOWN.
 //
-// Anything that is neither a JSON number nor a string of digits — a bool, an
-// object, an array, "4.0", "0x4", " 4", "" — is MALFORMED, never coerced.
+// The accepted string form is exactly what strconv.Atoi accepts and no more: an
+// optional sign then decimal digits (so "+4" and "0004" are read as 4). Anything
+// else is MALFORMED, never coerced — a bool, an object, an array, "4.0", "0x4",
+// " 4", "", and a digit run too large for a platform int.
+//
+// Normalisation keeps the integer and the encoding, not the lexical form: "4",
+// "+4" and "0004" all report 4/STRING, so a purely lexical change on the wire is
+// not visible in the record. That is the contracted semantics, and it is the
+// one thing the wire kind does not tell a reader.
 func milestoneNumericStringOrInt(parent map[string]interface{}, key string) MilestoneIntField {
 	raw, present := parent[key]
 	switch {
@@ -730,16 +742,21 @@ func milestoneNumericStringOrInt(parent map[string]interface{}, key string) Mile
 	case float64:
 		return milestoneIntFromNumber(typed)
 	case string:
-		// strconv.Atoi accepts an optional sign followed by decimal digits and
-		// nothing else, and reports a range error rather than saturating, so a
-		// string that is not exactly one platform int stays MALFORMED.
+		// The err check is load-bearing and must not be dropped: on a digit run
+		// too large for the platform int, strconv.Atoi returns the SATURATED
+		// magnitude (MaxInt/MinInt) TOGETHER WITH ErrRange — it does not leave
+		// the value alone. Using it would record MaxInt as an observed
+		// milestone, which is precisely the fabricated datum this parser
+		// exists to prevent. Out of range is MALFORMED.
 		//
-		// A decimal string carries its integer exactly, so unlike the number
-		// path below it needs no 2^53 guard: the guard exists because JSON
-		// numbers decode through float64 and lose identity above that bound,
-		// which never happens to a string. The two paths therefore classify
-		// very large magnitudes differently, and that asymmetry is the honest
-		// one — it reflects a real difference in what each encoding preserves.
+		// Within that bound a decimal string needs no 2^53 guard, because it
+		// carries its integer exactly: the guard on the number path exists only
+		// because JSON numbers decode through float64 and lose identity above
+		// 2^53, which never happens to a string. So on a 64-bit build the two
+		// encodings deliberately disagree between 2^53 and MaxInt — the string
+		// is still exact there while the number is not. On a 32-bit build the
+		// platform int bound bites first and both refuse near 2^31, so the
+		// disagreement is a property of the wider int, not a universal one.
 		value, err := strconv.Atoi(typed)
 		if err != nil {
 			return MilestoneIntField{Presence: MilestoneFieldMalformed}

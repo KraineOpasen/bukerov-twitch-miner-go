@@ -81,7 +81,10 @@ func (rt *milestoneRoundTripper) opLoginsSnapshot() []string {
 const defaultRewardListBody = `{"data":{"channel":{"id":"12345","self":{"watchStreakMilestone":{` +
 	`"watchStreakThreshold":3,"watchStreakCopoBonus":450,"state":"ACTIVE","expiresAt":"2026-09-10T00:00:00Z",` +
 	`"missedStreams":[{"broadcastIdentifiers":[{"id":"missed-b-1"}]}],` +
-	`"watchStreakMilestone":{"id":"m-1","value":4,"achievementTimestamp":"2026-09-05T12:00:00Z","shareStatus":"UNSHARED"}}}}}}`
+	// value is string-encoded because that is the form the donor evidence says
+	// Twitch sends for this field; the number form is tolerance and is covered
+	// explicitly by TestObservationReportsMilestoneValueWireKind.
+	`"watchStreakMilestone":{"id":"m-1","value":"4","achievementTimestamp":"2026-09-05T12:00:00Z","shareStatus":"UNSHARED"}}}}}}`
 
 func (rt *milestoneRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
 	body, err := io.ReadAll(req.Body)
@@ -534,7 +537,7 @@ func TestObservationRecordCarriesBoundedProvenance(t *testing.T) {
 		"milestoneNodePresence":        "<VALID>",
 		"milestoneId":                  "m-1",
 		"milestoneValue":               "4",
-		"milestoneValueWireKind":       "NUMBER",
+		"milestoneValueWireKind":       "STRING",
 		"watchStreakThreshold":         "3",
 		"watchStreakCopoBonus":         "450",
 		"state":                        "ACTIVE",
@@ -2079,6 +2082,11 @@ func TestMilestoneLogWireKindNeverRendersAnEmptyValue(t *testing.T) {
 		{Presence: twitch.MilestoneFieldNull},
 		{Presence: twitch.MilestoneFieldMalformed},
 		{Presence: twitch.MilestoneFieldMalformed, WireKind: twitch.MilestoneWireKindString},
+		// WireKind is an exported string field, so the renderer must be closed
+		// by construction: an encoding it does not know is not passed through
+		// into a log attribute.
+		{Presence: twitch.MilestoneFieldValid, Value: 4, WireKind: "\x1b[31mINJECTED"},
+		{Presence: twitch.MilestoneFieldValid, Value: 4, WireKind: "number"},
 	} {
 		if got := milestoneLogWireKind(f); got != "<UNSET>" {
 			t.Errorf("milestoneLogWireKind(%+v) = %q, want <UNSET>", f, got)
@@ -2253,6 +2261,11 @@ func TestObservationAttributesAreSanitizedBeforeFormatting(t *testing.T) {
 		`"state":"` + hostile + `","expiresAt":"` + hostile + `",` +
 		`"missedStreams":[{"broadcastIdentifiers":[{"id":"` + hostile + `"}]}],` +
 		`"watchStreakMilestone":{"id":"` + hostile + `","achievementTimestamp":"` + hostile + `",` +
+		// value is string-accepting now, so it is a wire-string attack surface
+		// like any other and must be in this fixture. A hostile string fails
+		// strconv.Atoi and renders as <MALFORMED>, which is itself the
+		// assertion: the raw bytes must never reach the attribute.
+		`"value":"` + hostile + `",` +
 		`"shareStatus":"` + hostile + `"}}}}}}`
 
 	// The fixture must be valid JSON AND must actually decode to control bytes,
@@ -2295,6 +2308,21 @@ func TestObservationAttributesAreSanitizedBeforeFormatting(t *testing.T) {
 			t.Errorf("attribute %q reached the record as invalid UTF-8: %q", key, value)
 		}
 	}
+	// The value node reaches the record through a DIFFERENT defence from every
+	// other wire string here, and the difference is worth asserting rather than
+	// leaving to the generic loop above. It is string-accepting now, but the
+	// only strings it accepts are runs of decimal digits, so hostile bytes
+	// cannot survive the parse at all: they are refused, not sanitized. Naming
+	// the expected tokens keeps this from passing for the wrong reason - if the
+	// field ever started echoing what it was given, <MALFORMED> would not be
+	// what came back.
+	if rec["milestoneValue"] != "<MALFORMED>" {
+		t.Errorf("hostile value rendered as %q, want <MALFORMED>", rec["milestoneValue"])
+	}
+	if rec["milestoneValueWireKind"] != "<UNSET>" {
+		t.Errorf("hostile value reported wire kind %q, want <UNSET>", rec["milestoneValueWireKind"])
+	}
+
 	// Sanitization REPLACES rather than deletes: printable content survives and
 	// the substituted bytes are visibly marked.
 	if !strings.Contains(rec["observedChannelId"], "hostile") {
