@@ -67,9 +67,6 @@ const (
 	milestoneBudgetRecord = "watch_streak_milestone_budget"
 )
 
-// unknownLink is the single vocabulary for a relationship this feature cannot
-// prove. It is printed explicitly rather than omitted, so a reader sees that
-// the question was asked and answered UNKNOWN — not that it was never asked.
 // milestoneObservationCycleBudget bounds ONE observation stage, end to end.
 //
 // The stage runs as a plain call on the bonusPollLoop goroutine, so without a
@@ -91,7 +88,11 @@ const (
 // caller - it is retried, up to gqlMaxRetries+1 attempts plus backoff. The
 // budget therefore expires during attempt 2, the error this stage sees is its
 // own context's, and the record reads CANCELLED/DEADLINE_EXCEEDED. Reproduced
-// against a transport that never answers: 40.009s, DEADLINE_EXCEEDED.
+// against a transport that never answers: 40.009s, DEADLINE_EXCEEDED. The
+// retry half of that mechanism is pinned by
+// TestAClientTimeoutIsRetriedRatherThanReturned in internal/twitch, the only
+// package that can shorten the client's hard-coded 30s timeout without adding
+// a production seam for a test's benefit.
 //
 // So MilestoneFailureTransportTimeout is not reachable through this stage for
 // the pure stall the old comment described. It stays reachable for a caller
@@ -119,6 +120,9 @@ const (
 // it, and it is deliberately not a settings surface.
 var milestoneObservationCycleBudget = 40 * time.Second
 
+// unknownLink is the single vocabulary for a relationship this feature cannot
+// prove. It is printed explicitly rather than omitted, so a reader sees that
+// the question was asked and answered UNKNOWN — not that it was never asked.
 const unknownLink = "UNKNOWN"
 
 // milestoneLogStringCap bounds every free-form observed string reaching a log

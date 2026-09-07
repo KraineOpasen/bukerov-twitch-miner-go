@@ -2858,3 +2858,87 @@ func TestMalformedJSONKeepsItsOwnFailureClass(t *testing.T) {
 		}
 	})
 }
+
+// TestAClientTimeoutIsRetriedRatherThanReturned pins the retry contract that
+// the miner's cycle-budget rationale rests on.
+//
+// An earlier version of that rationale claimed the 40s budget is longer than
+// the client's 30s HTTP timeout so a genuinely stalled Twitch still surfaces as
+// TRANSPORT_TIMEOUT rather than being masked by the stage's own deadline. That
+// is false, and this is the mechanism that makes it false: a Client.Timeout
+// error carries status code 0, doGQLRequestWithRetry classifies status 0 as
+// TRANSIENT, so the FIRST timeout is never handed to the caller — it is
+// retried. By the time the ladder is exhausted the caller's own context has
+// usually expired, and the caller sees its own error instead.
+//
+// This is asserted here rather than in internal/miner because this is where the
+// mechanism lives, and because only this package can shorten the client's
+// hard-coded 30s timeout without adding a production seam for a test's benefit.
+// The miner-layer test can only observe the consequence: with a test-sized
+// budget it is cancelled during attempt 1, so it never reaches a second attempt
+// and cannot see this at all.
+//
+// The assertion is on ATTEMPTS, not on the resulting class. A test that only
+// checked "the class is not TRANSPORT_TIMEOUT" would pass against a client that
+// never retried anything, because a caller deadline reached during backoff
+// produces the same class either way — that is exactly how the earlier
+// miner-layer version of this test came to prove nothing.
+func TestAClientTimeoutIsRetriedRatherThanReturned(t *testing.T) {
+	var (
+		mu       sync.Mutex
+		attempts int
+	)
+	// The handlers must be released explicitly. A client-side Client.Timeout
+	// does NOT reliably cancel the SERVER's request context, so a handler
+	// parked on r.Context().Done() alone stays parked and httptest's Close
+	// blocks forever waiting for it. Registered after newTestClient so LIFO
+	// cleanup closes this BEFORE that Close runs.
+	stopHandlers := make(chan struct{})
+	c := newTestClient(t, func(_ http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		attempts++
+		mu.Unlock()
+		// Accept the connection and never answer, so the client's own timeout
+		// is what ends each attempt.
+		select {
+		case <-r.Context().Done():
+		case <-stopHandlers:
+		}
+	})
+	t.Cleanup(func() { close(stopHandlers) })
+
+	// Same package, so this needs no production seam: shrink the hard-coded 30s
+	// timeout to test scale. The retry loop cannot tell the difference — a
+	// Client.Timeout error is a Client.Timeout error at any duration.
+	c.client.Timeout = 40 * time.Millisecond
+
+	// Long enough to cover the first timeout plus the first backoff (BaseBackoff
+	// is 500ms, jittered up to 1.5x) and reach attempt 2; far short of the whole
+	// ladder (~7.5s of backoff before jitter), so the test stays fast.
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	obs := c.ObserveWatchStreakMilestone(ctx, "12345", "somestreamer")
+
+	mu.Lock()
+	got := attempts
+	mu.Unlock()
+
+	if got < 2 {
+		t.Fatalf("the stalled request was attempted %d time(s): the client's own timeout was "+
+			"returned to the caller on its FIRST occurrence instead of being retried. If status 0 "+
+			"is deliberately no longer transient, the cycle-budget comment in "+
+			"internal/miner/watch_streak_milestone_observation.go and the matching text in "+
+			"SPECIFICATIONS.md both describe the opposite and must be rewritten with this change",
+			got)
+	}
+	if obs.FailureClass == MilestoneFailureTransportTimeout {
+		t.Fatalf("failure class = %s after %d attempts: the caller's deadline expired during the "+
+			"retry ladder, so the class should name the caller's own error, not the transport's",
+			obs.FailureClass, got)
+	}
+	if obs.Outcome != MilestoneCancelled {
+		t.Fatalf("outcome = %q (class %q), want %q: the caller's context expired first",
+			obs.Outcome, obs.FailureClass, MilestoneCancelled)
+	}
+}

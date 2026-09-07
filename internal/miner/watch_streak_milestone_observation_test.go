@@ -2137,31 +2137,47 @@ func TestMilestoneLogWireKindNeverRendersAnEmptyValue(t *testing.T) {
 	}
 }
 
-// TestObservationStageIsBoundedByACycleBudget proves the diagnostic stage
-// cannot run the bonus poll loop's goroutine for an unbounded time.
-//
-// The stage is a plain call on bonusPollLoop, so the loop cannot service its
-// next tick until the stage returns. Without a bound, a slow RewardList is paid
-// once per online target, serially, with the shared transport's whole retry
-// schedule behind it - a diagnostic deferring the chest-claim fallback it has
-// no business delaying.
-//
-// The fixture makes every RewardList take a fixed, uninterruptible slice of
-// wall clock, so the only way to honour the budget is to stop starting new
-// targets. The assertion is therefore on WORK ISSUED, not on elapsed time: a
-// bounded stage must leave part of the roster unexamined rather than walk it
-// all.
 // stallingTransport models a Twitch that accepts the connection and never
 // answers: it releases only when the request context is done.
-type stallingTransport struct{}
+//
+// It counts its requests and hands back one token per request it released that
+// way, so a test can prove the fixture actually STALLED rather than assume it.
+// An earlier version had no such seam, and the test below passed against a
+// transport that failed instantly - it was asserting an outcome many paths
+// reach, not the stall it named.
+type stallingTransport struct {
+	mu       sync.Mutex
+	attempts int
+	released chan struct{}
+}
 
-func (stallingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+func newStallingTransport() *stallingTransport {
+	return &stallingTransport{released: make(chan struct{}, 64)}
+}
+
+func (s *stallingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	s.mu.Lock()
+	s.attempts++
+	s.mu.Unlock()
+
 	<-req.Context().Done()
+
+	select {
+	case s.released <- struct{}{}:
+	default:
+	}
 	return nil, req.Context().Err()
 }
 
+func (s *stallingTransport) requests() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.attempts
+}
+
 // TestAStalledTwitchIsRecordedAsOurDeadlineNotTheTransportsTimeout pins the
-// classification an earlier version of the budget's own comment got backwards.
+// MINER-LAYER consequence of the classification an earlier version of the
+// budget's own comment got backwards.
 //
 // That comment claimed the budget is longer than the transport's 30s HTTP
 // timeout so a genuine stall still surfaces as TRANSPORT_TIMEOUT rather than
@@ -2171,16 +2187,28 @@ func (stallingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 // this caller — it is retried. The budget expires during a later attempt and
 // the stage sees its OWN context's error.
 //
-// Reproduced at the real 40s budget as 40.009s / DEADLINE_EXCEEDED. Pinned here
-// with a short budget, which exercises the same path: the stage's deadline
-// fires while the transport is still stalled, and the record says so.
+// What this test does and does not cover, stated exactly, because an earlier
+// version of this comment overclaimed:
 //
-// This test exists to stop the false rationale coming back. If someone makes
-// TRANSPORT_TIMEOUT reachable here, this test should fail and be rewritten
-// deliberately — not quietly satisfied.
+//   - It DOES prove that at this layer a stalled Twitch is ended by the stage's
+//     own budget and recorded as our deadline, at roughly the budget rather
+//     than at the transport's 30s timeout.
+//   - It does NOT exercise the timeout-is-retried mechanism itself. The client
+//     timeout is a hard-coded 30s that this package cannot shorten, so with a
+//     test-sized budget the stage is cancelled during attempt 1 and no timeout
+//     ever fires. Measured on the version that claimed otherwise: 1 attempt.
+//     That mechanism is pinned where it lives, by
+//     TestAClientTimeoutIsRetriedRatherThanReturned in internal/twitch.
+//
+// The fixture is asserted, not assumed: an earlier version of this test passed
+// against a transport that failed INSTANTLY, because a fast failure is also
+// retried and also ends at the budget. The released-token handshake below is
+// what makes the word "stalled" in the test name mean something.
 func TestAStalledTwitchIsRecordedAsOurDeadlineNotTheTransportsTimeout(t *testing.T) {
+	const budget = 200 * time.Millisecond
+
 	previousBudget := milestoneObservationCycleBudget
-	milestoneObservationCycleBudget = 200 * time.Millisecond
+	milestoneObservationCycleBudget = budget
 	t.Cleanup(func() { milestoneObservationCycleBudget = previousBudget })
 
 	m, _ := newMilestoneMiner(t, &milestoneRoundTripper{}, []string{"alpha"}, []string{"alpha"})
@@ -2190,14 +2218,42 @@ func TestAStalledTwitchIsRecordedAsOurDeadlineNotTheTransportsTimeout(t *testing
 	// sleeps and then answers is NOT this - it returns a response the client
 	// accepts, and the observation succeeds. That distinction is why this uses
 	// its own transport rather than the shared fixture's timing hook.
+	stall := newStallingTransport()
 	previousTransport := http.DefaultTransport
-	http.DefaultTransport = stallingTransport{}
+	http.DefaultTransport = stall
 	t.Cleanup(func() { http.DefaultTransport = previousTransport })
 
 	buf := captureLogs(t)
+	start := time.Now()
 	m.observeWatchStreakMilestones(context.Background())
+	elapsed := time.Since(start)
 	out := buf.String()
 
+	// 1. The fixture stalled. Every request it took was released by context
+	// cancellation, never by an answer of its own.
+	issued := stall.requests()
+	if issued == 0 {
+		t.Fatalf("the stalling transport was never reached, so this test proves nothing. Log:\n%s", out)
+	}
+	for i := 0; i < issued; i++ {
+		select {
+		case <-stall.released:
+		case <-time.After(5 * time.Second):
+			t.Fatalf("request %d of %d was not released by context cancellation: the fixture did "+
+				"not stall, so a passing assertion below would be about something else", i+1, issued)
+		}
+	}
+
+	// 2. Our budget is what ended it, not the transport's 30s timeout.
+	if elapsed >= 30*time.Second {
+		t.Fatalf("the stage took %v: the transport's own timeout ended this, not the cycle budget", elapsed)
+	}
+	if elapsed < budget {
+		t.Fatalf("the stage returned in %v, before its %v budget: it did not wait on the stall at all",
+			elapsed, budget)
+	}
+
+	// 3. And the record names our deadline rather than the transport's.
 	if strings.Contains(out, "TRANSPORT_TIMEOUT") {
 		t.Fatalf("the stage recorded TRANSPORT_TIMEOUT for a stall stopped by its own budget; "+
 			"if that is now genuinely reachable here, the budget comment and SPECIFICATIONS.md "+
