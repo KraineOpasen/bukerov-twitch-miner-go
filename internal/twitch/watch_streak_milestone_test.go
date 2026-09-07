@@ -2750,6 +2750,12 @@ func TestMalformedJSONKeepsItsOwnFailureClass(t *testing.T) {
 		{"an empty body", ``},
 		{"not JSON at all", `<html>go away</html>`},
 		{"malformed only past the value limit", malformedPastTheValueLimit.String()},
+		// A duplicate member in the PREFIX of a body that never parses. The
+		// duplicate scan stops at the repeated key and has seen only that
+		// prefix; the body is still malformed. Without the whole-document
+		// check, a peer picks between AMBIGUOUS_JSON and the transport class
+		// by moving its syntax error across the repeated key.
+		{"a duplicate member before a syntax error", `{"errors":[],"errors":[],"data":{"channel":`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {

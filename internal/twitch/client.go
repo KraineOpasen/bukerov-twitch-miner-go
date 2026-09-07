@@ -810,7 +810,20 @@ func diagnosticJSONHasDuplicateMembers(body []byte) bool {
 	if err != nil {
 		return false
 	}
-	return duplicate
+	if !duplicate {
+		return false
+	}
+
+	// A duplicate found does not yet mean a duplicate REPORTED. The scan stops
+	// at the first repeated key, so it has seen only a prefix - and a body
+	// whose remainder does not parse is malformed, whatever its prefix
+	// contained. Answering "duplicate members" for it would name a defect the
+	// response does not have, and would let a peer choose between this class
+	// and the transport class by moving a syntax error to either side of the
+	// repeated key.
+	//
+	// Same reasoning, and the same instrument, as the value limit above.
+	return json.Valid(body)
 }
 
 // diagnosticPersistedQueryNotFound reports whether body is a STRUCTURED
