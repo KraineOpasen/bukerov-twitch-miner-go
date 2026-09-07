@@ -903,8 +903,15 @@ func diagnosticCandidateServedTheOperation(body []byte) bool {
 			return false
 		}
 	}
-	data, present := result["data"]
-	return present && data != nil
+	// A present, non-null `data` is NOT enough: it has to be the OBJECT the read
+	// can actually use. {"data":[]}, {"data":"denied"} and {"data":7} all clear a
+	// non-nil test, enter the cache, and are then rejected by
+	// ObserveWatchStreakMilestone as NO_DATA_NODE - which is the very failure
+	// this function exists to prevent, reached one shape further along. The bar
+	// here must match the bar the read applies, or the cache pins candidates on
+	// exactly the responses the read throws away.
+	data, isObject := result["data"].(map[string]interface{})
+	return isObject && data != nil
 }
 
 // diagnosticPersistedQueryNotFound reports whether body is a STRUCTURED

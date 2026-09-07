@@ -3053,3 +3053,69 @@ func TestASingularTopLevelErrorIsNotAnObservation(t *testing.T) {
 			"already honours, so the observation path must fail closed on it too", obs.FailureClass)
 	}
 }
+
+// TestAMalformedDataNodeIsNotCachedAsWorking closes the second door into the
+// sticky-cache failure.
+//
+// The first repair required the candidate's body to carry a `data` node, which
+// is not the same as requiring it to carry a USABLE one. A present, non-null
+// but non-object `data` passed that test, entered the cache, and was then
+// rejected by the observation path as NO_DATA_NODE — so the candidate was
+// pinned on exactly the responses the read cannot use, which is the failure the
+// first repair existed to prevent, reached one shape further along.
+func TestAMalformedDataNodeIsNotCachedAsWorking(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body string
+	}{
+		{"array", `{"data":[]}`},
+		{"string", `{"data":"denied"}`},
+		{"number", `{"data":7}`},
+		{"bool", `{"data":false}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var (
+				mu   sync.Mutex
+				seen []string
+			)
+			c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+				id := r.Header.Get("Client-Id")
+				mu.Lock()
+				seen = append(seen, id)
+				mu.Unlock()
+				w.WriteHeader(http.StatusOK)
+				if id == constants.ClientIDTV {
+					_, _ = io.WriteString(w, `{"errors":[{"message":"PersistedQueryNotFound"}]}`)
+					return
+				}
+				_, _ = io.WriteString(w, tc.body)
+			})
+
+			// Cycle 1: the fallback answers with an unusable data node.
+			obs := c.ObserveWatchStreakMilestone(context.Background(), "12345", "somestreamer")
+			if obs.Outcome == MilestoneObserved {
+				t.Fatalf("%s was recorded as an observation; the fixture is wrong", tc.body)
+			}
+
+			mu.Lock()
+			seen = nil
+			mu.Unlock()
+
+			// Cycle 2: the shipped default must still be reachable.
+			_ = c.ObserveWatchStreakMilestone(context.Background(), "12345", "somestreamer")
+
+			mu.Lock()
+			second := append([]string(nil), seen...)
+			mu.Unlock()
+
+			for _, id := range second {
+				if id == constants.ClientIDTV {
+					return
+				}
+			}
+			t.Fatalf("the second cycle never tried the shipped default client ID (tried %v): a "+
+				"candidate whose %s the read rejects as NO_DATA_NODE was cached as working, so it "+
+				"is tried first forever and the others are never reached", second, tc.body)
+		})
+	}
+}
