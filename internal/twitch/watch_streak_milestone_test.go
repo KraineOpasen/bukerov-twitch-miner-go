@@ -2386,3 +2386,97 @@ func TestAnOversizedBodyCannotChangeATokenRejectionsClass(t *testing.T) {
 		})
 	}
 }
+
+// TestOversizedCollectionsAreRefusedBeforeTheyAreBuilt pins the cardinality
+// bound, which the byte limit does not give.
+//
+// A megabyte of wire is not a megabyte of memory: a dense array of tiny
+// elements turns it into hundreds of thousands of Go structs, once per online
+// target, on the bonus poll goroutine. The structs buy nothing — the record
+// prints exact counts and a small identifier sample, so everything past the
+// sample exists only to be tallied.
+//
+// Refusal rather than truncation is deliberate: a partly-walked array would
+// report an exact Count beside a tally taken over only some of the elements,
+// which reads as evidence while being none.
+func TestOversizedCollectionsAreRefusedBeforeTheyAreBuilt(t *testing.T) {
+	// Just under the BYTE limit, so this is the cardinality bound doing the
+	// work and not the body cap.
+	denseBody := func(t *testing.T) string {
+		t.Helper()
+		prefix := `{"data":{"channel":{"id":"12345","self":{"watchStreakMilestone":{"missedStreams":[`
+		suffix := `]}}}}}`
+		room := maxDiagnosticResponseBytes - len(prefix) - len(suffix)
+		n := room / len("0,")
+		body := prefix + strings.Repeat("0,", n-1) + "0" + suffix
+		if len(body) > maxDiagnosticResponseBytes {
+			t.Fatalf("fixture is %d bytes, over the %d-byte body limit; this would test the wrong bound",
+				len(body), maxDiagnosticResponseBytes)
+		}
+		return body
+	}
+
+	// The nested array counts toward the same budget, so the bound cannot be
+	// walked around one level down.
+	nestedBody := func(t *testing.T) string {
+		t.Helper()
+		var b strings.Builder
+		b.WriteString(`{"data":{"channel":{"id":"12345","self":{"watchStreakMilestone":{"missedStreams":[`)
+		b.WriteString(`{"broadcastIdentifiers":[`)
+		for i := 0; i <= maxMilestoneCollectionElements; i++ {
+			if i > 0 {
+				b.WriteString(",")
+			}
+			b.WriteString(`{"id":"b"}`)
+		}
+		b.WriteString(`]}]}}}}}`)
+		return b.String()
+	}
+
+	for _, tc := range []struct {
+		name string
+		body func(*testing.T) string
+	}{
+		{"a dense top-level collection", denseBody},
+		{"a dense nested collection", nestedBody},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body := tc.body(t)
+			c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusOK)
+				_, _ = io.WriteString(w, body)
+			})
+
+			obs := c.ObserveWatchStreakMilestone(context.Background(), "12345", "somestreamer")
+
+			if obs.Outcome != MilestoneUnavailable ||
+				obs.FailureClass != MilestoneFailureOversizedCollection {
+				t.Fatalf("outcome = %q/%q, want UNAVAILABLE/%s", obs.Outcome, obs.FailureClass,
+					MilestoneFailureOversizedCollection)
+			}
+			if got := len(obs.Snapshot.MissedStreams.Entries); got != 0 {
+				t.Fatalf("%d entry structs were built for a refused response; the refusal must come "+
+					"BEFORE the parse, or it does not bound anything", got)
+			}
+			assertEmptySnapshot(t, obs.Snapshot)
+		})
+	}
+
+	// The counterpart, so the bound cannot drift into refusing real responses:
+	// a credible milestone node is still a real observation.
+	t.Run("a credible collection is unaffected", func(t *testing.T) {
+		c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+			_, _ = io.WriteString(w, `{"data":{"channel":{"id":"12345","self":{"watchStreakMilestone":{`+
+				`"missedStreams":[{"broadcastIdentifiers":[{"id":"b-1"},{"id":"b-2"}]}],`+
+				`"watchStreakMilestone":{"value":"4"}}}}}}`)
+		})
+		obs := c.ObserveWatchStreakMilestone(context.Background(), "12345", "somestreamer")
+		if obs.Outcome != MilestoneObserved {
+			t.Fatalf("outcome = %q (%q), want OBSERVED", obs.Outcome, obs.FailureClass)
+		}
+		if obs.Snapshot.MissedStreams.Count != 1 {
+			t.Fatalf("missedStreams count = %d, want 1", obs.Snapshot.MissedStreams.Count)
+		}
+	})
+}

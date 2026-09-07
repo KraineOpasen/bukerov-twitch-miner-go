@@ -321,6 +321,13 @@ const (
 	// data-presence check and be recorded as evidence.
 	MilestoneFailureHTTPStatus MilestoneFailureClass = "HTTP_STATUS"
 
+	// MilestoneFailureOversizedCollection marks a response whose milestone
+	// collections carry more elements than any credible RewardList would. It is
+	// a refusal, not a truncation: a partly-walked array would report exact
+	// counts beside a tally taken over only some of the elements, which is
+	// worse than no observation.
+	MilestoneFailureOversizedCollection MilestoneFailureClass = "OVERSIZED_COLLECTION"
+
 	// MilestoneFailureAmbiguousJSON marks a response whose raw JSON carried
 	// duplicate object members. Decoding picks the last one, so an explicit
 	// rejection can be erased by a benign duplicate beside it; the two readings
@@ -519,6 +526,13 @@ func (c *TwitchClient) ObserveWatchStreakMilestone(ctx context.Context, channelI
 		// alongside it is still a real observation.
 	}
 
+	// Cardinality is checked BEFORE the parse, because the parse is what turns
+	// the elements into retained structs: see maxMilestoneCollectionElements.
+	if !milestoneCollectionsWithinLimit(resp) {
+		obs.Outcome, obs.FailureClass = MilestoneUnavailable, MilestoneFailureOversizedCollection
+		return obs
+	}
+
 	// A GraphQL data response always carries a data object, so its absence here
 	// means this was not one — record it as UNAVAILABLE rather than as an
 	// observation in which every field happened to be missing.
@@ -606,6 +620,61 @@ func parseWatchStreakMilestone(resp map[string]interface{}) WatchStreakMilestone
 	snap.ShareStatus = milestoneString(v, "shareStatus")
 
 	return snap
+}
+
+// maxMilestoneCollectionElements bounds how many array elements one observed
+// milestone node may contain, across missedStreams and every nested
+// broadcastIdentifiers together.
+//
+// The 1 MiB body limit bounds BYTES, not cardinality, and the two are not the
+// same bound: a dense array of tiny elements turns a megabyte of wire into
+// hundreds of thousands of Go structs. Measured on a 1,048,575-byte body of
+// "0," elements: 524,244 entries retained and ~145 MB allocated, on the bonus
+// poll goroutine, once per online target.
+//
+// The structs bought nothing. The record prints exact COUNTS and a sample of
+// at most a few identifiers, so every element past the sample exists only to be
+// tallied. The limit is set orders of magnitude above any credible RewardList -
+// a real missedStreams holds a handful - and orders of magnitude below the
+// cardinality that makes this expensive.
+const maxMilestoneCollectionElements = 4096
+
+// milestoneCollectionsWithinLimit reports whether the decoded response's
+// milestone collections are small enough to walk.
+//
+// It counts rather than parses, and stops as soon as the limit is passed, so
+// the check itself cannot become the amplification it exists to prevent. A
+// collection that is absent, null or the wrong shape is not a cardinality
+// problem and is left to the parser, which classifies it honestly.
+func milestoneCollectionsWithinLimit(resp map[string]interface{}) bool {
+	data, _ := resp["data"].(map[string]interface{})
+	channel, _ := data["channel"].(map[string]interface{})
+	self, _ := channel["self"].(map[string]interface{})
+	node, _ := self["watchStreakMilestone"].(map[string]interface{})
+	missed, isArray := node["missedStreams"].([]interface{})
+	if !isArray {
+		return true
+	}
+
+	total := len(missed)
+	if total > maxMilestoneCollectionElements {
+		return false
+	}
+	for _, element := range missed {
+		entry, ok := element.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		ids, ok := entry["broadcastIdentifiers"].([]interface{})
+		if !ok {
+			continue
+		}
+		total += len(ids)
+		if total > maxMilestoneCollectionElements {
+			return false
+		}
+	}
+	return true
 }
 
 // parseMilestoneMissedStreams reads S.missedStreams, preserving the difference
