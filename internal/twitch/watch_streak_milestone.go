@@ -50,6 +50,7 @@ import (
 	"context"
 	"errors"
 	"math"
+	"net/http"
 	"strconv"
 	"sync/atomic"
 	"time"
@@ -468,7 +469,18 @@ func (c *TwitchClient) ObserveWatchStreakMilestone(ctx context.Context, channelI
 		if obs.FailureClass == MilestoneFailureTransport &&
 			statusCode != 0 && (statusCode < 200 || statusCode > 299) &&
 			!gql.IsTransientStatus(statusCode) {
-			obs.FailureClass = MilestoneFailureHTTPStatus
+			// 401 is settled by the status alone and needs no body at all, so
+			// it keeps its own, more specific class whatever became of the
+			// body. Without this, a rejection whose body merely happened to be
+			// oversized would fail the read before the transport reached its
+			// 401 branch, land on the generic fallback, and be refined to
+			// HTTP_STATUS - letting an attacker-chosen body SIZE decide which
+			// failure this observation records.
+			if statusCode == http.StatusUnauthorized {
+				obs.FailureClass = MilestoneFailureUnauthorized
+			} else {
+				obs.FailureClass = MilestoneFailureHTTPStatus
+			}
 		}
 		return obs
 	}

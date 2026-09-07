@@ -1074,26 +1074,37 @@ func (c *TwitchClient) doGQLRequestWithClientIDFallback(ctx context.Context, bod
 		// non-2xx is not a working client ID, so nothing is cached for it.
 		// Transient statuses never arrive here - doGQLRequestWithRetry has
 		// already exhausted and returned them as an error above.
-		if diagnostic && (statusCode < 200 || statusCode > 299) {
-			return respBody, statusCode, nil
+		if diagnostic {
+			if statusCode < 200 || statusCode > 299 {
+				return respBody, statusCode, nil
+			}
+
+			// Duplicate JSON members are ambiguous evidence. encoding/json
+			// keeps the LAST value, so a response that carries an explicit
+			// rejection followed by a benign duplicate - say an "errors" array
+			// of real errors followed by an empty one - decodes with the
+			// rejection erased and would be recorded as a clean observation.
+			// The mutation path already refuses raw bodies like this
+			// (jsonObjectKeysAreUnique); an observation whose whole purpose is
+			// honest evidence has the same need, and the fail-closed checks
+			// downstream cannot help, because they only ever see the lossy
+			// decoded map.
+			//
+			// This runs BEFORE the APQ detector, not after, and the order is
+			// the whole point: that detector is a raw substring test, so a body
+			// carrying duplicate members AND the marker would otherwise be
+			// treated as authoritative APQ evidence, drive the candidate loop
+			// under every client ID, and end as UNSUPPORTED_QUERY - never
+			// reaching this refusal at all. An ambiguous body is not evidence
+			// of anything, the marker included.
+			if !jsonObjectKeysAreUnique(respBody) {
+				return nil, statusCode, fmt.Errorf(
+					"%w: operation %s", errAmbiguousDiagnosticJSON, operationLabel)
+			}
 		}
 
 		if !gql.IsPersistedQueryNotFound(respBody) {
 			if diagnostic {
-				// Duplicate JSON members are ambiguous evidence. encoding/json
-				// keeps the LAST value, so a response that carries an explicit
-				// rejection followed by a benign duplicate - say an "errors"
-				// array of real errors followed by an empty one - decodes with
-				// the rejection erased and would be recorded as a clean
-				// observation. The mutation path already refuses raw bodies
-				// like this (jsonObjectKeysAreUnique); an observation whose
-				// whole purpose is honest evidence has the same need, and the
-				// fail-closed checks downstream cannot help, because they only
-				// ever see the lossy decoded map.
-				if !jsonObjectKeysAreUnique(respBody) {
-					return nil, statusCode, fmt.Errorf(
-						"%w: operation %s", errAmbiguousDiagnosticJSON, operationLabel)
-				}
 				// A diagnostic read caches its own working ID but promotes
 				// nothing: see rememberDiagnosticClientID.
 				c.rememberDiagnosticClientID(operationLabel, clientID)

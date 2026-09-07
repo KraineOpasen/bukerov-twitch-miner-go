@@ -2318,3 +2318,71 @@ func TestDiagnosticRefusesAmbiguousJSON(t *testing.T) {
 		}
 	})
 }
+
+// TestAmbiguousJSONIsRefusedBeforeTheAPQDetector pins the ORDER of the two
+// diagnostic refusals, which is load-bearing rather than incidental.
+//
+// gql.IsPersistedQueryNotFound is a raw substring test over the whole body. A
+// response carrying duplicate object members AND the marker is ambiguous first
+// and APQ evidence second, so checking uniqueness after the detector lets the
+// ambiguous body drive the client-ID candidate loop and end as
+// UNSUPPORTED_QUERY — never reaching the AMBIGUOUS_JSON refusal at all. Found
+// independently by two reviewers on the commit that introduced the guard.
+func TestAmbiguousJSONIsRefusedBeforeTheAPQDetector(t *testing.T) {
+	var requests int
+	clientIDs := map[string]struct{}{}
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		clientIDs[r.Header.Get("Client-Id")] = struct{}{}
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, `{"errors":[{"message":"PersistedQueryNotFound"}],"errors":[],`+
+			`"data":{"channel":{"id":"12345","self":{"watchStreakMilestone":null}}}}`)
+	})
+
+	obs := c.ObserveWatchStreakMilestone(context.Background(), "12345", "somestreamer")
+
+	if obs.Outcome != MilestoneUnavailable || obs.FailureClass != MilestoneFailureAmbiguousJSON {
+		t.Errorf("outcome = %q/%q, want UNAVAILABLE/%s", obs.Outcome, obs.FailureClass,
+			MilestoneFailureAmbiguousJSON)
+	}
+	if requests != 1 {
+		t.Errorf("sent %d requests under %d client IDs; an ambiguous body is not APQ evidence and "+
+			"must not drive the candidate loop", requests, len(clientIDs))
+	}
+	assertEmptySnapshot(t, obs.Snapshot)
+}
+
+// TestAnOversizedBodyCannotChangeATokenRejectionsClass pins that the recorded
+// failure class does not depend on a value the peer chooses.
+//
+// A 401 is settled by the status alone and needs no body. But an oversized body
+// fails the bounded read before the transport reaches its 401 branch, so the
+// error lands on the generic transport fallback — and the status refinement
+// would then report HTTP_STATUS, letting the peer pick which failure gets
+// recorded simply by making its rejection large.
+func TestAnOversizedBodyCannotChangeATokenRejectionsClass(t *testing.T) {
+	oversized := bytes.Repeat([]byte("A"), maxDiagnosticResponseBytes+4096)
+
+	for _, tc := range []struct {
+		name string
+		body []byte
+	}{
+		{"a small rejection body", []byte(`{"message":"unauthorized"}`)},
+		{"an oversized rejection body", oversized},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusUnauthorized)
+				_, _ = w.Write(tc.body)
+			})
+
+			obs := c.ObserveWatchStreakMilestone(context.Background(), "12345", "somestreamer")
+
+			if obs.Outcome != MilestoneUnavailable || obs.FailureClass != MilestoneFailureUnauthorized {
+				t.Fatalf("outcome = %q/%q, want UNAVAILABLE/%s — the body's SIZE changed the class",
+					obs.Outcome, obs.FailureClass, MilestoneFailureUnauthorized)
+			}
+			assertEmptySnapshot(t, obs.Snapshot)
+		})
+	}
+}
