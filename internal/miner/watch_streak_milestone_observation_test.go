@@ -2151,6 +2151,63 @@ func TestMilestoneLogWireKindNeverRendersAnEmptyValue(t *testing.T) {
 // targets. The assertion is therefore on WORK ISSUED, not on elapsed time: a
 // bounded stage must leave part of the roster unexamined rather than walk it
 // all.
+// stallingTransport models a Twitch that accepts the connection and never
+// answers: it releases only when the request context is done.
+type stallingTransport struct{}
+
+func (stallingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	<-req.Context().Done()
+	return nil, req.Context().Err()
+}
+
+// TestAStalledTwitchIsRecordedAsOurDeadlineNotTheTransportsTimeout pins the
+// classification an earlier version of the budget's own comment got backwards.
+//
+// That comment claimed the budget is longer than the transport's 30s HTTP
+// timeout so a genuine stall still surfaces as TRANSPORT_TIMEOUT rather than
+// being masked by our deadline. It is false, and the reason is the retry
+// contract: a Client.Timeout error carries status code 0, which the shared
+// transport classifies as TRANSIENT, so the first timeout is never returned to
+// this caller — it is retried. The budget expires during a later attempt and
+// the stage sees its OWN context's error.
+//
+// Reproduced at the real 40s budget as 40.009s / DEADLINE_EXCEEDED. Pinned here
+// with a short budget, which exercises the same path: the stage's deadline
+// fires while the transport is still stalled, and the record says so.
+//
+// This test exists to stop the false rationale coming back. If someone makes
+// TRANSPORT_TIMEOUT reachable here, this test should fail and be rewritten
+// deliberately — not quietly satisfied.
+func TestAStalledTwitchIsRecordedAsOurDeadlineNotTheTransportsTimeout(t *testing.T) {
+	previousBudget := milestoneObservationCycleBudget
+	milestoneObservationCycleBudget = 200 * time.Millisecond
+	t.Cleanup(func() { milestoneObservationCycleBudget = previousBudget })
+
+	m, _ := newMilestoneMiner(t, &milestoneRoundTripper{}, []string{"alpha"}, []string{"alpha"})
+
+	// A real stall, which is not the same as a slow answer: never respond, and
+	// release only when the request context is done. A transport that merely
+	// sleeps and then answers is NOT this - it returns a response the client
+	// accepts, and the observation succeeds. That distinction is why this uses
+	// its own transport rather than the shared fixture's timing hook.
+	previousTransport := http.DefaultTransport
+	http.DefaultTransport = stallingTransport{}
+	t.Cleanup(func() { http.DefaultTransport = previousTransport })
+
+	buf := captureLogs(t)
+	m.observeWatchStreakMilestones(context.Background())
+	out := buf.String()
+
+	if strings.Contains(out, "TRANSPORT_TIMEOUT") {
+		t.Fatalf("the stage recorded TRANSPORT_TIMEOUT for a stall stopped by its own budget; "+
+			"if that is now genuinely reachable here, the budget comment and SPECIFICATIONS.md "+
+			"need rewriting with it. Log:\n%s", out)
+	}
+	if !strings.Contains(out, "DEADLINE_EXCEEDED") && !strings.Contains(out, "CANCELLED") {
+		t.Fatalf("expected the stage's own deadline to be what the record names. Log:\n%s", out)
+	}
+}
+
 func TestObservationStageIsBoundedByACycleBudget(t *testing.T) {
 	previousBudget := milestoneObservationCycleBudget
 	milestoneObservationCycleBudget = 50 * time.Millisecond

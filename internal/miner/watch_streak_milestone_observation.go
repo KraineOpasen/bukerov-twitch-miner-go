@@ -79,13 +79,30 @@ const (
 // per target. That is a diagnostic delaying the chest-claim fallback, which is
 // exactly backwards.
 //
-// The value is chosen between two hard numbers rather than picked freely. It is
-// LONGER than one shared-transport HTTP timeout (30s) on purpose: a genuinely
-// stalled Twitch must still surface as TRANSPORT_TIMEOUT, and a shorter budget
-// would cut the request first and record "we cancelled" for what was in fact a
-// Twitch stall — the precise confusion MilestoneFailureTransportTimeout exists
-// to prevent. It is SHORTER than bonusPollInterval (60s) so the stage alone can
+// The value is SHORTER than bonusPollInterval (60s) so the stage alone can
 // never push the next business pass past its tick.
+//
+// It is also longer than one shared-transport HTTP timeout (30s), but NOT for
+// the reason an earlier version of this comment gave. That version claimed the
+// margin let a genuinely stalled Twitch surface as TRANSPORT_TIMEOUT rather
+// than being masked by our own deadline. Measured, that is false: a
+// Client.Timeout error carries statusCode 0, which doGQLRequestWithRetry
+// classifies as TRANSIENT, so the first 30s timeout is never returned to this
+// caller - it is retried, up to gqlMaxRetries+1 attempts plus backoff. The
+// budget therefore expires during attempt 2, the error this stage sees is its
+// own context's, and the record reads CANCELLED/DEADLINE_EXCEEDED. Reproduced
+// against a transport that never answers: 40.009s, DEADLINE_EXCEEDED.
+//
+// So MilestoneFailureTransportTimeout is not reachable through this stage for
+// the pure stall the old comment described. It stays reachable for a caller
+// giving ObserveWatchStreakMilestone a longer-lived context, and through a
+// narrow race where the stall lands on the final attempt inside the budget.
+// The class is kept because it still names a real, distinguishable outcome at
+// the client boundary - not because this stage produces it.
+//
+// Making it reachable here would need a budget exceeding the whole retry
+// schedule, which is far past bonusPollInterval and defeats the bound. That is
+// a cadence decision, not a comment fix, so the comment is what changed.
 //
 // "Alone" is the whole of that claim, and it is worth stating what it does not
 // cover. The budget starts when the stage does, not at the tick, so a business
@@ -276,11 +293,14 @@ func (m *Miner) observeWatchStreakMilestones(owner context.Context) {
 		return
 	}
 
-	// One budget for the whole stage rather than one per request. A per-request
-	// deadline shorter than the shared transport's own 30s HTTP timeout would
-	// fire first on a stalled Twitch, and the observation would then be recorded
-	// as "we cancelled" instead of TRANSPORT_TIMEOUT - inverting the very
-	// distinction MilestoneFailureTransportTimeout exists to keep.
+	// One budget for the whole stage rather than one per request, so a slow
+	// roster cannot multiply the bound by its length.
+	//
+	// This deliberately does NOT claim to preserve TRANSPORT_TIMEOUT for a
+	// stalled Twitch; see milestoneObservationCycleBudget, where that claim was
+	// measured and found false. A stall inside this stage reads
+	// CANCELLED/DEADLINE_EXCEEDED, because the transport retries its own 30s
+	// timeout and the budget expires first.
 	ctx, cancel := context.WithTimeout(owner, milestoneObservationCycleBudget)
 	defer cancel()
 
