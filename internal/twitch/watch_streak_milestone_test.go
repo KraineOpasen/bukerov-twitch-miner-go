@@ -500,9 +500,15 @@ func TestObservationFailsClosedOnAMalformedErrorsNode(t *testing.T) {
 			})
 
 			obs := c.ObserveWatchStreakMilestone(context.Background(), "12345", "somestreamer")
-			if obs.Outcome == MilestoneObserved {
-				t.Fatalf("a present but malformed errors node (%s) was recorded as OBSERVED; "+
-					"a refused request became evidence", tc.name)
+			// "not OBSERVED" is too weak to pin anything: every failure class
+			// in this file satisfies it, so the branch could report any of them
+			// and this test would stay green. MALFORMED_ERRORS_NODE had ZERO
+			// assertions anywhere in the suite before this line existed.
+			if obs.Outcome != MilestoneUnavailable ||
+				obs.FailureClass != MilestoneFailureMalformedErrors {
+				t.Fatalf("a present but malformed errors node (%s) recorded %q/%q, want %s/%s",
+					tc.name, obs.Outcome, obs.FailureClass,
+					MilestoneUnavailable, MilestoneFailureMalformedErrors)
 			}
 			assertEmptySnapshot(t, obs.Snapshot)
 		})
@@ -2401,20 +2407,44 @@ func TestAnOversizedBodyCannotChangeATokenRejectionsClass(t *testing.T) {
 // report an exact Count beside a tally taken over only some of the elements,
 // which reads as evidence while being none.
 func TestOversizedCollectionsAreRefusedBeforeTheyAreBuilt(t *testing.T) {
-	// Just under the BYTE limit, so this is the cardinality bound doing the
-	// work and not the body cap.
-	denseBody := func(t *testing.T) string {
+	// Both fixtures must clear the OTHER two bounds, or they never reach the
+	// one this test names. An earlier version missed that and tested nothing:
+	// its elements were `0,` and `{"id":"b"}`, giving ~524,000 and ~12,000 JSON
+	// values against a limit of 8192, so the streaming value scan in the
+	// transport refused both bodies one layer earlier. Since that scan reports
+	// the SAME class, the assertions below passed while the parser-side bound
+	// was never executed - and disabling milestoneCollectionsWithinLimit
+	// entirely left this test green.
+	//
+	// Empty objects are what fix it: one JSON value each, one collection
+	// element each. 4097 of them is 4097 values, comfortably inside 8192, and
+	// 4097 elements, just past 4096.
+	assertReachesTheCollectionBound := func(t *testing.T, body string) string {
 		t.Helper()
-		prefix := `{"data":{"channel":{"id":"12345","self":{"watchStreakMilestone":{"missedStreams":[`
-		suffix := `]}}}}}`
-		room := maxDiagnosticResponseBytes - len(prefix) - len(suffix)
-		n := room / len("0,")
-		body := prefix + strings.Repeat("0,", n-1) + "0" + suffix
 		if len(body) > maxDiagnosticResponseBytes {
-			t.Fatalf("fixture is %d bytes, over the %d-byte body limit; this would test the wrong bound",
-				len(body), maxDiagnosticResponseBytes)
+			t.Fatalf("fixture is %d bytes, over the %d-byte body limit: it would be refused for the "+
+				"wrong reason", len(body), maxDiagnosticResponseBytes)
+		}
+		if diagnosticJSONValueCount([]byte(body)) != diagnosticJSONWithinLimit {
+			t.Fatalf("fixture exceeds the %d-value pre-decode limit, so the transport refuses it "+
+				"before the parser-side collection bound ever runs; this test would prove nothing",
+				maxDiagnosticJSONValues)
 		}
 		return body
+	}
+
+	denseBody := func(t *testing.T) string {
+		t.Helper()
+		var b strings.Builder
+		b.WriteString(`{"data":{"channel":{"id":"12345","self":{"watchStreakMilestone":{"missedStreams":[`)
+		for i := 0; i <= maxMilestoneCollectionElements; i++ {
+			if i > 0 {
+				b.WriteString(",")
+			}
+			b.WriteString(`{}`)
+		}
+		b.WriteString(`]}}}}}`)
+		return assertReachesTheCollectionBound(t, b.String())
 	}
 
 	// The nested array counts toward the same budget, so the bound cannot be
@@ -2428,10 +2458,10 @@ func TestOversizedCollectionsAreRefusedBeforeTheyAreBuilt(t *testing.T) {
 			if i > 0 {
 				b.WriteString(",")
 			}
-			b.WriteString(`{"id":"b"}`)
+			b.WriteString(`{}`)
 		}
 		b.WriteString(`]}]}}}}}`)
-		return b.String()
+		return assertReachesTheCollectionBound(t, b.String())
 	}
 
 	for _, tc := range []struct {
@@ -3052,6 +3082,12 @@ func TestASingularTopLevelErrorIsNotAnObservation(t *testing.T) {
 			"as OBSERVED (class %q): the singular `error` member is a rejection the APQ detector "+
 			"already honours, so the observation path must fail closed on it too", obs.FailureClass)
 	}
+	// And pin WHICH refusal, not merely that one happened.
+	if obs.Outcome != MilestoneGraphQLError ||
+		obs.FailureClass != MilestoneFailureGraphQLTopLevel {
+		t.Fatalf("outcome = %q/%q, want %s/%s", obs.Outcome, obs.FailureClass,
+			MilestoneGraphQLError, MilestoneFailureGraphQLTopLevel)
+	}
 }
 
 // TestAMalformedDataNodeIsNotCachedAsWorking closes the second door into the
@@ -3206,5 +3242,82 @@ func TestADiagnosticReadNeverPinsAClientID(t *testing.T) {
 					second)
 			}
 		})
+	}
+}
+
+// --- Q3 finding reproductions (round 15) -----------------------------------
+
+// Q3 standards/MAJOR: a non-2xx diagnostic response is handed back BEFORE the
+// pre-decode value bound runs, so encoding/json still materialises the body.
+func TestQ3NonSuccessBodyIsAlsoBounded(t *testing.T) {
+	prefix := `{"data":{"channel":{"id":"12345","self":{"watchStreakMilestone":{"missedStreams":[`
+	suffix := `]}}}}}`
+	room := maxDiagnosticResponseBytes - len(prefix) - len(suffix) - 8
+	elements := room / len("0,")
+	body := prefix + strings.Repeat("0,", elements-1) + "0" + suffix
+
+	measure := func(status int) float64 {
+		c := newTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(status)
+			_, _ = io.WriteString(w, body)
+		})
+		var before, after runtime.MemStats
+		runtime.GC()
+		runtime.ReadMemStats(&before)
+		_ = c.ObserveWatchStreakMilestone(context.Background(), "12345", "somestreamer")
+		runtime.ReadMemStats(&after)
+		return float64(after.TotalAlloc-before.TotalAlloc) / (1 << 20)
+	}
+
+	at200 := measure(http.StatusOK)
+	at404 := measure(http.StatusNotFound)
+	t.Logf("identical %d-byte body: 200 -> %.1f MB, 404 -> %.1f MB", len(body), at200, at404)
+
+	const budgetMB = 20
+	if at404 > budgetMB {
+		t.Fatalf("a REFUSED (404) %d-byte body allocated %.1f MB versus %.1f MB for the same body at "+
+			"200 (budget %d MB): the peer's status code decides whether the pre-decode value bound "+
+			"runs at all", len(body), at404, at200, budgetMB)
+	}
+}
+
+// Q3 standards+spec+security/MAJOR: at a non-401 non-2xx, a peer-chosen body
+// string decides UNAUTHORIZED instead of HTTP_STATUS.
+func TestQ3NonSuccessClassIsDecidedByStatusNotBody(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		status int
+		body   string
+	}{
+		{"404_with_unauthorized_string", http.StatusNotFound, `{"error":"Unauthorized"}`},
+		{"400_with_unauthorized_errors", http.StatusBadRequest, `{"errors":[{"message":"Unauthorized"}]}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := newTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(tc.status)
+				_, _ = io.WriteString(w, tc.body)
+			})
+			obs := c.ObserveWatchStreakMilestone(context.Background(), "12345", "somestreamer")
+			if obs.FailureClass != MilestoneFailureHTTPStatus {
+				t.Fatalf("HTTP %d with body %s recorded %q, want %s: the peer's BODY decided the "+
+					"class instead of the status", tc.status, tc.body, obs.FailureClass,
+					MilestoneFailureHTTPStatus)
+			}
+		})
+	}
+}
+
+// Q3 standards+spec/MAJOR: an explicit "error": null defeats the APQ detector,
+// though the spec says an explicit null is treated as absent.
+func TestQ3ExplicitNullErrorDoesNotHideAGenuineAPQ(t *testing.T) {
+	c := newTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, `{"error":null,"errors":[{"message":"PersistedQueryNotFound"}]}`)
+	})
+	obs := c.ObserveWatchStreakMilestone(context.Background(), "12345", "somestreamer")
+	if obs.Outcome != MilestoneUnsupported || obs.FailureClass != MilestoneFailureQueryNotFound {
+		t.Fatalf("outcome = %q/%q, want %s/%s: an explicit null `error` is absent everywhere else "+
+			"in this read, so it must not conceal a genuine PersistedQueryNotFound",
+			obs.Outcome, obs.FailureClass, MilestoneUnsupported, MilestoneFailureQueryNotFound)
 	}
 }

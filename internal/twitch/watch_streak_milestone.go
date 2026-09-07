@@ -413,9 +413,10 @@ func (o WatchStreakMilestoneObservation) Duration() time.Duration {
 // for its own outcome. That is what keeps a failed observation from degrading
 // health.SignalGQLAPI and closing the auto-bet gate — and equally keeps a
 // succeeding observation from masking a real business-path outage. The shared
-// client-ID pool is isolated too: this read caches its own working ID but never
-// promotes the process-wide default and never raises the stale-hash promotion
-// WARN; diagnosticRequestKey documents why.
+// client-ID pool is isolated too, and completely: this read caches NOTHING - it
+// pins no per-operation candidate and never promotes the process-wide default -
+// and it never raises the stale-hash promotion WARN; diagnosticRequestKey
+// documents why.
 //
 // ctx is the caller's existing loop context. Cancellation is honored before the
 // request is built and, through http.NewRequestWithContext and the
@@ -473,20 +474,57 @@ func (c *TwitchClient) ObserveWatchStreakMilestone(ctx context.Context, channelI
 		// Transient statuses keep TRANSPORT deliberately. A 429 or a 5xx here
 		// means the retry schedule ran and gave up, and that is the more
 		// useful fact than the last status seen.
-		if obs.FailureClass == MilestoneFailureTransport &&
-			statusCode != 0 && (statusCode < 200 || statusCode > 299) &&
+		if statusCode != 0 && (statusCode < 200 || statusCode > 299) &&
 			!gql.IsTransientStatus(statusCode) {
-			// 401 is settled by the status alone and needs no body at all, so
-			// it keeps its own, more specific class whatever became of the
-			// body. Without this, a rejection whose body merely happened to be
-			// oversized would fail the read before the transport reached its
-			// 401 branch, land on the generic fallback, and be refined to
-			// HTTP_STATUS - letting an attacker-chosen body SIZE decide which
-			// failure this observation records.
-			if statusCode == http.StatusUnauthorized {
-				obs.FailureClass = MilestoneFailureUnauthorized
-			} else {
-				obs.FailureClass = MilestoneFailureHTTPStatus
+			switch obs.FailureClass {
+			case MilestoneFailureTransport:
+				// The generic fallback answered "transport" for what the status
+				// had already settled. 401 is settled by the status alone and
+				// needs no body at all, so it takes its own, more specific
+				// class whatever became of the body. Without that, a rejection
+				// whose body merely happened to be oversized would fail before
+				// the transport reached its 401 branch and be refined to
+				// HTTP_STATUS - letting an attacker-chosen body SIZE pick the
+				// recorded failure.
+				if statusCode == http.StatusUnauthorized {
+					obs.FailureClass = MilestoneFailureUnauthorized
+				} else {
+					obs.FailureClass = MilestoneFailureHTTPStatus
+				}
+
+			case MilestoneFailureUnauthorized:
+				// UNAUTHORIZED must be STATUS-derived here, never body-derived.
+				// isAuthError also answers true for a body carrying the exact
+				// string "Unauthorized" - a reasonable rule for business reads,
+				// whose responses are not attacker-shaped text, and the wrong
+				// one for a diagnostic read of an untrusted body. Reproduced
+				// before either guard existed: HTTP 404 with
+				// {"error":"Unauthorized"} and HTTP 400 with
+				// {"errors":[{"message":"Unauthorized"}]} both recorded
+				// UNAUTHORIZED, so the peer chose the class the status had
+				// already settled.
+				//
+				// Stated honestly, because a test cannot currently tell the two
+				// guards apart: this branch is UNREACHABLE through the transport
+				// today. doGQLRequestWithClientIDFallback drops the body on a
+				// diagnostic non-2xx, so isAuthError never sees one and the
+				// class arrives as TRANSPORT, handled by the case above.
+				// Measured by reverting each guard alone: either one fixes the
+				// case, and only removing BOTH reproduces it.
+				//
+				// It is kept anyway, and not as decoration. The rule "at a
+				// non-2xx the STATUS names the failure" belongs at the layer
+				// that records the failure, not as a side effect of a
+				// resource-bound decision made two calls away; if a later change
+				// ever needs that body back, this is what stops the class bug
+				// returning silently with it.
+				//
+				// isAuthError itself is untouched: it is shared with the
+				// business paths, where the body IS trusted evidence and a token
+				// rejection must still drive credential recovery.
+				if statusCode != http.StatusUnauthorized {
+					obs.FailureClass = MilestoneFailureHTTPStatus
+				}
 			}
 		}
 		return obs

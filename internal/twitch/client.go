@@ -905,9 +905,18 @@ func diagnosticPersistedQueryNotFound(body []byte) bool {
 	// A top-level "error" is an explicit rejection in its own right, and it
 	// sits BESIDE the errors array rather than inside it - so an APQ-shaped
 	// array can be presented alongside one and would otherwise be believed,
-	// concealing the real rejection. strictPersistedQueryNotFound already
-	// refuses any present "error"; this read has the same need.
-	if _, present := result["error"]; present {
+	// concealing the real rejection.
+	//
+	// An explicit null is ABSENT, not a rejection, which is the rule this read
+	// applies to every other presence question and the rule SPECIFICATIONS.md
+	// states for it. Matching strictPersistedQueryNotFound's blunter "any
+	// present key" test here was wrong in the one direction that costs
+	// evidence: {"error":null,"errors":[{"message":"PersistedQueryNotFound"}]}
+	// was refused as APQ and recorded GRAPHQL_TOP_LEVEL_ERRORS, so a null the
+	// peer costs nothing to add would hide the stale shipped hash this
+	// operation exists to detect. That mutation-replay detector can afford to
+	// be blunter; this one cannot.
+	if raw, present := result["error"]; present && raw != nil {
 		return false
 	}
 
@@ -1258,8 +1267,10 @@ func (c *TwitchClient) rememberWorkingClientID(operation, clientID string, viaFa
 // client-ID/query-hash case.
 //
 // Candidate order is per-operation (candidateClientIDs): the operation's cached
-// known-good ID first, then the promoted default, then the rest. On success the
-// working ID is cached for the operation (rememberWorkingClientID). When every
+// known-good ID first, then the promoted default, then the rest. On success a
+// BUSINESS read caches the working ID for the operation
+// (rememberWorkingClientID); a DIAGNOSTIC read caches nothing at all, so it
+// always starts from the shipped default. When every
 // candidate returns PersistedQueryNotFound the request has genuinely failed
 // because the hash itself is stale — one ERROR is logged and
 // ErrPersistedQueryNotFound is returned so the caller keeps its last-known state
@@ -1295,15 +1306,28 @@ func (c *TwitchClient) doGQLRequestWithClientIDFallback(ctx context.Context, bod
 		// amplifying the request threefold and naming the wrong cause. The
 		// status is the authority on whether a body is worth reading at all.
 		//
-		// Only the iteration stops: the body and status are handed back
-		// unchanged, so gqlSingleRoundTrip keeps deciding 401 and 403, and the
-		// observation classifies the rest on the status it now trusts. A
-		// non-2xx is not a working client ID, so nothing is cached for it.
-		// Transient statuses never arrive here - doGQLRequestWithRetry has
-		// already exhausted and returned them as an error above.
+		// The BODY is dropped, not just the iteration stopped. An earlier
+		// version handed it back "unchanged, so gqlSingleRoundTrip keeps
+		// deciding 401 and 403" - but neither of those branches reads the body,
+		// so nothing needed it, and returning it walked the response straight
+		// past the pre-decode value bound twenty-five lines below into
+		// json.Unmarshal. Measured on one 1,048,567-byte dense array: 44.9 MB
+		// at HTTP 404 against 3.2 MB for the identical body at HTTP 200 - a
+		// 14x amplification on the bonus poll goroutine, selected purely by the
+		// peer's status code, in the one place this feature's stated order
+		// (bound the resource, establish the shape, then interpret) had no
+		// bound at all.
+		//
+		// Nothing downstream loses evidence: 401 and 403 are settled on the
+		// status alone, the resulting "empty response body" transport error
+		// carries no text worth keeping, and ObserveWatchStreakMilestone
+		// refines it back to HTTP_STATUS. A non-2xx is not a working client ID,
+		// so nothing is cached for it either. Transient statuses never arrive
+		// here - doGQLRequestWithRetry has already exhausted them into an error
+		// above.
 		if diagnostic {
 			if statusCode < 200 || statusCode > 299 {
-				return respBody, statusCode, nil
+				return nil, statusCode, nil
 			}
 
 			// Duplicate JSON members are ambiguous evidence. encoding/json
@@ -1495,7 +1519,9 @@ func (c *TwitchClient) doGQLRequestWithRetry(ctx context.Context, body []byte, o
 		} else {
 			retryAttrs = append(retryAttrs, "error", lastErr)
 		}
-		retryLog("GQL request failed, retrying", retryAttrs...) // The backoff belongs to the request, so it belongs to whoever owns the
+		retryLog("GQL request failed, retrying", retryAttrs...)
+
+		// The backoff belongs to the request, so it belongs to whoever owns the
 		// request. gql.RetryWait still computes the same jittered delay; only
 		// the waiting is interruptible now, so a cancelled owner stops instead
 		// of sleeping out the rest of the schedule.
@@ -1578,7 +1604,7 @@ func doGQLOnceWithClient(client *http.Client, req *http.Request) ([]byte, int, t
 	// response this read declines to trust.
 	//
 	// Reading limit+1 is what makes the overflow visible - see
-	// maxDiagnosticResponseBytes. This is the same shape fetchSpadeBytes uses.
+	// maxDiagnosticResponseBytes. This is the same shape fetchSpadeAsset uses.
 	diagnostic := isDiagnosticRequest(req.Context())
 	body := io.Reader(resp.Body)
 	if diagnostic {

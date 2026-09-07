@@ -143,8 +143,13 @@ const milestoneLogIDSample = 8
 // owner evidence and recorded 2026-09-06. Independently corroborated by the
 // already-audited donor mpforce1/Twitch-Channel-Points-Miner (ref
 // f1dda17ad61562ca2e93d975ee0a24e8b2f7ea0c, README blob
-// d5b60c22c5e6387cbe69c3e7e951b32d946672f6), which states the same
-// progression. The same guide documents that a qualifying stream must run at
+// d5b60c22c5e6387cbe69c3e7e951b32d946672f6), which lists the same four reward
+// AMOUNTS. Stated exactly, because the earlier wording ("states the same
+// progression", "independently corroborated") claimed more than the donor
+// supports: the amounts are corroborated, the streak-count-to-amount MAPPING
+// and the flat "5 or more" rung rest on the Twitch guide alone. That is why
+// provenStreakCount reads UNKNOWN on every record - a second source for the
+// amounts is not a second source for what they mean. The same guide documents that a qualifying stream must run at
 // least 10 minutes and that at least 30 minutes must have elapsed since the
 // previous stream ended — recorded here as Twitch's stated rule only; this
 // miner's pursuit semantics are unchanged and are NOT derived from it.
