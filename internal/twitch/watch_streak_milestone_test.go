@@ -9,6 +9,7 @@ import (
 	"math"
 	"net/http"
 	"reflect"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -235,6 +236,11 @@ func assertNoFabricatedValues(t *testing.T, snap WatchStreakMilestoneSnapshot) {
 		if f.Presence != MilestoneFieldValid && f.Value != 0 {
 			t.Errorf("%s: non-valid field carries value %d", name, f.Value)
 		}
+		// The wire kind is an observation of a value that arrived. A field that
+		// did not validly arrive has none, and must not carry a defaulted one.
+		if f.Presence != MilestoneFieldValid && f.WireKind != MilestoneWireKindUnset {
+			t.Errorf("%s: non-valid field carries wire kind %q", name, f.WireKind)
+		}
 	}
 }
 
@@ -256,24 +262,37 @@ func TestParseWatchStreakMilestoneMalformedScalars(t *testing.T) {
 		key   string
 		value interface{}
 	}{
-		{"value as string", "value", "450"},
 		{"value as bool", "value", true},
 		{"value as object", "value", map[string]interface{}{}},
+		{"value as array", "value", []interface{}{}},
 		{"value fractional", "value", 450.5},
 		{"value NaN", "value", math.NaN()},
 		{"value +Inf", "value", math.Inf(1)},
 		{"value beyond exact integer range", "value", math.Pow(2, 53)},
+		// The value node accepts a string of digits (see
+		// TestParseWatchStreakMilestoneValueAcceptsBothObservedWireKinds), which
+		// is exactly why a string that is NOT one must still be MALFORMED. The
+		// tolerance is for one documented wire encoding, not a licence to guess
+		// at a number.
+		{"value as non-numeric string", "value", "four"},
+		{"value as empty string", "value", ""},
+		{"value as fractional string", "value", "4.0"},
+		{"value as padded numeric string", "value", " 4"},
+		{"value as hexadecimal string", "value", "0x4"},
+		{"value as thousands-separated string", "value", "1,000"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			resp := fullRewardListResponse()
 			sNode(t, resp)["watchStreakMilestone"].(map[string]interface{})[tc.key] = tc.value
 			snap := parseWatchStreakMilestone(resp)
-			if snap.MilestoneValue.Presence != MilestoneFieldMalformed {
-				t.Fatalf("presence = %q, want MALFORMED (%v)", snap.MilestoneValue.Presence, tc.value)
-			}
-			if snap.MilestoneValue.Value != 0 {
-				t.Fatalf("malformed value was coerced to %d", snap.MilestoneValue.Value)
+			// The whole field is compared, not just its presence: a
+			// MALFORMED node must carry no value AND no wire kind. Reporting
+			// the encoding of a value the parser refused would say Twitch sent
+			// a well-formed number after all.
+			if got := snap.MilestoneValue; got != (MilestoneIntField{Presence: MilestoneFieldMalformed}) {
+				t.Fatalf("value %v observed as %+v, want MALFORMED with no value and no wire kind",
+					tc.value, got)
 			}
 		})
 	}
@@ -283,8 +302,8 @@ func TestParseWatchStreakMilestoneMalformedScalars(t *testing.T) {
 	for _, key := range []string{"value"} {
 		resp := fullRewardListResponse()
 		sNode(t, resp)["watchStreakMilestone"].(map[string]interface{})[key] = nil
-		if got := parseWatchStreakMilestone(resp).MilestoneValue; got.Presence != MilestoneFieldNull || got.Value != 0 {
-			t.Fatalf("null %s = %+v, want NULL/0", key, got)
+		if got := parseWatchStreakMilestone(resp).MilestoneValue; got != (MilestoneIntField{Presence: MilestoneFieldNull}) {
+			t.Fatalf("null %s = %+v, want NULL with no value and no wire kind", key, got)
 		}
 	}
 	for _, key := range []string{"watchStreakThreshold", "watchStreakCopoBonus"} {
@@ -295,8 +314,8 @@ func TestParseWatchStreakMilestoneMalformedScalars(t *testing.T) {
 		if key == "watchStreakCopoBonus" {
 			got = snap.WatchStreakCopoBonus
 		}
-		if got.Presence != MilestoneFieldNull || got.Value != 0 {
-			t.Fatalf("null %s = %+v, want NULL/0", key, got)
+		if got != (MilestoneIntField{Presence: MilestoneFieldNull}) {
+			t.Fatalf("null %s = %+v, want NULL with no value and no wire kind", key, got)
 		}
 		// And NULL must stay distinct from MISSING on the same field.
 		missing := fullRewardListResponse()
@@ -306,8 +325,24 @@ func TestParseWatchStreakMilestoneMalformedScalars(t *testing.T) {
 		if key == "watchStreakCopoBonus" {
 			mgot = msnap.WatchStreakCopoBonus
 		}
-		if mgot.Presence != MilestoneFieldMissing {
-			t.Fatalf("missing %s = %+v, want MISSING", key, mgot)
+		if mgot != (MilestoneIntField{Presence: MilestoneFieldMissing}) {
+			t.Fatalf("missing %s = %+v, want MISSING with no value and no wire kind", key, mgot)
+		}
+	}
+
+	// The value node's string tolerance must NOT leak to its siblings. Twitch
+	// sends watchStreakThreshold and watchStreakCopoBonus as JSON numbers, so a
+	// string there is a genuine shape surprise and has to keep reading as one.
+	for _, key := range []string{"watchStreakThreshold", "watchStreakCopoBonus"} {
+		resp := fullRewardListResponse()
+		sNode(t, resp)[key] = "4"
+		snap := parseWatchStreakMilestone(resp)
+		got := snap.WatchStreakThreshold
+		if key == "watchStreakCopoBonus" {
+			got = snap.WatchStreakCopoBonus
+		}
+		if got != (MilestoneIntField{Presence: MilestoneFieldMalformed}) {
+			t.Fatalf("string-encoded %s = %+v, want MALFORMED with no value and no wire kind", key, got)
 		}
 	}
 
@@ -324,6 +359,131 @@ func TestParseWatchStreakMilestoneMalformedScalars(t *testing.T) {
 	sNode(t, resp)["watchStreakMilestone"].(map[string]interface{})["shareStatus"] = ""
 	if got := parseWatchStreakMilestone(resp).ShareStatus; got.Presence != MilestoneFieldValid || got.Value != "" {
 		t.Fatalf("observed empty string = %+v, want VALID/empty", got)
+	}
+}
+
+// TestParseWatchStreakMilestoneValueAcceptsBothObservedWireKinds is the MAJOR-3
+// fidelity proof for the one field this observation exists to see.
+//
+// RewardList sends the milestone value node in TWO different JSON encodings:
+// the donor protocol evidence has ViewerMilestone.value as a string, while its
+// sibling watchStreakThreshold/watchStreakCopoBonus arrive as JSON integers.
+// A parser that accepts only the integer form does not report a shape problem
+// with Twitch's response, it throws away the documented wire form: "value":"4"
+// would classify MALFORMED and the observed 4 would never reach the record.
+//
+// Accepting both encodings is protocol tolerance, not interpretation. Nothing
+// here decides that the value IS the streak count; which field carries the
+// authoritative count stays UNKNOWN.
+//
+// This test names only Presence and Value, so it compiles unchanged on the
+// pre-repair candidate and fails there behaviourally.
+func TestParseWatchStreakMilestoneValueAcceptsBothObservedWireKinds(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		wire interface{}
+	}{
+		{"json string", "4"},
+		{"json integer", float64(4)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			resp := fullRewardListResponse()
+			sNode(t, resp)["watchStreakMilestone"].(map[string]interface{})["value"] = tc.wire
+			got := parseWatchStreakMilestone(resp).MilestoneValue
+			if got.Presence != MilestoneFieldValid || got.Value != 4 {
+				t.Fatalf("value %#v observed as %+v, want VALID/4 - the observed value was lost", tc.wire, got)
+			}
+		})
+	}
+}
+
+// TestParseWatchStreakMilestoneValueRecordsItsWireKind proves the two accepted
+// encodings stay told apart after normalisation.
+//
+// Normalising "4" and 4 to the same integer is the point; losing WHICH form
+// Twitch sent is not. The wire kind is protocol evidence in its own right — it
+// is how a later reader can tell a schema change from a parser bug — so it gets
+// its own slot rather than being inferred back out of the value.
+func TestParseWatchStreakMilestoneValueRecordsItsWireKind(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		wire         interface{}
+		wantValue    int
+		wantWireKind MilestoneWireKind
+	}{
+		{"digits", "4", 4, MilestoneWireKindString},
+		{"signed digits", "-4", -4, MilestoneWireKindString},
+		{"zero digits", "0", 0, MilestoneWireKindString},
+		{"leading zero digits", "04", 4, MilestoneWireKindString},
+		{"json number", float64(4), 4, MilestoneWireKindNumber},
+		{"json zero", float64(0), 0, MilestoneWireKindNumber},
+		{"negative json number", float64(-4), -4, MilestoneWireKindNumber},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			resp := fullRewardListResponse()
+			sNode(t, resp)["watchStreakMilestone"].(map[string]interface{})["value"] = tc.wire
+			got := parseWatchStreakMilestone(resp).MilestoneValue
+			want := MilestoneIntField{
+				Presence: MilestoneFieldValid,
+				Value:    tc.wantValue,
+				WireKind: tc.wantWireKind,
+			}
+			if got != want {
+				t.Fatalf("value %#v observed as %+v, want %+v", tc.wire, got, want)
+			}
+		})
+	}
+
+	// A value of 0 is a genuinely observed 0 and stays distinguishable from the
+	// three not-observed classifications, which carry no value and no wire kind.
+	for _, tc := range []struct {
+		name string
+		mut  func(v map[string]interface{})
+		want MilestoneIntField
+	}{
+		{"missing", func(v map[string]interface{}) { delete(v, "value") },
+			MilestoneIntField{Presence: MilestoneFieldMissing}},
+		{"null", func(v map[string]interface{}) { v["value"] = nil },
+			MilestoneIntField{Presence: MilestoneFieldNull}},
+		{"malformed", func(v map[string]interface{}) { v["value"] = true },
+			MilestoneIntField{Presence: MilestoneFieldMalformed}},
+	} {
+		resp := fullRewardListResponse()
+		tc.mut(sNode(t, resp)["watchStreakMilestone"].(map[string]interface{}))
+		if got := parseWatchStreakMilestone(resp).MilestoneValue; got != tc.want {
+			t.Fatalf("%s value = %+v, want %+v", tc.name, got, tc.want)
+		}
+	}
+}
+
+// TestParseWatchStreakMilestoneValueExactnessFollowsTheEncoding pins the one
+// deliberate asymmetry between the two accepted encodings.
+//
+// A JSON number decodes through float64, so at and above 2^53 it has already
+// lost the identity of the value that was actually sent; the parser refuses it
+// rather than reporting a number Twitch may never have written. A decimal
+// STRING has lost nothing, so the same magnitude is exactly observable there.
+// The asymmetry is a property of the encodings, not an oversight, and this test
+// exists so a later reader cannot "fix" one side into agreement with the other.
+func TestParseWatchStreakMilestoneValueExactnessFollowsTheEncoding(t *testing.T) {
+	const beyondFloat64Exact = "9007199254740993" // 2^53 + 1
+
+	resp := fullRewardListResponse()
+	sNode(t, resp)["watchStreakMilestone"].(map[string]interface{})["value"] = beyondFloat64Exact
+	got := parseWatchStreakMilestone(resp).MilestoneValue
+	if got.Presence != MilestoneFieldValid || got.WireKind != MilestoneWireKindString {
+		t.Fatalf("string-encoded %s = %+v, want VALID/STRING", beyondFloat64Exact, got)
+	}
+	if strconv.Itoa(got.Value) != beyondFloat64Exact {
+		t.Fatalf("string-encoded %s round-tripped to %d; a decimal string must be read exactly",
+			beyondFloat64Exact, got.Value)
+	}
+
+	// The same magnitude as a JSON number is not exactly observable.
+	resp = fullRewardListResponse()
+	sNode(t, resp)["watchStreakMilestone"].(map[string]interface{})["value"] = float64(1 << 53)
+	if got := parseWatchStreakMilestone(resp).MilestoneValue; got.Presence != MilestoneFieldMalformed {
+		t.Fatalf("number-encoded 2^53 = %+v, want MALFORMED", got)
 	}
 }
 

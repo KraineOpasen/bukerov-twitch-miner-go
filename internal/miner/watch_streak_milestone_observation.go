@@ -304,6 +304,11 @@ func logWatchStreakMilestoneObservation(obs twitch.WatchStreakMilestoneObservati
 		// Audited milestone fields. Values are reported, never interpreted.
 		"milestoneId", milestoneLogString(snap.MilestoneID),
 		"milestoneValue", milestoneLogInt(snap.MilestoneValue),
+		// The wire kind is kept in its own slot rather than folded into
+		// milestoneValue: "4" and 4 are the same observed integer but not the
+		// same wire fact, and a reader must be able to see both without one
+		// answer hiding the other.
+		"milestoneValueWireKind", milestoneLogWireKind(snap.MilestoneValue),
 		"shareStatus", milestoneLogString(snap.ShareStatus),
 		"watchStreakThreshold", milestoneLogInt(snap.WatchStreakThreshold),
 		"watchStreakCopoBonus", milestoneLogInt(snap.WatchStreakCopoBonus),
@@ -468,6 +473,16 @@ func milestoneLogInt(f twitch.MilestoneIntField) string {
 		return presenceToken(f.Presence)
 	}
 	return strconv.Itoa(f.Value)
+}
+
+// milestoneLogWireKind renders which JSON encoding a validly observed integer
+// arrived in. A field that was not validly observed has no encoding to report
+// and reads as <UNSET>, never as a borrowed or defaulted one.
+func milestoneLogWireKind(f twitch.MilestoneIntField) string {
+	if f.Presence != twitch.MilestoneFieldValid || f.WireKind == twitch.MilestoneWireKindUnset {
+		return "<UNSET>"
+	}
+	return string(f.WireKind)
 }
 
 // presenceToken renders a presence classification so it can never be confused

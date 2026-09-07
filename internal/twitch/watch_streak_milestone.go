@@ -46,6 +46,7 @@ import (
 	"context"
 	"errors"
 	"math"
+	"strconv"
 	"sync/atomic"
 	"time"
 
@@ -89,12 +90,41 @@ type MilestoneStringField struct {
 	Value    string
 }
 
+// MilestoneWireKind records which JSON encoding a validly observed integer
+// actually arrived in.
+//
+// It exists because RewardList does not use one encoding for its integers:
+// watchStreakThreshold and watchStreakCopoBonus arrive as JSON numbers, while
+// the nested milestone node's value arrives as a JSON string. Normalising both
+// to 4 and stopping there would erase which form Twitch sent, and that form is
+// itself protocol evidence this observation exists to collect. So the parsed
+// integer and its wire kind are kept in separate slots and neither substitutes
+// for the other.
+type MilestoneWireKind string
+
+const (
+	// MilestoneWireKindUnset: no encoding was observed, because no integer was
+	// validly read. It is the zero value on purpose: a field that is MISSING,
+	// NULL or MALFORMED must not appear to have arrived in some encoding.
+	MilestoneWireKindUnset MilestoneWireKind = ""
+	// MilestoneWireKindNumber: the value arrived as a JSON number.
+	MilestoneWireKindNumber MilestoneWireKind = "NUMBER"
+	// MilestoneWireKindString: the value arrived as a JSON string of digits.
+	MilestoneWireKindString MilestoneWireKind = "STRING"
+)
+
 // MilestoneIntField is one observed integer-valued field plus its presence
-// classification. A JSON number that is not a finite, exactly representable
-// integer is MALFORMED, never truncated to a plausible-looking integer.
+// classification and the wire kind it arrived in. A JSON number that is not a
+// finite, exactly representable integer is MALFORMED, never truncated to a
+// plausible-looking integer.
+//
+// Value and WireKind are meaningful only when Presence is VALID; otherwise both
+// stay at their zero values, so nothing reads as an observed 0 in an observed
+// encoding.
 type MilestoneIntField struct {
 	Presence MilestoneFieldPresence
 	Value    int
+	WireKind MilestoneWireKind
 }
 
 // MilestoneBroadcastIdentifiers is one missedStreams entry's
@@ -493,7 +523,7 @@ func parseWatchStreakMilestone(resp map[string]interface{}) WatchStreakMilestone
 	v, vPresence := milestoneObject(s, "watchStreakMilestone")
 	snap.MilestoneNodePresence = vPresence
 	snap.MilestoneID = milestoneString(v, "id")
-	snap.MilestoneValue = milestoneInt(v, "value")
+	snap.MilestoneValue = milestoneNumericStringOrInt(v, "value")
 	snap.AchievementTimestamp = milestoneString(v, "achievementTimestamp")
 	snap.ShareStatus = milestoneString(v, "shareStatus")
 
@@ -656,10 +686,10 @@ func milestoneString(parent map[string]interface{}, key string) MilestoneStringF
 	return MilestoneStringField{Presence: MilestoneFieldValid, Value: value}
 }
 
-// milestoneInt classifies one integer-valued field. A JSON number that is not
-// finite, not integral, or not exactly representable as an int is MALFORMED —
-// it is never truncated, rounded or clamped into a value that would read as an
-// observed fact.
+// milestoneInt classifies one integer-valued field that Twitch sends as a JSON
+// number. A string is the wrong shape here and is MALFORMED; only the nested
+// milestone value node is known to arrive string-encoded, and it is read by
+// milestoneNumericStringOrInt instead.
 func milestoneInt(parent map[string]interface{}, key string) MilestoneIntField {
 	raw, present := parent[key]
 	switch {
@@ -672,6 +702,63 @@ func milestoneInt(parent map[string]interface{}, key string) MilestoneIntField {
 	if !ok {
 		return MilestoneIntField{Presence: MilestoneFieldMalformed}
 	}
+	return milestoneIntFromNumber(number)
+}
+
+// milestoneNumericStringOrInt classifies one integer-valued field that Twitch
+// sends in EITHER JSON encoding, recording which one arrived.
+//
+// This is protocol tolerance, not interpretation. RewardList's milestone value
+// node is string-encoded on the wire, so reading only the number form would
+// discard the single field this observation exists to see and report the loss
+// as if Twitch had sent something malformed. Accepting the string form assigns
+// it no meaning: it does not make the value a streak count, a rung, or a link
+// to any grant. Which field carries the authoritative streak count stays
+// UNKNOWN.
+//
+// Anything that is neither a JSON number nor a string of digits — a bool, an
+// object, an array, "4.0", "0x4", " 4", "" — is MALFORMED, never coerced.
+func milestoneNumericStringOrInt(parent map[string]interface{}, key string) MilestoneIntField {
+	raw, present := parent[key]
+	switch {
+	case !present:
+		return MilestoneIntField{Presence: MilestoneFieldMissing}
+	case raw == nil:
+		return MilestoneIntField{Presence: MilestoneFieldNull}
+	}
+	switch typed := raw.(type) {
+	case float64:
+		return milestoneIntFromNumber(typed)
+	case string:
+		// strconv.Atoi accepts an optional sign followed by decimal digits and
+		// nothing else, and reports a range error rather than saturating, so a
+		// string that is not exactly one platform int stays MALFORMED.
+		//
+		// A decimal string carries its integer exactly, so unlike the number
+		// path below it needs no 2^53 guard: the guard exists because JSON
+		// numbers decode through float64 and lose identity above that bound,
+		// which never happens to a string. The two paths therefore classify
+		// very large magnitudes differently, and that asymmetry is the honest
+		// one — it reflects a real difference in what each encoding preserves.
+		value, err := strconv.Atoi(typed)
+		if err != nil {
+			return MilestoneIntField{Presence: MilestoneFieldMalformed}
+		}
+		return MilestoneIntField{
+			Presence: MilestoneFieldValid,
+			Value:    value,
+			WireKind: MilestoneWireKindString,
+		}
+	default:
+		return MilestoneIntField{Presence: MilestoneFieldMalformed}
+	}
+}
+
+// milestoneIntFromNumber applies the exact-integer rules to a decoded JSON
+// number. A number that is not finite, not integral, or not exactly
+// representable as an int is MALFORMED — it is never truncated, rounded or
+// clamped into a value that would read as an observed fact.
+func milestoneIntFromNumber(number float64) MilestoneIntField {
 	if math.IsNaN(number) || math.IsInf(number, 0) || number != math.Trunc(number) {
 		return MilestoneIntField{Presence: MilestoneFieldMalformed}
 	}
@@ -684,5 +771,9 @@ func milestoneInt(parent map[string]interface{}, key string) MilestoneIntField {
 		number > float64(math.MaxInt) || number < float64(math.MinInt) {
 		return MilestoneIntField{Presence: MilestoneFieldMalformed}
 	}
-	return MilestoneIntField{Presence: MilestoneFieldValid, Value: int(number)}
+	return MilestoneIntField{
+		Presence: MilestoneFieldValid,
+		Value:    int(number),
+		WireKind: MilestoneWireKindNumber,
+	}
 }

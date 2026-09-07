@@ -534,6 +534,7 @@ func TestObservationRecordCarriesBoundedProvenance(t *testing.T) {
 		"milestoneNodePresence":        "<VALID>",
 		"milestoneId":                  "m-1",
 		"milestoneValue":               "4",
+		"milestoneValueWireKind":       "NUMBER",
 		"watchStreakThreshold":         "3",
 		"watchStreakCopoBonus":         "450",
 		"state":                        "ACTIVE",
@@ -1630,7 +1631,7 @@ func TestUnsupportedQueryRecordStaysOffTheDashboardLogView(t *testing.T) {
 	// render as the never-reached token — not as an empty value, and not as a
 	// presence classification that would imply the parser saw the node.
 	for _, key := range []string{
-		"milestoneId", "milestoneValue", "state", "shareStatus", "expiresAt",
+		"milestoneId", "milestoneValue", "milestoneValueWireKind", "state", "shareStatus", "expiresAt",
 		"achievementTimestamp", "watchStreakThreshold", "watchStreakCopoBonus", "observedChannelId",
 	} {
 		if got := attrValue(lines[0], key); got != "<UNSET>" {
@@ -1957,6 +1958,145 @@ func observeOnceWithMissedStreams(t *testing.T, missedStreams string) string {
 		t.Fatalf("observation records = %d, want 1; logs:\n%s", len(lines), logs.String())
 	}
 	return lines[0]
+}
+
+// observeOnceWithMilestoneValue runs one observation cycle against a fixture
+// whose ONLY variable is the raw JSON of the milestone value node, and returns
+// the single emitted record line. Two fixtures therefore differ in nothing but
+// the wire encoding under test.
+func observeOnceWithMilestoneValue(t *testing.T, rawValue string) string {
+	t.Helper()
+	return observeOnceWithMilestoneNode(t, `"id":"m-1","value":`+rawValue)
+}
+
+// observeOnceWithMilestoneNode runs one observation cycle against a fixture
+// whose only variable is the BODY of the nested milestone node, so a test can
+// leave a key out entirely rather than only change its value.
+func observeOnceWithMilestoneNode(t *testing.T, nodeBody string) string {
+	t.Helper()
+	logs := captureLogs(t)
+	logins := milestoneLogins(t, 1)
+	body := `{"data":{"channel":{"id":"12345","self":{"watchStreakMilestone":{` +
+		`"state":"ACTIVE","watchStreakMilestone":{` + nodeBody + `}}}}}}`
+	m, _ := newMilestoneMiner(t, &milestoneRoundTripper{rewardListBody: body}, logins, logins)
+	logs.Reset()
+	m.observeWatchStreakMilestones(context.Background())
+	lines := recordLines(logs.String(), milestoneObservationRecord)
+	if len(lines) != 1 {
+		t.Fatalf("observation records = %d, want 1; logs:\n%s", len(lines), logs.String())
+	}
+	return lines[0]
+}
+
+// TestObservationReportsMilestoneValueWireKind is the MAJOR-3 fidelity proof
+// asserted where it matters: the emitted record.
+//
+// Two things must both hold, and they pull in opposite directions:
+//
+//   - "value":"4" and "value":4 are the SAME observed integer, so a reader
+//     comparing records across cycles must see the same 4 in both. Dropping
+//     the string form as MALFORMED loses the observation entirely.
+//   - They are NOT the same wire fact. Normalising them into one attribute and
+//     stopping there would erase which encoding Twitch actually sent, which is
+//     precisely the protocol evidence this diagnostic exists to collect.
+//
+// So the record carries the normalised integer AND its wire kind, separately.
+//
+// Written against attribute names only, so it compiles unchanged on the
+// pre-repair candidate and fails there behaviourally.
+func TestObservationReportsMilestoneValueWireKind(t *testing.T) {
+	stringWire := observeOnceWithMilestoneValue(t, `"4"`)
+	numberWire := observeOnceWithMilestoneValue(t, `4`)
+
+	// Both encodings must survive as the same observed integer.
+	if got := attrValue(stringWire, "milestoneValue"); got != "4" {
+		t.Fatalf("string-encoded value:\"4\" reported as milestoneValue=%q, want 4 "+
+			"- the observed value was lost", got)
+	}
+	if got := attrValue(numberWire, "milestoneValue"); got != "4" {
+		t.Fatalf("integer-encoded value:4 reported as milestoneValue=%q, want 4", got)
+	}
+
+	// And the two wire kinds must stay told apart.
+	if got := attrValue(stringWire, "milestoneValueWireKind"); got != "STRING" {
+		t.Fatalf("string-encoded value reported wire kind %q, want STRING", got)
+	}
+	if got := attrValue(numberWire, "milestoneValueWireKind"); got != "NUMBER" {
+		t.Fatalf("integer-encoded value reported wire kind %q, want NUMBER", got)
+	}
+}
+
+// TestObservationDoesNotFabricateAWireKind proves the wire kind is an
+// observation, not a default: a value node that was never validly read has no
+// encoding to report, and must not borrow one.
+func TestObservationDoesNotFabricateAWireKind(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		rawValue     string
+		wantValue    string
+		wantWireKind string
+	}{
+		{"null", `null`, "<NULL>", "<UNSET>"},
+		{"non-numeric string", `"soon"`, "<MALFORMED>", "<UNSET>"},
+		{"fractional number", `4.5`, "<MALFORMED>", "<UNSET>"},
+		{"bool", `true`, "<MALFORMED>", "<UNSET>"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			line := observeOnceWithMilestoneValue(t, tc.rawValue)
+			if got := attrValue(line, "milestoneValue"); got != tc.wantValue {
+				t.Fatalf("milestoneValue = %q, want %q", got, tc.wantValue)
+			}
+			if got := attrValue(line, "milestoneValueWireKind"); got != tc.wantWireKind {
+				t.Fatalf("milestoneValueWireKind = %q, want %q", got, tc.wantWireKind)
+			}
+		})
+	}
+
+	// A value key Twitch never sent at all is MISSING, and stays distinct from
+	// the NULL and MALFORMED cases above.
+	line := observeOnceWithMilestoneNode(t, `"id":"m-1"`)
+	if got := attrValue(line, "milestoneValue"); got != "<MISSING>" {
+		t.Fatalf("absent value key reported milestoneValue=%q, want <MISSING>", got)
+	}
+	if got := attrValue(line, "milestoneValueWireKind"); got != "<UNSET>" {
+		t.Fatalf("absent value key reported milestoneValueWireKind=%q, want <UNSET>", got)
+	}
+}
+
+// TestMilestoneLogWireKindNeverRendersAnEmptyValue covers the renderer's own
+// contract rather than the paths the parser happens to produce today.
+//
+// A VALID integer that carries no wire kind cannot come out of the current
+// parser, but the renderer must not depend on that: printing an empty
+// milestoneValueWireKind= would read as "observed, and it was nothing", which
+// is the one thing this attribute exists to prevent.
+func TestMilestoneLogWireKindNeverRendersAnEmptyValue(t *testing.T) {
+	for _, f := range []twitch.MilestoneIntField{
+		{},
+		{Presence: twitch.MilestoneFieldValid},
+		{Presence: twitch.MilestoneFieldValid, Value: 4},
+		{Presence: twitch.MilestoneFieldMissing},
+		{Presence: twitch.MilestoneFieldNull},
+		{Presence: twitch.MilestoneFieldMalformed},
+		{Presence: twitch.MilestoneFieldMalformed, WireKind: twitch.MilestoneWireKindString},
+	} {
+		if got := milestoneLogWireKind(f); got != "<UNSET>" {
+			t.Errorf("milestoneLogWireKind(%+v) = %q, want <UNSET>", f, got)
+		}
+	}
+	for _, tc := range []struct {
+		field twitch.MilestoneIntField
+		want  string
+	}{
+		{twitch.MilestoneIntField{Presence: twitch.MilestoneFieldValid, Value: 4,
+			WireKind: twitch.MilestoneWireKindString}, "STRING"},
+		{twitch.MilestoneIntField{Presence: twitch.MilestoneFieldValid, Value: 4,
+			WireKind: twitch.MilestoneWireKindNumber}, "NUMBER"},
+	} {
+		if got := milestoneLogWireKind(tc.field); got != tc.want {
+			t.Errorf("milestoneLogWireKind(%+v) = %q, want %q", tc.field, got, tc.want)
+		}
+	}
 }
 
 // TestObservationDistinguishesNullElementFromNullChild is the R1 fidelity
