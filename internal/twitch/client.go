@@ -418,19 +418,19 @@ func isBonusMutationOperation(operation constants.GQLOperation) bool {
 // reports whether the outcome was an authoritative auth rejection. The
 // marshaled body is reused verbatim across recovery replays, so a replayed
 // request is byte-identical to the original.
-func (c *TwitchClient) gqlSingleRoundTrip(ctx context.Context, body []byte, operationName, token string) (result map[string]interface{}, authRejected bool, err error) {
+func (c *TwitchClient) gqlSingleRoundTrip(ctx context.Context, body []byte, operationName, token string) (result map[string]interface{}, statusCode int, authRejected bool, err error) {
 	respBody, statusCode, err := c.doGQLRequestWithClientIDFallback(ctx, body, operationName, token)
 	if err != nil {
 		// Includes ErrPersistedQueryNotFound when every candidate client ID
 		// returned PersistedQueryNotFound. Returning it here (instead of an empty
 		// map) is what stops callers from misreading a stale hash as "streamer
 		// does not exist" or wiping their last-known state.
-		return nil, false, err
+		return nil, statusCode, false, err
 	}
 
 	// HTTP 401 is the authoritative token rejection regardless of body shape.
 	if statusCode == http.StatusUnauthorized {
-		return nil, true, nil
+		return nil, statusCode, true, nil
 	}
 	// HTTP 403 is a permission/scope/business rejection: NOT an auth
 	// rejection (no refresh, no device flow) and NOT data either — its error
@@ -440,36 +440,53 @@ func (c *TwitchClient) gqlSingleRoundTrip(ctx context.Context, body []byte, oper
 		if !isDiagnosticRequest(ctx) {
 			c.connAcct.markFunctionalFailure(time.Now())
 		}
-		return nil, false, fmt.Errorf("twitch GQL %s: permission denied (status 403)", operationName)
+		return nil, statusCode, false, fmt.Errorf("twitch GQL %s: permission denied (status 403)", operationName)
 	}
 
 	if len(bytes.TrimSpace(respBody)) == 0 {
-		return nil, false, fmt.Errorf("twitch GQL %s: empty response body", operationName)
+		return nil, statusCode, false, fmt.Errorf("twitch GQL %s: empty response body", operationName)
 	}
 
 	if err := json.Unmarshal(respBody, &result); err != nil {
-		return nil, false, fmt.Errorf("failed to unmarshal %s response: %w", operationName, err)
+		return nil, statusCode, false, fmt.Errorf("failed to unmarshal %s response: %w", operationName, err)
 	}
 
-	return result, isAuthError(statusCode, result), nil
+	return result, statusCode, isAuthError(statusCode, result), nil
 }
 
+// postGQLRequest is the ordinary read entry point. It keeps its historical
+// signature so every existing caller is untouched; callers that must judge the
+// HTTP status themselves use postGQLRequestWithStatus.
 func (c *TwitchClient) postGQLRequest(ctx context.Context, operation constants.GQLOperation) (map[string]interface{}, error) {
+	result, _, err := c.postGQLRequestWithStatus(ctx, operation)
+	return result, err
+}
+
+// postGQLRequestWithStatus is postGQLRequest plus the HTTP status of the
+// response it parsed.
+//
+// The shared transport special-cases only 401 and 403; every other non-2xx body
+// that happens to be JSON is returned verbatim as a result. A caller that
+// treats "this decoded into the shape I expected" as proof of success would
+// therefore accept a 400, a 404 or a redirect page as data. The status is
+// exposed so such a caller can refuse first and decide on evidence rather than
+// on shape.
+func (c *TwitchClient) postGQLRequestWithStatus(ctx context.Context, operation constants.GQLOperation) (map[string]interface{}, int, error) {
 	if isBonusMutationOperation(operation) {
-		return nil, ErrDirectBonusMutation
+		return nil, 0, ErrDirectBonusMutation
 	}
 	body, err := json.Marshal(operation)
 	if err != nil {
-		return nil, fmt.Errorf("failed to marshal operation: %w", err)
+		return nil, 0, fmt.Errorf("failed to marshal operation: %w", err)
 	}
 
 	// Capture the credential snapshot the request is signed with; its
 	// Generation is what a recovery is keyed on, so a rejection of an
 	// already-rotated token never triggers a second refresh.
 	snap := c.auth.Snapshot()
-	result, authRejected, err := c.gqlSingleRoundTrip(ctx, body, operation.OperationName, snap.AccessToken)
+	result, statusCode, authRejected, err := c.gqlSingleRoundTrip(ctx, body, operation.OperationName, snap.AccessToken)
 	if err != nil {
-		return nil, err
+		return nil, statusCode, err
 	}
 
 	if authRejected {
@@ -479,7 +496,7 @@ func (c *TwitchClient) postGQLRequest(ctx context.Context, operation constants.G
 		// and an observation must not be the thing that declares the session
 		// dead.
 		if isDiagnosticRequest(ctx) {
-			return nil, fmt.Errorf("%w: operation %s", ErrUnauthorized, operation.OperationName)
+			return nil, statusCode, fmt.Errorf("%w: operation %s", ErrUnauthorized, operation.OperationName)
 		}
 		// Serialized recovery + exactly ONE replay of the identical body. A
 		// replay that is rejected again surfaces ErrUnauthorized with no
@@ -493,15 +510,15 @@ func (c *TwitchClient) postGQLRequest(ctx context.Context, operation constants.G
 			if !isTransientRecoveryFailure(rerr) {
 				c.handleUnauthorized()
 			}
-			return nil, fmt.Errorf("%w: operation %s", ErrUnauthorized, operation.OperationName)
+			return nil, statusCode, fmt.Errorf("%w: operation %s", ErrUnauthorized, operation.OperationName)
 		}
-		result, authRejected, err = c.gqlSingleRoundTrip(ctx, body, operation.OperationName, newSnap.AccessToken)
+		result, statusCode, authRejected, err = c.gqlSingleRoundTrip(ctx, body, operation.OperationName, newSnap.AccessToken)
 		if err != nil {
-			return nil, err
+			return nil, statusCode, err
 		}
 		if authRejected {
 			c.handleUnauthorized()
-			return nil, fmt.Errorf("%w: operation %s", ErrUnauthorized, operation.OperationName)
+			return nil, statusCode, fmt.Errorf("%w: operation %s", ErrUnauthorized, operation.OperationName)
 		}
 	}
 
@@ -518,14 +535,14 @@ func (c *TwitchClient) postGQLRequest(ctx context.Context, operation constants.G
 		// health timestamp nor records a functional failure. Letting it
 		// refresh lastSuccess would let a diagnostic that Twitch happens to
 		// answer mask a real business-path outage.
-		return result, nil
+		return result, statusCode, nil
 	}
 	if !gql.HasTopLevelErrors(result) {
 		c.markSuccess()
 	} else {
 		c.connAcct.markFunctionalFailure(time.Now())
 	}
-	return result, nil
+	return result, statusCode, nil
 }
 
 // postBonusMutation is the only transport allowed to send
@@ -1127,19 +1144,26 @@ func (c *TwitchClient) doGQLRequestWithRetry(ctx context.Context, body []byte, o
 
 		wait, via := gql.RetryWait(attempt, retryAfter)
 		retryLog := slog.Warn
-		if isDiagnosticRequest(ctx) {
-			retryLog = slog.Debug
-		}
-		retryLog("GQL request failed, retrying",
+		retryAttrs := []any{
 			"operation", operationLabel,
-			"attempt", attempt+1,
-			"maxAttempts", gqlMaxRetries+1,
+			"attempt", attempt + 1,
+			"maxAttempts", gqlMaxRetries + 1,
 			"waitSeconds", wait.Seconds(),
 			"nextRetryVia", via,
 			"status", statusCode,
-			"error", lastErr,
-		)
-		// The backoff belongs to the request, so it belongs to whoever owns the
+		}
+		if isDiagnosticRequest(ctx) {
+			// Lowering the level is not enough on its own: FileLevel defaults
+			// to DEBUG, so this record still reaches the retained log. The
+			// transport error is an arbitrary, unbounded string that a hostile
+			// redirect or proxy can shape - exactly what a diagnostic read
+			// promises never to write. The bounded status is what makes a retry
+			// diagnosable; the raw text adds nothing a class does not.
+			retryLog = slog.Debug
+		} else {
+			retryAttrs = append(retryAttrs, "error", lastErr)
+		}
+		retryLog("GQL request failed, retrying", retryAttrs...) // The backoff belongs to the request, so it belongs to whoever owns the
 		// request. gql.RetryWait still computes the same jittered delay; only
 		// the waiting is interruptible now, so a cancelled owner stops instead
 		// of sleeping out the rest of the schedule.

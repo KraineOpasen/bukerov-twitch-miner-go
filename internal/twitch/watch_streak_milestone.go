@@ -55,7 +55,6 @@ import (
 	"time"
 
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/constants"
-	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/gql"
 )
 
 // MilestoneFieldPresence is the parser's quality/presence classification for
@@ -306,6 +305,19 @@ const (
 	// not special-case. Reporting it as OBSERVED would record "Twitch answered
 	// and there is no milestone" when the request was in fact rejected.
 	MilestoneFailureNoDataNode MilestoneFailureClass = "NO_DATA_NODE"
+	// MilestoneFailureMalformedErrors: an `errors` node was PRESENT but was not
+	// an array. A GraphQL errors node is only ever valid as a list, so every
+	// other shape is a rejection wearing the wrong clothes. gql.HasTopLevelErrors
+	// answers "is there a non-empty array", which is false for an object, a
+	// string, a number or null - so without this the rejection would be walked
+	// past and its accompanying data recorded as an observed milestone.
+	MilestoneFailureMalformedErrors MilestoneFailureClass = "MALFORMED_ERRORS_NODE"
+	// MilestoneFailureHTTPStatus: the response did not carry a 2xx status. The
+	// shared read transport special-cases only 401 and 403 and hands back any
+	// other non-2xx JSON body verbatim, so a 400, a 404 or a redirect page whose
+	// payload happens to contain a data object would otherwise satisfy the
+	// data-presence check and be recorded as evidence.
+	MilestoneFailureHTTPStatus MilestoneFailureClass = "HTTP_STATUS"
 )
 
 // milestoneObservationSequence is the process-wide monotonic counter stamped on
@@ -429,7 +441,7 @@ func (c *TwitchClient) ObserveWatchStreakMilestone(ctx context.Context, channelI
 	// automated prediction bet for as long as the miner runs. Cancellation and
 	// deadlines propagate through the wrapper unchanged.
 	obs.RequestStart = time.Now()
-	resp, err := c.postGQLRequest(withDiagnosticRequest(ctx), op)
+	resp, statusCode, err := c.postGQLRequestWithStatus(withDiagnosticRequest(ctx), op)
 	obs.RequestEnd = time.Now()
 
 	if err != nil {
@@ -437,18 +449,41 @@ func (c *TwitchClient) ObserveWatchStreakMilestone(ctx context.Context, channelI
 		return obs
 	}
 
-	// A top-level GraphQL errors array means Twitch returned no authoritative
-	// data, even at HTTP 200 and even alongside a partially populated data
-	// node. Stop before parsing: a service-layer error must never be presented
-	// as an observed milestone.
-	if gql.HasTopLevelErrors(resp) {
-		obs.Outcome, obs.FailureClass = MilestoneGraphQLError, MilestoneFailureGraphQLTopLevel
+	// Success is judged on the STATUS, not on the shape of what came back. The
+	// shared transport special-cases only 401 and 403 and returns every other
+	// non-2xx JSON body verbatim, so a 400, a 404 or a redirect page carrying a
+	// data object would otherwise pass the data-presence check below and be
+	// recorded as an observed milestone. A refused request is not evidence.
+	if statusCode < 200 || statusCode > 299 {
+		obs.Outcome, obs.FailureClass = MilestoneUnavailable, MilestoneFailureHTTPStatus
 		return obs
 	}
 
-	// Only 401 and 403 are special-cased by the shared transport; any other
-	// non-2xx body that happens to be JSON is returned verbatim as a result. A
-	// GraphQL data response always carries a data object, so its absence here
+	// A top-level GraphQL errors node means Twitch returned no authoritative
+	// data, even at HTTP 200 and even alongside a partially populated data
+	// node. Stop before parsing: a service-layer error must never be presented
+	// as an observed milestone.
+	//
+	// Shape is checked here rather than deferring to gql.HasTopLevelErrors,
+	// which asks only "is there a non-empty ARRAY". A present errors node that
+	// is an object, a string, a number or null answers false there and would be
+	// walked past; a GraphQL errors node is valid only as a list, so anything
+	// else is a rejection this read must fail closed on.
+	if raw, present := resp["errors"]; present {
+		errs, isArray := raw.([]interface{})
+		switch {
+		case !isArray:
+			obs.Outcome, obs.FailureClass = MilestoneUnavailable, MilestoneFailureMalformedErrors
+			return obs
+		case len(errs) > 0:
+			obs.Outcome, obs.FailureClass = MilestoneGraphQLError, MilestoneFailureGraphQLTopLevel
+			return obs
+		}
+		// Present, an array, and empty: that reports no error, so the data
+		// alongside it is still a real observation.
+	}
+
+	// A GraphQL data response always carries a data object, so its absence here
 	// means this was not one — record it as UNAVAILABLE rather than as an
 	// observation in which every field happened to be missing.
 	snap := parseWatchStreakMilestone(resp)

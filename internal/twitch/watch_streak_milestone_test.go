@@ -473,6 +473,130 @@ func TestDiagnosticReadDoesNotRotateTheSharedClientIDDefault(t *testing.T) {
 	})
 }
 
+// TestObservationFailsClosedOnAMalformedErrorsNode covers a rejection wearing
+// the wrong shape.
+//
+// gql.HasTopLevelErrors asks "is there a NON-EMPTY ARRAY at errors", so a
+// present errors node that is an object, a string or null answers false. A
+// GraphQL errors node is only ever valid as an array, so every other shape is
+// a rejection this parser must not walk past: accepting it would turn a
+// definitively refused request into an observed milestone.
+func TestObservationFailsClosedOnAMalformedErrorsNode(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		errs string
+	}{
+		{"object", `{"message":"denied"}`},
+		{"string", `"denied"`},
+		{"null", `null`},
+		{"number", `7`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body := `{"errors":` + tc.errs + `,"data":{"channel":{"id":"12345","self":{"watchStreakMilestone":null}}}}`
+			c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusOK)
+				_, _ = io.WriteString(w, body)
+			})
+
+			obs := c.ObserveWatchStreakMilestone(context.Background(), "12345", "somestreamer")
+			if obs.Outcome == MilestoneObserved {
+				t.Fatalf("a present but malformed errors node (%s) was recorded as OBSERVED; "+
+					"a refused request became evidence", tc.name)
+			}
+			assertEmptySnapshot(t, obs.Snapshot)
+		})
+	}
+
+	// A present, well-formed, EMPTY array is not a rejection: it carries no
+	// error, so the data alongside it is still a real observation.
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w,
+			`{"errors":[],"data":{"channel":{"id":"12345","self":{"watchStreakMilestone":null}}}}`)
+	})
+	if obs := c.ObserveWatchStreakMilestone(context.Background(), "12345", "x"); obs.Outcome != MilestoneObserved {
+		t.Errorf("an empty errors array made the observation %q; an empty array reports no error",
+			obs.Outcome)
+	}
+}
+
+// TestObservationRequiresAnHTTPSuccessStatus covers a rejection whose body
+// merely LOOKS like a GraphQL response.
+//
+// The shared transport special-cases only 401 and 403; every other non-2xx body
+// that happens to be JSON comes back verbatim. So a 400 or 404 whose payload
+// carries an object-valued data key would satisfy the data-presence check and
+// be recorded as an observation. A hostile endpoint or proxy could therefore
+// manufacture diagnostic evidence out of a request the server refused.
+func TestObservationRequiresAnHTTPSuccessStatus(t *testing.T) {
+	for _, status := range []int{http.StatusBadRequest, http.StatusNotFound,
+		http.StatusMovedPermanently, http.StatusTeapot} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(status)
+				_, _ = io.WriteString(w,
+					`{"data":{"channel":{"id":"12345","self":{"watchStreakMilestone":{"watchStreakMilestone":{"value":"9"}}}}}}`)
+			})
+
+			obs := c.ObserveWatchStreakMilestone(context.Background(), "12345", "somestreamer")
+			if obs.Outcome == MilestoneObserved {
+				t.Fatalf("HTTP %d carrying a data-shaped body was recorded as OBSERVED; "+
+					"a refused request became evidence", status)
+			}
+			assertEmptySnapshot(t, obs.Snapshot)
+		})
+	}
+}
+
+// TestDiagnosticRetryTraceCarriesNoRawErrorText holds the diagnostic read to its
+// own stated privacy bound.
+//
+// The retry trace is lowered to DEBUG for a diagnostic read, but FileLevel
+// defaults to DEBUG, so a lowered record still reaches the retained log. If it
+// still attaches the transport error verbatim, an unbounded attacker-shaped
+// string - a redirect URL, a proxy banner - lands in that log unsanitized,
+// which is exactly what "arbitrary raw error strings are never logged" rules
+// out. A bounded status is enough to diagnose a retry.
+func TestDiagnosticRetryTraceCarriesNoRawErrorText(t *testing.T) {
+	const retryMsg = "GQL request failed, retrying"
+
+	logs := captureClientLogs(t)
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = io.WriteString(w, `{"message":"boom"}`)
+	})
+	_ = c.ObserveWatchStreakMilestone(context.Background(), "12345", "somestreamer")
+
+	for _, line := range strings.Split(logs.String(), "\n") {
+		if !strings.Contains(line, retryMsg) {
+			continue
+		}
+		if strings.Contains(line, "error=") {
+			t.Errorf("a diagnostic retry trace carried a raw transport error string:\n%s", line)
+		}
+	}
+
+	// The business half keeps its full trace: the raw error is actionable there
+	// and the operator is meant to see it.
+	logs.Reset()
+	business := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = io.WriteString(w, `{"message":"boom"}`)
+	})
+	_ = business.LoadChannelPointsContext(newTestStreamer("somestreamer"))
+
+	sawBusinessError := false
+	for _, line := range strings.Split(logs.String(), "\n") {
+		if strings.Contains(line, retryMsg) && strings.Contains(line, "error=") {
+			sawBusinessError = true
+		}
+	}
+	if !sawBusinessError {
+		t.Error("a business retry trace no longer carries its error; the diagnostic bound leaked " +
+			"onto the business path")
+	}
+}
+
 // TestParseWatchStreakMilestoneValueAcceptsBothObservedWireKinds is the MAJOR-3
 // fidelity proof for the one field this observation exists to see.
 //
@@ -1606,15 +1730,23 @@ func TestParseWatchStreakMilestoneSelfNodeAbsence(t *testing.T) {
 // answering "this channel has no milestone", which is the exact confusion this
 // feature exists to prevent.
 func TestObserveWatchStreakMilestoneNonGraphQLBodyIsUnavailable(t *testing.T) {
+	// The failure class differs per case on purpose. A non-2xx is refused on its
+	// STATUS before the body is looked at, which is the sharper fact; the 200
+	// cases are refused because the body is not a GraphQL data response.
 	tests := []struct {
-		name string
-		code int
-		body string
+		name      string
+		code      int
+		body      string
+		wantClass MilestoneFailureClass
 	}{
-		{"4xx rejection with a JSON body", http.StatusNotFound, `{"error":"Not Found","status":404}`},
-		{"gateway body with no data node", http.StatusOK, `{"message":"upstream unavailable"}`},
-		{"explicit null data with no errors array", http.StatusOK, `{"data":null}`},
-		{"data of the wrong shape", http.StatusOK, `{"data":[]}`},
+		{"4xx rejection with a JSON body", http.StatusNotFound,
+			`{"error":"Not Found","status":404}`, MilestoneFailureHTTPStatus},
+		{"gateway body with no data node", http.StatusOK,
+			`{"message":"upstream unavailable"}`, MilestoneFailureNoDataNode},
+		{"explicit null data with no errors array", http.StatusOK,
+			`{"data":null}`, MilestoneFailureNoDataNode},
+		{"data of the wrong shape", http.StatusOK,
+			`{"data":[]}`, MilestoneFailureNoDataNode},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1629,8 +1761,8 @@ func TestObserveWatchStreakMilestoneNonGraphQLBodyIsUnavailable(t *testing.T) {
 				t.Fatalf("outcome = %q, want UNAVAILABLE — a rejected request must not read as an "+
 					"observation with everything missing", obs.Outcome)
 			}
-			if obs.FailureClass != MilestoneFailureNoDataNode {
-				t.Errorf("failureClass = %q, want NO_DATA_NODE", obs.FailureClass)
+			if obs.FailureClass != tc.wantClass {
+				t.Errorf("failureClass = %q, want %q", obs.FailureClass, tc.wantClass)
 			}
 			assertEmptySnapshot(t, obs.Snapshot)
 		})
