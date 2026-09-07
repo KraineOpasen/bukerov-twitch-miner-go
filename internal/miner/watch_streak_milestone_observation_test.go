@@ -1470,8 +1470,8 @@ func TestPreviousEventFollowingObservationLinksStayUnknown(t *testing.T) {
 		t.Fatalf("the grant rewrote the previous observation:\nbefore: %s\nafter:  %s", previous[0], observations[0])
 	}
 	// Ordering in the retained log: previous, then event, then following.
-	if !(strings.Index(full, observations[0]) < strings.Index(full, correlation) &&
-		strings.Index(full, correlation) < strings.Index(full, observations[1])) {
+	if strings.Index(full, observations[0]) >= strings.Index(full, correlation) ||
+		strings.Index(full, correlation) >= strings.Index(full, observations[1]) {
 		t.Fatal("records are not in PREVIOUS -> EVENT -> FOLLOWING order")
 	}
 	// Distinct observations, not a deduped one.

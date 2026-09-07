@@ -1031,7 +1031,7 @@ func TestObserveWatchStreakMilestoneOrderingIsByRequestStart(t *testing.T) {
 	close(release)
 	<-done
 
-	if !(older.Sequence < newer.Sequence) {
+	if older.Sequence >= newer.Sequence {
 		t.Fatalf("sequences = %d then %d; the earlier-started request must hold the lower sequence",
 			older.Sequence, newer.Sequence)
 	}
