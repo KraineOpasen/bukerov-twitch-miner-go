@@ -3119,3 +3119,92 @@ func TestAMalformedDataNodeIsNotCachedAsWorking(t *testing.T) {
 		})
 	}
 }
+
+// TestADiagnosticReadNeverPinsAClientID is the CLASS-level assertion that three
+// consecutive rounds of per-shape repairs failed to reach.
+//
+// The diagnostic client-ID cache tried to predict, in the transport, whether the
+// reader would accept a response. Every version of that prediction was an
+// incomplete restatement of the reader's rules, and each round a peer-reachable
+// body was found that the cache admitted and the reader then rejected: an
+// explicit service rejection, a non-object data node, and an oversized
+// collection. The candidate loop stops on any non-APQ response and
+// candidateClientIDs puts the cached ID first, so each of those pinned the
+// fallback permanently and the shipped default was never retried.
+//
+// This asserts the property instead of enumerating the shapes: NO diagnostic
+// response pins a client ID - not a rejection, not a malformed one, not an
+// oversized one, and not even a perfectly valid observation.
+func TestADiagnosticReadNeverPinsAClientID(t *testing.T) {
+	oversized := func() string {
+		elements := make([]interface{}, maxMilestoneCollectionElements+1)
+		for i := range elements {
+			elements[i] = map[string]interface{}{}
+		}
+		resp := fullRewardListResponse()
+		sNode(t, resp)["missedStreams"] = elements
+		raw, err := json.Marshal(resp)
+		if err != nil {
+			t.Fatalf("marshal oversized fixture: %v", err)
+		}
+		return string(raw)
+	}()
+
+	valid := func() string {
+		raw, err := json.Marshal(fullRewardListResponse())
+		if err != nil {
+			t.Fatalf("marshal valid fixture: %v", err)
+		}
+		return string(raw)
+	}()
+
+	for _, tc := range []struct {
+		name string
+		body string
+	}{
+		{"oversized_collection", oversized},
+		{"explicit_rejection", `{"errors":[{"message":"denied"}]}`},
+		{"non_object_data", `{"data":"denied"}`},
+		// The strongest case: even a response the reader fully ACCEPTS must not
+		// pin the candidate, because pinning is what makes any later mismatch
+		// permanent.
+		{"valid_observation", valid},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var (
+				mu   sync.Mutex
+				seen []string
+			)
+			c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+				id := r.Header.Get("Client-Id")
+				mu.Lock()
+				seen = append(seen, id)
+				mu.Unlock()
+				w.WriteHeader(http.StatusOK)
+				if id == constants.ClientIDTV {
+					_, _ = io.WriteString(w, `{"errors":[{"message":"PersistedQueryNotFound"}]}`)
+					return
+				}
+				_, _ = io.WriteString(w, tc.body)
+			})
+
+			_ = c.ObserveWatchStreakMilestone(context.Background(), "12345", "somestreamer")
+
+			mu.Lock()
+			seen = nil
+			mu.Unlock()
+
+			_ = c.ObserveWatchStreakMilestone(context.Background(), "12345", "somestreamer")
+
+			mu.Lock()
+			second := append([]string(nil), seen...)
+			mu.Unlock()
+
+			if len(second) == 0 || second[0] != constants.ClientIDTV {
+				t.Fatalf("cycle 2 began with %v, not the shipped default: a diagnostic response "+
+					"pinned a client ID, so any body the reader later rejects becomes permanent",
+					second)
+			}
+		})
+	}
+}

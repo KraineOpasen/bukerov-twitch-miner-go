@@ -377,9 +377,9 @@ func isAuthError(statusCode int, result map[string]interface{}) bool {
 // and the retry trace carries no raw transport error text, only its bounded
 // status.
 //
-// The shared CLIENT-ID POOL is isolated too. A diagnostic read caches its own
-// working ID for its own operation (rememberDiagnosticClientID) but never
-// promotes the process-wide defaultClientID and never raises the WARN that
+// The shared CLIENT-ID POOL is isolated too, and completely: a diagnostic read
+// caches NOTHING. It does not promote the process-wide defaultClientID, it does
+// not pin a per-operation candidate, and it never raises the WARN that
 // announces the shipped persisted-query hashes are stale. rememberWorkingClientID
 // promotes on any fallback answer that is not PersistedQueryNotFound — a 401
 // included — so without the split a diagnostic that FAILED would steer the
@@ -873,47 +873,6 @@ func diagnosticJSONHasDuplicateMembers(body []byte) bool {
 	return json.Unmarshal(body, &decoded) == nil
 }
 
-// diagnosticCandidateServedTheOperation reports whether body is the kind of
-// response that justifies PINNING this client ID for the operation's future
-// diagnostic reads.
-//
-// "Not PersistedQueryNotFound" is far too weak a proxy for "this candidate
-// works", and using it as one made the cache self-sealing. candidateClientIDs
-// puts the cached ID FIRST, so a candidate that answered HTTP 200 with an
-// explicit service rejection was pinned, tried first on every later cycle,
-// returned the same rejection, and was re-pinned - and because a non-APQ
-// response ends the candidate loop immediately, the shipped default was then
-// never attempted again, even once Twitch would have served it.
-//
-// So the bar is that the candidate actually answered: the body decodes, it
-// carries no top-level rejection in either spelling, and it has a data node.
-// This decides CACHING only. The response itself is returned unchanged and
-// classified by the caller exactly as before.
-func diagnosticCandidateServedTheOperation(body []byte) bool {
-	var result map[string]interface{}
-	if err := json.Unmarshal(body, &result); err != nil {
-		return false
-	}
-	if raw, present := result["error"]; present && raw != nil {
-		return false
-	}
-	if raw, present := result["errors"]; present {
-		list, isArray := raw.([]interface{})
-		if !isArray || len(list) > 0 {
-			return false
-		}
-	}
-	// A present, non-null `data` is NOT enough: it has to be the OBJECT the read
-	// can actually use. {"data":[]}, {"data":"denied"} and {"data":7} all clear a
-	// non-nil test, enter the cache, and are then rejected by
-	// ObserveWatchStreakMilestone as NO_DATA_NODE - which is the very failure
-	// this function exists to prevent, reached one shape further along. The bar
-	// here must match the bar the read applies, or the cache pins candidates on
-	// exactly the responses the read throws away.
-	data, isObject := result["data"].(map[string]interface{})
-	return isObject && data != nil
-}
-
 // diagnosticPersistedQueryNotFound reports whether body is a STRUCTURED
 // PersistedQueryNotFound rejection.
 //
@@ -1289,35 +1248,6 @@ func (c *TwitchClient) rememberWorkingClientID(operation, clientID string, viaFa
 	}
 }
 
-// rememberDiagnosticClientID caches the working client ID for a DIAGNOSTIC
-// operation and touches nothing else.
-//
-// It deliberately does NOT promote the process-wide default and emits no
-// rotation WARN, which is the whole difference from rememberWorkingClientID.
-// defaultClientID is shared: candidateClientIDs hands it to every UNCACHED
-// operation, business ones included, and ActiveClientID surfaces it to the
-// operator. Promotion fires whenever a fallback answers anything that is not
-// PersistedQueryNotFound - a 401 included - so without this split a diagnostic
-// observation that FAILED would still steer the client ID a later bonus claim
-// goes out under, and would still tell the operator that the persisted-query
-// hashes in internal/constants/gql.go are stale when nothing resolved.
-//
-// That is not a corner case for this caller. RewardList's live acceptance is
-// PENDING, so "PQNF on the default, something else on a fallback" is its
-// EXPECTED shape, once per online streamer per cycle.
-//
-// The per-operation cache is kept because it is scoped to the diagnostic
-// operation itself: it saves that operation's own retries and is invisible to
-// every other caller. Safe for concurrent callers.
-func (c *TwitchClient) rememberDiagnosticClientID(operation, clientID string) {
-	c.clientIDMu.Lock()
-	defer c.clientIDMu.Unlock()
-	if c.opClientID == nil {
-		c.opClientID = make(map[string]string)
-	}
-	c.opClientID[operation] = clientID
-}
-
 // doGQLRequestWithClientIDFallback sends a GQL request and, on a
 // PersistedQueryNotFound response, transparently retries with the alternate
 // public Twitch client IDs before giving up. This guards against the
@@ -1430,17 +1360,33 @@ func (c *TwitchClient) doGQLRequestWithClientIDFallback(ctx context.Context, bod
 		}
 
 		if !queryNotFound {
-			if diagnostic {
-				// A diagnostic read caches its own working ID but promotes
-				// nothing: see rememberDiagnosticClientID. It also caches only
-				// a candidate that actually SERVED the operation - see
-				// diagnosticCandidateServedTheOperation - because the cached ID
-				// is tried first and a rejection cached as working never lets
-				// the other candidates run again.
-				if diagnosticCandidateServedTheOperation(respBody) {
-					c.rememberDiagnosticClientID(operationLabel, clientID)
-				}
-			} else {
+			// A diagnostic read pins NOTHING - not the process-wide default,
+			// and not the per-operation candidate either.
+			//
+			// It used to pin the per-operation candidate, guarded by a predicate
+			// that tried to decide HERE whether the reader would accept the
+			// response. Every version of that predicate was an incomplete
+			// restatement of the reader's rules, and three consecutive review
+			// rounds each found a body it admitted and the reader then rejected:
+			// an explicit service rejection, a non-object data node, and an
+			// oversized collection. Because candidateClientIDs puts the cached
+			// ID FIRST and any non-APQ response ends this loop, each of those
+			// pinned a candidate permanently and the shipped default was never
+			// retried.
+			//
+			// Predicting one layer's verdict in another is the defect, not any
+			// one of those shapes, so the prediction is gone rather than
+			// extended a fourth time. What it bought was at most one saved
+			// request per target per cycle, and only in a state - the shipped
+			// default failing while a fallback serves - that RewardList has
+			// never been observed in, its acceptance being PENDING. In the
+			// state it IS expected to be in, every candidate answers
+			// PersistedQueryNotFound and nothing was ever cached anyway.
+			//
+			// This also makes the code match what this feature claims: it owns
+			// no cache. A BUSINESS read is untouched and still caches and
+			// promotes exactly as before.
+			if !diagnostic {
 				c.rememberWorkingClientID(operationLabel, clientID, i > 0)
 			}
 			return respBody, statusCode, nil
