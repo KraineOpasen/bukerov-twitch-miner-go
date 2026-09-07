@@ -335,6 +335,7 @@ func logWatchStreakMilestoneObservation(obs twitch.WatchStreakMilestoneObservati
 		// indistinguishable from a genuinely empty one.
 		"missedStreamElements", ids.Elements,
 		"broadcastIdentifierArrays", ids.Arrays,
+		"broadcastIdentifierElements", ids.IdentifierElements,
 		"broadcastIdentifierIds", ids.IDs,
 		"broadcastIdentifierSample", ids.Sample,
 
@@ -394,13 +395,19 @@ type milestoneBroadcastIdentifiers struct {
 	// as a single NULL somewhere in the record and the two wire facts collapse.
 	Elements string
 	Arrays   string
-	IDs      string
+	// IdentifierElements tallies each broadcastIdentifiers ELEMENT's own
+	// presence; IDs tallies the id NODE of the elements that had one. Two
+	// tallies, because a null element and an element whose id is null are
+	// different wire facts.
+	IdentifierElements string
+	IDs                string
 }
 
 func milestoneBroadcastIdentifierSummary(missed twitch.MilestoneMissedStreams) milestoneBroadcastIdentifiers {
 	out := milestoneBroadcastIdentifiers{}
 	elements := map[twitch.MilestoneFieldPresence]int{}
 	arrays := map[twitch.MilestoneFieldPresence]int{}
+	identifierElements := map[twitch.MilestoneFieldPresence]int{}
 	ids := map[twitch.MilestoneFieldPresence]int{}
 	for _, entry := range missed.Entries {
 		// The ELEMENT's own classification, always.
@@ -415,7 +422,12 @@ func milestoneBroadcastIdentifierSummary(missed twitch.MilestoneMissedStreams) m
 		out.Total += len(entry.BroadcastIdentifiers.IDs)
 		out.Malformed += entry.BroadcastIdentifiers.MalformedCount
 		for _, element := range entry.BroadcastIdentifiers.Elements {
-			ids[element.Presence]++
+			identifierElements[element.Presence]++
+			if element.Presence != twitch.MilestoneFieldValid {
+				// No element object, so no id node was ever observed.
+				continue
+			}
+			ids[element.ID.Presence]++
 		}
 		for _, id := range entry.BroadcastIdentifiers.IDs {
 			if len(out.Sample) < milestoneLogIDSample {
@@ -425,6 +437,7 @@ func milestoneBroadcastIdentifierSummary(missed twitch.MilestoneMissedStreams) m
 	}
 	out.Elements = presenceTally(elements)
 	out.Arrays = presenceTally(arrays)
+	out.IdentifierElements = presenceTally(identifierElements)
 	out.IDs = presenceTally(ids)
 	return out
 }

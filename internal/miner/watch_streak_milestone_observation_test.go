@@ -667,17 +667,19 @@ func TestObservationRecordDistinguishesNullMalformedAndEmpty(t *testing.T) {
 		},
 		{
 			name: "per-element id classes survive",
-			// Six elements covering every class, INCLUDING a null element,
-			// which is distinct from an element whose id is null: a well-formed
-			// id, a null id, an absent id, a wrong-typed id, a non-object
-			// element, and a null element.
+			// Six elements classified at TWO nodes. Four are well-formed
+			// element objects whose id is VALID / NULL / MISSING / MALFORMED;
+			// the remaining two are a non-object element and a null element,
+			// neither of which has an id node to classify at all — so they
+			// appear in the ELEMENT tally and not in the id tally.
 			body: `{"data":{"channel":{"id":"1","self":{"watchStreakMilestone":{` +
 				`"missedStreams":[{"broadcastIdentifiers":[{"id":"keep"},{"id":null},{},{"id":9},"nope",null]}]}}}}}`,
 			want: map[string]string{
 				"broadcastIdentifierValidIds":  "1",
 				"broadcastIdentifierMalformed": "2",
 				"broadcastIdentifierArrays":    "MALFORMED:1",
-				"broadcastIdentifierIds":       "VALID:1,MISSING:1,NULL:2,MALFORMED:2",
+				"broadcastIdentifierElements":  "VALID:4,NULL:1,MALFORMED:1",
+				"broadcastIdentifierIds":       "VALID:1,MISSING:1,NULL:1,MALFORMED:1",
 			},
 		},
 		{
@@ -1931,7 +1933,7 @@ func nodeClassification(line string) map[string]string {
 	for _, key := range []string{
 		"missedStreamsPresence", "missedStreamsCount", "missedStreamsMalformed",
 		"missedStreamElements",
-		"broadcastIdentifierArrays", "broadcastIdentifierIds",
+		"broadcastIdentifierArrays", "broadcastIdentifierElements", "broadcastIdentifierIds",
 		"broadcastIdentifierValidIds", "broadcastIdentifierMalformed",
 	} {
 		out[key] = attrValue(line, key)
@@ -2167,4 +2169,105 @@ func TestObservationAttributesAreSanitizedBeforeFormatting(t *testing.T) {
 			t.Errorf("attribute %q exceeded the bound: %d bytes", key, len(rec[key]))
 		}
 	}
+}
+
+// TestObservationDistinguishesNullIdentifierElementFromNullId is the same
+// fidelity claim as TestObservationDistinguishesNullElementFromNullChild, one
+// node further down.
+//
+//	[{"broadcastIdentifiers":[null]}]        — a null ELEMENT of the identifier
+//	                                           array; it has no id node at all.
+//	[{"broadcastIdentifiers":[{"id":null}]}] — a well-formed element whose id
+//	                                           node is explicitly null.
+//
+// The standing contract requires the presence vocabulary to be preserved at
+// EVERY node including array elements, so these two wire facts must not render
+// identically. Writing the element's own NULL into the id's slot is the same
+// collapse, just one level deeper.
+func TestObservationDistinguishesNullIdentifierElementFromNullId(t *testing.T) {
+	nullElement := nodeClassification(observeOnceWithMissedStreams(t, `[{"broadcastIdentifiers":[null]}]`))
+	nullID := nodeClassification(observeOnceWithMissedStreams(t, `[{"broadcastIdentifiers":[{"id":null}]}]`))
+
+	if reflect.DeepEqual(nullElement, nullID) {
+		t.Fatalf("a null identifier ELEMENT and an element whose id is null produced identical node "+
+			"classifications — the two wire facts collapsed:\n"+
+			"  [{\"broadcastIdentifiers\":[null]}]        -> %v\n"+
+			"  [{\"broadcastIdentifiers\":[{\"id\":null}]}] -> %v", nullElement, nullID)
+	}
+}
+
+// TestCorrelationAttributesAreSanitizedBeforeFormatting closes the second half
+// of the R7 gap: the sanitizer seam covered the observation record only, while
+// the grant-correlation record carries wire-controlled values of its own
+// (Twitch's data.timestamp, the event identity, and the broadcast strings) that
+// no test bounded.
+//
+// Same seam and same reasoning: assertions are made on attribute VALUES before
+// slog formats them, because the TextHandler escapes control bytes on render
+// and would hide a bypass behind its own output encoding.
+func TestCorrelationAttributesAreSanitizedBeforeFormatting(t *testing.T) {
+	const hostile = `\u001b\u0000\u0007\u000a\u000d\u0009hostile`
+
+	decoded := hostileDecoded(t, hostile)
+
+	attrs := captureAttrs(t)
+	m, s, _ := newMilestoneCorrelationMiner(t, &milestoneRoundTripper{})
+	// Wire-controlled strings on the correlation path: the broadcast identity
+	// the record carries as context, and Twitch's own event timestamp. The
+	// frame is parsed through the real layer first and its timestamp is then
+	// replaced with the decoded hostile value — the parse helper renders the
+	// payload with %q, which cannot express a control byte as valid JSON, and
+	// the record reads Data["timestamp"] rather than the raw text anyway.
+	s.Stream.Update(decoded, "title", nil, nil, 1)
+	msg := watchStreakFrame(t, s, 450, 5450, "2026-09-05T12:00:00Z")
+	msg.Data["timestamp"] = decoded
+	deliverPointsEarned(t, m, s, msg)
+
+	records := attrs.recordsFor(milestoneCorrelationRecord)
+	if len(records) != 1 {
+		t.Fatalf("correlation records = %d, want 1", len(records))
+	}
+	rec := records[0]
+
+	const control = "\x00\x01\x02\x03\x04\x05\x06\x07\x08\t\n\v\f\r\x1b"
+	for key, value := range rec {
+		if strings.ContainsAny(value, control) {
+			t.Errorf("attribute %q reached the correlation record with raw control characters: %q", key, value)
+		}
+		if !utf8.ValidString(value) {
+			t.Errorf("attribute %q reached the correlation record as invalid UTF-8: %q", key, value)
+		}
+	}
+	// The wire-controlled attributes are bounded, not merely sanitized.
+	for _, key := range []string{"wireTimestamp", "localBroadcastContextOnly", "eventId", "streamer", "channelId"} {
+		if _, ok := rec[key]; !ok {
+			t.Errorf("correlation record does not emit %q at all", key)
+			continue
+		}
+		if len(rec[key]) > milestoneLogStringCap+len("...(truncated)") {
+			t.Errorf("attribute %q exceeded the bound: %d bytes", key, len(rec[key]))
+		}
+	}
+	// And the hostile content genuinely reached the record, so the loop above
+	// is not passing over an empty one.
+	if !strings.Contains(rec["wireTimestamp"], "hostile") {
+		t.Errorf("fixture did not reach wireTimestamp: %q", rec["wireTimestamp"])
+	}
+	if !strings.Contains(rec["wireTimestamp"], string(utf8.RuneError)) {
+		t.Errorf("wireTimestamp was not sanitized: %q", rec["wireTimestamp"])
+	}
+}
+
+// hostileDecoded turns a JSON-escaped fixture into the decoded string a caller
+// would actually hold, so the hostile bytes exist only after decoding.
+func hostileDecoded(t *testing.T, escaped string) string {
+	t.Helper()
+	var out string
+	if err := json.Unmarshal([]byte(`"`+escaped+`"`), &out); err != nil {
+		t.Fatalf("hostile fixture is not valid JSON: %v", err)
+	}
+	if !strings.ContainsAny(out, "\x00\x1b\n") {
+		t.Fatalf("hostile fixture did not decode to control characters: %q", out)
+	}
+	return out
 }

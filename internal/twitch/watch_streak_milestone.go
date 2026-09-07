@@ -113,19 +113,33 @@ type MilestoneIntField struct {
 // would lose the same NULL/MALFORMED distinction this parser preserves
 // everywhere else.
 //
-// Elements carries the PER-ELEMENT classification of each element's id, in wire
-// order. It exists because a single MalformedCount would collapse four
-// different observations — an absent id key, an explicit id: null, a
-// wrong-typed id, and an element that is not an object at all — into one
-// number, destroying exactly the MISSING != NULL != VALID != MALFORMED
-// distinction this parser exists to preserve. An element that is not an object
-// contributes a MALFORMED entry, since its id cannot be classified at all.
+// Elements carries the PER-ELEMENT observation, in wire order. It exists
+// because a single MalformedCount would collapse several different
+// observations — an absent id key, an explicit id: null, a wrong-typed id, a
+// null element, and an element that is not an object at all — into one number,
+// destroying exactly the MISSING != NULL != VALID != MALFORMED distinction
+// this parser exists to preserve.
 type MilestoneBroadcastIdentifiers struct {
 	Presence       MilestoneFieldPresence
 	Count          int
 	MalformedCount int
 	IDs            []string
-	Elements       []MilestoneStringField
+	Elements       []MilestoneBroadcastIdentifier
+}
+
+// MilestoneBroadcastIdentifier is one observed broadcastIdentifiers element.
+//
+// Presence classifies the ELEMENT itself; ID classifies the element's id node.
+// They are separate for the same reason MilestoneMissedStream separates its own
+// presence from its child array: a null ELEMENT (which has no id node at all)
+// and a well-formed element whose id is explicitly null are different wire
+// facts, and sharing one slot would make them indistinguishable.
+//
+// When Presence is not VALID there was no element object to look inside, so ID
+// is left at its zero value rather than being given a fabricated observation.
+type MilestoneBroadcastIdentifier struct {
+	Presence MilestoneFieldPresence
+	ID       MilestoneStringField
 }
 
 // MilestoneMissedStream is one observed missedStreams element.
@@ -564,23 +578,28 @@ func parseMilestoneBroadcastIdentifiers(entry map[string]interface{}) MilestoneB
 		out.Presence = MilestoneFieldEmpty
 		return out
 	}
-	out.Elements = make([]MilestoneStringField, 0, len(list))
+	out.Elements = make([]MilestoneBroadcastIdentifier, 0, len(list))
 	for _, element := range list {
 		if element == nil {
-			// An explicitly null ELEMENT is a null, not a shape error.
-			out.Elements = append(out.Elements, MilestoneStringField{Presence: MilestoneFieldNull})
+			// An explicitly null ELEMENT is a null, not a shape error, and it
+			// has no id node — so the NULL belongs to the ELEMENT and its ID is
+			// left unset rather than given a fabricated NULL of its own.
+			out.Elements = append(out.Elements, MilestoneBroadcastIdentifier{Presence: MilestoneFieldNull})
 			continue
 		}
 		identifier, ok := element.(map[string]interface{})
 		if !ok || identifier == nil {
-			// The element is present, non-null and not an object, so its id
-			// cannot be classified as missing or null — only as malformed.
-			out.Elements = append(out.Elements, MilestoneStringField{Presence: MilestoneFieldMalformed})
+			// Present, non-null and the wrong shape: a genuine shape error, and
+			// again no id node to look inside.
+			out.Elements = append(out.Elements, MilestoneBroadcastIdentifier{Presence: MilestoneFieldMalformed})
 			out.MalformedCount++
 			continue
 		}
 		id := milestoneString(identifier, "id")
-		out.Elements = append(out.Elements, id)
+		out.Elements = append(out.Elements, MilestoneBroadcastIdentifier{
+			Presence: MilestoneFieldValid,
+			ID:       id,
+		})
 		switch id.Presence {
 		case MilestoneFieldValid:
 			out.IDs = append(out.IDs, id.Value)
