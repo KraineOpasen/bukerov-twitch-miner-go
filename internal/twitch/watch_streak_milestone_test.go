@@ -2533,6 +2533,49 @@ func TestAnOversizedResponseIsRefusedBeforeItIsDecoded(t *testing.T) {
 	t.Logf("refused %d elements in %.1f MB", elements, allocatedMB)
 }
 
+// TestAContainerHeavyResponseIsAlsoRefusedBeforeDecoding pins the half of the
+// pre-decode bound that its first version missed.
+//
+// The scan counts JSON values, and the first version counted only scalars — so
+// a body made of nothing but delimiters counted as ZERO. That is the cheapest
+// amplification available: 349,496 empty objects fit inside a just-under-1 MiB
+// body, scanned as within limit, and still cost ~88 MB to decode. The eventual
+// outcome was right, because the collection limit caught them after the fact,
+// which is exactly why an outcome-only assertion proves nothing here.
+func TestAContainerHeavyResponseIsAlsoRefusedBeforeDecoding(t *testing.T) {
+	prefix := `{"data":{"channel":{"id":"12345","self":{"watchStreakMilestone":{"missedStreams":[`
+	suffix := `]}}}}}`
+	room := maxDiagnosticResponseBytes - len(prefix) - len(suffix)
+	objects := room / len("{},")
+	body := prefix + strings.Repeat("{},", objects-1) + "{}" + suffix
+
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, body)
+	})
+
+	var before, after runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&before)
+	obs := c.ObserveWatchStreakMilestone(context.Background(), "12345", "somestreamer")
+	runtime.ReadMemStats(&after)
+
+	if obs.Outcome != MilestoneUnavailable ||
+		obs.FailureClass != MilestoneFailureOversizedCollection {
+		t.Fatalf("outcome = %q/%q, want UNAVAILABLE/%s", obs.Outcome, obs.FailureClass,
+			MilestoneFailureOversizedCollection)
+	}
+
+	const budgetMB = 20
+	allocatedMB := float64(after.TotalAlloc-before.TotalAlloc) / (1 << 20)
+	if allocatedMB > budgetMB {
+		t.Fatalf("refusing %d empty objects allocated %.1f MB (budget %d MB): container tokens are "+
+			"not being counted, so the body was decoded before it was refused",
+			objects, allocatedMB, budgetMB)
+	}
+	t.Logf("refused %d empty objects in %.1f MB", objects, allocatedMB)
+}
+
 // TestTheAPQMarkerIsOnlyHonouredWhereARejectionPutsIt pins that a peer cannot
 // destroy a valid observation by writing a string.
 //

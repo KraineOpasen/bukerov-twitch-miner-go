@@ -723,6 +723,11 @@ func strictPersistedQueryNotFound(respBody []byte) bool {
 // A megabyte of wire is only a megabyte of memory when the values inside it are
 // large. This is the bound for the opposite case.
 //
+// "Value" counts scalars, object keys AND opening containers, because the
+// containers are exactly what gets allocated. A first version of this scan
+// counted only scalars and was therefore blind to the cheapest amplification
+// available: a body that is nothing but delimiters.
+//
 // Set generously above any credible diagnostic response - a real RewardList
 // carries a few dozen values - and, deliberately, above the milestone
 // collection limit, so a merely implausible collection is still decoded and
@@ -748,8 +753,19 @@ func diagnosticJSONValuesWithinLimit(body []byte) bool {
 		if err != nil {
 			return true
 		}
-		if _, isDelimiter := token.(json.Delim); isDelimiter {
-			continue
+		// An OPENING delimiter is a value: it is the map or slice
+		// encoding/json will allocate. Counting only scalars leaves the
+		// cheapest amplification of all uncounted, because a container-heavy
+		// body - [{},{},{},...] - is nothing BUT delimiters. Measured before
+		// this line existed: 349,496 empty objects inside a just-under-1 MiB
+		// body scanned as zero values and still cost ~88 MB to decode.
+		//
+		// Closing delimiters are skipped so a container is counted once, not
+		// twice.
+		if delimiter, isDelimiter := token.(json.Delim); isDelimiter {
+			if delimiter != '{' && delimiter != '[' {
+				continue
+			}
 		}
 		values++
 		if values > maxDiagnosticJSONValues {
