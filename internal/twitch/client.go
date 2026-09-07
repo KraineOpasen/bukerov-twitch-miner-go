@@ -735,20 +735,42 @@ func strictPersistedQueryNotFound(respBody []byte) bool {
 // rejected here as an unreadable body.
 const maxDiagnosticJSONValues = 8192
 
-// diagnosticJSONValuesWithinLimit reports whether body carries few enough JSON
-// values to be worth decoding.
+// diagnosticJSONValueVerdict is what diagnosticJSONValueCount answers. The
+// over-limit case is split in two because the SIZE question and the SHAPE
+// question have different owners, and collapsing them cost the bound its teeth
+// once already: reporting "within limit" for an over-limit malformed body let
+// the next pass walk the whole document.
+type diagnosticJSONValueVerdict int
+
+const (
+	// diagnosticJSONWithinLimit: few enough values to decode.
+	diagnosticJSONWithinLimit diagnosticJSONValueVerdict = iota
+	// diagnosticJSONOverLimit: too many values, in a body that is otherwise
+	// well formed. "Too large" is the honest class.
+	diagnosticJSONOverLimit
+	// diagnosticJSONOverLimitMalformed: too many values AND not well formed.
+	// There is no honest size verdict to give - the decoder owns the shape one
+	// - but the resource bound still applies, so no caller may run another
+	// allocating pass over this body.
+	diagnosticJSONOverLimitMalformed
+)
+
+// diagnosticJSONValueCount classifies body by how many JSON values it carries.
 //
 // It streams tokens and stops at the limit, so it holds only the decoder's
 // nesting stack and never the document: the check cannot become the
 // amplification it exists to prevent.
 //
-// Malformed JSON is NOT this function's business. It answers true and leaves
-// the shape to the decoder that follows, which reports it honestly. Saying
-// "too large" about a body that is merely broken would be a fabricated reason -
-// and, worse, one a peer could choose, by moving its syntax error to either
-// side of the limit boundary. Honouring that contract is precisely why the scan
-// finishes rather than returning the moment the count is exceeded.
-func diagnosticJSONValuesWithinLimit(body []byte) bool {
+// Malformed JSON is NOT this function's business to CLASSIFY. Saying "too
+// large" about a body that is merely broken would be a fabricated reason - and,
+// worse, one a peer could choose, by moving its syntax error to either side of
+// the limit boundary. But declining to name the class is not the same as
+// declining to bound the resource, and an earlier version conflated the two:
+// it answered a plain "within limit" for an over-limit malformed body, and the
+// duplicate-member scan that runs next then boxed the entire payload. Measured:
+// a 1,048,560-byte dense array with one trailing invalid byte allocated 55.2 MB
+// - the exact cost this scan exists to avoid, reachable by appending a byte.
+func diagnosticJSONValueCount(body []byte) diagnosticJSONValueVerdict {
 	decoder := json.NewDecoder(bytes.NewReader(body))
 
 	// UseNumber is what keeps this bound from being switchable off. Without it
@@ -765,7 +787,9 @@ func diagnosticJSONValuesWithinLimit(body []byte) bool {
 	for {
 		token, err := decoder.Token()
 		if err != nil {
-			return true
+			// Ran out of readable tokens before the limit: too small to matter,
+			// whatever its shape. The decoder reports the shape.
+			return diagnosticJSONWithinLimit
 		}
 		// An OPENING delimiter is a value: it is the map or slice
 		// encoding/json will allocate. Counting only scalars leaves the
@@ -795,7 +819,10 @@ func diagnosticJSONValuesWithinLimit(body []byte) bool {
 			// every value it reads, which measured 54 MB on a 1 MiB body -
 			// reintroducing the cost this scan exists to avoid. json.Valid
 			// walks the bytes without materialising anything.
-			return !json.Valid(body)
+			if json.Valid(body) {
+				return diagnosticJSONOverLimit
+			}
+			return diagnosticJSONOverLimitMalformed
 		}
 	}
 }
@@ -844,6 +871,40 @@ func diagnosticJSONHasDuplicateMembers(body []byte) bool {
 	// and so can only afford json.Valid.
 	var decoded interface{}
 	return json.Unmarshal(body, &decoded) == nil
+}
+
+// diagnosticCandidateServedTheOperation reports whether body is the kind of
+// response that justifies PINNING this client ID for the operation's future
+// diagnostic reads.
+//
+// "Not PersistedQueryNotFound" is far too weak a proxy for "this candidate
+// works", and using it as one made the cache self-sealing. candidateClientIDs
+// puts the cached ID FIRST, so a candidate that answered HTTP 200 with an
+// explicit service rejection was pinned, tried first on every later cycle,
+// returned the same rejection, and was re-pinned - and because a non-APQ
+// response ends the candidate loop immediately, the shipped default was then
+// never attempted again, even once Twitch would have served it.
+//
+// So the bar is that the candidate actually answered: the body decodes, it
+// carries no top-level rejection in either spelling, and it has a data node.
+// This decides CACHING only. The response itself is returned unchanged and
+// classified by the caller exactly as before.
+func diagnosticCandidateServedTheOperation(body []byte) bool {
+	var result map[string]interface{}
+	if err := json.Unmarshal(body, &result); err != nil {
+		return false
+	}
+	if raw, present := result["error"]; present && raw != nil {
+		return false
+	}
+	if raw, present := result["errors"]; present {
+		list, isArray := raw.([]interface{})
+		if !isArray || len(list) > 0 {
+			return false
+		}
+	}
+	data, present := result["data"]
+	return present && data != nil
 }
 
 // diagnosticPersistedQueryNotFound reports whether body is a STRUCTURED
@@ -1330,14 +1391,25 @@ func (c *TwitchClient) doGQLRequestWithClientIDFallback(ctx context.Context, bod
 			// decode after them - from being handed a document that makes them
 			// expensive. jsonObjectKeysAreUnique builds a key set per object,
 			// so it is one of the things being protected, not a peer.
-			if !diagnosticJSONValuesWithinLimit(respBody) {
+			switch diagnosticJSONValueCount(respBody) {
+			case diagnosticJSONOverLimit:
 				return nil, statusCode, fmt.Errorf(
 					"%w: operation %s", errOversizedDiagnosticJSON, operationLabel)
-			}
 
-			if diagnosticJSONHasDuplicateMembers(respBody) {
-				return nil, statusCode, fmt.Errorf(
-					"%w: operation %s", errAmbiguousDiagnosticJSON, operationLabel)
+			case diagnosticJSONOverLimitMalformed:
+				// Over the limit, and broken. It keeps its malformed class -
+				// the decoder below names that, and a peer must not be able to
+				// pick between the two classes with a syntax error - but the
+				// duplicate scan is SKIPPED, because that scan boxes every
+				// value it reads and this body is precisely the one too large
+				// to hand it. Nothing is lost by skipping it: a body that does
+				// not decode cannot be recorded as an observation either way.
+
+			default:
+				if diagnosticJSONHasDuplicateMembers(respBody) {
+					return nil, statusCode, fmt.Errorf(
+						"%w: operation %s", errAmbiguousDiagnosticJSON, operationLabel)
+				}
 			}
 		}
 
@@ -1353,8 +1425,14 @@ func (c *TwitchClient) doGQLRequestWithClientIDFallback(ctx context.Context, bod
 		if !queryNotFound {
 			if diagnostic {
 				// A diagnostic read caches its own working ID but promotes
-				// nothing: see rememberDiagnosticClientID.
-				c.rememberDiagnosticClientID(operationLabel, clientID)
+				// nothing: see rememberDiagnosticClientID. It also caches only
+				// a candidate that actually SERVED the operation - see
+				// diagnosticCandidateServedTheOperation - because the cached ID
+				// is tried first and a rejection cached as working never lets
+				// the other candidates run again.
+				if diagnosticCandidateServedTheOperation(respBody) {
+					c.rememberDiagnosticClientID(operationLabel, clientID)
+				}
 			} else {
 				c.rememberWorkingClientID(operationLabel, clientID, i > 0)
 			}

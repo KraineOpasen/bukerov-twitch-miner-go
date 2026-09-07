@@ -512,6 +512,18 @@ func (c *TwitchClient) ObserveWatchStreakMilestone(ctx context.Context, channelI
 	// is an object, a string, a number or null answers false there and would be
 	// walked past; a GraphQL errors node is valid only as a list, so anything
 	// else is a rejection this read must fail closed on.
+	// The SINGULAR spelling is a rejection too, and it is checked first because
+	// diagnosticPersistedQueryNotFound already refuses to read APQ evidence out
+	// of a body carrying one. Leaving it unchecked here made the two disagree:
+	// {"error":"Forbidden","data":{…}} was recorded as OBSERVED, so a peer could
+	// attach an explicit rejection to forged data and still have the data
+	// retained as evidence. An explicit null is absent, as everywhere else in
+	// this file.
+	if raw, present := resp["error"]; present && raw != nil {
+		obs.Outcome, obs.FailureClass = MilestoneGraphQLError, MilestoneFailureGraphQLTopLevel
+		return obs
+	}
+
 	if raw, present := resp["errors"]; present {
 		errs, isArray := raw.([]interface{})
 		switch {

@@ -2562,7 +2562,7 @@ func TestADecodeErrorCannotDisableTheValueBound(t *testing.T) {
 		t.Fatalf("fixture is %d bytes, at or over the %d-byte cap; this would test the wrong bound",
 			len(body), maxDiagnosticResponseBytes)
 	}
-	if diagnosticJSONValuesWithinLimit([]byte(body)) {
+	if diagnosticJSONValueCount([]byte(body)) == diagnosticJSONWithinLimit {
 		t.Fatalf("the value scan reported %d values as within the %d limit; an unrepresentable "+
 			"number switched the bound off", 120000, maxDiagnosticJSONValues)
 	}
@@ -2940,5 +2940,116 @@ func TestAClientTimeoutIsRetriedRatherThanReturned(t *testing.T) {
 	if obs.Outcome != MilestoneCancelled {
 		t.Fatalf("outcome = %q (class %q), want %q: the caller's context expired first",
 			obs.Outcome, obs.FailureClass, MilestoneCancelled)
+	}
+}
+
+// --- Codex round 12 reproductions -------------------------------------------
+
+// TestAMalformedOversizedBodyIsStillBounded reproduces the resource bypass a
+// trailing syntax error opens.
+func TestAMalformedOversizedBodyIsStillBounded(t *testing.T) {
+	prefix := `{"data":{"channel":{"id":"12345","self":{"watchStreakMilestone":{"missedStreams":[`
+	suffix := `]}}}}}`
+	room := maxDiagnosticResponseBytes - len(prefix) - len(suffix) - 16
+	elements := room / len("0,")
+	// Well over the 8192-value limit, under the 1 MiB byte limit, and NOT
+	// well formed: the trailing byte is what a peer moves to pick a class.
+	body := prefix + strings.Repeat("0,", elements-1) + "0" + suffix + "x"
+	if len(body) > maxDiagnosticResponseBytes {
+		t.Fatalf("fixture is %d bytes, over the %d-byte limit: it would be refused for the "+
+			"wrong reason", len(body), maxDiagnosticResponseBytes)
+	}
+	if json.Valid([]byte(body)) {
+		t.Fatal("fixture must be malformed for this test to mean anything")
+	}
+
+	c := newTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, body)
+	})
+
+	var before, after runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&before)
+	obs := c.ObserveWatchStreakMilestone(context.Background(), "12345", "somestreamer")
+	runtime.ReadMemStats(&after)
+
+	const budgetMB = 20
+	allocatedMB := float64(after.TotalAlloc-before.TotalAlloc) / (1 << 20)
+	if allocatedMB > budgetMB {
+		t.Fatalf("a malformed %d-byte body allocated %.1f MB (budget %d MB): moving a syntax "+
+			"error past the value limit switched the resource bound off",
+			len(body), allocatedMB, budgetMB)
+	}
+	if obs.Outcome == MilestoneObserved {
+		t.Fatalf("a malformed body was recorded as OBSERVED")
+	}
+	t.Logf("refused in %.1f MB, class %q", allocatedMB, obs.FailureClass)
+}
+
+// TestARejectedFallbackIsNotCachedAsWorking reproduces the sticky diagnostic
+// client-ID cache.
+func TestARejectedFallbackIsNotCachedAsWorking(t *testing.T) {
+	var (
+		mu   sync.Mutex
+		seen []string
+	)
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		id := r.Header.Get("Client-Id")
+		mu.Lock()
+		seen = append(seen, id)
+		mu.Unlock()
+		if id == constants.ClientIDTV {
+			w.WriteHeader(http.StatusOK)
+			_, _ = io.WriteString(w, `{"errors":[{"message":"PersistedQueryNotFound"}]}`)
+			return
+		}
+		// Not APQ, but not an answer either: an explicit service rejection.
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, `{"errors":[{"message":"denied"}]}`)
+	})
+
+	_ = c.ObserveWatchStreakMilestone(context.Background(), "12345", "somestreamer")
+
+	mu.Lock()
+	seen = nil
+	mu.Unlock()
+
+	_ = c.ObserveWatchStreakMilestone(context.Background(), "12345", "somestreamer")
+
+	mu.Lock()
+	second := append([]string(nil), seen...)
+	mu.Unlock()
+
+	for _, id := range second {
+		if id == constants.ClientIDTV {
+			return // the shipped default was tried again: nothing is pinned to a rejection
+		}
+	}
+	t.Fatalf("the second cycle never tried the shipped default client ID (tried %v): a candidate "+
+		"that answered with an explicit rejection was cached as working, so it is now tried "+
+		"first forever and the others are never reached", second)
+}
+
+// TestASingularTopLevelErrorIsNotAnObservation reproduces the asymmetry between
+// the APQ detector and the observation path.
+func TestASingularTopLevelErrorIsNotAnObservation(t *testing.T) {
+	resp := fullRewardListResponse()
+	resp["error"] = "Forbidden"
+	raw, err := json.Marshal(resp)
+	if err != nil {
+		t.Fatalf("marshal fixture: %v", err)
+	}
+
+	c := newTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(raw)
+	})
+
+	obs := c.ObserveWatchStreakMilestone(context.Background(), "12345", "somestreamer")
+	if obs.Outcome == MilestoneObserved {
+		t.Fatalf("a body carrying an explicit top-level rejection alongside data was recorded "+
+			"as OBSERVED (class %q): the singular `error` member is a rejection the APQ detector "+
+			"already honours, so the observation path must fail closed on it too", obs.FailureClass)
 	}
 }
