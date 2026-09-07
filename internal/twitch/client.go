@@ -361,21 +361,22 @@ func isAuthError(statusCode int, result map[string]interface{}) bool {
 // invent one.
 //
 // Scope, stated precisely rather than generously: no WARN or ERROR is raised
-// for the request's own OUTCOME (stale hash, retries, exhaustion — all DEBUG).
-// One shared-transport line is NOT suppressed: rememberWorkingClientID's WARN
-// when a fallback client ID rotates the process-wide default. That is a
-// property of the client-ID pool rather than of this request, and suppressing
-// it would hide a genuine rotation from the operator.
+// for the request's own OUTCOME (stale hash, retries, exhaustion — all DEBUG),
+// and the retry trace carries no raw transport error text, only its bounded
+// status.
 //
-// Its frequency, stated accurately: the WARN fires on every promotion where the
-// working ID differs from the THEN-CURRENT default, and there is no
-// once-per-process guard. Per-operation caching (opClientID) makes repeats
-// uncommon, because an operation that has resolved once tries its known-good ID
-// first and so never promotes again — but it does not make them impossible. A
-// later A->B->A transition, where one operation promotes B and another
-// subsequently resolves on A, warns again. Everything else about the request —
-// its client-ID candidates, its retries and its returned error — is identical
-// to a business read.
+// The shared CLIENT-ID POOL is isolated too. A diagnostic read caches its own
+// working ID for its own operation (rememberDiagnosticClientID) but never
+// promotes the process-wide defaultClientID and never raises the WARN that
+// announces the shipped persisted-query hashes are stale. rememberWorkingClientID
+// promotes on any fallback answer that is not PersistedQueryNotFound — a 401
+// included — so without the split a diagnostic that FAILED would steer the
+// client ID a later business call goes out under, and would tell the operator to
+// update internal/constants/gql.go when nothing had resolved. A BUSINESS
+// rotation still promotes and still warns, unchanged.
+//
+// Everything else about the request — its client-ID candidates, its retries and
+// its returned error — is identical to a business read.
 type diagnosticRequestKey struct{}
 
 // withDiagnosticRequest marks ctx as a diagnostic-only read. Cancellation and
@@ -1205,6 +1206,11 @@ func waitForRetry(ctx context.Context, wait time.Duration) error {
 	}
 }
 
+// maxDiagnosticResponseBytes caps the response body a DIAGNOSTIC read will pull
+// into memory. Chosen orders of magnitude above a real RewardList response so it
+// cannot truncate one, and far below anything that would matter to the process.
+const maxDiagnosticResponseBytes = 1 << 20 // 1 MiB
+
 // doGQLOnce performs a single HTTP round trip. It returns the response body on
 // success, or an error with the observed status code (0 for network-level
 // errors, where no HTTP response was received at all) plus any Retry-After delay
@@ -1220,7 +1226,23 @@ func doGQLOnceWithClient(client *http.Client, req *http.Request) ([]byte, int, t
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	respBody, err := io.ReadAll(resp.Body)
+	// A diagnostic read caps what it will pull into memory. The status is only
+	// known after the response arrives, so a hostile endpoint or proxy could
+	// otherwise answer a rejected diagnostic with an unbounded body and have it
+	// read in full — on the bonus poll goroutine — before anything classifies
+	// it. Business reads stay unbounded as they were; this is a property of the
+	// diagnostic caller, not a change to the shared contract.
+	//
+	// The cap is orders of magnitude above a real RewardList response (~1-2 KB),
+	// so a legitimate body is never truncated; a body that exceeds it fails to
+	// decode and is reported as a transport failure, which is the honest outcome
+	// for a response this read refuses to trust.
+	body := io.Reader(resp.Body)
+	if isDiagnosticRequest(req.Context()) {
+		body = io.LimitReader(resp.Body, maxDiagnosticResponseBytes)
+	}
+
+	respBody, err := io.ReadAll(body)
 	if err != nil {
 		return nil, resp.StatusCode, 0, fmt.Errorf("failed to read response: %w", err)
 	}

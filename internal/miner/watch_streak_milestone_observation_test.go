@@ -810,7 +810,13 @@ func TestTruncateForLogBoundsTwitchStrings(t *testing.T) {
 		// JSON-ESCAPED here because a raw control byte inside a JSON string is
 		// invalid JSON — the body has to decode to control characters, not
 		// contain them literally.
-		hostile := strings.Repeat(`\u001b\u0000Z`, 70000)
+		// Sized to stay under the diagnostic body cap (1 MiB across all five
+		// fields). This subtest is about the RECORD's size bound, which needs a
+		// response that actually parses; an over-cap body is refused outright
+		// and is covered separately by TestDiagnosticResponseBodyIsCapped. Each
+		// field is still ~180 KB, three orders of magnitude past the 128-char
+		// per-value truncation, so the path under test is fully exercised.
+		hostile := strings.Repeat(`\u001b\u0000Z`, 10000)
 		body := `{"data":{"channel":{"id":"` + hostile + `","self":{"watchStreakMilestone":{` +
 			`"state":"` + hostile + `","missedStreams":[{"broadcastIdentifiers":[{"id":"` + hostile + `"}]}],` +
 			`"watchStreakMilestone":{"id":"` + hostile + `","achievementTimestamp":"` + hostile + `"}}}}}}`

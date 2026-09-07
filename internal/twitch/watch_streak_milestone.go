@@ -397,9 +397,10 @@ func (o WatchStreakMilestoneObservation) Duration() time.Duration {
 // credential recovery or operator reauth escalation, and raises no WARN/ERROR
 // for its own outcome. That is what keeps a failed observation from degrading
 // health.SignalGQLAPI and closing the auto-bet gate — and equally keeps a
-// succeeding observation from masking a real business-path outage. The one
-// shared-transport line that is NOT suppressed is the client-ID promotion WARN;
-// diagnosticRequestKey documents why.
+// succeeding observation from masking a real business-path outage. The shared
+// client-ID pool is isolated too: this read caches its own working ID but never
+// promotes the process-wide default and never raises the stale-hash promotion
+// WARN; diagnosticRequestKey documents why.
 //
 // ctx is the caller's existing loop context. Cancellation is honored before the
 // request is built and, through http.NewRequestWithContext and the

@@ -597,6 +597,44 @@ func TestDiagnosticRetryTraceCarriesNoRawErrorText(t *testing.T) {
 	}
 }
 
+// TestDiagnosticResponseBodyIsCapped proves a diagnostic read will not pull an
+// unbounded body into memory.
+//
+// The HTTP status is only known once the response arrives, so refusing a non-2xx
+// on its status does not by itself stop the body being read first. A hostile
+// endpoint or proxy could answer a rejected diagnostic with an enormous body and
+// have it read in full, on the bonus poll goroutine, before anything classified
+// it. The read is capped for diagnostic requests; a body past the cap fails to
+// decode and is reported as a failure rather than as an observation.
+func TestDiagnosticResponseBodyIsCapped(t *testing.T) {
+	// The oversized body is VALID JSON that would parse into a real observation.
+	// That is what makes this a test of the bound: without the cap the whole
+	// document is read and the observation succeeds; with the cap the read is
+	// truncated mid-document, the JSON no longer decodes, and the request is
+	// reported as a failure instead. A body of junk bytes would fail either way
+	// and would prove nothing.
+	prefix := `{"data":{"channel":{"id":"12345","self":{"watchStreakMilestone":null}}},"pad":"`
+	suffix := `"}`
+	padding := strings.Repeat("A", 2*maxDiagnosticResponseBytes)
+
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, prefix)
+		_, _ = io.WriteString(w, padding)
+		_, _ = io.WriteString(w, suffix)
+	})
+
+	obs := c.ObserveWatchStreakMilestone(context.Background(), "12345", "somestreamer")
+
+	if obs.Outcome == MilestoneObserved {
+		t.Fatalf("a %d-byte body was read in full and recorded as OBSERVED; the diagnostic read "+
+			"pulled an unbounded response into memory on the poll goroutine",
+			len(prefix)+len(padding)+len(suffix))
+	}
+	assertEmptySnapshot(t, obs.Snapshot)
+
+}
+
 // TestParseWatchStreakMilestoneValueAcceptsBothObservedWireKinds is the MAJOR-3
 // fidelity proof for the one field this observation exists to see.
 //
