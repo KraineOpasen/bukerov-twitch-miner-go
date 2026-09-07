@@ -577,6 +577,12 @@ func classifyMilestoneRequestError(ctx context.Context, err error) (WatchStreakM
 		return MilestoneUnavailable, MilestoneFailureUnauthorized
 	case errors.Is(err, errAmbiguousDiagnosticJSON):
 		return MilestoneUnavailable, MilestoneFailureAmbiguousJSON
+	case errors.Is(err, errOversizedDiagnosticJSON):
+		// Same policy as the parser-side collection limit, enforced one layer
+		// earlier and reported under the same class: this response is too large
+		// to be a credible answer, and refusing it before the decode is what
+		// makes the refusal cheap.
+		return MilestoneUnavailable, MilestoneFailureOversizedCollection
 	default:
 		return MilestoneUnavailable, MilestoneFailureTransport
 	}

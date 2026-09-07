@@ -11,6 +11,7 @@ import (
 	"math"
 	"net/http"
 	"reflect"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -2479,4 +2480,55 @@ func TestOversizedCollectionsAreRefusedBeforeTheyAreBuilt(t *testing.T) {
 			t.Fatalf("missedStreams count = %d, want 1", obs.Snapshot.MissedStreams.Count)
 		}
 	})
+}
+
+// TestAnOversizedResponseIsRefusedBeforeItIsDecoded pins the bound that the
+// byte limit and the collection limit both leave open.
+//
+// Refusing a response is only cheap if the refusal runs before the expensive
+// part. The collection limit added earlier reads the DECODED response, so
+// encoding/json had already materialised the whole document by the time it
+// could say no: measured at ~97 MB and ~300 ms to refuse a 1 MiB body. The
+// outcome was right and the cost was paid anyway.
+//
+// So this asserts the cost, not just the class. A test that only checked the
+// failure class would have passed against the version this fixes — which is
+// exactly what happened.
+func TestAnOversizedResponseIsRefusedBeforeItIsDecoded(t *testing.T) {
+	prefix := `{"data":{"channel":{"id":"12345","self":{"watchStreakMilestone":{"missedStreams":[`
+	suffix := `]}}}}}`
+	room := maxDiagnosticResponseBytes - len(prefix) - len(suffix)
+	elements := room / len("0,")
+	body := prefix + strings.Repeat("0,", elements-1) + "0" + suffix
+
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, body)
+	})
+
+	var before, after runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&before)
+	obs := c.ObserveWatchStreakMilestone(context.Background(), "12345", "somestreamer")
+	runtime.ReadMemStats(&after)
+
+	if obs.Outcome != MilestoneUnavailable ||
+		obs.FailureClass != MilestoneFailureOversizedCollection {
+		t.Fatalf("outcome = %q/%q, want UNAVAILABLE/%s", obs.Outcome, obs.FailureClass,
+			MilestoneFailureOversizedCollection)
+	}
+	assertEmptySnapshot(t, obs.Snapshot)
+
+	// A coarse bound, on purpose. The point is the ORDER OF MAGNITUDE: decoding
+	// this body costs ~97 MB, streaming past it costs a few. Anything in
+	// between still means the decode was skipped. A tight threshold here would
+	// be a flaky test about allocator behaviour rather than about the guard.
+	const budgetMB = 20
+	allocatedMB := float64(after.TotalAlloc-before.TotalAlloc) / (1 << 20)
+	if allocatedMB > budgetMB {
+		t.Fatalf("refusing a %d-byte body allocated %.1f MB (budget %d MB): the response was decoded "+
+			"before it was refused, so the refusal bounded nothing",
+			len(body), allocatedMB, budgetMB)
+	}
+	t.Logf("refused %d elements in %.1f MB", elements, allocatedMB)
 }

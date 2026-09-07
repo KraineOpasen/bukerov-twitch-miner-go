@@ -70,6 +70,12 @@ var (
 	// classifies it, and no business path changes behaviour on it.
 	errAmbiguousDiagnosticJSON = errors.New("twitch: ambiguous diagnostic JSON response (duplicate object members)")
 
+	// errOversizedDiagnosticJSON marks a DIAGNOSTIC response carrying more JSON
+	// values than any credible answer to a diagnostic operation. Unexported for
+	// the same reason as errAmbiguousDiagnosticJSON: only the observation
+	// raises and classifies it.
+	errOversizedDiagnosticJSON = errors.New("twitch: oversized diagnostic JSON response (too many values)")
+
 	// ErrClaimNotAccepted is returned only when Twitch authoritatively rejected a
 	// bonus claim in the mutation's business-result node. Missing/null/malformed
 	// responses use ErrBonusClaimIndeterminate and are quarantined, never retried.
@@ -703,6 +709,55 @@ func strictPersistedQueryNotFound(respBody []byte) bool {
 	return true
 }
 
+// maxDiagnosticJSONValues bounds how many JSON values one DIAGNOSTIC response
+// may contain, counted over the RAW body before anything decodes it.
+//
+// The byte limit and the collection limit each bound something real, and
+// neither bounds this. maxDiagnosticResponseBytes bounds the wire. The
+// milestone collection limit bounds what the PARSER retains. Between them sits
+// encoding/json, which materialises the entire document into interface values
+// before either the parser or its guard is reached: measured, a 1,048,575-byte
+// body of "0," elements still cost ~97 MB and ~300 ms to refuse, because the
+// refusal ran after the decode that made it expensive.
+//
+// A megabyte of wire is only a megabyte of memory when the values inside it are
+// large. This is the bound for the opposite case.
+//
+// Set generously above any credible diagnostic response - a real RewardList
+// carries a few dozen values - and, deliberately, above the milestone
+// collection limit, so a merely implausible collection is still decoded and
+// refused with the precise OVERSIZED_COLLECTION evidence rather than being
+// rejected here as an unreadable body.
+const maxDiagnosticJSONValues = 8192
+
+// diagnosticJSONValuesWithinLimit reports whether body carries few enough JSON
+// values to be worth decoding.
+//
+// It streams tokens and stops at the limit, so it holds only the decoder's
+// nesting stack and never the document: the check cannot become the
+// amplification it exists to prevent.
+//
+// Malformed JSON is NOT this function's business. It answers true and leaves
+// the shape to the decoder that follows, which reports it honestly. Saying
+// "too large" about a body that is merely broken would be a fabricated reason.
+func diagnosticJSONValuesWithinLimit(body []byte) bool {
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	values := 0
+	for {
+		token, err := decoder.Token()
+		if err != nil {
+			return true
+		}
+		if _, isDelimiter := token.(json.Delim); isDelimiter {
+			continue
+		}
+		values++
+		if values > maxDiagnosticJSONValues {
+			return false
+		}
+	}
+}
+
 // jsonObjectKeysAreUnique validates the raw JSON token stream before decoding
 // into maps. encoding/json otherwise applies last-value-wins to duplicate
 // members, which is unsafe proof for a side-effect retry: a conflicting
@@ -1097,6 +1152,15 @@ func (c *TwitchClient) doGQLRequestWithClientIDFallback(ctx context.Context, bod
 			// under every client ID, and end as UNSUPPORTED_QUERY - never
 			// reaching this refusal at all. An ambiguous body is not evidence
 			// of anything, the marker included.
+			// Size first: this scan is what keeps the two below - and the
+			// decode after them - from being handed a document that makes them
+			// expensive. jsonObjectKeysAreUnique builds a key set per object,
+			// so it is one of the things being protected, not a peer.
+			if !diagnosticJSONValuesWithinLimit(respBody) {
+				return nil, statusCode, fmt.Errorf(
+					"%w: operation %s", errOversizedDiagnosticJSON, operationLabel)
+			}
+
 			if !jsonObjectKeysAreUnique(respBody) {
 				return nil, statusCode, fmt.Errorf(
 					"%w: operation %s", errAmbiguousDiagnosticJSON, operationLabel)
