@@ -2653,6 +2653,39 @@ func TestTheAPQMarkerIsOnlyHonouredWhereARejectionPutsIt(t *testing.T) {
 			wantRequest: 3,
 		},
 		{
+			// Presence and shape are separate questions: a present but
+			// non-object extensions member is malformed metadata, not absent
+			// metadata, so it must not fall through to the message.
+			name: "non-object extensions is malformed, not absent",
+			body: `{"errors":[{"message":"PersistedQueryNotFound",` +
+				`"extensions":"UNAUTHORIZED"}]}`,
+			wantOutcome: MilestoneGraphQLError,
+			wantClass:   MilestoneFailureGraphQLTopLevel,
+			wantRequest: 1,
+		},
+		{
+			// An explicit null says "no extensions object" rather than
+			// "malformed metadata". Refusing it would risk missing a genuine
+			// rejection, which is the direction that hides a stale hash.
+			name:        "null extensions falls back to the message",
+			body:        `{"errors":[{"message":"PersistedQueryNotFound","extensions":null}]}`,
+			wantOutcome: MilestoneUnsupported,
+			wantClass:   MilestoneFailureQueryNotFound,
+			wantRequest: 3,
+		},
+		{
+			// A top-level "error" sits BESIDE the errors array and is an
+			// explicit rejection in its own right. Refusing the APQ reading
+			// lets the response say what it actually said: the shared
+			// transport recognises "Unauthorized" here, so the recorded class
+			// is the specific one rather than a fabricated APQ result.
+			name:        "a top-level error member beside the array is a rejection",
+			body:        `{"error":"Unauthorized","errors":[{"message":"PersistedQueryNotFound"}]}`,
+			wantOutcome: MilestoneUnavailable,
+			wantClass:   MilestoneFailureUnauthorized,
+			wantRequest: 1,
+		},
+		{
 			// Usable data beside the rejection means it is not one.
 			name: "the marker beside usable data is not a rejection",
 			body: `{"errors":[{"message":"PersistedQueryNotFound"}],` +

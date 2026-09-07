@@ -842,6 +842,15 @@ func diagnosticPersistedQueryNotFound(body []byte) bool {
 	if data, present := result["data"]; present && data != nil {
 		return false
 	}
+	// A top-level "error" is an explicit rejection in its own right, and it
+	// sits BESIDE the errors array rather than inside it - so an APQ-shaped
+	// array can be presented alongside one and would otherwise be believed,
+	// concealing the real rejection. strictPersistedQueryNotFound already
+	// refuses any present "error"; this read has the same need.
+	if _, present := result["error"]; present {
+		return false
+	}
+
 	list, ok := result["errors"].([]interface{})
 	if !ok || len(list) == 0 {
 		return false
@@ -859,7 +868,21 @@ func diagnosticPersistedQueryNotFound(body []byte) bool {
 		// is an authorization rejection wearing an APQ message, and taking the
 		// message on its own would replay the authenticated request under every
 		// client ID and record the real rejection as UNSUPPORTED_QUERY.
-		if extensions, present := object["extensions"].(map[string]interface{}); present {
+		// Presence and SHAPE are separate questions. A single type assertion
+		// answers both at once and therefore answers neither: it reports false
+		// for an absent extensions member and for a present one that is a
+		// string, so malformed rejection metadata reads as no metadata and
+		// falls through to the message.
+		//
+		// An explicit null is treated as absent rather than malformed, because
+		// it says "no extensions object" and refusing it would risk missing a
+		// genuine PersistedQueryNotFound - the one direction where being wrong
+		// hides a stale shipped hash instead of merely refusing a response.
+		if rawExtensions, present := object["extensions"]; present && rawExtensions != nil {
+			extensions, isObject := rawExtensions.(map[string]interface{})
+			if !isObject {
+				return false
+			}
 			if code, carried := extensions["code"]; carried {
 				if code != "PERSISTED_QUERY_NOT_FOUND" {
 					return false
