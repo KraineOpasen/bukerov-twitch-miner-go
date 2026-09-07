@@ -1260,7 +1260,13 @@ func TestBusinessReadStillRecoversOnUnauthorized(t *testing.T) {
 		return auth.Snapshot{AccessToken: "recovered-token", Generation: 99}, nil
 	}
 
-	_ = c.LoadChannelPointsContext(newTestStreamer("somestreamer"))
+	// The error is asserted rather than discarded: this fixture answers 401 to
+	// every attempt, so a nil error here would mean the business read reported
+	// success after two rejections, and the recovery/attempt counts below would
+	// not notice.
+	if err := c.LoadChannelPointsContext(newTestStreamer("somestreamer")); err == nil {
+		t.Error("business read returned nil error although every attempt was rejected 401")
+	}
 
 	if recoveries != 1 {
 		t.Errorf("business read ran recovery %d time(s), want 1; the diagnostic rule leaked", recoveries)

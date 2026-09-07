@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -334,7 +335,16 @@ func TestObservationRunsAfterTheBusinessPassOfTheSameCycle(t *testing.T) {
 		defer close(done)
 		m.bonusPollLoop(ctx)
 	}()
-	<-seenTwo
+	// Bounded: the handshake is a real synchronization seam, but without a
+	// deadline a loop that never reaches a second observation would hang the
+	// package binary instead of failing with a reason.
+	select {
+	case <-seenTwo:
+	case <-time.After(30 * time.Second):
+		cancel()
+		<-done
+		t.Fatal("the bonus poll loop did not reach a second RewardList observation within 30s")
+	}
 	cancel()
 	<-done
 
@@ -1671,7 +1681,16 @@ func TestBusinessStaleHashStillRaisesTheOperatorError(t *testing.T) {
 	rt.mu.Lock()
 	rt.contextBody = `{"errors":[{"message":"PersistedQueryNotFound","extensions":{"code":"PERSISTED_QUERY_NOT_FOUND"}}]}`
 	rt.mu.Unlock()
-	_, _ = m.client.ClaimAvailableBonus(streamers[logins[0]])
+	// The returned values are asserted, not discarded: the log line alone would
+	// still pass if the business call had swallowed the stale hash and reported
+	// success, which is the failure this test exists to catch.
+	claimed, err := m.client.ClaimAvailableBonus(streamers[logins[0]])
+	if claimed {
+		t.Error("a business read against a stale hash reported an owned claim")
+	}
+	if !errors.Is(err, twitch.ErrPersistedQueryNotFound) {
+		t.Errorf("business read error = %v, want ErrPersistedQueryNotFound", err)
+	}
 
 	if !strings.Contains(logs.String(), "PersistedQueryNotFound on all known client IDs") {
 		t.Error("a business read no longer raises the stale-hash ERROR; the diagnostic silence leaked")
