@@ -816,14 +816,23 @@ func diagnosticJSONHasDuplicateMembers(body []byte) bool {
 
 	// A duplicate found does not yet mean a duplicate REPORTED. The scan stops
 	// at the first repeated key, so it has seen only a prefix - and a body
-	// whose remainder does not parse is malformed, whatever its prefix
-	// contained. Answering "duplicate members" for it would name a defect the
-	// response does not have, and would let a peer choose between this class
-	// and the transport class by moving a syntax error to either side of the
-	// repeated key.
+	// whose remainder the decoder cannot read is a shape problem, whatever its
+	// prefix contained. Reporting "duplicate members" for it would let a peer
+	// choose between this class and the transport class by moving the bad part
+	// to either side of the repeated key.
 	//
-	// Same reasoning, and the same instrument, as the value limit above.
-	return json.Valid(body)
+	// The test is DECODABILITY, not syntax, and the difference is reachable:
+	// json.Valid accepts 1e10000 as a well-formed number while the decode that
+	// follows fails on it, because interface{} decoding puts numbers in a
+	// float64. Syntax is the wrong question here - the operative one is
+	// whether the value the rest of this read works with can exist at all.
+	//
+	// Affordable precisely here: the value bound above has already passed, so
+	// this document is at most maxDiagnosticJSONValues values. The value scan
+	// itself cannot do this, because it runs before any bound is established
+	// and so can only afford json.Valid.
+	var decoded interface{}
+	return json.Unmarshal(body, &decoded) == nil
 }
 
 // diagnosticPersistedQueryNotFound reports whether body is a STRUCTURED

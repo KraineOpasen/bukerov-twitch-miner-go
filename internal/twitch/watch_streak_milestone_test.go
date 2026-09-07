@@ -2756,6 +2756,12 @@ func TestMalformedJSONKeepsItsOwnFailureClass(t *testing.T) {
 		// check, a peer picks between AMBIGUOUS_JSON and the transport class
 		// by moving its syntax error across the repeated key.
 		{"a duplicate member before a syntax error", `{"errors":[],"errors":[],"data":{"channel":`},
+		// Syntactically valid and still undecodable: json.Valid accepts
+		// 1e10000, the decode that follows cannot put it in a float64. The
+		// duplicate verdict must not outrank that, or a peer picks the class
+		// by putting the number on either side of the repeated key.
+		{"a duplicate member before an undecodable number", `{"errors":[],"errors":[],"x":1e10000}`},
+		{"an undecodable number before a duplicate member", `{"x":1e10000,"errors":[],"errors":[]}`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
