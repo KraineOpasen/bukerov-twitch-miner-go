@@ -45,9 +45,14 @@ func fullRewardListResponse() map[string]interface{} {
 							"id": "milestone-7",
 							// String-encoded on purpose: the donor evidence says this
 							// is the form Twitch actually sends for this field, so the
-							// suite's "well-formed live response" must model it. The
-							// number form is real tolerance and is covered explicitly by
-							// TestParseWatchStreakMilestoneValueRecordsItsWireKind.
+							// suite's "well-formed live response" must model it.
+							//
+							// The raw-JSON response fixtures further down this file
+							// deliberately keep "value":4. Converting them too would
+							// just move the blind spot rather than close it: the
+							// number form is real tolerance, and those bodies are
+							// where it stays exercised inside a live-shaped response
+							// rather than only in a dedicated table test.
 							"value":                "4",
 							"achievementTimestamp": "2026-09-05T12:00:00Z",
 							"shareStatus":          "UNSHARED",
@@ -370,12 +375,17 @@ func TestParseWatchStreakMilestoneMalformedScalars(t *testing.T) {
 // TestParseWatchStreakMilestoneValueAcceptsBothObservedWireKinds is the MAJOR-3
 // fidelity proof for the one field this observation exists to see.
 //
-// RewardList sends the milestone value node in TWO different JSON encodings:
-// the donor protocol evidence has ViewerMilestone.value as a string, while its
-// sibling watchStreakThreshold/watchStreakCopoBonus arrive as JSON integers.
-// A parser that accepts only the integer form does not report a shape problem
-// with Twitch's response, it throws away the documented wire form: "value":"4"
-// would classify MALFORMED and the observed 4 would never reach the record.
+// RewardList is not uniform about its integers: the donor protocol evidence has
+// ViewerMilestone.value as a STRING, while its siblings watchStreakThreshold and
+// watchStreakCopoBonus arrive as JSON integers. The string is therefore the form
+// attested for THIS field, and a parser that accepts only the integer form does
+// not report a shape problem with Twitch's response - it throws away the
+// documented wire form: "value":"4" would classify MALFORMED and the observed 4
+// would never reach the record.
+//
+// The number form is accepted as well, but as TOLERANCE, not as an observed
+// wire fact: nothing attests it for this field. If Twitch ever does send it, the
+// recorded wire kind is what makes that visible instead of silent.
 //
 // Accepting both encodings is protocol tolerance, not interpretation. Nothing
 // here decides that the value IS the streak count; which field carries the
