@@ -62,11 +62,35 @@ import (
 const (
 	milestoneObservationRecord = "watch_streak_milestone_observation"
 	milestoneCorrelationRecord = "watch_streak_grant_correlation"
+	// milestoneBudgetRecord marks the one record a cycle emits when its budget
+	// stopped it before the roster was finished.
+	milestoneBudgetRecord = "watch_streak_milestone_budget"
 )
 
 // unknownLink is the single vocabulary for a relationship this feature cannot
 // prove. It is printed explicitly rather than omitted, so a reader sees that
 // the question was asked and answered UNKNOWN — not that it was never asked.
+// milestoneObservationCycleBudget bounds ONE observation stage, end to end.
+//
+// The stage runs as a plain call on the bonusPollLoop goroutine, so without a
+// bound an optional diagnostic could defer the next BUSINESS bonus pass: the
+// loop cannot service its next tick until the stage returns, and a transiently
+// failing RewardList inherits the shared read transport's full retry schedule
+// per target. That is a diagnostic delaying the chest-claim fallback, which is
+// exactly backwards.
+//
+// The value is chosen between two hard numbers rather than picked freely. It is
+// LONGER than one shared-transport HTTP timeout (30s) on purpose: a genuinely
+// stalled Twitch must still surface as TRANSPORT_TIMEOUT, and a shorter budget
+// would cut the request first and record "we cancelled" for what was in fact a
+// Twitch stall — the precise confusion MilestoneFailureTransportTimeout exists
+// to prevent. It is SHORTER than bonusPollInterval (60s) so the stage alone can
+// never push the next business pass past its tick.
+//
+// It is a var, not a const, so tests can shorten it; nothing at runtime writes
+// it, and it is deliberately not a settings surface.
+var milestoneObservationCycleBudget = 40 * time.Second
+
 const unknownLink = "UNKNOWN"
 
 // milestoneLogStringCap bounds every free-form observed string reaching a log
@@ -216,9 +240,16 @@ const (
 //     bonusPollLoop goroutine, invoked only AFTER that cycle's business pass
 //     (pollBonuses: bonus claiming and auto-redeem) has fully returned. It is
 //     never interleaved with a claim or redemption.
-//   - It runs on the loop's own context. Cancellation is checked before every
+//   - It runs on a BUDGETED child of the loop's context
+//     (milestoneObservationCycleBudget). Cancellation is checked before every
 //     target and is honored inside each in-flight request, so a cancelled loop
 //     releases the current request and returns instead of finishing the roster.
+//     The budget exists because this call sits between the loop and its next
+//     tick: without it a slow Twitch would defer the next BUSINESS bonus pass
+//     for as long as the retry schedule runs, once per target. A stage stopped
+//     by its own budget says so and says how much roster it did not examine;
+//     an owner shutdown stays silent, because the process is going away and a
+//     record nobody will read is not evidence.
 //   - At most ONE RewardList request per eligible target per cycle. Eligibility
 //     is deliberately narrow and side-effect free: online, with a channel
 //     identity to scope the request. It does not consult the watch-streak
@@ -229,12 +260,28 @@ const (
 //   - No network or log I/O happens under a domain lock: each accessor takes
 //     and releases its own lock and returns a value before the request or the
 //     log call.
-func (m *Miner) observeWatchStreakMilestones(ctx context.Context) {
+func (m *Miner) observeWatchStreakMilestones(owner context.Context) {
 	if m.client == nil || m.streamers == nil {
 		return
 	}
-	for _, s := range m.streamers.All() {
+
+	// One budget for the whole stage rather than one per request. A per-request
+	// deadline shorter than the shared transport's own 30s HTTP timeout would
+	// fire first on a stalled Twitch, and the observation would then be recorded
+	// as "we cancelled" instead of TRANSPORT_TIMEOUT - inverting the very
+	// distinction MilestoneFailureTransportTimeout exists to keep.
+	ctx, cancel := context.WithTimeout(owner, milestoneObservationCycleBudget)
+	defer cancel()
+
+	targets := m.streamers.All()
+	for i, s := range targets {
 		if ctx.Err() != nil {
+			// Owner shutdown and budget exhaustion end the same loop but are
+			// different facts. Only the budget leaves a live miner with an
+			// unexplained short cycle, so only the budget is reported.
+			if owner.Err() == nil {
+				logWatchStreakMilestoneBudgetExhausted(len(targets) - i)
+			}
 			return
 		}
 		if !s.GetIsOnline() {
@@ -247,6 +294,20 @@ func (m *Miner) observeWatchStreakMilestones(ctx context.Context) {
 		obs := m.client.ObserveWatchStreakMilestone(ctx, channelID, s.GetUsername())
 		logWatchStreakMilestoneObservation(obs, s)
 	}
+}
+
+// logWatchStreakMilestoneBudgetExhausted records that a cycle stopped early.
+//
+// It carries a count, not identities: the point is that the roster was
+// truncated, and naming the streamers that were NOT looked at would add
+// per-cycle volume without adding evidence. DEBUG for the same reason the
+// observation record is: this recurs once per degraded cycle.
+func logWatchStreakMilestoneBudgetExhausted(unexamined int) {
+	slog.Debug("Watch Streak milestone observation stopped on its cycle budget",
+		"record", milestoneBudgetRecord,
+		"cycleBudgetSeconds", milestoneObservationCycleBudget.Seconds(),
+		"unexaminedTargets", unexamined,
+	)
 }
 
 // logWatchStreakMilestoneObservation emits one diagnostic observation record
@@ -646,8 +707,14 @@ func (m *Miner) logWatchStreakGrantCorrelation(
 		wireTimestamp = truncateForLog(ts)
 	}
 
+	// One lookup for the whole record. admittedGrantFact is a linear scan over
+	// the retained grant snapshot, and every field below asks the same question
+	// about the same event, so scanning once per field would grow the cost of a
+	// record with the history it reads.
+	fact, haveFact := admittedGrantFact(grant, msg.EventFingerprint)
+
 	acceptedAt := unknownLink
-	if fact, ok := admittedGrantFact(grant, msg.EventFingerprint); ok {
+	if haveFact {
 		acceptedAt = fact.AcceptedAt.UTC().Format(time.RFC3339Nano)
 	}
 
@@ -665,7 +732,7 @@ func (m *Miner) logWatchStreakGrantCorrelation(
 	// UNKNOWN means no fact was found at all, so nothing is known either way;
 	// printing NONE there would assert an absence this code cannot see.
 	provenBroadcast := unknownLink
-	if fact, ok := admittedGrantFact(grant, msg.EventFingerprint); ok {
+	if haveFact {
 		provenBroadcast = "NONE"
 		if fact.BroadcastID != "" {
 			provenBroadcast = fact.BroadcastID
@@ -681,7 +748,7 @@ func (m *Miner) logWatchStreakGrantCorrelation(
 		// with the ledger outcome below.
 		"domainAdmission", string(grant.Admission),
 		"domainAccepted", grant.NewlyAccepted(),
-		"grantBinding", grantBinding(grant, msg.EventFingerprint),
+		"grantBinding", grantBindingOf(fact, haveFact),
 
 		// The already-existing event identity and exact event-local amount.
 		"eventId", truncateForLog(msg.EventFingerprint),
@@ -726,13 +793,16 @@ func admittedGrantFact(grant models.WatchStreakGrantResult, eventID string) (mod
 	return models.WatchStreakGrantFact{}, false
 }
 
-// grantBinding reports the admitted grant's binding, or this feature's explicit
-// UNKNOWN vocabulary when the fact is not present in the snapshot. It never
-// guesses a bound binding, and it never prints a bare empty string that a
-// reader could mistake for an observed unbound binding.
-func grantBinding(grant models.WatchStreakGrantResult, eventID string) string {
-	if fact, ok := admittedGrantFact(grant, eventID); ok {
-		return string(fact.Binding)
+// grantBindingOf reports an admitted grant's binding, or this feature's
+// explicit UNKNOWN vocabulary when no fact was found. It never guesses a bound
+// binding, and it never prints a bare empty string that a reader could mistake
+// for an observed unbound binding.
+//
+// It takes the already-resolved fact rather than looking it up again, so a
+// record that reads several fields off one grant pays for one scan.
+func grantBindingOf(fact models.WatchStreakGrantFact, haveFact bool) string {
+	if !haveFact {
+		return unknownLink
 	}
-	return unknownLink
+	return string(fact.Binding)
 }

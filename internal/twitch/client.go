@@ -968,6 +968,35 @@ func (c *TwitchClient) rememberWorkingClientID(operation, clientID string, viaFa
 	}
 }
 
+// rememberDiagnosticClientID caches the working client ID for a DIAGNOSTIC
+// operation and touches nothing else.
+//
+// It deliberately does NOT promote the process-wide default and emits no
+// rotation WARN, which is the whole difference from rememberWorkingClientID.
+// defaultClientID is shared: candidateClientIDs hands it to every UNCACHED
+// operation, business ones included, and ActiveClientID surfaces it to the
+// operator. Promotion fires whenever a fallback answers anything that is not
+// PersistedQueryNotFound - a 401 included - so without this split a diagnostic
+// observation that FAILED would still steer the client ID a later bonus claim
+// goes out under, and would still tell the operator that the persisted-query
+// hashes in internal/constants/gql.go are stale when nothing resolved.
+//
+// That is not a corner case for this caller. RewardList's live acceptance is
+// PENDING, so "PQNF on the default, something else on a fallback" is its
+// EXPECTED shape, once per online streamer per cycle.
+//
+// The per-operation cache is kept because it is scoped to the diagnostic
+// operation itself: it saves that operation's own retries and is invisible to
+// every other caller. Safe for concurrent callers.
+func (c *TwitchClient) rememberDiagnosticClientID(operation, clientID string) {
+	c.clientIDMu.Lock()
+	defer c.clientIDMu.Unlock()
+	if c.opClientID == nil {
+		c.opClientID = make(map[string]string)
+	}
+	c.opClientID[operation] = clientID
+}
+
 // doGQLRequestWithClientIDFallback sends a GQL request and, on a
 // PersistedQueryNotFound response, transparently retries with the alternate
 // public Twitch client IDs before giving up. This guards against the
@@ -1004,7 +1033,13 @@ func (c *TwitchClient) doGQLRequestWithClientIDFallback(ctx context.Context, bod
 		}
 
 		if !gql.IsPersistedQueryNotFound(respBody) {
-			c.rememberWorkingClientID(operationLabel, clientID, i > 0)
+			if diagnostic {
+				// A diagnostic read caches its own working ID but promotes
+				// nothing: see rememberDiagnosticClientID.
+				c.rememberDiagnosticClientID(operationLabel, clientID)
+			} else {
+				c.rememberWorkingClientID(operationLabel, clientID, i > 0)
+			}
 			return respBody, statusCode, nil
 		}
 

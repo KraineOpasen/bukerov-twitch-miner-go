@@ -1,11 +1,13 @@
 package twitch
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"math"
 	"net/http"
 	"reflect"
@@ -370,6 +372,105 @@ func TestParseWatchStreakMilestoneMalformedScalars(t *testing.T) {
 	if got := parseWatchStreakMilestone(resp).ShareStatus; got.Presence != MilestoneFieldValid || got.Value != "" {
 		t.Fatalf("observed empty string = %+v, want VALID/empty", got)
 	}
+}
+
+// captureClientLogs redirects the default slog logger into a buffer for the
+// duration of one test.
+func captureClientLogs(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	buf := &bytes.Buffer{}
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+	return buf
+}
+
+// TestDiagnosticReadDoesNotRotateTheSharedClientIDDefault is the isolation
+// proof for the one piece of shared transport state a diagnostic read could
+// still move.
+//
+// c.defaultClientID is process-wide: candidateClientIDs feeds it to EVERY
+// uncached operation, business ones included, and ActiveClientID surfaces it to
+// the operator. Promotion happens whenever a fallback candidate answers
+// anything that is not PersistedQueryNotFound - which includes a 401, so a
+// diagnostic observation that FAILED can still move it and still raise the
+// operator WARN saying the shipped hashes are stale, when nothing resolved
+// anything.
+//
+// That matters here more than anywhere else: RewardList's live acceptance is
+// PENDING, so "PQNF on the default, something else on a fallback" is this
+// operation's EXPECTED shape, once per online streamer per cycle.
+func TestDiagnosticReadDoesNotRotateTheSharedClientIDDefault(t *testing.T) {
+	const pqnf = `{"errors":[{"message":"PersistedQueryNotFound","extensions":{"code":"PERSISTED_QUERY_NOT_FOUND"}}]}`
+	const staleHashWarn = "persisted-query hashes in internal/constants/gql.go are likely stale"
+
+	for _, tc := range []struct {
+		name string
+		code int
+		body string
+	}{
+		// The observation SUCCEEDS on the fallback.
+		{"fallback answers", http.StatusOK,
+			`{"data":{"channel":{"id":"12345","self":{"watchStreakMilestone":null}}}}`},
+		// The observation FAILS on the fallback. Promotion must not happen here
+		// either: nothing was resolved, so there is nothing to promote.
+		{"fallback rejects", http.StatusUnauthorized, `{"message":"unauthorized"}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			logs := captureClientLogs(t)
+			c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+				if r.Header.Get("Client-Id") == constants.ClientIDTV {
+					w.WriteHeader(http.StatusOK)
+					_, _ = io.WriteString(w, pqnf)
+					return
+				}
+				w.WriteHeader(tc.code)
+				_, _ = io.WriteString(w, tc.body)
+			})
+
+			before := c.ActiveClientID()
+			_ = c.ObserveWatchStreakMilestone(context.Background(), "12345", "somestreamer")
+
+			if got := c.ActiveClientID(); got != before {
+				t.Errorf("a diagnostic read rotated the shared client-ID default from %q to %q; "+
+					"the next uncached BUSINESS operation would go out under it", before, got)
+			}
+			if strings.Contains(logs.String(), staleHashWarn) {
+				t.Errorf("a diagnostic read raised the operator stale-hash rotation WARN; "+
+					"RewardList acceptance is PENDING, so this alert is not actionable\nlogs:\n%s",
+					logs.String())
+			}
+		})
+	}
+
+	// The other half: the rule applies ONLY to the diagnostic read. A business
+	// operation that genuinely resolves on a fallback must still rotate the
+	// default and still tell the operator, exactly as before.
+	t.Run("business read still rotates and warns", func(t *testing.T) {
+		logs := captureClientLogs(t)
+		c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+			if r.Header.Get("Client-Id") == constants.ClientIDTV {
+				w.WriteHeader(http.StatusOK)
+				_, _ = io.WriteString(w, pqnf)
+				return
+			}
+			w.WriteHeader(http.StatusOK)
+			_, _ = io.WriteString(w,
+				`{"data":{"community":{"channel":{"self":{"communityPoints":{"balance":7,"availableClaim":null}}}}}}`)
+		})
+
+		before := c.ActiveClientID()
+		_ = c.LoadChannelPointsContext(newTestStreamer("somestreamer"))
+
+		if got := c.ActiveClientID(); got == before {
+			t.Errorf("a business read resolved on a fallback but did not rotate the default (still %q); "+
+				"the diagnostic guard leaked onto the business path", got)
+		}
+		if !strings.Contains(logs.String(), staleHashWarn) {
+			t.Error("a business rotation no longer raises the operator stale-hash WARN; " +
+				"the diagnostic guard leaked onto the business path")
+		}
+	})
 }
 
 // TestParseWatchStreakMilestoneValueAcceptsBothObservedWireKinds is the MAJOR-3

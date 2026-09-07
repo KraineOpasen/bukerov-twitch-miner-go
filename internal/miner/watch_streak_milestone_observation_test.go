@@ -1754,8 +1754,13 @@ func TestWatchStreakCorrelationBindingIsExplicitWhenUnknown(t *testing.T) {
 		t.Fatalf("grantBinding = %q, want GRANTED_UNBOUND", got)
 	}
 	// And the fallback for an unmatchable fact is the explicit vocabulary.
-	if got := grantBinding(models.WatchStreakGrantResult{}, "no-such-event"); got != "UNKNOWN" {
-		t.Errorf("grantBinding fallback = %q, want UNKNOWN (never a bare empty string)", got)
+	if got := grantBindingOf(models.WatchStreakGrantFact{}, false); got != "UNKNOWN" {
+		t.Errorf("grantBindingOf fallback = %q, want UNKNOWN (never a bare empty string)", got)
+	}
+	// A found fact with an empty binding is still not UNKNOWN: it is an observed
+	// empty binding, and collapsing the two would erase the distinction.
+	if got := grantBindingOf(models.WatchStreakGrantFact{}, true); got != "" {
+		t.Errorf("grantBindingOf of a found fact = %q, want the observed binding", got)
 	}
 }
 
@@ -2123,6 +2128,92 @@ func TestMilestoneLogWireKindNeverRendersAnEmptyValue(t *testing.T) {
 		if got := milestoneLogWireKind(tc.field); got != tc.want {
 			t.Errorf("milestoneLogWireKind(%+v) = %q, want %q", tc.field, got, tc.want)
 		}
+	}
+}
+
+// TestObservationStageIsBoundedByACycleBudget proves the diagnostic stage
+// cannot run the bonus poll loop's goroutine for an unbounded time.
+//
+// The stage is a plain call on bonusPollLoop, so the loop cannot service its
+// next tick until the stage returns. Without a bound, a slow RewardList is paid
+// once per online target, serially, with the shared transport's whole retry
+// schedule behind it - a diagnostic deferring the chest-claim fallback it has
+// no business delaying.
+//
+// The fixture makes every RewardList take a fixed, uninterruptible slice of
+// wall clock, so the only way to honour the budget is to stop starting new
+// targets. The assertion is therefore on WORK ISSUED, not on elapsed time: a
+// bounded stage must leave part of the roster unexamined rather than walk it
+// all.
+func TestObservationStageIsBoundedByACycleBudget(t *testing.T) {
+	previousBudget := milestoneObservationCycleBudget
+	milestoneObservationCycleBudget = 50 * time.Millisecond
+	t.Cleanup(func() { milestoneObservationCycleBudget = previousBudget })
+
+	const targets = 4
+	logins := milestoneLogins(t, targets)
+	rt := &milestoneRoundTripper{}
+	// Each observation costs more than the whole budget, and the cost is NOT
+	// cancellable, so the budget can only be honoured between targets.
+	rt.onRewardList = func(int) { time.Sleep(120 * time.Millisecond) }
+	m, _ := newMilestoneMiner(t, rt, logins, logins)
+
+	m.observeWatchStreakMilestones(context.Background())
+
+	_, reward := rt.counts()
+	issued := 0
+	for _, n := range reward {
+		issued += n
+	}
+	if issued == 0 {
+		t.Fatalf("no RewardList request was issued at all; the fixture proves nothing")
+	}
+	if issued >= targets {
+		t.Fatalf("the stage issued %d of %d RewardList requests: it walked the whole roster "+
+			"with the cycle budget already spent, so the bonus poll loop stays blocked "+
+			"for as long as Twitch is slow", issued, targets)
+	}
+}
+
+// TestObservationBudgetExhaustionIsRecorded proves a truncated roster is
+// REPORTED rather than silently shortened.
+//
+// Absence is not evidence in this feature. A cycle that stops early must say so
+// and say how much it did not look at, or a reader comparing cycles would read
+// the missing records as "those streamers had nothing".
+func TestObservationBudgetExhaustionIsRecorded(t *testing.T) {
+	previousBudget := milestoneObservationCycleBudget
+	milestoneObservationCycleBudget = 50 * time.Millisecond
+	t.Cleanup(func() { milestoneObservationCycleBudget = previousBudget })
+
+	logs := captureLogs(t)
+	logins := milestoneLogins(t, 4)
+	rt := &milestoneRoundTripper{}
+	rt.onRewardList = func(int) { time.Sleep(120 * time.Millisecond) }
+	m, _ := newMilestoneMiner(t, rt, logins, logins)
+	logs.Reset()
+
+	m.observeWatchStreakMilestones(context.Background())
+
+	lines := recordLines(logs.String(), milestoneBudgetRecord)
+	if len(lines) != 1 {
+		t.Fatalf("budget-exhaustion records = %d, want exactly 1; logs:\n%s", len(lines), logs.String())
+	}
+	if got := attrValue(lines[0], "level"); got != "DEBUG" {
+		t.Errorf("budget record level = %q, want DEBUG; it recurs on a degraded cycle", got)
+	}
+	unexamined := attrValue(lines[0], "unexaminedTargets")
+	if unexamined == "" || unexamined == "0" {
+		t.Errorf("unexaminedTargets = %q, want a positive count naming what was skipped", unexamined)
+	}
+	// An owner shutdown is NOT a budget exhaustion and must stay silent here.
+	logs.Reset()
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	m.observeWatchStreakMilestones(cancelled)
+	if got := len(recordLines(logs.String(), milestoneBudgetRecord)); got != 0 {
+		t.Errorf("an already-cancelled owner produced %d budget record(s); shutdown is not "+
+			"budget exhaustion", got)
 	}
 }
 
