@@ -267,13 +267,17 @@ const (
 	// is the outcome that would falsify the RewardList protocol premise; it is
 	// reported, never worked around.
 	MilestoneUnsupported WatchStreakMilestoneOutcome = "UNSUPPORTED_QUERY"
-	// MilestoneUnavailable: the request failed at the transport/auth layer.
+	// MilestoneUnavailable: the request failed at the transport/auth layer, or
+	// the cycle's diagnostic dispatch allowance ran out AFTER at least one
+	// dispatch had been made for this target (ALLOWANCE_EXHAUSTED), so what was
+	// learned is incomplete.
 	MilestoneUnavailable WatchStreakMilestoneOutcome = "UNAVAILABLE"
 	// MilestoneCancelled: the owning context was cancelled; the request was
 	// released rather than completed.
 	MilestoneCancelled WatchStreakMilestoneOutcome = "CANCELLED"
-	// MilestoneSkipped: no request was made at all (no channel identity, or the
-	// context was already done before the attempt).
+	// MilestoneSkipped: no request was made at all (no channel identity, the
+	// context was already done before the attempt, or the cycle's dispatch
+	// allowance was already empty on entry).
 	MilestoneSkipped WatchStreakMilestoneOutcome = "SKIPPED"
 )
 
@@ -333,6 +337,14 @@ const (
 	// rejection can be erased by a benign duplicate beside it; the two readings
 	// are not distinguishable after the fact, and neither is evidence.
 	MilestoneFailureAmbiguousJSON MilestoneFailureClass = "AMBIGUOUS_JSON"
+
+	// MilestoneFailureAllowanceExhausted marks a read the cycle's diagnostic
+	// dispatch allowance stopped. With outcome SKIPPED no request was made at
+	// all; with outcome UNAVAILABLE at least one dispatch was made and the
+	// candidate traversal was cut short - which is INCOMPLETE evidence, never
+	// proof that every client ID rejected the query. It is a local stopping
+	// reason, not a transport fact.
+	MilestoneFailureAllowanceExhausted MilestoneFailureClass = "ALLOWANCE_EXHAUSTED"
 )
 
 // milestoneObservationSequence is the process-wide monotonic counter stamped on
@@ -376,6 +388,12 @@ type WatchStreakMilestoneObservation struct {
 
 	Outcome      WatchStreakMilestoneOutcome
 	FailureClass MilestoneFailureClass
+
+	// Dispatches counts the explicit authenticated HTTP dispatches this
+	// observation made - first attempt, retries and client-ID fallbacks alike.
+	// Zero means the target was never started, which is what lets the caller
+	// tell "refused before dispatch" from "tried and failed".
+	Dispatches int
 
 	Snapshot WatchStreakMilestoneSnapshot
 }
@@ -421,7 +439,7 @@ func (o WatchStreakMilestoneObservation) Duration() time.Duration {
 // ctx is the caller's existing loop context. Cancellation is honored before the
 // request is built and, through http.NewRequestWithContext and the
 // interruptible retry wait, while it is in flight.
-func (c *TwitchClient) ObserveWatchStreakMilestone(ctx context.Context, channelID, login string) WatchStreakMilestoneObservation {
+func (c *TwitchClient) ObserveWatchStreakMilestone(ctx context.Context, channelID, login string, allowance *DiagnosticAllowance) WatchStreakMilestoneObservation {
 	obs := WatchStreakMilestoneObservation{
 		Sequence:           milestoneObservationSequence.Add(1),
 		RequestedChannelID: channelID,
@@ -442,6 +460,14 @@ func (c *TwitchClient) ObserveWatchStreakMilestone(ctx context.Context, channelI
 		obs.Outcome, obs.FailureClass = MilestoneSkipped, MilestoneFailureContextDone
 		return obs
 	}
+	// An empty allowance on entry means no request will be made for this
+	// target, so it is SKIPPED, not failed: nothing was tried.
+	if allowance != nil && allowance.Remaining() == 0 {
+		now := time.Now()
+		obs.RequestStart, obs.RequestEnd = now, now
+		obs.Outcome, obs.FailureClass = MilestoneSkipped, MilestoneFailureAllowanceExhausted
+		return obs
+	}
 
 	op := constants.RewardList.WithVariables(map[string]interface{}{
 		"channelID":                        channelID,
@@ -457,9 +483,13 @@ func (c *TwitchClient) ObserveWatchStreakMilestone(ctx context.Context, channelI
 	// second target, pin health.SignalGQLAPI at DEGRADED, and block every
 	// automated prediction bet for as long as the miner runs. Cancellation and
 	// deadlines propagate through the wrapper unchanged.
+	dctx := withDiagnosticRequest(ctx, allowance)
 	obs.RequestStart = time.Now()
-	resp, statusCode, err := c.postGQLRequestWithStatus(withDiagnosticRequest(ctx), op)
+	resp, statusCode, err := c.postGQLRequestWithStatus(dctx, op)
 	obs.RequestEnd = time.Now()
+	// The transport counted every explicit dispatch on the value dctx carries;
+	// read it back here, on the same goroutine, once the request has returned.
+	obs.Dispatches = diagnosticRequestOf(dctx).dispatches
 
 	if err != nil {
 		obs.Outcome, obs.FailureClass = classifyMilestoneRequestError(ctx, err)
@@ -621,6 +651,13 @@ func classifyMilestoneRequestError(ctx context.Context, err error) (WatchStreakM
 		// Cancellation with a live owner: an inner scope gave up, which is a
 		// transport fault from this observation's point of view.
 		return MilestoneUnavailable, MilestoneFailureTransport
+	case errors.Is(err, errDiagnosticAllowanceExhausted):
+		// Placed after the owner-cancellation cases on purpose, though the
+		// transport already returns the owner's error first when both apply.
+		// A read that reached this point made at least one dispatch (the
+		// zero-dispatch case is SKIPPED at entry) and was stopped before its
+		// candidate traversal completed, so what it learned is incomplete.
+		return MilestoneUnavailable, MilestoneFailureAllowanceExhausted
 	case errors.Is(err, ErrPersistedQueryNotFound):
 		return MilestoneUnsupported, MilestoneFailureQueryNotFound
 	case errors.Is(err, ErrUnauthorized):

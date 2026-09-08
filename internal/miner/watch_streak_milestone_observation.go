@@ -105,16 +105,20 @@ const (
 // schedule, which is far past bonusPollInterval and defeats the bound. That is
 // a cadence decision, not a comment fix, so the comment is what changed.
 //
-// "Alone" is the whole of that claim, and it is worth stating what it does not
-// cover. The budget starts when the stage does, not at the tick, so a business
-// pass that itself ran long leaves the two ADDING: a 30s pollBonuses followed
-// by a stage that spends its full budget returns at 70s, and the coalesced tick
-// fires 10s late. Budgeting from the time remaining until the next tick would
-// close that, at the price of a stage that yields entirely on exactly the
-// cycles where a slow Twitch makes the evidence most interesting; deciding
-// which of those matters more is a cadence question, not a bug fix. Note the
-// business pass is unbounded on this loop today and can overrun a tick with no
-// help from this stage.
+// "Alone" is deliberate. This budget starts when the stage does, not at the
+// tick, so on its own it would let a long business pass and a full stage ADD:
+// a 30s pollBonuses followed by a 40s stage returns at 70s and the coalesced
+// tick fires 10s late. The stage therefore does not run on this budget alone:
+// its deadline is the EARLIEST of this budget, the next business tick
+// (tick + bonusPollInterval, from the timestamp the serviced ticker event
+// carries) and the owner's deadline — see milestoneStageDeadline. A cycle
+// whose business pass consumed the whole period admits no diagnostic request
+// at all rather than being granted a fresh budget. That is an owner cadence
+// decision, recorded in SPECIFICATIONS.md: on exactly the cycles where a slow
+// Twitch makes the evidence most interesting, business polling wins. Note the
+// business pass itself is still unbounded on this loop and can overrun a tick
+// with no help from this stage; the rule only guarantees the stage never
+// compounds it.
 //
 // It is a var, not a const, so tests can shorten it; nothing at runtime writes
 // it, and it is deliberately not a settings surface.
@@ -268,85 +272,259 @@ const (
 	ledgerAnalyticsUnavailable pointLedgerOutcome = "ANALYTICS_UNAVAILABLE"
 )
 
+// milestoneCycleDispatchAllowance is how many explicit, authenticated
+// diagnostic HTTP attempts ONE observation stage may make in total.
+//
+// It is shared across every target, every retry and every client-ID fallback
+// of that cycle: three permits, not three per target. It is charged once,
+// immediately before each dispatch, never refunded on error or timeout and
+// never refilled within the cycle, so a roster of 100 fast-failing targets and
+// a roster of one slow one both cost at most three attempts per cycle.
+//
+// This is an APPLICATION attempt cap, chosen so a diagnostic can never lean
+// on the shared read transport's retry schedule. It is NOT a Twitch quota and
+// says nothing about what the wire is willing to accept.
+const milestoneCycleDispatchAllowance = 3
+
+// milestoneCycle is what the bonus poll loop hands one observation stage.
+//
+//   - Tick is the timestamp carried by the serviced ticker event. A
+//     time.Ticker stamps each event with its SCHEDULED fire time, so a tick
+//     read late (coalesced behind a long business pass) still reports when it
+//     was due, which is what the next-tick bound needs. A zero Tick is
+//     maximally overdue and admits nothing: the loop is the only production
+//     caller and always passes the serviced tick.
+//   - Period is the loop's ticker period, so the stage can compute when the
+//     NEXT business tick is due without owning a ticker of its own.
+//   - Cursor is the loop-owned roster position the previous cycle returned.
+//     It is a plain index, normalized against the current roster snapshot on
+//     every cycle, so removals and resizes can never dereference a stale
+//     streamer.
+type milestoneCycle struct {
+	Tick   time.Time
+	Period time.Duration
+	Cursor int
+}
+
+// milestoneDeadlineSource names which bound produced a stage's deadline. Kept
+// on the budget record so a short cycle can be read as "the business pass ran
+// long" (NEXT_TICK) rather than "Twitch was slow" (STAGE_BUDGET) or "the
+// process is going away" (OWNER).
+type milestoneDeadlineSource string
+
+const (
+	milestoneDeadlineStageBudget milestoneDeadlineSource = "STAGE_BUDGET"
+	milestoneDeadlineNextTick    milestoneDeadlineSource = "NEXT_TICK"
+	milestoneDeadlineOwner       milestoneDeadlineSource = "OWNER"
+)
+
+// milestoneCutoff names WHY a stage stopped before finishing the roster: its
+// deadline (TIME) or its dispatch allowance (COUNT). Both leave targets
+// unexamined; they are different facts with different remedies.
+type milestoneCutoff string
+
+const (
+	milestoneCutoffTime  milestoneCutoff = "TIME"
+	milestoneCutoffCount milestoneCutoff = "COUNT"
+)
+
+// milestoneStageDeadline is the D1 deadline rule, as a pure function so the
+// arithmetic can be pinned with literals rather than by sleeping.
+//
+// The stage may run until the EARLIEST of:
+//
+//   - stageStart + milestoneObservationCycleBudget (STAGE_BUDGET): the stage
+//     alone can never hold the loop for longer than its own budget;
+//   - tick + period (NEXT_TICK): the stage yields whatever the business pass
+//     left of the cycle, so business work that already ran long is never
+//     compounded by a diagnostic. A cycle whose business pass consumed the
+//     whole period, or an overdue tick, has no slack and admits nothing — it
+//     is NOT granted a fresh budget;
+//   - the owner's own deadline (OWNER), when it has one.
+//
+// On a tie the earlier-listed source is reported. This is a scheduling bound,
+// not a real-time guarantee: an in-flight request is released by the deadline
+// through its context, not pre-empted.
+func milestoneStageDeadline(owner context.Context, tick time.Time, period time.Duration, stageStart time.Time) (time.Time, milestoneDeadlineSource) {
+	deadline, source := stageStart.Add(milestoneObservationCycleBudget), milestoneDeadlineStageBudget
+	if nextTick := tick.Add(period); nextTick.Before(deadline) {
+		deadline, source = nextTick, milestoneDeadlineNextTick
+	}
+	if ownerDeadline, ok := owner.Deadline(); ok && ownerDeadline.Before(deadline) {
+		deadline, source = ownerDeadline, milestoneDeadlineOwner
+	}
+	return deadline, source
+}
+
+// milestoneEligible is the whole eligibility rule: online, with a channel
+// identity to scope the request. Deliberately narrow and side-effect free. It
+// does not consult the watch-streak setting, because that setting governs
+// PURSUIT, and gating observation on it would suppress evidence for exactly
+// the grants this exists to observe.
+func milestoneEligible(s *models.Streamer) bool {
+	return s.GetIsOnline() && s.ChannelID != ""
+}
+
 // observeWatchStreakMilestones is the optional observation stage of one bonus
-// cycle.
+// cycle. It returns the roster cursor the NEXT cycle should start from.
 //
 // Lifecycle contract, all of it load-bearing:
 //
 //   - It owns nothing. It is a plain function call on the EXISTING
 //     bonusPollLoop goroutine, invoked only AFTER that cycle's business pass
 //     (pollBonuses: bonus claiming and auto-redeem) has fully returned. It is
-//     never interleaved with a claim or redemption.
-//   - It runs on a BUDGETED child of the loop's context
-//     (milestoneObservationCycleBudget). Cancellation is checked before every
-//     target and is honored inside each in-flight request, so a cancelled loop
-//     releases the current request and returns instead of finishing the roster.
-//     The budget exists because this call sits between the loop and its next
-//     tick: without it a slow Twitch would defer the next BUSINESS bonus pass
-//     for as long as the retry schedule runs, once per target. A stage stopped
-//     by its own budget says so and says how much roster it did not examine;
-//     an owner shutdown stays silent, because the process is going away and a
-//     record nobody will read is not evidence.
-//   - At most ONE RewardList request per eligible target per cycle. Eligibility
-//     is deliberately narrow and side-effect free: online, with a channel
-//     identity to scope the request. It does not consult the watch-streak
-//     setting, because that setting governs PURSUIT, and gating observation on
-//     it would suppress evidence for exactly the grants this exists to observe.
-//   - Every failure is observational only. There is no return value, no error,
-//     and no state to roll back — a failed observation cannot degrade mining.
+//     never interleaved with a claim or redemption, and it never touches the
+//     business ticker: it does not reset it, drain it, or change when the
+//     next business pass is due.
+//   - It runs on a child of the loop's context whose deadline is the D1 rule
+//     (milestoneStageDeadline): the earliest of its own budget, the next
+//     business tick and the owner's deadline. A cycle with no slack admits no
+//     request at all. Cancellation is checked before every target and is
+//     honored inside each in-flight request, so a cancelled loop releases the
+//     current request and returns instead of finishing the roster. A stage
+//     stopped by its own bound says so, says which bound, and says how much
+//     roster it did not examine; an owner shutdown stays silent, because the
+//     process is going away and a record nobody will read is not evidence.
+//   - It spends at most milestoneCycleDispatchAllowance explicit HTTP attempts
+//     per cycle, shared across targets, retries and client-ID fallback. The
+//     allowance is checked, without being consumed, before every target; the
+//     client charges it immediately before each dispatch and refuses further
+//     dispatches, retry waits and fallback candidates once it is spent.
+//   - Each eligible target is visited at most once per cycle, in roster order
+//     from the loop-owned cursor. The cursor advances past the last target
+//     that actually STARTED (made at least one dispatch), whatever that
+//     dispatch's outcome; a target refused before its first dispatch keeps its
+//     turn and is not reported as observed, so a slow or expensive first
+//     target cannot monopolize the roster across cycles. Ineligible entries
+//     are skipped and never move the cursor on their own.
+//   - Every failure is observational only. There is no error and no state to
+//     roll back — a failed observation cannot degrade mining. The only value
+//     it returns is the cursor.
 //   - No network or log I/O happens under a domain lock: each accessor takes
 //     and releases its own lock and returns a value before the request or the
 //     log call.
-func (m *Miner) observeWatchStreakMilestones(owner context.Context) {
+func (m *Miner) observeWatchStreakMilestones(owner context.Context, cycle milestoneCycle) (next int) {
 	if m.client == nil || m.streamers == nil {
-		return
+		return cycle.Cursor
 	}
 
-	// One budget for the whole stage rather than one per request, so a slow
-	// roster cannot multiply the bound by its length.
-	//
+	// One roster snapshot per cycle. Everything below indexes this slice and
+	// nothing else, so a streamer removed or re-added mid-cycle changes the
+	// NEXT snapshot, never this loop.
+	targets := m.streamers.All()
+	n := len(targets)
+	if n == 0 {
+		return 0
+	}
+	start := ((cycle.Cursor % n) + n) % n
+	next = start
+
+	// Eligibility is decided once, up front, so the count of what was NOT
+	// examined is exact even when a streamer's online state moves while a
+	// request is in flight.
+	eligible := make([]bool, n)
+	eligibleCount := 0
+	for i, s := range targets {
+		if milestoneEligible(s) {
+			eligible[i] = true
+			eligibleCount++
+		}
+	}
+	if eligibleCount == 0 {
+		return start
+	}
+
+	stageStart := time.Now()
+	deadline, source := milestoneStageDeadline(owner, cycle.Tick, cycle.Period, stageStart)
+	slack := deadline.Sub(stageStart)
+	allowance := twitch.NewDiagnosticAllowance(milestoneCycleDispatchAllowance)
+
+	if owner.Err() != nil {
+		// Shutdown: silent, see above.
+		return start
+	}
+	if slack <= 0 {
+		// Overdue or fully consumed cycle. Nothing is admitted and nothing is
+		// started, so the cursor does not move: the target that was due keeps
+		// its turn.
+		logWatchStreakMilestoneCutoff(milestoneCutoffTime, source, slack, 0, eligibleCount, allowance)
+		return start
+	}
+
 	// This deliberately does NOT claim to preserve TRANSPORT_TIMEOUT for a
 	// stalled Twitch; see milestoneObservationCycleBudget, where that claim was
 	// measured and found false. A stall inside this stage reads
 	// CANCELLED/DEADLINE_EXCEEDED, because the transport retries its own 30s
-	// timeout and the budget expires first.
-	ctx, cancel := context.WithTimeout(owner, milestoneObservationCycleBudget)
+	// timeout and the deadline expires first.
+	ctx, cancel := context.WithDeadline(owner, deadline)
 	defer cancel()
 
-	targets := m.streamers.All()
-	for i, s := range targets {
+	started := 0
+	var cutoff milestoneCutoff
+	for k := 0; k < n; k++ {
+		i := (start + k) % n
+		if !eligible[i] {
+			continue
+		}
+		// Both refusals happen BEFORE the target's first dispatch, so it keeps
+		// its turn: next stays at i.
 		if ctx.Err() != nil {
-			// Owner shutdown and budget exhaustion end the same loop but are
-			// different facts. Only the budget leaves a live miner with an
-			// unexplained short cycle, so only the budget is reported.
-			if owner.Err() == nil {
-				logWatchStreakMilestoneBudgetExhausted(len(targets) - i)
+			cutoff, next = milestoneCutoffTime, i
+			break
+		}
+		if allowance.Remaining() == 0 {
+			cutoff, next = milestoneCutoffCount, i
+			break
+		}
+		s := targets[i]
+		obs := m.client.ObserveWatchStreakMilestone(ctx, s.ChannelID, s.GetUsername(), allowance)
+		if obs.Dispatches == 0 {
+			// Refused at the client boundary before any request left (the
+			// deadline landed between the check above and the dispatch). Not
+			// observed, not reported as observed, keeps its turn.
+			cutoff, next = milestoneCutoffTime, i
+			if allowance.Remaining() == 0 {
+				cutoff = milestoneCutoffCount
 			}
-			return
+			break
 		}
-		if !s.GetIsOnline() {
-			continue
-		}
-		channelID := s.ChannelID
-		if channelID == "" {
-			continue
-		}
-		obs := m.client.ObserveWatchStreakMilestone(ctx, channelID, s.GetUsername())
+		started++
+		next = (i + 1) % n
 		logWatchStreakMilestoneObservation(obs, s)
 	}
+
+	if cutoff != "" && owner.Err() == nil {
+		// Owner shutdown and a stage bound end the same loop but are different
+		// facts. Only the bound leaves a live miner with an unexplained short
+		// cycle, so only the bound is reported.
+		logWatchStreakMilestoneCutoff(cutoff, source, slack, started, eligibleCount-started, allowance)
+	}
+	return next
 }
 
-// logWatchStreakMilestoneBudgetExhausted records that a cycle stopped early.
+// logWatchStreakMilestoneCutoff records that a cycle stopped before its
+// roster was finished, and why.
 //
-// It carries a count, not identities: the point is that the roster was
+// It carries counts, not identities: the point is that the roster was
 // truncated, and naming the streamers that were NOT looked at would add
-// per-cycle volume without adding evidence. DEBUG for the same reason the
-// observation record is: this recurs once per degraded cycle.
-func logWatchStreakMilestoneBudgetExhausted(unexamined int) {
-	slog.Debug("Watch Streak milestone observation stopped on its cycle budget",
+// per-cycle volume without adding evidence. startedTargets is how many
+// targets made at least one dispatch; unexaminedTargets is how many eligible
+// targets did not, which is exactly the set the cursor will revisit first.
+// DEBUG for the same reason the observation record is: this recurs once per
+// degraded cycle.
+func logWatchStreakMilestoneCutoff(cutoff milestoneCutoff, source milestoneDeadlineSource, slack time.Duration,
+	started, unexamined int, allowance *twitch.DiagnosticAllowance) {
+	slog.Debug("Watch Streak milestone observation stopped before the roster was finished",
 		"record", milestoneBudgetRecord,
-		"cycleBudgetSeconds", milestoneObservationCycleBudget.Seconds(),
+		"cutoff", string(cutoff),
+		"deadlineSource", string(source),
+		"slackMs", slack.Milliseconds(),
+		"startedTargets", started,
 		"unexaminedTargets", unexamined,
+		"dispatchesSpent", allowance.Spent(),
+		"dispatchesRemaining", allowance.Remaining(),
+		"dispatchAllowance", milestoneCycleDispatchAllowance,
+		"cycleBudgetSeconds", milestoneObservationCycleBudget.Seconds(),
 	)
 }
 
@@ -388,6 +566,9 @@ func logWatchStreakMilestoneObservation(obs twitch.WatchStreakMilestoneObservati
 		"observedAt", time.Now().UTC().Format(time.RFC3339Nano),
 		"outcome", string(obs.Outcome),
 		"failureClass", string(obs.FailureClass),
+		// Explicit HTTP attempts this observation made against the shared
+		// per-cycle allowance: retries and client-ID fallback included.
+		"dispatches", obs.Dispatches,
 
 		// Parser quality / presence classification, node by node.
 		"dataPresence", presenceToken(snap.DataPresence),

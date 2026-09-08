@@ -1494,21 +1494,28 @@ var bonusPollInterval = 60 * time.Second
 // available bonus through the shared Streamer owner. A successful fallback is
 // logged as a poll-path success only; it makes no claim about PubSub delivery.
 func (m *Miner) bonusPollLoop(ctx context.Context) {
-	ticker := time.NewTicker(bonusPollInterval)
+	period := bonusPollInterval
+	ticker := time.NewTicker(period)
 	defer ticker.Stop()
 
+	// cursor is the observation stage's roster position. It lives on this
+	// loop's stack and nowhere else: not persisted, not shared, not a streamer
+	// pointer. Each cycle hands it in and takes the next one back.
+	cursor := 0
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-ticker.C:
+		case tick := <-ticker.C:
 			m.pollBonuses()
 			// Optional, read-only observation stage. It runs only AFTER this
 			// cycle's business pass has fully returned, so it is never
 			// interleaved with bonus claiming or auto-redeem, and it owns no
-			// ticker, goroutine or retry subsystem of its own. See
-			// watch_streak_milestone_observation.go.
-			m.observeWatchStreakMilestones(ctx)
+			// ticker, goroutine or retry subsystem of its own. It is handed the
+			// serviced tick's timestamp so it can yield whatever the business
+			// pass left of this period; the ticker itself is never reset or
+			// drained. See watch_streak_milestone_observation.go.
+			cursor = m.observeWatchStreakMilestones(ctx, milestoneCycle{Tick: tick, Period: period, Cursor: cursor})
 		}
 	}
 }

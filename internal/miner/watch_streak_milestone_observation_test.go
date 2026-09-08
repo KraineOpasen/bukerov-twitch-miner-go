@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net/http"
 	"reflect"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -49,6 +50,17 @@ type milestoneRoundTripper struct {
 	// rewardListBody, when set, replaces the default RewardList response body.
 	rewardListBody string
 
+	// rewardOrder is every RewardList channelID in dispatch order, so a test
+	// can assert the roster ORDER the cursor produced, not only per-target
+	// counts.
+	rewardOrder []string
+
+	// rewardListRespond, when set, decides the HTTP status and body of one
+	// RewardList answer from its channelID and the running RewardList count
+	// (1-based). A zero status keeps the default answer; an empty body keeps
+	// the default body for that status.
+	rewardListRespond func(channelID string, n int) (status int, body string)
+
 	// contextBody, when set, replaces the default ChannelPointsContext response
 	// body — the BUSINESS read, used to prove the diagnostic-only suppressions
 	// do not leak onto it.
@@ -70,6 +82,20 @@ func (rt *milestoneRoundTripper) counts() (ops []string, reward map[string]int) 
 		reward[k] = v
 	}
 	return ops, reward
+}
+
+// rewardSequence returns the RewardList channelIDs in dispatch order.
+func (rt *milestoneRoundTripper) rewardSequence() []string {
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	return append([]string(nil), rt.rewardOrder...)
+}
+
+// rewardTotal returns how many RewardList requests reached the transport.
+func (rt *milestoneRoundTripper) rewardTotal() int {
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	return len(rt.rewardOrder)
 }
 
 // opLoginsSnapshot returns the per-op login attribution, aligned with ops().
@@ -114,22 +140,24 @@ func (rt *milestoneRoundTripper) RoundTrip(req *http.Request) (*http.Response, e
 		rt.contextOrder = append(rt.contextOrder, login)
 	}
 	rewardCount := 0
+	rewardChannelID := ""
 	if operation.Name == "RewardList" {
 		if rt.rewardBy == nil {
 			rt.rewardBy = map[string]int{}
 		}
-		channelID, _ := operation.Variables["channelID"].(string)
-		rt.rewardBy[channelID]++
-		for _, n := range rt.rewardBy {
-			rewardCount += n
-		}
+		rewardChannelID, _ = operation.Variables["channelID"].(string)
+		rt.rewardBy[rewardChannelID]++
+		rt.rewardOrder = append(rt.rewardOrder, rewardChannelID)
+		rewardCount = len(rt.rewardOrder)
 	}
 	hook := rt.onRewardList
+	respond := rt.rewardListRespond
 	rewardBody := rt.rewardListBody
 	contextBody := rt.contextBody
 	offerClaim := rt.offerClaim
 	rt.mu.Unlock()
 
+	status := http.StatusOK
 	response := `{"data":{}}`
 	switch operation.Name {
 	case "ChannelPointsContext":
@@ -151,9 +179,17 @@ func (rt *milestoneRoundTripper) RoundTrip(req *http.Request) (*http.Response, e
 		if hook != nil {
 			hook(rewardCount)
 		}
+		if respond != nil {
+			if st, body := respond(rewardChannelID, rewardCount); st != 0 {
+				status = st
+				if body != "" {
+					response = body
+				}
+			}
+		}
 	}
 	return &http.Response{
-		StatusCode: http.StatusOK,
+		StatusCode: status,
 		Header:     make(http.Header),
 		Body:       io.NopCloser(strings.NewReader(response)),
 		Request:    req,
@@ -256,6 +292,16 @@ func attrValue(line, key string) string {
 	return rest
 }
 
+// milestoneCycleNow builds the cycle bonusPollLoop would hand a stage that is
+// serviced right now: a tick stamped now and the production period, so the
+// next-tick bound leaves the whole stage budget as slack and the test's own
+// budget/transport fixture is what decides the outcome. Tests that need a
+// specific tick, period, overdue cycle or non-zero cursor build the
+// milestoneCycle directly.
+func milestoneCycleNow(cursor int) milestoneCycle {
+	return milestoneCycle{Tick: time.Now(), Period: bonusPollInterval, Cursor: cursor}
+}
+
 func milestoneLogins(t *testing.T, n int) []string {
 	t.Helper()
 	seq := milestoneTestSequence.Add(1)
@@ -275,7 +321,7 @@ func TestObservationRunsOncePerOnlineTargetAndSkipsIneligible(t *testing.T) {
 	rt := &milestoneRoundTripper{}
 	m, streamers := newMilestoneMiner(t, rt, logins, logins[:2])
 
-	m.observeWatchStreakMilestones(context.Background())
+	m.observeWatchStreakMilestones(context.Background(), milestoneCycleNow(0))
 
 	_, reward := rt.counts()
 	for _, login := range logins[:2] {
@@ -296,7 +342,7 @@ func TestObservationRunsOncePerOnlineTargetAndSkipsIneligible(t *testing.T) {
 // and auto-redeem for every online streamer) completes before the first
 // observation request, and no observation request is interleaved into it.
 func TestObservationRunsAfterTheBusinessPassOfTheSameCycle(t *testing.T) {
-	captureLogs(t)
+	logs := captureLogs(t)
 	logins := milestoneLogins(t, 2)
 	// A real bonus is available, so the business pass performs an actual
 	// ClaimCommunityPoints mutation. The contract does not merely require the
@@ -316,7 +362,10 @@ func TestObservationRunsAfterTheBusinessPassOfTheSameCycle(t *testing.T) {
 	}
 
 	previousInterval := bonusPollInterval
-	bonusPollInterval = 5 * time.Millisecond
+	// Long enough that a cycle's business pass leaves the observation stage
+	// real slack before the next tick (D1 yields on a consumed period), short
+	// enough that two cycles complete well inside the bound below.
+	bonusPollInterval = 500 * time.Millisecond
 	t.Cleanup(func() { bonusPollInterval = previousInterval })
 
 	seenTwo := make(chan struct{})
@@ -343,7 +392,7 @@ func TestObservationRunsAfterTheBusinessPassOfTheSameCycle(t *testing.T) {
 	case <-time.After(30 * time.Second):
 		cancel()
 		<-done
-		t.Fatal("the bonus poll loop did not reach a second RewardList observation within 30s")
+		t.Fatalf("the bonus poll loop did not reach a second RewardList observation within 30s; logs:\n%s", logs.String())
 	}
 	cancel()
 	<-done
@@ -438,7 +487,7 @@ func TestObservationHonoursAlreadyCancelledContext(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	m.observeWatchStreakMilestones(ctx)
+	m.observeWatchStreakMilestones(ctx, milestoneCycleNow(0))
 
 	if _, reward := rt.counts(); len(reward) != 0 {
 		t.Fatalf("cancelled observation stage still issued requests: %v", reward)
@@ -468,7 +517,7 @@ func TestObservationStopsMidRosterOnCancellation(t *testing.T) {
 	}
 	rt.mu.Unlock()
 
-	m.observeWatchStreakMilestones(ctx)
+	m.observeWatchStreakMilestones(ctx, milestoneCycleNow(0))
 
 	_, reward := rt.counts()
 	total := 0
@@ -523,7 +572,7 @@ func TestObservationRecordCarriesBoundedProvenance(t *testing.T) {
 	m, streamers := newMilestoneMiner(t, rt, logins, logins)
 	streamers[logins[0]].Stream.Update("broadcast-local-1", "title", nil, nil, 1)
 
-	m.observeWatchStreakMilestones(context.Background())
+	m.observeWatchStreakMilestones(context.Background(), milestoneCycleNow(0))
 
 	lines := recordLines(logs.String(), milestoneObservationRecord)
 	if len(lines) != 1 {
@@ -602,7 +651,7 @@ func TestObservationRecordNeverFabricatesAbsentFields(t *testing.T) {
 	}
 	m, _ := newMilestoneMiner(t, rt, logins, logins)
 
-	m.observeWatchStreakMilestones(context.Background())
+	m.observeWatchStreakMilestones(context.Background(), milestoneCycleNow(0))
 
 	lines := recordLines(logs.String(), milestoneObservationRecord)
 	if len(lines) != 1 {
@@ -721,7 +770,7 @@ func TestObservationRecordDistinguishesNullMalformedAndEmpty(t *testing.T) {
 			logins := milestoneLogins(t, 1)
 			m, _ := newMilestoneMiner(t, &milestoneRoundTripper{rewardListBody: tc.body}, logins, logins)
 
-			m.observeWatchStreakMilestones(context.Background())
+			m.observeWatchStreakMilestones(context.Background(), milestoneCycleNow(0))
 
 			lines := recordLines(logs.String(), milestoneObservationRecord)
 			if len(lines) != 1 {
@@ -822,7 +871,7 @@ func TestTruncateForLogBoundsTwitchStrings(t *testing.T) {
 			`"watchStreakMilestone":{"id":"` + hostile + `","achievementTimestamp":"` + hostile + `"}}}}}}`
 		m, _ := newMilestoneMiner(t, &milestoneRoundTripper{rewardListBody: body}, logins, logins)
 
-		m.observeWatchStreakMilestones(context.Background())
+		m.observeWatchStreakMilestones(context.Background(), milestoneCycleNow(0))
 
 		lines := recordLines(logs.String(), milestoneObservationRecord)
 		if len(lines) != 1 {
@@ -864,7 +913,7 @@ func TestObservationUnsupportedQueryStaysObservationalOnly(t *testing.T) {
 	beforeBroadcast := s.Stream.GetBroadcastID()
 	beforeOnline := s.GetIsOnline()
 
-	m.observeWatchStreakMilestones(context.Background())
+	m.observeWatchStreakMilestones(context.Background(), milestoneCycleNow(0))
 
 	lines := recordLines(logs.String(), milestoneObservationRecord)
 	if len(lines) != 1 {
@@ -904,8 +953,8 @@ func TestRepeatedIdenticalObservationsStayDistinctLogFacts(t *testing.T) {
 	rt := &milestoneRoundTripper{}
 	m, _ := newMilestoneMiner(t, rt, logins, logins)
 
-	m.observeWatchStreakMilestones(context.Background())
-	m.observeWatchStreakMilestones(context.Background())
+	m.observeWatchStreakMilestones(context.Background(), milestoneCycleNow(0))
+	m.observeWatchStreakMilestones(context.Background(), milestoneCycleNow(0))
 
 	lines := recordLines(logs.String(), milestoneObservationRecord)
 	if len(lines) != 2 {
@@ -930,7 +979,7 @@ func TestObservationRecordsLeakNoSecrets(t *testing.T) {
 	rt := &milestoneRoundTripper{}
 	m, _ := newMilestoneMiner(t, rt, logins, logins)
 
-	m.observeWatchStreakMilestones(context.Background())
+	m.observeWatchStreakMilestones(context.Background(), milestoneCycleNow(0))
 
 	lines := recordLines(logs.String(), milestoneObservationRecord)
 	if len(lines) != 1 {
@@ -1460,7 +1509,7 @@ func TestPreviousEventFollowingObservationLinksStayUnknown(t *testing.T) {
 	s.Stream.Update("broadcast-live-1", "title", nil, nil, 1)
 
 	// PREVIOUS OBSERVATION
-	m.observeWatchStreakMilestones(context.Background())
+	m.observeWatchStreakMilestones(context.Background(), milestoneCycleNow(0))
 	previousLogs := logbuf.String()
 	previous := recordLines(previousLogs, milestoneObservationRecord)
 	if len(previous) != 1 {
@@ -1472,7 +1521,7 @@ func TestPreviousEventFollowingObservationLinksStayUnknown(t *testing.T) {
 	deliverPointsEarned(t, m, s, msg)
 
 	// FOLLOWING OBSERVATION
-	m.observeWatchStreakMilestones(context.Background())
+	m.observeWatchStreakMilestones(context.Background(), milestoneCycleNow(0))
 
 	full := logbuf.String()
 	observations := recordLines(full, milestoneObservationRecord)
@@ -1541,7 +1590,7 @@ func TestBroadcastChangeDuringObservationCreatesNoGrantBinding(t *testing.T) {
 	}
 	rt.mu.Unlock()
 
-	m.observeWatchStreakMilestones(context.Background())
+	m.observeWatchStreakMilestones(context.Background(), milestoneCycleNow(0))
 
 	lines := recordLines(logbuf.String(), milestoneObservationRecord)
 	if len(lines) != 1 {
@@ -1629,7 +1678,7 @@ func TestUnsupportedQueryRecordStaysOffTheDashboardLogView(t *testing.T) {
 
 	// Miner construction logs its own setup lines; only the CYCLE is under test.
 	logs.Reset()
-	m.observeWatchStreakMilestones(context.Background())
+	m.observeWatchStreakMilestones(context.Background(), milestoneCycleNow(0))
 
 	lines := recordLines(logs.String(), milestoneObservationRecord)
 	if len(lines) != 1 {
@@ -1833,7 +1882,7 @@ func TestObservationSkipsTargetsWithoutAChannelIdentity(t *testing.T) {
 	streamers[logins[0]].ChannelID = ""
 	logs.Reset()
 
-	m.observeWatchStreakMilestones(context.Background())
+	m.observeWatchStreakMilestones(context.Background(), milestoneCycleNow(0))
 
 	_, reward := rt.counts()
 	if len(reward) != 1 {
@@ -1870,7 +1919,7 @@ func TestObservationRecordBoundsTheIdentifierSample(t *testing.T) {
 
 	m, _ := newMilestoneMiner(t, &milestoneRoundTripper{rewardListBody: body}, logins, logins)
 	logs.Reset()
-	m.observeWatchStreakMilestones(context.Background())
+	m.observeWatchStreakMilestones(context.Background(), milestoneCycleNow(0))
 
 	lines := recordLines(logs.String(), milestoneObservationRecord)
 	if len(lines) != 1 {
@@ -1985,7 +2034,7 @@ func observeOnceWithMissedStreams(t *testing.T, missedStreams string) string {
 		rewardListBody: milestoneNodeFixture(missedStreams),
 	}, logins, logins)
 	logs.Reset()
-	m.observeWatchStreakMilestones(context.Background())
+	m.observeWatchStreakMilestones(context.Background(), milestoneCycleNow(0))
 	lines := recordLines(logs.String(), milestoneObservationRecord)
 	if len(lines) != 1 {
 		t.Fatalf("observation records = %d, want 1; logs:\n%s", len(lines), logs.String())
@@ -2013,7 +2062,7 @@ func observeOnceWithMilestoneNode(t *testing.T, nodeBody string) string {
 		`"state":"ACTIVE","watchStreakMilestone":{` + nodeBody + `}}}}}}`
 	m, _ := newMilestoneMiner(t, &milestoneRoundTripper{rewardListBody: body}, logins, logins)
 	logs.Reset()
-	m.observeWatchStreakMilestones(context.Background())
+	m.observeWatchStreakMilestones(context.Background(), milestoneCycleNow(0))
 	lines := recordLines(logs.String(), milestoneObservationRecord)
 	if len(lines) != 1 {
 		t.Fatalf("observation records = %d, want 1; logs:\n%s", len(lines), logs.String())
@@ -2225,7 +2274,7 @@ func TestAStalledTwitchIsRecordedAsOurDeadlineNotTheTransportsTimeout(t *testing
 
 	buf := captureLogs(t)
 	start := time.Now()
-	m.observeWatchStreakMilestones(context.Background())
+	m.observeWatchStreakMilestones(context.Background(), milestoneCycleNow(0))
 	elapsed := time.Since(start)
 	out := buf.String()
 
@@ -2277,7 +2326,7 @@ func TestObservationStageIsBoundedByACycleBudget(t *testing.T) {
 	rt.onRewardList = func(int) { time.Sleep(120 * time.Millisecond) }
 	m, _ := newMilestoneMiner(t, rt, logins, logins)
 
-	m.observeWatchStreakMilestones(context.Background())
+	m.observeWatchStreakMilestones(context.Background(), milestoneCycleNow(0))
 
 	_, reward := rt.counts()
 	issued := 0
@@ -2312,7 +2361,7 @@ func TestObservationBudgetExhaustionIsRecorded(t *testing.T) {
 	m, _ := newMilestoneMiner(t, rt, logins, logins)
 	logs.Reset()
 
-	m.observeWatchStreakMilestones(context.Background())
+	m.observeWatchStreakMilestones(context.Background(), milestoneCycleNow(0))
 
 	lines := recordLines(logs.String(), milestoneBudgetRecord)
 	if len(lines) != 1 {
@@ -2329,7 +2378,7 @@ func TestObservationBudgetExhaustionIsRecorded(t *testing.T) {
 	logs.Reset()
 	cancelled, cancel := context.WithCancel(context.Background())
 	cancel()
-	m.observeWatchStreakMilestones(cancelled)
+	m.observeWatchStreakMilestones(cancelled, milestoneCycleNow(0))
 	if got := len(recordLines(logs.String(), milestoneBudgetRecord)); got != 0 {
 		t.Errorf("an already-cancelled owner produced %d budget record(s); shutdown is not "+
 			"budget exhaustion", got)
@@ -2511,7 +2560,7 @@ func TestObservationAttributesAreSanitizedBeforeFormatting(t *testing.T) {
 	attrs := captureAttrs(t)
 	logins := milestoneLogins(t, 1)
 	m, _ := newMilestoneMiner(t, &milestoneRoundTripper{rewardListBody: body}, logins, logins)
-	m.observeWatchStreakMilestones(context.Background())
+	m.observeWatchStreakMilestones(context.Background(), milestoneCycleNow(0))
 
 	records := attrs.recordsFor(milestoneObservationRecord)
 	if len(records) != 1 {
@@ -2667,4 +2716,822 @@ func hostileDecoded(t *testing.T, escaped string) string {
 		t.Fatalf("hostile fixture did not decode to control characters: %q", out)
 	}
 	return out
+}
+
+// ---------------------------------------------------------------------------
+// D1 (business-first deadline), D2 (roster cursor), D4 (cycle allowance).
+// ---------------------------------------------------------------------------
+
+// milestonePQNFBody is the structured APQ rejection the diagnostic read accepts
+// as evidence; every candidate client ID answering it costs one dispatch each.
+const milestonePQNFBody = `{"errors":[{"message":"PersistedQueryNotFound","extensions":{"code":"PERSISTED_QUERY_NOT_FOUND"}}]}`
+
+// milestoneChannelIDs maps logins to the channel IDs the fixture resolves them
+// to, in roster order.
+func milestoneChannelIDs(streamers map[string]*models.Streamer, logins ...string) []string {
+	out := make([]string, 0, len(logins))
+	for _, login := range logins {
+		out = append(out, streamers[login].ChannelID)
+	}
+	return out
+}
+
+func assertRewardSequence(t *testing.T, rt *milestoneRoundTripper, want []string) {
+	t.Helper()
+	got := rt.rewardSequence()
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("RewardList dispatch order = %v, want %v", got, want)
+	}
+}
+
+// TestMilestoneStageDeadlineIsTheEarliestBound pins the D1 arithmetic with
+// literals and no sleeping: the stage may run until the earliest of its own
+// budget, the next business tick, and the owner's deadline; a cycle whose
+// business pass consumed the period, or an overdue tick, has no slack.
+func TestMilestoneStageDeadlineIsTheEarliestBound(t *testing.T) {
+	if milestoneObservationCycleBudget != 40*time.Second || bonusPollInterval != 60*time.Second {
+		t.Fatalf("production constants moved (budget %v, period %v); update the table", milestoneObservationCycleBudget, bonusPollInterval)
+	}
+	tick := time.Date(2026, 9, 8, 12, 0, 0, 0, time.UTC)
+	const period = 60 * time.Second
+
+	tests := []struct {
+		name       string
+		business   time.Duration // how long the business pass took after the tick
+		tickLate   time.Duration // how late the serviced tick itself was read (coalesced)
+		owner      time.Duration // owner deadline after the tick; 0 = none
+		wantSource milestoneDeadlineSource
+		wantSlack  time.Duration
+	}{
+		{"business 10s: own budget binds", 10 * time.Second, 0, 0, milestoneDeadlineStageBudget, 40 * time.Second},
+		{"business 20s: tie keeps the earlier-listed source", 20 * time.Second, 0, 0, milestoneDeadlineStageBudget, 40 * time.Second},
+		{"business 30s: next tick binds, 30s left", 30 * time.Second, 0, 0, milestoneDeadlineNextTick, 30 * time.Second},
+		{"business 59s: 1s left", 59 * time.Second, 0, 0, milestoneDeadlineNextTick, 1 * time.Second},
+		{"business 60s: period consumed, no slack", 60 * time.Second, 0, 0, milestoneDeadlineNextTick, 0},
+		{"business 70s: overdue, negative slack, no fresh budget", 70 * time.Second, 0, 0, milestoneDeadlineNextTick, -10 * time.Second},
+		{"coalesced tick read two periods late", 5 * time.Second, 2 * period, 0, milestoneDeadlineNextTick, -65 * time.Second},
+		{"earlier owner deadline binds", 10 * time.Second, 0, 15 * time.Second, milestoneDeadlineOwner, 5 * time.Second},
+		{"later owner deadline does not", 10 * time.Second, 0, 5 * time.Minute, milestoneDeadlineStageBudget, 40 * time.Second},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			owner := context.Context(context.Background())
+			if tc.owner != 0 {
+				var stop context.CancelFunc
+				owner, stop = context.WithDeadline(context.Background(), tick.Add(tc.owner))
+				defer stop()
+			}
+			stageStart := tick.Add(tc.tickLate).Add(tc.business)
+			deadline, source := milestoneStageDeadline(owner, tick, period, stageStart)
+			if source != tc.wantSource {
+				t.Errorf("source = %q, want %q", source, tc.wantSource)
+			}
+			if got := deadline.Sub(stageStart); got != tc.wantSlack {
+				t.Errorf("slack = %v, want %v", got, tc.wantSlack)
+			}
+		})
+	}
+}
+
+// TestANoSlackCycleAdmitsNoDiagnosticRequest runs the real stage on a cycle
+// whose period is already consumed or overdue: zero dispatches, the target
+// that was due keeps its turn, and the record says the cycle was cut on TIME
+// by the next tick with nothing started.
+func TestANoSlackCycleAdmitsNoDiagnosticRequest(t *testing.T) {
+	for name, late := range map[string]time.Duration{
+		"period exactly consumed": 0,
+		"overdue by a period":     bonusPollInterval,
+		"overdue by many periods": 5 * bonusPollInterval,
+	} {
+		t.Run(name, func(t *testing.T) {
+			logs := captureLogs(t)
+			logins := milestoneLogins(t, 3)
+			rt := &milestoneRoundTripper{}
+			m, _ := newMilestoneMiner(t, rt, logins, logins)
+			logs.Reset()
+
+			// The serviced tick was due one full period (plus `late`) ago, as a
+			// business pass that ran that long would leave it.
+			cycle := milestoneCycle{Tick: time.Now().Add(-bonusPollInterval - late), Period: bonusPollInterval, Cursor: 1}
+			next := m.observeWatchStreakMilestones(context.Background(), cycle)
+
+			if got := rt.rewardTotal(); got != 0 {
+				t.Fatalf("a no-slack cycle dispatched %d RewardList request(s); want 0", got)
+			}
+			if next != 1 {
+				t.Errorf("cursor = %d, want 1: nothing started, so the due target keeps its turn", next)
+			}
+			if got := len(recordLines(logs.String(), milestoneObservationRecord)); got != 0 {
+				t.Errorf("%d observation record(s) for a cycle that observed nothing", got)
+			}
+			lines := recordLines(logs.String(), milestoneBudgetRecord)
+			if len(lines) != 1 {
+				t.Fatalf("budget records = %d, want 1; logs:\n%s", len(lines), logs.String())
+			}
+			for key, want := range map[string]string{
+				"cutoff": "TIME", "deadlineSource": "NEXT_TICK", "startedTargets": "0",
+				"unexaminedTargets": "3", "dispatchesSpent": "0", "dispatchesRemaining": "3",
+			} {
+				if got := attrValue(lines[0], key); got != want {
+					t.Errorf("%s = %q, want %q; line: %s", key, got, want, lines[0])
+				}
+			}
+			slack, err := strconv.Atoi(attrValue(lines[0], "slackMs"))
+			if err != nil || slack > 0 {
+				t.Errorf("slackMs = %q, want a non-positive integer", attrValue(lines[0], "slackMs"))
+			}
+		})
+	}
+
+	t.Run("nothing eligible: no record either", func(t *testing.T) {
+		logs := captureLogs(t)
+		logins := milestoneLogins(t, 2)
+		rt := &milestoneRoundTripper{}
+		m, _ := newMilestoneMiner(t, rt, logins, nil) // all offline
+		logs.Reset()
+		next := m.observeWatchStreakMilestones(context.Background(),
+			milestoneCycle{Tick: time.Now().Add(-2 * bonusPollInterval), Period: bonusPollInterval, Cursor: 1})
+		if got := len(recordLines(logs.String(), milestoneBudgetRecord)); got != 0 || rt.rewardTotal() != 0 || next != 1 {
+			t.Fatalf("budget records %d, dispatches %d, cursor %d; want 0/0/1", got, rt.rewardTotal(), next)
+		}
+	})
+}
+
+// TestACycleSpendsAtMostThreeDispatchesWhateverTheRosterSize is the D4 bound
+// under the worst realistic shape: every target answers PersistedQueryNotFound,
+// so a single target's complete client-ID traversal costs the whole allowance.
+// N=1, N=10 and N=100 all cost exactly three dispatches per cycle.
+func TestACycleSpendsAtMostThreeDispatchesWhateverTheRosterSize(t *testing.T) {
+	for _, n := range []int{1, 10, 100} {
+		t.Run(fmt.Sprintf("N=%d", n), func(t *testing.T) {
+			logs := captureLogs(t)
+			logins := milestoneLogins(t, n)
+			rt := &milestoneRoundTripper{rewardListBody: milestonePQNFBody}
+			m, streamers := newMilestoneMiner(t, rt, logins, logins)
+			logs.Reset()
+
+			next := m.observeWatchStreakMilestones(context.Background(), milestoneCycleNow(0))
+
+			if got := rt.rewardTotal(); got != milestoneCycleDispatchAllowance {
+				t.Fatalf("N=%d: RewardList dispatches = %d, want exactly %d for the whole cycle", n, got, milestoneCycleDispatchAllowance)
+			}
+			first := streamers[logins[0]].ChannelID
+			assertRewardSequence(t, rt, []string{first, first, first})
+
+			obs := recordLines(logs.String(), milestoneObservationRecord)
+			if len(obs) != 1 {
+				t.Fatalf("observation records = %d, want 1 (only the first target was started)", len(obs))
+			}
+			if got := attrValue(obs[0], "outcome"); got != string(twitch.MilestoneUnsupported) {
+				t.Errorf("outcome = %q, want UNSUPPORTED_QUERY: the traversal was COMPLETE, so the classification holds", got)
+			}
+			if got := attrValue(obs[0], "dispatches"); got != "3" {
+				t.Errorf("dispatches = %q, want 3", got)
+			}
+
+			budget := recordLines(logs.String(), milestoneBudgetRecord)
+			if n == 1 {
+				if len(budget) != 0 || next != 0 {
+					t.Fatalf("N=1: budget records %d, cursor %d; want none and a wrap to 0", len(budget), next)
+				}
+				return
+			}
+			if len(budget) != 1 {
+				t.Fatalf("budget records = %d, want 1", len(budget))
+			}
+			for key, want := range map[string]string{
+				"cutoff": "COUNT", "startedTargets": "1", "unexaminedTargets": strconv.Itoa(n - 1),
+				"dispatchesSpent": "3", "dispatchesRemaining": "0",
+			} {
+				if got := attrValue(budget[0], key); got != want {
+					t.Errorf("%s = %q, want %q", key, got, want)
+				}
+			}
+			if next != 1 {
+				t.Errorf("cursor = %d, want 1: the next cycle starts after the one target that was started", next)
+			}
+		})
+	}
+}
+
+// TestMixedOutcomesShareOneAllowance: a success, a target that needs a second
+// dispatch (client-ID fallback or a transient retry) and the target after them
+// all draw on the SAME three permits, so the third target is refused before
+// its first dispatch and keeps its turn.
+func TestMixedOutcomesShareOneAllowance(t *testing.T) {
+	cases := map[string]func(channelID string, n int) (int, string){
+		"success then APQ fallback success": func(_ string, n int) (int, string) {
+			if n == 2 {
+				return http.StatusOK, milestonePQNFBody // first candidate rejected; the fallback (n=3) succeeds
+			}
+			return 0, ""
+		},
+		"success then transient retry success": func(_ string, n int) (int, string) {
+			if n == 2 {
+				return http.StatusServiceUnavailable, "" // retried after one backoff; n=3 succeeds
+			}
+			return 0, ""
+		},
+	}
+	for name, respond := range cases {
+		t.Run(name, func(t *testing.T) {
+			logs := captureLogs(t)
+			logins := milestoneLogins(t, 5)
+			rt := &milestoneRoundTripper{rewardListRespond: respond}
+			m, streamers := newMilestoneMiner(t, rt, logins, logins)
+			logs.Reset()
+
+			next := m.observeWatchStreakMilestones(context.Background(), milestoneCycleNow(0))
+
+			ids := milestoneChannelIDs(streamers, logins...)
+			assertRewardSequence(t, rt, []string{ids[0], ids[1], ids[1]})
+			obs := recordLines(logs.String(), milestoneObservationRecord)
+			if len(obs) != 2 {
+				t.Fatalf("observation records = %d, want 2; logs:\n%s", len(obs), logs.String())
+			}
+			for i, want := range []string{"1", "2"} {
+				if got := attrValue(obs[i], "outcome"); got != string(twitch.MilestoneObserved) {
+					t.Errorf("record %d outcome = %q, want OBSERVED", i, got)
+				}
+				if got := attrValue(obs[i], "dispatches"); got != want {
+					t.Errorf("record %d dispatches = %q, want %s", i, got, want)
+				}
+			}
+			budget := recordLines(logs.String(), milestoneBudgetRecord)
+			if len(budget) != 1 {
+				t.Fatalf("budget records = %d, want 1", len(budget))
+			}
+			for key, want := range map[string]string{"cutoff": "COUNT", "startedTargets": "2", "unexaminedTargets": "3"} {
+				if got := attrValue(budget[0], key); got != want {
+					t.Errorf("%s = %q, want %q", key, got, want)
+				}
+			}
+			if next != 2 {
+				t.Errorf("cursor = %d, want 2: the refused third target keeps its turn", next)
+			}
+		})
+	}
+}
+
+// TestTheLastPermitCannotCauseAFourthDispatchOrARetryWait: a target that keeps
+// failing transiently spends the whole allowance on its retries, is reported
+// as UNAVAILABLE/ALLOWANCE_EXHAUSTED after its third dispatch WITHOUT sitting
+// out the third backoff, and the next target is refused on COUNT.
+func TestTheLastPermitCannotCauseAFourthDispatchOrARetryWait(t *testing.T) {
+	logs := captureLogs(t)
+	logins := milestoneLogins(t, 2)
+	rt := &milestoneRoundTripper{rewardListRespond: func(string, int) (int, string) {
+		return http.StatusServiceUnavailable, ""
+	}}
+	m, streamers := newMilestoneMiner(t, rt, logins, logins)
+	logs.Reset()
+
+	start := time.Now()
+	next := m.observeWatchStreakMilestones(context.Background(), milestoneCycleNow(0))
+	elapsed := time.Since(start)
+
+	first := streamers[logins[0]].ChannelID
+	assertRewardSequence(t, rt, []string{first, first, first})
+	// Two backoffs were paid (>= 500ms + 1000ms), the third (>= 2s) was not.
+	if elapsed < 1500*time.Millisecond {
+		t.Fatalf("stage took %v: the fixture did not retry, so the bound below is vacuous", elapsed)
+	}
+	if elapsed >= 3500*time.Millisecond {
+		t.Fatalf("stage took %v: it waited out a retry backoff after the last permit was spent", elapsed)
+	}
+	obs := recordLines(logs.String(), milestoneObservationRecord)
+	if len(obs) != 1 {
+		t.Fatalf("observation records = %d, want 1", len(obs))
+	}
+	if got := attrValue(obs[0], "failureClass"); got != string(twitch.MilestoneFailureAllowanceExhausted) {
+		t.Errorf("failureClass = %q, want ALLOWANCE_EXHAUSTED — not a transient transport failure", got)
+	}
+	if got := attrValue(obs[0], "dispatches"); got != "3" {
+		t.Errorf("dispatches = %q, want 3", got)
+	}
+	budget := recordLines(logs.String(), milestoneBudgetRecord)
+	if len(budget) != 1 || attrValue(budget[0], "cutoff") != "COUNT" || attrValue(budget[0], "unexaminedTargets") != "1" {
+		t.Fatalf("want one COUNT budget record with 1 unexamined target; got %v", budget)
+	}
+	if next != 1 {
+		t.Errorf("cursor = %d, want 1", next)
+	}
+}
+
+// TestCursorRotatesTheRosterAcrossCycles is the D2 proof over several cycles:
+// the cursor follows the last STARTED target, wraps, is normalized against the
+// current snapshot, skips ineligible entries without letting them move it, and
+// survives an empty, refilled, shrunk and remove/re-add roster.
+func TestCursorRotatesTheRosterAcrossCycles(t *testing.T) {
+	t.Run("wrap across partial cycles", func(t *testing.T) {
+		captureLogs(t)
+		logins := milestoneLogins(t, 5)
+		rt := &milestoneRoundTripper{}
+		m, streamers := newMilestoneMiner(t, rt, logins, logins)
+		ids := milestoneChannelIDs(streamers, logins...)
+
+		cursor := 0
+		cursor = m.observeWatchStreakMilestones(context.Background(), milestoneCycleNow(cursor))
+		if cursor != 3 {
+			t.Fatalf("cycle 1 cursor = %d, want 3", cursor)
+		}
+		cursor = m.observeWatchStreakMilestones(context.Background(), milestoneCycleNow(cursor))
+		if cursor != 1 {
+			t.Fatalf("cycle 2 cursor = %d, want 1 (wrapped)", cursor)
+		}
+		cursor = m.observeWatchStreakMilestones(context.Background(), milestoneCycleNow(cursor))
+		if cursor != 4 {
+			t.Fatalf("cycle 3 cursor = %d, want 4", cursor)
+		}
+		assertRewardSequence(t, rt, []string{ids[0], ids[1], ids[2], ids[3], ids[4], ids[0], ids[1], ids[2], ids[3]})
+		// Every target was visited at most once per cycle, and every eligible
+		// target was reached within two cycles.
+		_, per := rt.counts()
+		for _, id := range ids {
+			if per[id] == 0 {
+				t.Errorf("target %s was never reached across three cycles", id)
+			}
+		}
+	})
+
+	t.Run("full cycle wraps to zero without a budget record", func(t *testing.T) {
+		logs := captureLogs(t)
+		logins := milestoneLogins(t, 2)
+		rt := &milestoneRoundTripper{}
+		m, streamers := newMilestoneMiner(t, rt, logins, logins)
+		logs.Reset()
+		if next := m.observeWatchStreakMilestones(context.Background(), milestoneCycleNow(0)); next != 0 {
+			t.Fatalf("cursor = %d, want 0", next)
+		}
+		assertRewardSequence(t, rt, milestoneChannelIDs(streamers, logins...))
+		if got := len(recordLines(logs.String(), milestoneBudgetRecord)); got != 0 {
+			t.Errorf("a finished roster emitted %d budget record(s)", got)
+		}
+	})
+
+	t.Run("offline and ID-less entries are skipped and do not move the cursor", func(t *testing.T) {
+		captureLogs(t)
+		logins := milestoneLogins(t, 5)
+		rt := &milestoneRoundTripper{}
+		online := []string{logins[0], logins[2], logins[3], logins[4]}
+		m, streamers := newMilestoneMiner(t, rt, logins, online)
+		streamers[logins[3]].ChannelID = "" // online but unscoped
+		ids := milestoneChannelIDs(streamers, logins...)
+
+		// From 1: index 1 is offline, so the cycle is 2, 4 (3 has no ID), then
+		// wraps to 0 — three dispatches, cursor lands after 0.
+		if next := m.observeWatchStreakMilestones(context.Background(), milestoneCycleNow(1)); next != 1 {
+			t.Fatalf("cursor = %d, want 1", next)
+		}
+		assertRewardSequence(t, rt, []string{ids[2], ids[4], ids[0]})
+		_, per := rt.counts()
+		if per[ids[1]] != 0 {
+			t.Errorf("offline target %s was dispatched", ids[1])
+		}
+	})
+
+	t.Run("out-of-range and negative cursors are normalized", func(t *testing.T) {
+		captureLogs(t)
+		logins := milestoneLogins(t, 3)
+		rt := &milestoneRoundTripper{}
+		m, streamers := newMilestoneMiner(t, rt, logins, logins)
+		ids := milestoneChannelIDs(streamers, logins...)
+		if next := m.observeWatchStreakMilestones(context.Background(), milestoneCycleNow(7)); next != 1 {
+			t.Fatalf("cursor 7 over 3 targets: next = %d, want 1", next)
+		}
+		if next := m.observeWatchStreakMilestones(context.Background(), milestoneCycleNow(-1)); next != 2 {
+			t.Fatalf("cursor -1 over 3 targets: next = %d, want 2", next)
+		}
+		assertRewardSequence(t, rt, []string{ids[1], ids[2], ids[0], ids[2], ids[0], ids[1]})
+	})
+
+	t.Run("empty, refilled, shrunk, removed and re-added rosters", func(t *testing.T) {
+		logs := captureLogs(t)
+		rt := &milestoneRoundTripper{}
+		// LoadFromConfig refuses an empty roster, so seed one streamer and
+		// remove it through the same runtime path a settings change uses.
+		seed := milestoneLogins(t, 1)
+		m, _ := newMilestoneMiner(t, rt, seed, nil)
+		if _, removed, _, _ := m.streamers.ApplySettings(nil, m.config.StreamerSettings); len(removed) != 1 || len(m.streamers.All()) != 0 {
+			t.Fatalf("could not empty the roster: removed %d, remaining %d", len(removed), len(m.streamers.All()))
+		}
+		logs.Reset()
+
+		// Empty: nothing to do, cursor resets to 0, no record.
+		if next := m.observeWatchStreakMilestones(context.Background(), milestoneCycleNow(4)); next != 0 {
+			t.Fatalf("empty roster: next = %d, want 0", next)
+		}
+		if rt.rewardTotal() != 0 || len(recordLines(logs.String(), milestoneBudgetRecord)) != 0 {
+			t.Fatalf("empty roster dispatched or recorded something")
+		}
+
+		// Refill with five, all online.
+		logins := milestoneLogins(t, 5)
+		apply := func(keep ...string) map[string]*models.Streamer {
+			t.Helper()
+			var configs []config.StreamerConfig
+			for _, login := range keep {
+				configs = append(configs, config.StreamerConfig{Username: login})
+			}
+			added, _, _, _ := m.streamers.ApplySettings(configs, m.config.StreamerSettings)
+			for _, s := range added {
+				s.SetConfirmedOnline()
+			}
+			out := map[string]*models.Streamer{}
+			for _, s := range m.streamers.All() {
+				if s.ChannelID == "" {
+					t.Fatalf("streamer %s has no channel ID after ApplySettings", s.GetUsername())
+				}
+				out[s.GetUsername()] = s
+			}
+			return out
+		}
+		streamers := apply(logins...)
+		roster := func() []string {
+			var out []string
+			for _, s := range m.streamers.All() {
+				out = append(out, s.ChannelID)
+			}
+			return out
+		}
+		ids := roster()
+		if len(ids) != 5 {
+			t.Fatalf("roster = %d, want 5", len(ids))
+		}
+		cursor := m.observeWatchStreakMilestones(context.Background(), milestoneCycleNow(0))
+		if cursor != 3 {
+			t.Fatalf("refilled roster: cursor = %d, want 3", cursor)
+		}
+		assertRewardSequence(t, rt, []string{ids[0], ids[1], ids[2]})
+
+		// Shrink to two while the cursor says 3: normalized to 3 % 2 = 1, so
+		// index 1 is served first, then index 0, and the cursor lands after 0.
+		streamers = apply(logins[0], logins[1])
+		ids = roster()
+		cursor = m.observeWatchStreakMilestones(context.Background(), milestoneCycleNow(cursor))
+		if cursor != 1 {
+			t.Fatalf("shrunk roster: cursor = %d, want 1", cursor)
+		}
+		assertRewardSequence(t, rt, append(rt.rewardSequence()[:3], ids[1], ids[0]))
+
+		// Remove one entry BEFORE the cursor position and re-add another: the
+		// cursor is a position in the snapshot, not a streamer, so the entry
+		// that slides into the position is served and the one that slid past
+		// it waits one cycle. That is the documented cost of owning no
+		// per-streamer state.
+		_ = streamers
+		apply(logins[0], logins[1], logins[2], logins[3])
+		ids = roster()
+		cursor = 2                             // logins[2] is due next
+		apply(logins[1], logins[2], logins[3]) // remove logins[0], before the cursor
+		ids = roster()
+		before := rt.rewardTotal()
+		cursor = m.observeWatchStreakMilestones(context.Background(), milestoneCycleNow(cursor))
+		seq := rt.rewardSequence()[before:]
+		// Snapshot is [1, 2, 3]; position 2 is logins[3], then wrap to 1, 2.
+		if !reflect.DeepEqual(seq, []string{ids[2], ids[0], ids[1]}) {
+			t.Fatalf("after removal before the cursor: order = %v, want %v", seq, []string{ids[2], ids[0], ids[1]})
+		}
+		if cursor != 2 {
+			t.Fatalf("cursor after a full wrap = %d, want 2", cursor)
+		}
+
+		// Re-add logins[0]: it lands at the end of the snapshot and is reached
+		// in roster order like any other entry; no stale pointer is involved.
+		apply(logins[1], logins[2], logins[3], logins[0])
+		ids = roster()
+		before = rt.rewardTotal()
+		cursor = m.observeWatchStreakMilestones(context.Background(), milestoneCycleNow(cursor))
+		seq = rt.rewardSequence()[before:]
+		if !reflect.DeepEqual(seq, []string{ids[2], ids[3], ids[0]}) {
+			t.Fatalf("after re-add: order = %v, want %v", seq, []string{ids[2], ids[3], ids[0]})
+		}
+		if cursor != 1 {
+			t.Fatalf("cursor = %d, want 1", cursor)
+		}
+	})
+}
+
+// TestASlowFirstTargetCannotMonopolizeTheRoster: without a cursor, a first
+// target that alone consumes the stage's time would be the ONLY target ever
+// observed. With it, the next cycle starts after that target.
+func TestASlowFirstTargetCannotMonopolizeTheRoster(t *testing.T) {
+	previousBudget := milestoneObservationCycleBudget
+	milestoneObservationCycleBudget = 50 * time.Millisecond
+	t.Cleanup(func() { milestoneObservationCycleBudget = previousBudget })
+
+	captureLogs(t)
+	logins := milestoneLogins(t, 3)
+	rt := &milestoneRoundTripper{}
+	m, streamers := newMilestoneMiner(t, rt, logins, logins)
+	ids := milestoneChannelIDs(streamers, logins...)
+	rt.mu.Lock()
+	rt.rewardListRespond = func(channelID string, _ int) (int, string) {
+		if channelID == ids[0] {
+			time.Sleep(120 * time.Millisecond) // longer than the whole stage budget
+		}
+		return 0, ""
+	}
+	rt.mu.Unlock()
+
+	cursor := m.observeWatchStreakMilestones(context.Background(), milestoneCycleNow(0))
+	if cursor != 1 {
+		t.Fatalf("cycle 1 cursor = %d, want 1: the slow target was started, so the cursor moves past it", cursor)
+	}
+	assertRewardSequence(t, rt, []string{ids[0]})
+
+	cursor = m.observeWatchStreakMilestones(context.Background(), milestoneCycleNow(cursor))
+	seq := rt.rewardSequence()
+	if len(seq) < 3 || seq[1] != ids[1] || seq[2] != ids[2] {
+		t.Fatalf("cycle 2 did not start after the slow target: order = %v", seq)
+	}
+	if cursor != 1 {
+		t.Fatalf("cycle 2 cursor = %d, want 1 (targets 1, 2 and the slow 0 were all started)", cursor)
+	}
+}
+
+// TestCancellationStopsAdmissionsMidBackoffAndMidRequest: an owner cancelled
+// while the stage is inside a retry backoff, or inside an in-flight request,
+// makes no further dispatch, records the started target as CANCELLED, emits no
+// budget record (shutdown is silent) and leaves the cursor after the target
+// that was started.
+func TestCancellationStopsAdmissionsMidBackoffAndMidRequest(t *testing.T) {
+	t.Run("during the retry backoff", func(t *testing.T) {
+		logs := captureLogs(t)
+		logins := milestoneLogins(t, 3)
+		owner, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		rt := &milestoneRoundTripper{rewardListRespond: func(string, int) (int, string) {
+			return http.StatusServiceUnavailable, "" // transient: the client wants to back off
+		}}
+		rt.onRewardList = func(n int) {
+			if n == 1 {
+				cancel() // the owner goes away while the first answer is being returned
+			}
+		}
+		m, streamers := newMilestoneMiner(t, rt, logins, logins)
+		logs.Reset()
+
+		start := time.Now()
+		next := m.observeWatchStreakMilestones(owner, milestoneCycleNow(0))
+		elapsed := time.Since(start)
+
+		assertRewardSequence(t, rt, []string{streamers[logins[0]].ChannelID})
+		if elapsed >= 500*time.Millisecond {
+			t.Errorf("stage took %v after cancellation: it sat out a retry backoff", elapsed)
+		}
+		obs := recordLines(logs.String(), milestoneObservationRecord)
+		if len(obs) != 1 || attrValue(obs[0], "outcome") != string(twitch.MilestoneCancelled) || attrValue(obs[0], "dispatches") != "1" {
+			t.Fatalf("want one CANCELLED observation with dispatches=1; got %v", obs)
+		}
+		if got := len(recordLines(logs.String(), milestoneBudgetRecord)); got != 0 {
+			t.Errorf("owner shutdown emitted %d budget record(s)", got)
+		}
+		if next != 1 {
+			t.Errorf("cursor = %d, want 1", next)
+		}
+	})
+
+	t.Run("during an in-flight request", func(t *testing.T) {
+		logs := captureLogs(t)
+		logins := milestoneLogins(t, 3)
+		m, streamers := newMilestoneMiner(t, &milestoneRoundTripper{}, logins, logins)
+		stall := newStallingTransport()
+		previousTransport := http.DefaultTransport
+		http.DefaultTransport = stall
+		t.Cleanup(func() { http.DefaultTransport = previousTransport })
+		owner, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		go func() {
+			// Wait for the first request to be in flight, then pull the owner.
+			deadline := time.Now().Add(5 * time.Second)
+			for stall.requests() == 0 && time.Now().Before(deadline) {
+				time.Sleep(time.Millisecond)
+			}
+			cancel()
+		}()
+		logs.Reset()
+
+		next := m.observeWatchStreakMilestones(owner, milestoneCycleNow(0))
+
+		if got := stall.requests(); got != 1 {
+			t.Fatalf("requests = %d, want exactly 1: cancellation must stop every further admission", got)
+		}
+		obs := recordLines(logs.String(), milestoneObservationRecord)
+		if len(obs) != 1 || attrValue(obs[0], "outcome") != string(twitch.MilestoneCancelled) {
+			t.Fatalf("want one CANCELLED observation; got %v", obs)
+		}
+		if got := attrValue(obs[0], "channelId"); got != streamers[logins[0]].ChannelID {
+			t.Errorf("the cancelled observation names %q, want the first target", got)
+		}
+		if got := len(recordLines(logs.String(), milestoneBudgetRecord)); got != 0 {
+			t.Errorf("owner shutdown emitted %d budget record(s)", got)
+		}
+		if next != 1 {
+			t.Errorf("cursor = %d, want 1", next)
+		}
+	})
+}
+
+// TestBudgetRecordDistinguishesTimeFromCountAndExaminedFromUnexamined pins the
+// record's fields for each way a cycle can stop short.
+func TestBudgetRecordDistinguishesTimeFromCountAndExaminedFromUnexamined(t *testing.T) {
+	t.Run("COUNT under the stage budget", func(t *testing.T) {
+		logs := captureLogs(t)
+		logins := milestoneLogins(t, 5)
+		rt := &milestoneRoundTripper{}
+		m, _ := newMilestoneMiner(t, rt, logins, logins)
+		logs.Reset()
+		m.observeWatchStreakMilestones(context.Background(), milestoneCycleNow(0))
+
+		for _, line := range recordLines(logs.String(), milestoneObservationRecord) {
+			if got := attrValue(line, "dispatches"); got != "1" {
+				t.Errorf("observation dispatches = %q, want 1", got)
+			}
+		}
+		lines := recordLines(logs.String(), milestoneBudgetRecord)
+		if len(lines) != 1 {
+			t.Fatalf("budget records = %d, want 1", len(lines))
+		}
+		for key, want := range map[string]string{
+			"cutoff": "COUNT", "deadlineSource": "STAGE_BUDGET", "startedTargets": "3", "unexaminedTargets": "2",
+			"dispatchesSpent": "3", "dispatchesRemaining": "0", "dispatchAllowance": "3", "cycleBudgetSeconds": "40",
+		} {
+			if got := attrValue(lines[0], key); got != want {
+				t.Errorf("%s = %q, want %q; line: %s", key, got, want, lines[0])
+			}
+		}
+		if slack, err := strconv.Atoi(attrValue(lines[0], "slackMs")); err != nil || slack <= 0 || slack > 40_000 {
+			t.Errorf("slackMs = %q, want a positive value up to the 40s budget", attrValue(lines[0], "slackMs"))
+		}
+		if got := attrValue(lines[0], "level"); got != "DEBUG" {
+			t.Errorf("level = %q, want DEBUG", got)
+		}
+		for _, forbidden := range logins {
+			if strings.Contains(lines[0], forbidden) {
+				t.Errorf("budget record names a streamer: %s", lines[0])
+			}
+		}
+	})
+
+	t.Run("TIME under the stage budget", func(t *testing.T) {
+		previousBudget := milestoneObservationCycleBudget
+		milestoneObservationCycleBudget = 50 * time.Millisecond
+		t.Cleanup(func() { milestoneObservationCycleBudget = previousBudget })
+		logs := captureLogs(t)
+		logins := milestoneLogins(t, 4)
+		rt := &milestoneRoundTripper{}
+		rt.onRewardList = func(int) { time.Sleep(120 * time.Millisecond) }
+		m, _ := newMilestoneMiner(t, rt, logins, logins)
+		logs.Reset()
+		m.observeWatchStreakMilestones(context.Background(), milestoneCycleNow(0))
+
+		lines := recordLines(logs.String(), milestoneBudgetRecord)
+		if len(lines) != 1 {
+			t.Fatalf("budget records = %d, want 1", len(lines))
+		}
+		for key, want := range map[string]string{
+			"cutoff": "TIME", "deadlineSource": "STAGE_BUDGET", "startedTargets": "1", "unexaminedTargets": "3",
+			"dispatchesSpent": "1", "dispatchesRemaining": "2",
+		} {
+			if got := attrValue(lines[0], key); got != want {
+				t.Errorf("%s = %q, want %q; line: %s", key, got, want, lines[0])
+			}
+		}
+	})
+
+	t.Run("COUNT under an earlier owner deadline names the owner", func(t *testing.T) {
+		logs := captureLogs(t)
+		logins := milestoneLogins(t, 5)
+		rt := &milestoneRoundTripper{}
+		m, _ := newMilestoneMiner(t, rt, logins, logins)
+		owner, stop := context.WithTimeout(context.Background(), 10*time.Second)
+		defer stop()
+		logs.Reset()
+		m.observeWatchStreakMilestones(owner, milestoneCycleNow(0))
+
+		lines := recordLines(logs.String(), milestoneBudgetRecord)
+		if len(lines) != 1 {
+			t.Fatalf("budget records = %d, want 1", len(lines))
+		}
+		if got := attrValue(lines[0], "deadlineSource"); got != "OWNER" {
+			t.Errorf("deadlineSource = %q, want OWNER", got)
+		}
+		if slack, err := strconv.Atoi(attrValue(lines[0], "slackMs")); err != nil || slack <= 0 || slack > 10_000 {
+			t.Errorf("slackMs = %q, want a positive value up to the owner's 10s", attrValue(lines[0], "slackMs"))
+		}
+	})
+
+	t.Run("TIME under the next tick", func(t *testing.T) {
+		logs := captureLogs(t)
+		logins := milestoneLogins(t, 4)
+		rt := &milestoneRoundTripper{}
+		rt.onRewardList = func(int) { time.Sleep(120 * time.Millisecond) }
+		m, _ := newMilestoneMiner(t, rt, logins, logins)
+		logs.Reset()
+		// The business pass left 50ms of the period.
+		cycle := milestoneCycle{Tick: time.Now().Add(-bonusPollInterval + 50*time.Millisecond), Period: bonusPollInterval}
+		m.observeWatchStreakMilestones(context.Background(), cycle)
+
+		lines := recordLines(logs.String(), milestoneBudgetRecord)
+		if len(lines) != 1 {
+			t.Fatalf("budget records = %d, want 1", len(lines))
+		}
+		for key, want := range map[string]string{"cutoff": "TIME", "deadlineSource": "NEXT_TICK", "startedTargets": "1", "unexaminedTargets": "3"} {
+			if got := attrValue(lines[0], key); got != want {
+				t.Errorf("%s = %q, want %q; line: %s", key, got, want, lines[0])
+			}
+		}
+	})
+}
+
+// TestBonusPollLoopCarriesTheCursorAcrossCycles proves the ONE cursor lives on
+// the loop and is threaded from one serviced tick to the next: over two ticks
+// a five-target roster is walked 0,1,2 then 3,4,0.
+func TestBonusPollLoopCarriesTheCursorAcrossCycles(t *testing.T) {
+	logs := captureLogs(t)
+	logins := milestoneLogins(t, 5)
+	rt := &milestoneRoundTripper{}
+	m, streamers := newMilestoneMiner(t, rt, logins, logins)
+	ids := milestoneChannelIDs(streamers, logins...)
+
+	previousInterval := bonusPollInterval
+	bonusPollInterval = 500 * time.Millisecond
+	t.Cleanup(func() { bonusPollInterval = previousInterval })
+
+	seenSix := make(chan struct{})
+	var once sync.Once
+	rt.mu.Lock()
+	rt.onRewardList = func(n int) {
+		if n >= 6 {
+			once.Do(func() { close(seenSix) })
+		}
+	}
+	rt.mu.Unlock()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		m.bonusPollLoop(ctx)
+	}()
+	select {
+	case <-seenSix:
+	case <-time.After(30 * time.Second):
+		cancel()
+		<-done
+		t.Fatalf("the loop did not reach six RewardList dispatches within 30s; logs:\n%s", logs.String())
+	}
+	cancel()
+	<-done
+
+	seq := rt.rewardSequence()[:6]
+	if want := []string{ids[0], ids[1], ids[2], ids[3], ids[4], ids[0]}; !reflect.DeepEqual(seq, want) {
+		t.Fatalf("dispatch order across two ticks = %v, want %v", seq, want)
+	}
+}
+
+// TestCursorFollowsTheLastStartedTargetWhateverItsOutcome: the cursor moves
+// past a started target on a FAILED outcome exactly as on a success, including
+// when that target is the last one the cycle touched and nothing was refused
+// after it. Otherwise a roster whose last entry keeps failing would be
+// re-examined first every cycle.
+func TestCursorFollowsTheLastStartedTargetWhateverItsOutcome(t *testing.T) {
+	cases := map[string]func(string, int) (int, string){
+		"HTTP status refusal": func(_ string, n int) (int, string) {
+			if n == 3 {
+				return http.StatusNotFound, `{"error":"Not Found"}`
+			}
+			return 0, ""
+		},
+		"APQ traversal cut by the allowance": func(_ string, n int) (int, string) {
+			if n == 3 {
+				return http.StatusOK, milestonePQNFBody // the last permit; the traversal cannot complete
+			}
+			return 0, ""
+		},
+	}
+	for name, respond := range cases {
+		t.Run(name, func(t *testing.T) {
+			logs := captureLogs(t)
+			logins := milestoneLogins(t, 3)
+			rt := &milestoneRoundTripper{rewardListRespond: respond}
+			m, streamers := newMilestoneMiner(t, rt, logins, logins)
+			ids := milestoneChannelIDs(streamers, logins...)
+			logs.Reset()
+
+			next := m.observeWatchStreakMilestones(context.Background(), milestoneCycleNow(0))
+			assertRewardSequence(t, rt, []string{ids[0], ids[1], ids[2]})
+			obs := recordLines(logs.String(), milestoneObservationRecord)
+			if len(obs) != 3 || attrValue(obs[2], "outcome") == string(twitch.MilestoneObserved) {
+				t.Fatalf("want three observations with the last one failed; got %d: %v", len(obs), obs)
+			}
+			if next != 0 {
+				t.Fatalf("cursor = %d, want 0: the failed last target was STARTED, so the cursor wraps past it", next)
+			}
+			// And the next cycle really starts at the beginning again.
+			m.observeWatchStreakMilestones(context.Background(), milestoneCycleNow(next))
+			assertRewardSequence(t, rt, []string{ids[0], ids[1], ids[2], ids[0], ids[1], ids[2]})
+		})
+	}
 }

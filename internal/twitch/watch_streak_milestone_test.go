@@ -430,7 +430,7 @@ func TestDiagnosticReadDoesNotRotateTheSharedClientIDDefault(t *testing.T) {
 			})
 
 			before := c.ActiveClientID()
-			_ = c.ObserveWatchStreakMilestone(context.Background(), "12345", "somestreamer")
+			_ = c.ObserveWatchStreakMilestone(context.Background(), "12345", "somestreamer", nil)
 
 			if got := c.ActiveClientID(); got != before {
 				t.Errorf("a diagnostic read rotated the shared client-ID default from %q to %q; "+
@@ -499,7 +499,7 @@ func TestObservationFailsClosedOnAMalformedErrorsNode(t *testing.T) {
 				_, _ = io.WriteString(w, body)
 			})
 
-			obs := c.ObserveWatchStreakMilestone(context.Background(), "12345", "somestreamer")
+			obs := c.ObserveWatchStreakMilestone(context.Background(), "12345", "somestreamer", nil)
 			// "not OBSERVED" is too weak to pin anything: every failure class
 			// in this file satisfies it, so the branch could report any of them
 			// and this test would stay green. MALFORMED_ERRORS_NODE had ZERO
@@ -521,7 +521,7 @@ func TestObservationFailsClosedOnAMalformedErrorsNode(t *testing.T) {
 		_, _ = io.WriteString(w,
 			`{"errors":[],"data":{"channel":{"id":"12345","self":{"watchStreakMilestone":null}}}}`)
 	})
-	if obs := c.ObserveWatchStreakMilestone(context.Background(), "12345", "x"); obs.Outcome != MilestoneObserved {
+	if obs := c.ObserveWatchStreakMilestone(context.Background(), "12345", "x", nil); obs.Outcome != MilestoneObserved {
 		t.Errorf("an empty errors array made the observation %q; an empty array reports no error",
 			obs.Outcome)
 	}
@@ -545,7 +545,7 @@ func TestObservationRequiresAnHTTPSuccessStatus(t *testing.T) {
 					`{"data":{"channel":{"id":"12345","self":{"watchStreakMilestone":{"watchStreakMilestone":{"value":"9"}}}}}}`)
 			})
 
-			obs := c.ObserveWatchStreakMilestone(context.Background(), "12345", "somestreamer")
+			obs := c.ObserveWatchStreakMilestone(context.Background(), "12345", "somestreamer", nil)
 			if obs.Outcome == MilestoneObserved {
 				t.Fatalf("HTTP %d carrying a data-shaped body was recorded as OBSERVED; "+
 					"a refused request became evidence", status)
@@ -572,7 +572,7 @@ func TestDiagnosticRetryTraceCarriesNoRawErrorText(t *testing.T) {
 		w.WriteHeader(http.StatusInternalServerError)
 		_, _ = io.WriteString(w, `{"message":"boom"}`)
 	})
-	_ = c.ObserveWatchStreakMilestone(context.Background(), "12345", "somestreamer")
+	_ = c.ObserveWatchStreakMilestone(context.Background(), "12345", "somestreamer", nil)
 
 	for _, line := range strings.Split(logs.String(), "\n") {
 		if !strings.Contains(line, retryMsg) {
@@ -672,7 +672,7 @@ func TestDiagnosticResponseBodyIsCapped(t *testing.T) {
 				_, _ = io.WriteString(w, body)
 			})
 
-			obs := c.ObserveWatchStreakMilestone(context.Background(), "12345", "somestreamer")
+			obs := c.ObserveWatchStreakMilestone(context.Background(), "12345", "somestreamer", nil)
 
 			if obs.Outcome == MilestoneObserved {
 				t.Fatalf("a %d-byte body (limit %d) was recorded as OBSERVED; a diagnostic read "+
@@ -1078,7 +1078,7 @@ func TestObserveWatchStreakMilestoneSendsAuditedRequest(t *testing.T) {
 			`"watchStreakMilestone":{"id":"m-1","value":4,"achievementTimestamp":"2026-09-05T12:00:00Z","shareStatus":"UNSHARED"}}}}}}`)
 	})
 
-	obs := c.ObserveWatchStreakMilestone(context.Background(), "12345", "somestreamer")
+	obs := c.ObserveWatchStreakMilestone(context.Background(), "12345", "somestreamer", nil)
 
 	if obs.Outcome != MilestoneObserved {
 		t.Fatalf("outcome = %q, want OBSERVED (failure %q)", obs.Outcome, obs.FailureClass)
@@ -1129,7 +1129,7 @@ func TestObserveWatchStreakMilestoneTopLevelGraphQLError(t *testing.T) {
 			`"data":{"channel":{"id":"12345","self":{"watchStreakMilestone":{"watchStreakMilestone":{"value":450}}}}}}`)
 	})
 
-	obs := c.ObserveWatchStreakMilestone(context.Background(), "12345", "somestreamer")
+	obs := c.ObserveWatchStreakMilestone(context.Background(), "12345", "somestreamer", nil)
 
 	if obs.Outcome != MilestoneGraphQLError || obs.FailureClass != MilestoneFailureGraphQLTopLevel {
 		t.Fatalf("outcome = %q/%q, want GRAPHQL_ERROR/GRAPHQL_TOP_LEVEL_ERRORS", obs.Outcome, obs.FailureClass)
@@ -1155,7 +1155,7 @@ func TestObserveWatchStreakMilestoneUnsupportedQuery(t *testing.T) {
 		_, _ = io.WriteString(w, persistedQueryNotFoundBody)
 	})
 
-	obs := c.ObserveWatchStreakMilestone(context.Background(), "12345", "somestreamer")
+	obs := c.ObserveWatchStreakMilestone(context.Background(), "12345", "somestreamer", nil)
 
 	if obs.Outcome != MilestoneUnsupported || obs.FailureClass != MilestoneFailureQueryNotFound {
 		t.Fatalf("outcome = %q/%q, want UNSUPPORTED_QUERY/PERSISTED_QUERY_NOT_FOUND", obs.Outcome, obs.FailureClass)
@@ -1192,7 +1192,7 @@ func TestObserveWatchStreakMilestoneSingleRequestOnSuccess(t *testing.T) {
 			`"watchStreakMilestone":{"value":4}}}}}}`)
 	})
 
-	if obs := c.ObserveWatchStreakMilestone(context.Background(), "12345", "somestreamer"); obs.Outcome != MilestoneObserved {
+	if obs := c.ObserveWatchStreakMilestone(context.Background(), "12345", "somestreamer", nil); obs.Outcome != MilestoneObserved {
 		t.Fatalf("outcome = %q, want OBSERVED", obs.Outcome)
 	}
 	mu.Lock()
@@ -1243,7 +1243,7 @@ func TestObserveWatchStreakMilestoneRequestFailure(t *testing.T) {
 				_, _ = io.WriteString(w, `{"message":"rejected"}`)
 			})
 
-			obs := c.ObserveWatchStreakMilestone(context.Background(), "12345", "somestreamer")
+			obs := c.ObserveWatchStreakMilestone(context.Background(), "12345", "somestreamer", nil)
 
 			if obs.Outcome != MilestoneUnavailable || obs.FailureClass != tc.wantClass {
 				t.Fatalf("outcome = %q/%q, want UNAVAILABLE/%s", obs.Outcome, obs.FailureClass, tc.wantClass)
@@ -1263,7 +1263,7 @@ func TestObserveWatchStreakMilestoneNoChannelIDSkips(t *testing.T) {
 		_, _ = io.WriteString(w, `{"data":{}}`)
 	})
 
-	obs := c.ObserveWatchStreakMilestone(context.Background(), "", "somestreamer")
+	obs := c.ObserveWatchStreakMilestone(context.Background(), "", "somestreamer", nil)
 
 	if obs.Outcome != MilestoneSkipped || obs.FailureClass != MilestoneFailureNoChannelID {
 		t.Fatalf("outcome = %q/%q, want SKIPPED/NO_CHANNEL_ID", obs.Outcome, obs.FailureClass)
@@ -1285,7 +1285,7 @@ func TestObserveWatchStreakMilestoneAlreadyCancelledSendsNothing(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	obs := c.ObserveWatchStreakMilestone(ctx, "12345", "somestreamer")
+	obs := c.ObserveWatchStreakMilestone(ctx, "12345", "somestreamer", nil)
 
 	if obs.Outcome != MilestoneSkipped || obs.FailureClass != MilestoneFailureContextDone {
 		t.Fatalf("outcome = %q/%q, want SKIPPED/CONTEXT_ALREADY_DONE", obs.Outcome, obs.FailureClass)
@@ -1321,7 +1321,7 @@ func TestObserveWatchStreakMilestoneCancellationReleasesInFlightRequest(t *testi
 		cancel()
 	}()
 
-	obs := c.ObserveWatchStreakMilestone(ctx, "12345", "somestreamer")
+	obs := c.ObserveWatchStreakMilestone(ctx, "12345", "somestreamer", nil)
 	close(release) // let the (still-blocked) handler finish so the server can close
 
 	if obs.Outcome != MilestoneCancelled || obs.FailureClass != MilestoneFailureCancelled {
@@ -1368,11 +1368,11 @@ func TestObserveWatchStreakMilestoneOrderingIsByRequestStart(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		older = c.ObserveWatchStreakMilestone(context.Background(), "12345", "somestreamer")
+		older = c.ObserveWatchStreakMilestone(context.Background(), "12345", "somestreamer", nil)
 	}()
 
 	<-entered // the older request is in flight and pinned
-	newer := c.ObserveWatchStreakMilestone(context.Background(), "12345", "somestreamer")
+	newer := c.ObserveWatchStreakMilestone(context.Background(), "12345", "somestreamer", nil)
 	close(release)
 	<-done
 
@@ -1407,8 +1407,8 @@ func TestObserveWatchStreakMilestoneRepeatedIdenticalValuesStayDistinct(t *testi
 			`"watchStreakMilestone":{"id":"m-1","value":4,"achievementTimestamp":"2026-09-05T12:00:00Z"}}}}}}`)
 	})
 
-	first := c.ObserveWatchStreakMilestone(context.Background(), "12345", "somestreamer")
-	second := c.ObserveWatchStreakMilestone(context.Background(), "12345", "somestreamer")
+	first := c.ObserveWatchStreakMilestone(context.Background(), "12345", "somestreamer", nil)
+	second := c.ObserveWatchStreakMilestone(context.Background(), "12345", "somestreamer", nil)
 
 	if !reflect.DeepEqual(first.Snapshot, second.Snapshot) {
 		t.Fatalf("fixture did not produce identical content:\n%+v\n%+v", first.Snapshot, second.Snapshot)
@@ -1477,7 +1477,7 @@ func TestObserveWatchStreakMilestoneDoesNotTouchConnectionHealth(t *testing.T) {
 			// Several cycles' worth of targets: more than enough to cross the
 			// miner's degrade threshold if any of this were being counted.
 			for i := 0; i < 6; i++ {
-				if got := c.ObserveWatchStreakMilestone(context.Background(), "12345", "somestreamer"); got.Outcome != tc.want {
+				if got := c.ObserveWatchStreakMilestone(context.Background(), "12345", "somestreamer", nil); got.Outcome != tc.want {
 					t.Fatalf("observation %d outcome = %q, want %q (failure %q)", i, got.Outcome, tc.want, got.FailureClass)
 				}
 			}
@@ -1515,7 +1515,7 @@ func TestBusinessReadStillAccountsConnectionHealth(t *testing.T) {
 	})
 
 	// A diagnostic observation first: it must leave the accounting untouched.
-	c.ObserveWatchStreakMilestone(context.Background(), "12345", "somestreamer")
+	c.ObserveWatchStreakMilestone(context.Background(), "12345", "somestreamer", nil)
 	if h := c.ConnHealth(time.Now(), time.Hour); h.RecentFunctionalFailures != 0 || !h.LastAttempt.IsZero() {
 		t.Fatalf("diagnostic observation polluted the accounting: %+v", h)
 	}
@@ -1564,7 +1564,7 @@ func TestObserveWatchStreakMilestoneUnauthorizedDoesNotEscalate(t *testing.T) {
 	escalated := false
 	c.SetAuthErrorHandler(func() { escalated = true })
 
-	obs := c.ObserveWatchStreakMilestone(context.Background(), "12345", "somestreamer")
+	obs := c.ObserveWatchStreakMilestone(context.Background(), "12345", "somestreamer", nil)
 
 	if obs.Outcome != MilestoneUnavailable || obs.FailureClass != MilestoneFailureUnauthorized {
 		t.Fatalf("outcome = %q/%q, want UNAVAILABLE/UNAUTHORIZED", obs.Outcome, obs.FailureClass)
@@ -1668,7 +1668,7 @@ func TestObserveWatchStreakMilestoneCancelledThroughADerivedTimeoutContext(t *te
 	deadlined, stop := context.WithTimeout(ctx, time.Hour)
 	defer stop()
 
-	obs := c.ObserveWatchStreakMilestone(deadlined, "12345", "somestreamer")
+	obs := c.ObserveWatchStreakMilestone(deadlined, "12345", "somestreamer", nil)
 	close(release)
 
 	if obs.Outcome != MilestoneCancelled {
@@ -1700,7 +1700,7 @@ func TestObserveWatchStreakMilestoneExpiredDeadlineIsSkippedNotSent(t *testing.T
 		t.Fatalf("fixture context error = %v, want DeadlineExceeded", ctx.Err())
 	}
 
-	obs := c.ObserveWatchStreakMilestone(ctx, "12345", "somestreamer")
+	obs := c.ObserveWatchStreakMilestone(ctx, "12345", "somestreamer", nil)
 
 	if obs.Outcome != MilestoneSkipped || obs.FailureClass != MilestoneFailureContextDone {
 		t.Fatalf("outcome = %q/%q, want SKIPPED/CONTEXT_ALREADY_DONE", obs.Outcome, obs.FailureClass)
@@ -1714,12 +1714,13 @@ func TestObserveWatchStreakMilestoneExpiredDeadlineIsSkippedNotSent(t *testing.T
 // reaches a record as a bounded class, never as raw error text.
 func TestClassifyMilestoneRequestErrorVocabularyIsClosed(t *testing.T) {
 	allowed := map[MilestoneFailureClass]bool{
-		MilestoneFailureCancelled:        true,
-		MilestoneFailureDeadline:         true,
-		MilestoneFailureQueryNotFound:    true,
-		MilestoneFailureUnauthorized:     true,
-		MilestoneFailureTransport:        true,
-		MilestoneFailureTransportTimeout: true,
+		MilestoneFailureCancelled:          true,
+		MilestoneFailureDeadline:           true,
+		MilestoneFailureQueryNotFound:      true,
+		MilestoneFailureUnauthorized:       true,
+		MilestoneFailureTransport:          true,
+		MilestoneFailureTransportTimeout:   true,
+		MilestoneFailureAllowanceExhausted: true,
 	}
 	secret := "OAuth super-secret-token Authorization: Bearer abc"
 	tests := []error{
@@ -1727,6 +1728,7 @@ func TestClassifyMilestoneRequestErrorVocabularyIsClosed(t *testing.T) {
 		context.DeadlineExceeded,
 		fmt.Errorf("wrapped: %w", ErrPersistedQueryNotFound),
 		fmt.Errorf("wrapped: %w", ErrUnauthorized),
+		fmt.Errorf("wrapped: %w", errDiagnosticAllowanceExhausted),
 		errors.New(secret),
 		fmt.Errorf("request failed: %s", secret),
 	}
@@ -1875,7 +1877,7 @@ func TestObserveWatchStreakMilestoneNonGraphQLBodyIsUnavailable(t *testing.T) {
 				_, _ = io.WriteString(w, tc.body)
 			})
 
-			obs := c.ObserveWatchStreakMilestone(context.Background(), "12345", "somestreamer")
+			obs := c.ObserveWatchStreakMilestone(context.Background(), "12345", "somestreamer", nil)
 
 			if obs.Outcome != MilestoneUnavailable {
 				t.Fatalf("outcome = %q, want UNAVAILABLE — a rejected request must not read as an "+
@@ -1895,7 +1897,7 @@ func TestObserveWatchStreakMilestoneNonGraphQLBodyIsUnavailable(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = io.WriteString(w, `{"data":{"channel":null}}`)
 	})
-	obs := c.ObserveWatchStreakMilestone(context.Background(), "12345", "somestreamer")
+	obs := c.ObserveWatchStreakMilestone(context.Background(), "12345", "somestreamer", nil)
 	if obs.Outcome != MilestoneObserved {
 		t.Fatalf("outcome = %q, want OBSERVED for a real GraphQL response", obs.Outcome)
 	}
@@ -1931,7 +1933,7 @@ func TestObserveWatchStreakMilestoneTransientFailureLeavesTransportHealthAlone(t
 
 	before := c.ConnHealth(time.Now(), time.Hour)
 
-	obs := c.ObserveWatchStreakMilestone(context.Background(), "12345", "somestreamer")
+	obs := c.ObserveWatchStreakMilestone(context.Background(), "12345", "somestreamer", nil)
 	if obs.Outcome != MilestoneUnavailable || obs.FailureClass != MilestoneFailureTransport {
 		t.Fatalf("outcome = %q/%q, want UNAVAILABLE/TRANSPORT", obs.Outcome, obs.FailureClass)
 	}
@@ -1942,6 +1944,11 @@ func TestObserveWatchStreakMilestoneTransientFailureLeavesTransportHealthAlone(t
 	if got != gqlMaxRetries+1 {
 		t.Fatalf("attempts = %d, want %d — the fixture did not exhaust the retry ladder, so the "+
 			"assertion below would be vacuous", got, gqlMaxRetries+1)
+	}
+	// A nil allowance is uncapped: the whole ladder is walked, and every
+	// retry is counted as a dispatch.
+	if obs.Dispatches != gqlMaxRetries+1 {
+		t.Errorf("obs.Dispatches = %d, want %d: retries must count as dispatches", obs.Dispatches, gqlMaxRetries+1)
 	}
 
 	after := c.ConnHealth(time.Now(), time.Hour)
@@ -2248,7 +2255,7 @@ func TestDiagnosticStopsAtANonSuccessStatusInsteadOfRotatingClientIDs(t *testing
 				_, _ = io.WriteString(w, tc.body)
 			})
 
-			obs := c.ObserveWatchStreakMilestone(context.Background(), "12345", "somestreamer")
+			obs := c.ObserveWatchStreakMilestone(context.Background(), "12345", "somestreamer", nil)
 
 			if obs.Outcome != MilestoneUnavailable {
 				t.Errorf("outcome = %q, want %q", obs.Outcome, MilestoneUnavailable)
@@ -2299,7 +2306,7 @@ func TestDiagnosticRefusesAmbiguousJSON(t *testing.T) {
 				_, _ = io.WriteString(w, tc.body)
 			})
 
-			obs := c.ObserveWatchStreakMilestone(context.Background(), "12345", "somestreamer")
+			obs := c.ObserveWatchStreakMilestone(context.Background(), "12345", "somestreamer", nil)
 
 			if obs.Outcome != MilestoneUnavailable {
 				t.Errorf("outcome = %q, want %q", obs.Outcome, MilestoneUnavailable)
@@ -2319,7 +2326,7 @@ func TestDiagnosticRefusesAmbiguousJSON(t *testing.T) {
 			_, _ = io.WriteString(w, `{"data":{"channel":{"id":"12345",`+
 				`"self":{"watchStreakMilestone":null}}}}`)
 		})
-		obs := c.ObserveWatchStreakMilestone(context.Background(), "12345", "somestreamer")
+		obs := c.ObserveWatchStreakMilestone(context.Background(), "12345", "somestreamer", nil)
 		if obs.Outcome != MilestoneObserved {
 			t.Fatalf("outcome = %q (%q), want %q", obs.Outcome, obs.FailureClass, MilestoneObserved)
 		}
@@ -2346,7 +2353,7 @@ func TestAmbiguousJSONIsRefusedBeforeTheAPQDetector(t *testing.T) {
 			`"data":{"channel":{"id":"12345","self":{"watchStreakMilestone":null}}}}`)
 	})
 
-	obs := c.ObserveWatchStreakMilestone(context.Background(), "12345", "somestreamer")
+	obs := c.ObserveWatchStreakMilestone(context.Background(), "12345", "somestreamer", nil)
 
 	if obs.Outcome != MilestoneUnavailable || obs.FailureClass != MilestoneFailureAmbiguousJSON {
 		t.Errorf("outcome = %q/%q, want UNAVAILABLE/%s", obs.Outcome, obs.FailureClass,
@@ -2383,7 +2390,7 @@ func TestAnOversizedBodyCannotChangeATokenRejectionsClass(t *testing.T) {
 				_, _ = w.Write(tc.body)
 			})
 
-			obs := c.ObserveWatchStreakMilestone(context.Background(), "12345", "somestreamer")
+			obs := c.ObserveWatchStreakMilestone(context.Background(), "12345", "somestreamer", nil)
 
 			if obs.Outcome != MilestoneUnavailable || obs.FailureClass != MilestoneFailureUnauthorized {
 				t.Fatalf("outcome = %q/%q, want UNAVAILABLE/%s — the body's SIZE changed the class",
@@ -2478,7 +2485,7 @@ func TestOversizedCollectionsAreRefusedBeforeTheyAreBuilt(t *testing.T) {
 				_, _ = io.WriteString(w, body)
 			})
 
-			obs := c.ObserveWatchStreakMilestone(context.Background(), "12345", "somestreamer")
+			obs := c.ObserveWatchStreakMilestone(context.Background(), "12345", "somestreamer", nil)
 
 			if obs.Outcome != MilestoneUnavailable ||
 				obs.FailureClass != MilestoneFailureOversizedCollection {
@@ -2502,7 +2509,7 @@ func TestOversizedCollectionsAreRefusedBeforeTheyAreBuilt(t *testing.T) {
 				`"missedStreams":[{"broadcastIdentifiers":[{"id":"b-1"},{"id":"b-2"}]}],`+
 				`"watchStreakMilestone":{"value":"4"}}}}}}`)
 		})
-		obs := c.ObserveWatchStreakMilestone(context.Background(), "12345", "somestreamer")
+		obs := c.ObserveWatchStreakMilestone(context.Background(), "12345", "somestreamer", nil)
 		if obs.Outcome != MilestoneObserved {
 			t.Fatalf("outcome = %q (%q), want OBSERVED", obs.Outcome, obs.FailureClass)
 		}
@@ -2539,7 +2546,7 @@ func TestAnOversizedResponseIsRefusedBeforeItIsDecoded(t *testing.T) {
 	var before, after runtime.MemStats
 	runtime.GC()
 	runtime.ReadMemStats(&before)
-	obs := c.ObserveWatchStreakMilestone(context.Background(), "12345", "somestreamer")
+	obs := c.ObserveWatchStreakMilestone(context.Background(), "12345", "somestreamer", nil)
 	runtime.ReadMemStats(&after)
 
 	if obs.Outcome != MilestoneUnavailable ||
@@ -2605,7 +2612,7 @@ func TestADecodeErrorCannotDisableTheValueBound(t *testing.T) {
 	var before, after runtime.MemStats
 	runtime.GC()
 	runtime.ReadMemStats(&before)
-	obs := c.ObserveWatchStreakMilestone(context.Background(), "12345", "somestreamer")
+	obs := c.ObserveWatchStreakMilestone(context.Background(), "12345", "somestreamer", nil)
 	runtime.ReadMemStats(&after)
 
 	if obs.Outcome != MilestoneUnavailable {
@@ -2646,7 +2653,7 @@ func TestAContainerHeavyResponseIsAlsoRefusedBeforeDecoding(t *testing.T) {
 	var before, after runtime.MemStats
 	runtime.GC()
 	runtime.ReadMemStats(&before)
-	obs := c.ObserveWatchStreakMilestone(context.Background(), "12345", "somestreamer")
+	obs := c.ObserveWatchStreakMilestone(context.Background(), "12345", "somestreamer", nil)
 	runtime.ReadMemStats(&after)
 
 	if obs.Outcome != MilestoneUnavailable ||
@@ -2794,7 +2801,7 @@ func TestTheAPQMarkerIsOnlyHonouredWhereARejectionPutsIt(t *testing.T) {
 				_, _ = io.WriteString(w, tc.body)
 			})
 
-			obs := c.ObserveWatchStreakMilestone(context.Background(), "12345", "somestreamer")
+			obs := c.ObserveWatchStreakMilestone(context.Background(), "12345", "somestreamer", nil)
 
 			if obs.Outcome != tc.wantOutcome || obs.FailureClass != tc.wantClass {
 				t.Errorf("outcome = %q/%q, want %q/%q", obs.Outcome, obs.FailureClass,
@@ -2858,7 +2865,7 @@ func TestMalformedJSONKeepsItsOwnFailureClass(t *testing.T) {
 				_, _ = io.WriteString(w, tc.body)
 			})
 
-			obs := c.ObserveWatchStreakMilestone(context.Background(), "12345", "somestreamer")
+			obs := c.ObserveWatchStreakMilestone(context.Background(), "12345", "somestreamer", nil)
 
 			if obs.FailureClass == MilestoneFailureAmbiguousJSON {
 				t.Fatalf("malformed input reported as %s, a class that means duplicate object members",
@@ -2882,7 +2889,7 @@ func TestMalformedJSONKeepsItsOwnFailureClass(t *testing.T) {
 			_, _ = io.WriteString(w, `{"errors":[{"message":"denied"}],"errors":[],`+
 				`"data":{"channel":{"id":"12345","self":{"watchStreakMilestone":null}}}}`)
 		})
-		obs := c.ObserveWatchStreakMilestone(context.Background(), "12345", "somestreamer")
+		obs := c.ObserveWatchStreakMilestone(context.Background(), "12345", "somestreamer", nil)
 		if obs.FailureClass != MilestoneFailureAmbiguousJSON {
 			t.Fatalf("failure class = %q, want %s", obs.FailureClass, MilestoneFailureAmbiguousJSON)
 		}
@@ -2948,7 +2955,7 @@ func TestAClientTimeoutIsRetriedRatherThanReturned(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
-	obs := c.ObserveWatchStreakMilestone(ctx, "12345", "somestreamer")
+	obs := c.ObserveWatchStreakMilestone(ctx, "12345", "somestreamer", nil)
 
 	mu.Lock()
 	got := attempts
@@ -3001,7 +3008,7 @@ func TestAMalformedOversizedBodyIsStillBounded(t *testing.T) {
 	var before, after runtime.MemStats
 	runtime.GC()
 	runtime.ReadMemStats(&before)
-	obs := c.ObserveWatchStreakMilestone(context.Background(), "12345", "somestreamer")
+	obs := c.ObserveWatchStreakMilestone(context.Background(), "12345", "somestreamer", nil)
 	runtime.ReadMemStats(&after)
 
 	const budgetMB = 20
@@ -3039,13 +3046,13 @@ func TestARejectedFallbackIsNotCachedAsWorking(t *testing.T) {
 		_, _ = io.WriteString(w, `{"errors":[{"message":"denied"}]}`)
 	})
 
-	_ = c.ObserveWatchStreakMilestone(context.Background(), "12345", "somestreamer")
+	_ = c.ObserveWatchStreakMilestone(context.Background(), "12345", "somestreamer", nil)
 
 	mu.Lock()
 	seen = nil
 	mu.Unlock()
 
-	_ = c.ObserveWatchStreakMilestone(context.Background(), "12345", "somestreamer")
+	_ = c.ObserveWatchStreakMilestone(context.Background(), "12345", "somestreamer", nil)
 
 	mu.Lock()
 	second := append([]string(nil), seen...)
@@ -3076,7 +3083,7 @@ func TestASingularTopLevelErrorIsNotAnObservation(t *testing.T) {
 		_, _ = w.Write(raw)
 	})
 
-	obs := c.ObserveWatchStreakMilestone(context.Background(), "12345", "somestreamer")
+	obs := c.ObserveWatchStreakMilestone(context.Background(), "12345", "somestreamer", nil)
 	if obs.Outcome == MilestoneObserved {
 		t.Fatalf("a body carrying an explicit top-level rejection alongside data was recorded "+
 			"as OBSERVED (class %q): the singular `error` member is a rejection the APQ detector "+
@@ -3128,7 +3135,7 @@ func TestAMalformedDataNodeIsNotCachedAsWorking(t *testing.T) {
 			})
 
 			// Cycle 1: the fallback answers with an unusable data node.
-			obs := c.ObserveWatchStreakMilestone(context.Background(), "12345", "somestreamer")
+			obs := c.ObserveWatchStreakMilestone(context.Background(), "12345", "somestreamer", nil)
 			if obs.Outcome == MilestoneObserved {
 				t.Fatalf("%s was recorded as an observation; the fixture is wrong", tc.body)
 			}
@@ -3138,7 +3145,7 @@ func TestAMalformedDataNodeIsNotCachedAsWorking(t *testing.T) {
 			mu.Unlock()
 
 			// Cycle 2: the shipped default must still be reachable.
-			_ = c.ObserveWatchStreakMilestone(context.Background(), "12345", "somestreamer")
+			_ = c.ObserveWatchStreakMilestone(context.Background(), "12345", "somestreamer", nil)
 
 			mu.Lock()
 			second := append([]string(nil), seen...)
@@ -3224,13 +3231,13 @@ func TestADiagnosticReadNeverPinsAClientID(t *testing.T) {
 				_, _ = io.WriteString(w, tc.body)
 			})
 
-			_ = c.ObserveWatchStreakMilestone(context.Background(), "12345", "somestreamer")
+			_ = c.ObserveWatchStreakMilestone(context.Background(), "12345", "somestreamer", nil)
 
 			mu.Lock()
 			seen = nil
 			mu.Unlock()
 
-			_ = c.ObserveWatchStreakMilestone(context.Background(), "12345", "somestreamer")
+			_ = c.ObserveWatchStreakMilestone(context.Background(), "12345", "somestreamer", nil)
 
 			mu.Lock()
 			second := append([]string(nil), seen...)
@@ -3264,7 +3271,7 @@ func TestQ3NonSuccessBodyIsAlsoBounded(t *testing.T) {
 		var before, after runtime.MemStats
 		runtime.GC()
 		runtime.ReadMemStats(&before)
-		_ = c.ObserveWatchStreakMilestone(context.Background(), "12345", "somestreamer")
+		_ = c.ObserveWatchStreakMilestone(context.Background(), "12345", "somestreamer", nil)
 		runtime.ReadMemStats(&after)
 		return float64(after.TotalAlloc-before.TotalAlloc) / (1 << 20)
 	}
@@ -3297,7 +3304,7 @@ func TestQ3NonSuccessClassIsDecidedByStatusNotBody(t *testing.T) {
 				w.WriteHeader(tc.status)
 				_, _ = io.WriteString(w, tc.body)
 			})
-			obs := c.ObserveWatchStreakMilestone(context.Background(), "12345", "somestreamer")
+			obs := c.ObserveWatchStreakMilestone(context.Background(), "12345", "somestreamer", nil)
 			if obs.FailureClass != MilestoneFailureHTTPStatus {
 				t.Fatalf("HTTP %d with body %s recorded %q, want %s: the peer's BODY decided the "+
 					"class instead of the status", tc.status, tc.body, obs.FailureClass,
@@ -3314,10 +3321,453 @@ func TestQ3ExplicitNullErrorDoesNotHideAGenuineAPQ(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = io.WriteString(w, `{"error":null,"errors":[{"message":"PersistedQueryNotFound"}]}`)
 	})
-	obs := c.ObserveWatchStreakMilestone(context.Background(), "12345", "somestreamer")
+	obs := c.ObserveWatchStreakMilestone(context.Background(), "12345", "somestreamer", nil)
 	if obs.Outcome != MilestoneUnsupported || obs.FailureClass != MilestoneFailureQueryNotFound {
 		t.Fatalf("outcome = %q/%q, want %s/%s: an explicit null `error` is absent everywhere else "+
 			"in this read, so it must not conceal a genuine PersistedQueryNotFound",
 			obs.Outcome, obs.FailureClass, MilestoneUnsupported, MilestoneFailureQueryNotFound)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// D4: shared per-cycle dispatch allowance and diagnostic-only no-follow.
+// ---------------------------------------------------------------------------
+
+// TestDiagnosticAllowanceChargesOncePerDispatchAndNeverRefills pins the
+// allowance's own arithmetic: a permit is spent exactly once, Remaining never
+// consumes, a spent allowance refuses every further charge, and nothing
+// refills it.
+func TestDiagnosticAllowanceChargesOncePerDispatchAndNeverRefills(t *testing.T) {
+	a := NewDiagnosticAllowance(3)
+	if a.Remaining() != 3 || a.Spent() != 0 {
+		t.Fatalf("fresh allowance = remaining %d, spent %d; want 3/0", a.Remaining(), a.Spent())
+	}
+	// Remaining is a read: asking twice must not spend anything.
+	_ = a.Remaining()
+	if a.Remaining() != 3 {
+		t.Fatalf("Remaining consumed a permit")
+	}
+	for i := 1; i <= 3; i++ {
+		if !a.charge() {
+			t.Fatalf("charge %d refused with %d permits left", i, a.Remaining())
+		}
+		if a.Remaining() != 3-i || a.Spent() != i {
+			t.Fatalf("after charge %d: remaining %d, spent %d", i, a.Remaining(), a.Spent())
+		}
+	}
+	for i := 0; i < 5; i++ {
+		if a.charge() {
+			t.Fatalf("charge succeeded on an exhausted allowance (attempt %d)", i+1)
+		}
+	}
+	if a.Remaining() != 0 || a.Spent() != 3 {
+		t.Fatalf("exhausted allowance = remaining %d, spent %d; want 0/3 — a refused charge must "+
+			"neither refund nor count", a.Remaining(), a.Spent())
+	}
+	if z := NewDiagnosticAllowance(0); z.charge() || z.Remaining() != 0 {
+		t.Fatalf("a zero allowance admitted a dispatch")
+	}
+	if n := NewDiagnosticAllowance(-2); n.charge() || n.Remaining() != 0 {
+		t.Fatalf("a negative allowance admitted a dispatch")
+	}
+}
+
+// TestRewardListCandidateSetFitsTheCycleAllowance is the premise the
+// complete-traversal proof below rests on: a full client-ID traversal for this
+// operation costs at most three dispatches, which is exactly the cycle
+// allowance. If a fourth shipped candidate ever appears, UNSUPPORTED_QUERY
+// becomes unreachable under the allowance and this test says so first.
+func TestRewardListCandidateSetFitsTheCycleAllowance(t *testing.T) {
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {})
+	if got := len(c.candidateClientIDs("RewardList")); got > 3 {
+		t.Fatalf("RewardList has %d candidate client IDs; a complete traversal no longer fits the "+
+			"three-dispatch cycle allowance", got)
+	}
+}
+
+// TestPartialClientIDTraversalIsIncompleteNotUnsupported: a traversal the
+// allowance stops part-way has NOT shown that every client ID rejects the
+// query. It is UNAVAILABLE/ALLOWANCE_EXHAUSTED — an incomplete result — and
+// never UNSUPPORTED_QUERY, which remains valid only after actual, complete APQ
+// exhaustion.
+func TestPartialClientIDTraversalIsIncompleteNotUnsupported(t *testing.T) {
+	var (
+		mu       sync.Mutex
+		attempts int
+	)
+	logs := captureClientLogs(t)
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		attempts++
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, persistedQueryNotFoundBody)
+	})
+	if n := len(c.candidateClientIDs("RewardList")); n < 3 {
+		t.Fatalf("only %d candidates: an allowance of 2 would not be a partial traversal", n)
+	}
+
+	allowance := NewDiagnosticAllowance(2)
+	obs := c.ObserveWatchStreakMilestone(context.Background(), "12345", "somestreamer", allowance)
+
+	mu.Lock()
+	got := attempts
+	mu.Unlock()
+	if got != 2 {
+		t.Fatalf("dispatches reaching the server = %d, want exactly 2 (the allowance)", got)
+	}
+	if obs.Outcome == MilestoneUnsupported {
+		t.Fatalf("a traversal stopped after 2 of 3 client IDs was recorded as UNSUPPORTED_QUERY: " +
+			"an incomplete traversal is not proof that every client ID rejects the query")
+	}
+	if obs.Outcome != MilestoneUnavailable || obs.FailureClass != MilestoneFailureAllowanceExhausted {
+		t.Fatalf("outcome = %q/%q, want UNAVAILABLE/ALLOWANCE_EXHAUSTED", obs.Outcome, obs.FailureClass)
+	}
+	if obs.Dispatches != 2 {
+		t.Errorf("obs.Dispatches = %d, want 2", obs.Dispatches)
+	}
+	if allowance.Remaining() != 0 || allowance.Spent() != 2 {
+		t.Errorf("allowance = remaining %d, spent %d; want 0/2", allowance.Remaining(), allowance.Spent())
+	}
+	assertEmptySnapshot(t, obs.Snapshot)
+	// The stale-hash exhaustion summary is a statement about EVERY candidate
+	// and must not be written for a traversal that did not reach every one.
+	if strings.Contains(logs.String(), "exhausted") && strings.Contains(logs.String(), "client ID") {
+		t.Errorf("a partial traversal logged a candidates-exhausted summary:\n%s", logs.String())
+	}
+}
+
+// TestCompleteClientIDTraversalKeepsUnsupportedQuery is the other half: when
+// the allowance covers the whole candidate set, actual APQ exhaustion is still
+// reported as UNSUPPORTED_QUERY, spends exactly one permit per candidate, and
+// makes no further dispatch.
+func TestCompleteClientIDTraversalKeepsUnsupportedQuery(t *testing.T) {
+	var (
+		mu       sync.Mutex
+		attempts int
+	)
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		attempts++
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, persistedQueryNotFoundBody)
+	})
+	candidates := len(c.candidateClientIDs("RewardList"))
+
+	allowance := NewDiagnosticAllowance(3)
+	obs := c.ObserveWatchStreakMilestone(context.Background(), "12345", "somestreamer", allowance)
+
+	if obs.Outcome != MilestoneUnsupported || obs.FailureClass != MilestoneFailureQueryNotFound {
+		t.Fatalf("outcome = %q/%q, want UNSUPPORTED_QUERY/PERSISTED_QUERY_NOT_FOUND after a complete traversal",
+			obs.Outcome, obs.FailureClass)
+	}
+	mu.Lock()
+	got := attempts
+	mu.Unlock()
+	if got != candidates {
+		t.Fatalf("dispatches = %d, want one per candidate (%d)", got, candidates)
+	}
+	if obs.Dispatches != candidates {
+		t.Errorf("obs.Dispatches = %d, want %d: retries and fallback candidates all count", obs.Dispatches, candidates)
+	}
+	if allowance.Spent() != candidates {
+		t.Errorf("allowance spent = %d, want %d", allowance.Spent(), candidates)
+	}
+}
+
+// TestDiagnosticReadNeverFollowsARedirect: a 3xx on the diagnostic path is
+// refused on its status, and the redirect target is never requested — a
+// redirect must not become a second authenticated dispatch, charged or not.
+// Both the classic and the method-preserving redirect statuses are covered,
+// because the default client would re-POST the authenticated body on 307/308.
+func TestDiagnosticReadNeverFollowsARedirect(t *testing.T) {
+	for _, status := range []int{http.StatusMovedPermanently, http.StatusFound, http.StatusSeeOther,
+		http.StatusTemporaryRedirect, http.StatusPermanentRedirect} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			var (
+				mu              sync.Mutex
+				requests        int
+				redirectTargets int
+			)
+			c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+				mu.Lock()
+				defer mu.Unlock()
+				if r.URL.Path == "/redirected" {
+					redirectTargets++
+					w.WriteHeader(http.StatusOK)
+					_, _ = io.WriteString(w, defaultObservationBody())
+					return
+				}
+				requests++
+				w.Header().Set("Location", "/redirected")
+				w.WriteHeader(status)
+			})
+
+			allowance := NewDiagnosticAllowance(3)
+			obs := c.ObserveWatchStreakMilestone(context.Background(), "12345", "somestreamer", allowance)
+
+			mu.Lock()
+			gotRequests, gotTargets := requests, redirectTargets
+			mu.Unlock()
+			if gotRequests != 1 {
+				t.Fatalf("origin requests = %d, want exactly 1 (no retry, no fallback on a 3xx)", gotRequests)
+			}
+			if gotTargets != 0 {
+				t.Fatalf("the redirect target was requested %d time(s): the diagnostic read followed a %d",
+					gotTargets, status)
+			}
+			if obs.Outcome != MilestoneUnavailable || obs.FailureClass != MilestoneFailureHTTPStatus {
+				t.Fatalf("outcome = %q/%q, want UNAVAILABLE/HTTP_STATUS on a %d", obs.Outcome, obs.FailureClass, status)
+			}
+			if obs.Dispatches != 1 || allowance.Spent() != 1 {
+				t.Errorf("dispatches %d, spent %d; want 1/1", obs.Dispatches, allowance.Spent())
+			}
+			assertEmptySnapshot(t, obs.Snapshot)
+			// The no-follow policy lives on a request-local copy. The SHARED
+			// client keeps its default redirect behaviour for business reads.
+			if c.client.CheckRedirect != nil {
+				t.Errorf("the shared HTTP client's CheckRedirect was changed by a diagnostic read")
+			}
+		})
+	}
+}
+
+// defaultObservationBody is a valid, minimal accepted-hash RewardList body for
+// tests that need a redirect TARGET to answer something an observation would
+// otherwise accept, so that following the redirect would be detectable as an
+// OBSERVED outcome rather than merely as a request count.
+func defaultObservationBody() string {
+	return `{"data":{"channel":{"id":"12345","self":{"watchStreakMilestone":{"watchStreakMilestone":{"value":"9"}}}}}}`
+}
+
+// TestBusinessReadStillFollowsRedirects is the counterpart: the no-follow
+// policy is diagnostic-only, so a business read over the same client still
+// reaches the redirect target exactly as before.
+func TestBusinessReadStillFollowsRedirects(t *testing.T) {
+	var (
+		mu              sync.Mutex
+		redirectTargets int
+	)
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		if r.URL.Path == "/redirected" {
+			redirectTargets++
+			w.WriteHeader(http.StatusOK)
+			_, _ = io.WriteString(w, `{"data":{"user":{"id":"777"}}}`)
+			return
+		}
+		w.Header().Set("Location", "/redirected")
+		w.WriteHeader(http.StatusTemporaryRedirect)
+	})
+
+	// A diagnostic read first, so a leaked policy would be visible on the
+	// business read that follows it.
+	_ = c.ObserveWatchStreakMilestone(context.Background(), "12345", "somestreamer", NewDiagnosticAllowance(3))
+	mu.Lock()
+	afterDiagnostic := redirectTargets
+	mu.Unlock()
+	if afterDiagnostic != 0 {
+		t.Fatalf("the diagnostic read followed the redirect (%d target requests)", afterDiagnostic)
+	}
+
+	if _, err := c.GetChannelID("somebody"); err != nil {
+		t.Fatalf("business read across a 307: %v", err)
+	}
+	mu.Lock()
+	got := redirectTargets
+	mu.Unlock()
+	if got == 0 {
+		t.Fatalf("the business read never reached the redirect target: the diagnostic no-follow policy leaked " +
+			"onto the shared client")
+	}
+}
+
+// TestAllowanceExhaustionNeverAddsARequestOrARetryWait pins the two things an
+// exhausted allowance must NOT do: make one more dispatch, or sit out a backoff
+// it can no longer use. It also pins that exhaustion is its own class, never a
+// transient transport failure.
+func TestAllowanceExhaustionNeverAddsARequestOrARetryWait(t *testing.T) {
+	t.Run("last permit on a transient failure returns without the next backoff", func(t *testing.T) {
+		var (
+			mu       sync.Mutex
+			attempts int
+		)
+		c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+			mu.Lock()
+			attempts++
+			mu.Unlock()
+			w.WriteHeader(http.StatusServiceUnavailable)
+		})
+		before := c.ConnHealth(time.Now(), time.Hour)
+
+		allowance := NewDiagnosticAllowance(1)
+		start := time.Now()
+		obs := c.ObserveWatchStreakMilestone(context.Background(), "12345", "somestreamer", allowance)
+		elapsed := time.Since(start)
+
+		mu.Lock()
+		got := attempts
+		mu.Unlock()
+		if got != 1 {
+			t.Fatalf("attempts = %d, want exactly 1", got)
+		}
+		// The first retry wait is at least BaseBackoff (500ms). Returning well
+		// under it proves the exhausted read did not wait for a retry it could
+		// never make.
+		if elapsed >= gqlBaseBackoffForTest() {
+			t.Fatalf("the read took %v after its only permit was spent: it waited out a retry backoff it "+
+				"could not use", elapsed)
+		}
+		if obs.Outcome != MilestoneUnavailable || obs.FailureClass != MilestoneFailureAllowanceExhausted {
+			t.Fatalf("outcome = %q/%q, want UNAVAILABLE/ALLOWANCE_EXHAUSTED — exhaustion is not a transient "+
+				"transport failure", obs.Outcome, obs.FailureClass)
+		}
+		if obs.Dispatches != 1 {
+			t.Errorf("obs.Dispatches = %d, want 1", obs.Dispatches)
+		}
+		if after := c.ConnHealth(time.Now(), time.Hour); after.RecentTransportFailures != before.RecentTransportFailures {
+			t.Errorf("allowance exhaustion moved transport health %d -> %d",
+				before.RecentTransportFailures, after.RecentTransportFailures)
+		}
+	})
+
+	t.Run("three permits across retries are three dispatches and two waits", func(t *testing.T) {
+		var (
+			mu       sync.Mutex
+			attempts int
+		)
+		c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+			mu.Lock()
+			attempts++
+			mu.Unlock()
+			w.WriteHeader(http.StatusServiceUnavailable)
+		})
+
+		allowance := NewDiagnosticAllowance(3)
+		start := time.Now()
+		obs := c.ObserveWatchStreakMilestone(context.Background(), "12345", "somestreamer", allowance)
+		elapsed := time.Since(start)
+
+		mu.Lock()
+		got := attempts
+		mu.Unlock()
+		if got != 3 {
+			t.Fatalf("attempts = %d, want exactly 3: the allowance, not the %d-attempt retry ladder, is the bound",
+				got, gqlMaxRetries+1)
+		}
+		if obs.Outcome != MilestoneUnavailable || obs.FailureClass != MilestoneFailureAllowanceExhausted {
+			t.Fatalf("outcome = %q/%q, want UNAVAILABLE/ALLOWANCE_EXHAUSTED", obs.Outcome, obs.FailureClass)
+		}
+		if obs.Dispatches != 3 || allowance.Remaining() != 0 {
+			t.Errorf("dispatches %d, remaining %d; want 3/0", obs.Dispatches, allowance.Remaining())
+		}
+		// Two waits were paid (attempt 0: 500-750ms, attempt 1: 1000-1500ms),
+		// so the fixture really retried; the third wait (>= 2s) was not, so
+		// the total stays under the smallest possible three-wait sum.
+		if elapsed < 3*gqlBaseBackoffForTest() {
+			t.Fatalf("the read returned in %v: it did not pay the two retry waits, so the fixture did not "+
+				"exercise the ladder and the bound below would be vacuous", elapsed)
+		}
+		if elapsed >= 7*gqlBaseBackoffForTest() {
+			t.Fatalf("the read took %v: it waited out a third backoff after its last permit was spent", elapsed)
+		}
+	})
+}
+
+// gqlBaseBackoffForTest names the transport's base backoff for timing bounds
+// without importing the gql package into this file's assertions twice.
+func gqlBaseBackoffForTest() time.Duration { return 500 * time.Millisecond }
+
+// TestOwnerCancellationOnTheLastPermitIsCancelledNotExhausted: when the owner
+// is cancelled while the last permit is in flight, the record must say the
+// owner went away, not that the allowance ran out. The cancellation check
+// precedes the allowance check on the retry path for exactly this reason.
+func TestOwnerCancellationOnTheLastPermitIsCancelledNotExhausted(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var (
+		mu       sync.Mutex
+		attempts int
+	)
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		attempts++
+		mu.Unlock()
+		// The owner is cancelled while this — the only permitted — dispatch is
+		// being answered; the answer itself is transient.
+		cancel()
+		w.WriteHeader(http.StatusServiceUnavailable)
+	})
+
+	obs := c.ObserveWatchStreakMilestone(ctx, "12345", "somestreamer", NewDiagnosticAllowance(1))
+
+	mu.Lock()
+	got := attempts
+	mu.Unlock()
+	if got != 1 {
+		t.Fatalf("attempts = %d, want 1", got)
+	}
+	if obs.Outcome != MilestoneCancelled || obs.FailureClass != MilestoneFailureCancelled {
+		t.Fatalf("outcome = %q/%q, want CANCELLED/CANCELLED: an owner cancellation landing on the last "+
+			"permit was misreported", obs.Outcome, obs.FailureClass)
+	}
+}
+
+// TestAnExhaustedAllowanceOnEntryIsSkippedWithoutADispatch: a target handed a
+// spent allowance is refused before its first dispatch — SKIPPED, no request,
+// no permit charged — so a caller can tell "never tried" from "tried and
+// failed".
+func TestAnExhaustedAllowanceOnEntryIsSkippedWithoutADispatch(t *testing.T) {
+	var (
+		mu       sync.Mutex
+		attempts int
+	)
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		attempts++
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, defaultObservationBody())
+	})
+
+	obs := c.ObserveWatchStreakMilestone(context.Background(), "12345", "somestreamer", NewDiagnosticAllowance(0))
+
+	mu.Lock()
+	got := attempts
+	mu.Unlock()
+	if got != 0 {
+		t.Fatalf("attempts = %d, want 0", got)
+	}
+	if obs.Outcome != MilestoneSkipped || obs.FailureClass != MilestoneFailureAllowanceExhausted {
+		t.Fatalf("outcome = %q/%q, want SKIPPED/ALLOWANCE_EXHAUSTED", obs.Outcome, obs.FailureClass)
+	}
+	if obs.Dispatches != 0 {
+		t.Errorf("obs.Dispatches = %d, want 0", obs.Dispatches)
+	}
+	assertEmptySnapshot(t, obs.Snapshot)
+}
+
+// TestAllowanceExhaustionIsItsOwnClassNotATransportFault pins the classifier:
+// the exhaustion sentinel, wrapped or bare, is UNAVAILABLE/ALLOWANCE_EXHAUSTED
+// and never the generic transient TRANSPORT class. The owner-cancellation
+// precedence is NOT decided here — the transport returns the owner's error
+// before it consults the allowance, which
+// TestOwnerCancellationOnTheLastPermitIsCancelledNotExhausted proves end to
+// end — so the sentinel reads the same whatever the owner's state.
+func TestAllowanceExhaustionIsItsOwnClassNotATransportFault(t *testing.T) {
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	for name, ctx := range map[string]context.Context{"live owner": context.Background(), "cancelled owner": cancelled} {
+		for _, err := range []error{errDiagnosticAllowanceExhausted, fmt.Errorf("wrapped: %w", errDiagnosticAllowanceExhausted)} {
+			outcome, class := classifyMilestoneRequestError(ctx, err)
+			if outcome != MilestoneUnavailable || class != MilestoneFailureAllowanceExhausted {
+				t.Errorf("%s, %v: %q/%q, want UNAVAILABLE/ALLOWANCE_EXHAUSTED", name, err, outcome, class)
+			}
+			if class == MilestoneFailureTransport {
+				t.Errorf("%s: allowance exhaustion was classified as a transient transport failure", name)
+			}
+		}
 	}
 }

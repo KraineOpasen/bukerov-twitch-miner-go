@@ -391,21 +391,92 @@ func isAuthError(statusCode int, result map[string]interface{}) bool {
 // its returned error — is identical to a business read.
 type diagnosticRequestKey struct{}
 
-// withDiagnosticRequest marks ctx as a diagnostic-only read. Cancellation and
-// deadlines propagate unchanged.
-func withDiagnosticRequest(ctx context.Context) context.Context {
-	return context.WithValue(ctx, diagnosticRequestKey{}, true)
+// DiagnosticAllowance caps the explicit authenticated diagnostic HTTP dispatches
+// one logical cycle may make. The caller that owns the cycle creates it, hands
+// it to every ObserveWatchStreakMilestone of that cycle, and lets it go when
+// the cycle ends: it is per-cycle state, not a limiter on the client, and it is
+// deliberately NOT safe for concurrent use, because a diagnostic stage has
+// exactly one goroutine.
+//
+// The unit is one explicit http.Client.Do call made by this package - a first
+// attempt, a retry or a client-ID fallback alike. It is an application attempt
+// cap, not a wire-delivery bound: net/http may transparently replay a request
+// on a dead keep-alive connection, and nothing here claims to count what
+// Twitch counts.
+type DiagnosticAllowance struct {
+	remaining int
+	spent     int
+}
+
+// NewDiagnosticAllowance returns an allowance of permits explicit dispatches.
+func NewDiagnosticAllowance(permits int) *DiagnosticAllowance {
+	if permits < 0 {
+		permits = 0
+	}
+	return &DiagnosticAllowance{remaining: permits}
+}
+
+// Remaining reports how many dispatches may still be made. It consumes nothing,
+// which is what lets a caller decide whether to START another target, fallback
+// or retry without spending the permit that decision needs.
+func (a *DiagnosticAllowance) Remaining() int { return a.remaining }
+
+// Spent reports how many dispatches were charged.
+func (a *DiagnosticAllowance) Spent() int { return a.spent }
+
+// charge takes one permit immediately before a dispatch. It never refunds:
+// a dispatch that errors, times out or is cancelled has still been made.
+func (a *DiagnosticAllowance) charge() bool {
+	if a.remaining == 0 {
+		return false
+	}
+	a.remaining--
+	a.spent++
+	return true
+}
+
+// errDiagnosticAllowanceExhausted is the stopping reason a diagnostic read
+// returns when its cycle's dispatch allowance ran out before the read could
+// finish. It is a LOCAL decision, never a transport fact: it is not transient,
+// it must not be retried, and a candidate traversal it cut short is incomplete
+// evidence rather than proof that every client ID rejected the query.
+var errDiagnosticAllowanceExhausted = errors.New("twitch: diagnostic dispatch allowance exhausted")
+
+// diagnosticRequest is the value a diagnostic-only context carries. It is a
+// pointer so the transport can count the dispatches it actually makes and the
+// caller can read that count after the request returns; the count is per
+// ObserveWatchStreakMilestone call, because that is where the value is created.
+type diagnosticRequest struct {
+	// allowance is the cycle's shared permit pool. nil means uncapped, which is
+	// what non-cycle callers and tests use; the miner always passes one.
+	allowance *DiagnosticAllowance
+	// dispatches counts the explicit http.Client.Do calls this request made.
+	dispatches int
+}
+
+// withDiagnosticRequest marks ctx as a diagnostic-only read that draws on
+// allowance (nil = uncapped). Cancellation and deadlines propagate unchanged.
+// The stored value is ALWAYS non-nil: the mark is the pointer's presence, not
+// the allowance's.
+func withDiagnosticRequest(ctx context.Context, allowance *DiagnosticAllowance) context.Context {
+	return context.WithValue(ctx, diagnosticRequestKey{}, &diagnosticRequest{allowance: allowance})
+}
+
+// diagnosticRequestOf returns the diagnostic value ctx carries, or nil for a
+// nil or unmarked (business) context.
+func diagnosticRequestOf(ctx context.Context) *diagnosticRequest {
+	if ctx == nil {
+		return nil
+	}
+	dr, _ := ctx.Value(diagnosticRequestKey{}).(*diagnosticRequest)
+	return dr
 }
 
 // isDiagnosticRequest reports whether ctx was marked diagnostic-only. A nil or
 // unmarked context is a business request, so the accounting default is
 // unchanged for every pre-existing caller.
 func isDiagnosticRequest(ctx context.Context) bool {
-	if ctx == nil {
-		return false
-	}
-	marked, _ := ctx.Value(diagnosticRequestKey{}).(bool)
-	return marked
+	return diagnosticRequestOf(ctx) != nil
 }
 
 // PostGQL runs one GQL operation under the client's own lifetime. A caller that
@@ -1276,7 +1347,8 @@ func (c *TwitchClient) rememberWorkingClientID(operation, clientID string, viaFa
 // ErrPersistedQueryNotFound is returned so the caller keeps its last-known state
 // instead of parsing an error body as "no data".
 func (c *TwitchClient) doGQLRequestWithClientIDFallback(ctx context.Context, body []byte, operationLabel, token string) ([]byte, int, error) {
-	diagnostic := isDiagnosticRequest(ctx)
+	dr := diagnosticRequestOf(ctx)
+	diagnostic := dr != nil
 	if !diagnostic {
 		c.connAcct.markAttempt(time.Now())
 	}
@@ -1289,6 +1361,18 @@ func (c *TwitchClient) doGQLRequestWithClientIDFallback(ctx context.Context, bod
 	)
 
 	for i, clientID := range candidates {
+		// A diagnostic read asks - WITHOUT spending anything - whether the
+		// cycle can still afford another candidate before it starts one. When
+		// it cannot, the traversal ends here as INCOMPLETE. That is not the
+		// same fact as the exhausted-hash return after the loop: that one says
+		// every candidate answered PersistedQueryNotFound, and a traversal cut
+		// short by the allowance has not established it. UNSUPPORTED_QUERY
+		// stays reachable only through the full walk.
+		if dr != nil && dr.allowance != nil && dr.allowance.Remaining() == 0 {
+			return nil, 0, fmt.Errorf("%w: after %d of %d client IDs",
+				errDiagnosticAllowanceExhausted, i, len(candidates))
+		}
+
 		respBody, statusCode, err = c.doGQLRequestWithRetry(ctx, body, operationLabel, clientID, token)
 		if err != nil {
 			return respBody, statusCode, err
@@ -1467,6 +1551,8 @@ func logStaleHashExhausted(diagnostic bool, operationLabel string, clientIDsTrie
 // same failure. A successful response never incurs a wait.
 func (c *TwitchClient) doGQLRequestWithRetry(ctx context.Context, body []byte, operationLabel, clientID, token string) ([]byte, int, error) {
 	var lastErr error
+	dr := diagnosticRequestOf(ctx)
+	diagnostic := dr != nil
 
 	for attempt := 0; attempt <= gqlMaxRetries; attempt++ {
 		req, err := http.NewRequestWithContext(ctx, "POST", c.gqlURL, bytes.NewReader(body))
@@ -1475,13 +1561,46 @@ func (c *TwitchClient) doGQLRequestWithRetry(ctx context.Context, body []byte, o
 		}
 		c.setGQLHeaders(req, clientID, token)
 
-		respBody, statusCode, retryAfter, err := c.doGQLOnce(req)
+		var (
+			respBody   []byte
+			statusCode int
+			retryAfter time.Duration
+		)
+		if !diagnostic {
+			respBody, statusCode, retryAfter, err = c.doGQLOnce(req)
+		} else {
+			// The permit is charged IMMEDIATELY before the dispatch and in the
+			// same breath as the dispatch count, so spent == dispatches by
+			// construction; a charge refused here means no request is made.
+			// A dead owner is checked first so a permit is not spent on a
+			// Do that would refuse on its own context without dialling.
+			if cerr := ctx.Err(); cerr != nil {
+				return nil, 0, cerr
+			}
+			if dr.allowance != nil && !dr.allowance.charge() {
+				return nil, 0, errDiagnosticAllowanceExhausted
+			}
+			dr.dispatches++
+
+			// A diagnostic read never follows a redirect. The shared client
+			// follows up to ten, each one another authenticated request that
+			// no permit above would have counted and that the byte cap cannot
+			// see. The copy is request-local and made at dispatch time, as
+			// doGQLMutationOnce already does, so the shared client's policy -
+			// and every business read's - is untouched. The 3xx then comes
+			// back as an ordinary non-2xx and is refused on its status.
+			noFollow := *c.client
+			noFollow.CheckRedirect = func(*http.Request, []*http.Request) error {
+				return http.ErrUseLastResponse
+			}
+			respBody, statusCode, retryAfter, err = doGQLOnceWithClient(&noFollow, req)
+		}
 		if err == nil {
 			// A diagnostic read repeats for every target on every cycle, so its
 			// per-attempt trace is pure volume in the retained log; the caller
 			// records the outcome as its own structured fact instead. A
 			// business read keeps the trace.
-			if !isDiagnosticRequest(ctx) {
+			if !diagnostic {
 				slog.Debug("GQL response", "operation", operationLabel, "status", statusCode)
 			}
 			return respBody, statusCode, nil
@@ -1498,6 +1617,24 @@ func (c *TwitchClient) doGQLRequestWithRetry(ctx context.Context, body []byte, o
 			break
 		}
 
+		if diagnostic {
+			// Order matters and is the whole point of these two lines. The
+			// owner's own cancellation is checked FIRST: an owner deadline or
+			// SIGTERM that lands on the last permitted dispatch must be
+			// recorded as CANCELLED, not as an allowance stop, and no switch
+			// order downstream can recover that once the wrong sentinel has
+			// been returned. Only then is the allowance asked - WITHOUT
+			// spending - whether a retry is affordable at all; when it is not,
+			// waiting out the backoff would be a wait for a request that can
+			// never be sent.
+			if cerr := ctx.Err(); cerr != nil {
+				return nil, statusCode, cerr
+			}
+			if dr.allowance != nil && dr.allowance.Remaining() == 0 {
+				return nil, statusCode, errDiagnosticAllowanceExhausted
+			}
+		}
+
 		wait, via := gql.RetryWait(attempt, retryAfter)
 		retryLog := slog.Warn
 		retryAttrs := []any{
@@ -1508,7 +1645,7 @@ func (c *TwitchClient) doGQLRequestWithRetry(ctx context.Context, body []byte, o
 			"nextRetryVia", via,
 			"status", statusCode,
 		}
-		if isDiagnosticRequest(ctx) {
+		if diagnostic {
 			// Lowering the level is not enough on its own: FileLevel defaults
 			// to DEBUG, so this record still reaches the retained log. The
 			// transport error is an arbitrary, unbounded string that a hostile
@@ -1530,7 +1667,7 @@ func (c *TwitchClient) doGQLRequestWithRetry(ctx context.Context, body []byte, o
 		}
 	}
 
-	if !isDiagnosticRequest(ctx) {
+	if !diagnostic {
 		c.gqlFailures.mark(time.Now())
 		slog.Error("GQL request exhausted all retries, skipping this cycle",
 			"operation", operationLabel,
