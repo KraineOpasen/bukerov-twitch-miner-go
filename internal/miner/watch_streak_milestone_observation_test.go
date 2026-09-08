@@ -3127,7 +3127,7 @@ func TestCursorRotatesTheRosterAcrossCycles(t *testing.T) {
 
 		// Refill with five, all online.
 		logins := milestoneLogins(t, 5)
-		apply := func(keep ...string) map[string]*models.Streamer {
+		apply := func(keep ...string) {
 			t.Helper()
 			var configs []config.StreamerConfig
 			for _, login := range keep {
@@ -3137,16 +3137,13 @@ func TestCursorRotatesTheRosterAcrossCycles(t *testing.T) {
 			for _, s := range added {
 				s.SetConfirmedOnline()
 			}
-			out := map[string]*models.Streamer{}
 			for _, s := range m.streamers.All() {
 				if s.ChannelID == "" {
 					t.Fatalf("streamer %s has no channel ID after ApplySettings", s.GetUsername())
 				}
-				out[s.GetUsername()] = s
 			}
-			return out
 		}
-		streamers := apply(logins...)
+		apply(logins...)
 		roster := func() []string {
 			var out []string
 			for _, s := range m.streamers.All() {
@@ -3166,7 +3163,7 @@ func TestCursorRotatesTheRosterAcrossCycles(t *testing.T) {
 
 		// Shrink to two while the cursor says 3: normalized to 3 % 2 = 1, so
 		// index 1 is served first, then index 0, and the cursor lands after 0.
-		streamers = apply(logins[0], logins[1])
+		apply(logins[0], logins[1])
 		ids = roster()
 		cursor = m.observeWatchStreakMilestones(context.Background(), milestoneCycleNow(cursor))
 		if cursor != 1 {
@@ -3179,9 +3176,7 @@ func TestCursorRotatesTheRosterAcrossCycles(t *testing.T) {
 		// that slides into the position is served and the one that slid past
 		// it waits one cycle. That is the documented cost of owning no
 		// per-streamer state.
-		_ = streamers
 		apply(logins[0], logins[1], logins[2], logins[3])
-		ids = roster()
 		cursor = 2                             // logins[2] is due next
 		apply(logins[1], logins[2], logins[3]) // remove logins[0], before the cursor
 		ids = roster()
