@@ -1909,6 +1909,54 @@ func TestObservationSkipsTargetsWithoutAChannelIdentity(t *testing.T) {
 	if got := attrValue(lines[0], "streamer"); got != logins[1] {
 		t.Errorf("record is for %q, want the identifiable streamer %q", got, logins[1])
 	}
+
+	// The stage's OWN half of the rule, not merely the client's refusal: an
+	// ID-less online entry is not ELIGIBLE, so it never counts toward what the
+	// cycle can examine. With exactly the allowance's worth of identifiable
+	// targets ahead of it, a mask that counted it would reach it with the
+	// allowance spent and write a spurious COUNT record.
+	t.Run("an ID-less entry is not counted as eligible", func(t *testing.T) {
+		logs := captureLogs(t)
+		logins := milestoneLogins(t, milestoneCycleDispatchAllowance+1)
+		rt := &milestoneRoundTripper{}
+		m, streamers := newMilestoneMiner(t, rt, logins, logins)
+		streamers[logins[len(logins)-1]].ChannelID = ""
+		logs.Reset()
+
+		next := m.observeWatchStreakMilestones(context.Background(), milestoneCycleNow(0))
+
+		if got := rt.rewardTotal(); got != milestoneCycleDispatchAllowance {
+			t.Fatalf("dispatches = %d, want %d", got, milestoneCycleDispatchAllowance)
+		}
+		if got := len(recordLines(logs.String(), milestoneBudgetRecord)); got != 0 {
+			t.Fatalf("an ID-less online entry produced %d budget record(s); it is not eligible, so the roster "+
+				"was finished:\n%s", got, logs.String())
+		}
+		if next != len(logins)-1 {
+			t.Errorf("cursor = %d, want %d (after the last started target)", next, len(logins)-1)
+		}
+	})
+
+	// And on a cycle that IS cut on COUNT, the ID-less entry is excluded from
+	// the unexamined count, which is defined over eligible targets only.
+	t.Run("an ID-less entry is excluded from the unexamined count", func(t *testing.T) {
+		logs := captureLogs(t)
+		logins := milestoneLogins(t, milestoneCycleDispatchAllowance+2)
+		rt := &milestoneRoundTripper{}
+		m, streamers := newMilestoneMiner(t, rt, logins, logins)
+		streamers[logins[1]].ChannelID = "" // sits between started targets
+		logs.Reset()
+
+		m.observeWatchStreakMilestones(context.Background(), milestoneCycleNow(0))
+
+		budget := recordLines(logs.String(), milestoneBudgetRecord)
+		if len(budget) != 1 {
+			t.Fatalf("budget records = %d, want 1 (one eligible target refused on COUNT)", len(budget))
+		}
+		if got := attrValue(budget[0], "unexaminedTargets"); got != "1" {
+			t.Errorf("unexaminedTargets = %q, want 1: the ID-less entry is not eligible and must not be counted", got)
+		}
+	})
 }
 
 // TestObservationRecordBoundsTheIdentifierSample covers the record's last
@@ -2781,6 +2829,10 @@ func TestMilestoneStageDeadlineIsTheEarliestBound(t *testing.T) {
 		{"coalesced tick read two periods late", 5 * time.Second, 2 * period, 0, milestoneDeadlineNextTick, -65 * time.Second},
 		{"earlier owner deadline binds", 10 * time.Second, 0, 15 * time.Second, milestoneDeadlineOwner, 5 * time.Second},
 		{"later owner deadline does not", 10 * time.Second, 0, 5 * time.Minute, milestoneDeadlineStageBudget, 40 * time.Second},
+		// The owner comparison is strict too: an owner deadline exactly equal
+		// to the binding bound does not take the name.
+		{"owner tie with the stage budget keeps STAGE_BUDGET", 10 * time.Second, 0, 50 * time.Second, milestoneDeadlineStageBudget, 40 * time.Second},
+		{"owner tie with the next tick keeps NEXT_TICK", 30 * time.Second, 0, 60 * time.Second, milestoneDeadlineNextTick, 30 * time.Second},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

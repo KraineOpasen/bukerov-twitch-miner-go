@@ -320,18 +320,22 @@ const (
 	// past and its accompanying data recorded as an observed milestone.
 	MilestoneFailureMalformedErrors MilestoneFailureClass = "MALFORMED_ERRORS_NODE"
 	// MilestoneFailureHTTPStatus: the response did not carry a 2xx status. For
-	// a diagnostic read the shared transport special-cases only 401 and 403;
-	// every other non-2xx has its body DROPPED in doGQLRequestWithClientIDFallback
-	// and surfaces as an error, which this reader refines to the status class.
-	// So a 400, a 404 or a redirect page is refused on its status alone and
-	// its payload is never parsed or trusted, whatever data object it carried.
+	// a diagnostic read EVERY non-2xx body is DROPPED in
+	// doGQLRequestWithClientIDFallback; 401 and 403 are then settled by status
+	// in gqlSingleRoundTrip, and every other status surfaces as an error which
+	// this reader refines to the status class. So a 400, a 404 or a redirect
+	// page is refused on its status alone and its payload is never parsed or
+	// trusted, whatever data object it carried.
 	MilestoneFailureHTTPStatus MilestoneFailureClass = "HTTP_STATUS"
 
 	// MilestoneFailureOversizedCollection marks a response whose milestone
-	// collections carry more elements than any credible RewardList would. It is
-	// a refusal, not a truncation: a partly-walked array would report exact
+	// collections carry more elements than the parser will retain. It is a
+	// refusal, not a truncation: a partly-walked array would report exact
 	// counts beside a tally taken over only some of the elements, which is
-	// worse than no observation.
+	// worse than no observation. It is also the class for a body refused by
+	// the pre-decode value bound (maxDiagnosticJSONValues), which bounds the
+	// same amplification one layer earlier over the WHOLE document; see
+	// classifyMilestoneRequestError.
 	MilestoneFailureOversizedCollection MilestoneFailureClass = "OVERSIZED_COLLECTION"
 
 	// MilestoneFailureAmbiguousJSON marks a response whose raw JSON carried
@@ -509,8 +513,12 @@ func (c *TwitchClient) ObserveWatchStreakMilestone(ctx context.Context, channelI
 		// a 4xx whose body did not parse reached the record as TRANSPORT even
 		// though the status alone had already settled it.
 		//
-		// Transient statuses keep TRANSPORT deliberately. A 429 or a 5xx here
-		// means the retry schedule ran and gave up, and that is the more
+		// Transient statuses keep TRANSPORT deliberately. After the retry
+		// schedule gives up the transport reports status 0, not the last
+		// transient status, so this clause is defence in depth for a status
+		// that does not reach it today; it is kept so a future path that
+		// surfaces a 429 or a 5xx here with the generic class is not refined
+		// into HTTP_STATUS, because "the schedule ran and gave up" is the more
 		// useful fact than the last status seen.
 		if statusCode != 0 && (statusCode < 200 || statusCode > 299) &&
 			!gql.IsTransientStatus(statusCode) {
@@ -603,8 +611,10 @@ func (c *TwitchClient) ObserveWatchStreakMilestone(ctx context.Context, channelI
 	// of a body carrying one. Leaving it unchecked here made the two disagree:
 	// {"error":"Forbidden","data":{…}} was recorded as OBSERVED, so a peer could
 	// attach an explicit rejection to forged data and still have the data
-	// retained as evidence. An explicit null is absent, as everywhere else in
-	// this file.
+	// retained as evidence. An explicit null is absent for THIS key, as it is
+	// for data and extensions; a null plural errors node is the deliberate
+	// exception, refused below as MALFORMED_ERRORS_NODE (see
+	// MilestoneFailureMalformedErrors).
 	if raw, present := resp["error"]; present && raw != nil {
 		obs.Outcome, obs.FailureClass = MilestoneGraphQLError, MilestoneFailureGraphQLTopLevel
 		return obs
@@ -656,7 +666,7 @@ func (c *TwitchClient) ObserveWatchStreakMilestone(ctx context.Context, channelI
 // "the owning context was cancelled" — and quietly turn a remote fault into an
 // apparent local shutdown.
 func classifyMilestoneRequestError(ctx context.Context, err error) (WatchStreakMilestoneOutcome, MilestoneFailureClass) {
-	ownerDone := ctx != nil && ctx.Err() != nil
+	ownerDone := ctx.Err() != nil
 	switch {
 	case errors.Is(err, context.Canceled) && ownerDone:
 		return MilestoneCancelled, MilestoneFailureCancelled

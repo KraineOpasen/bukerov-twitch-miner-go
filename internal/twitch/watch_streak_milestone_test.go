@@ -683,6 +683,23 @@ func TestDiagnosticResponseBodyIsCapped(t *testing.T) {
 			assertEmptySnapshot(t, obs.Snapshot)
 		})
 	}
+
+	// The accept side of the boundary: a whole document of EXACTLY the limit
+	// is still observed. Without this, a reader shortened to the limit (the
+	// truncating reader the design refuses) or an off-by-one in the size
+	// check would keep every refuse-side case green.
+	t.Run("a whole document exactly at the limit is still observed", func(t *testing.T) {
+		body := docOfSize(t, maxDiagnosticResponseBytes)
+		c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+			_, _ = io.WriteString(w, body)
+		})
+		obs := c.ObserveWatchStreakMilestone(context.Background(), "12345", "somestreamer", nil)
+		if obs.Outcome != MilestoneObserved {
+			t.Fatalf("a %d-byte body at exactly the %d-byte limit was refused as %q/%q; the bound is inclusive",
+				len(body), maxDiagnosticResponseBytes, obs.Outcome, obs.FailureClass)
+		}
+	})
 }
 
 // TestParseWatchStreakMilestoneValueAcceptsBothObservedWireKinds is the MAJOR-3
@@ -3158,6 +3175,24 @@ func TestASingularTopLevelErrorIsNotAnObservation(t *testing.T) {
 		t.Fatalf("outcome = %q/%q, want %s/%s", obs.Outcome, obs.FailureClass,
 			MilestoneGraphQLError, MilestoneFailureGraphQLTopLevel)
 	}
+
+	// The observation layer applies the same null-is-absent rule the APQ
+	// detector does for this key: an explicit null costs the peer nothing and
+	// must not erase a valid observation.
+	nullResp := fullRewardListResponse()
+	nullResp["error"] = nil
+	nullRaw, err := json.Marshal(nullResp)
+	if err != nil {
+		t.Fatalf("marshal fixture: %v", err)
+	}
+	c2 := newTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(nullRaw)
+	})
+	if got := c2.ObserveWatchStreakMilestone(context.Background(), "12345", "somestreamer", nil); got.Outcome != MilestoneObserved {
+		t.Fatalf("an explicit top-level error:null made the observation %q/%q; a null is absent for this key",
+			got.Outcome, got.FailureClass)
+	}
 }
 
 // TestAMalformedDataNodeIsNotCachedAsWorking closes the second door into the
@@ -4039,5 +4074,41 @@ func TestOwnerCancellationBetweenCandidatesIsCancelledNotExhausted(t *testing.T)
 	}
 	if obs.Dispatches != 1 || allowance.Spent() != 1 {
 		t.Errorf("dispatches %d, spent %d; want 1/1", obs.Dispatches, allowance.Spent())
+	}
+}
+
+// TestACappedTransientAnswerKeepsItsRetryAfter pins that a 429 whose body the
+// diagnostic cap refuses still hands its Retry-After to the retry loop, so the
+// capped answer is retried on the peer's schedule rather than on the computed
+// backoff - and that a capped 2xx carries none.
+func TestACappedTransientAnswerKeepsItsRetryAfter(t *testing.T) {
+	oversized := strings.Repeat("x", maxDiagnosticResponseBytes+1)
+	for name, tc := range map[string]struct {
+		status int
+		want   time.Duration
+	}{
+		"429 with Retry-After": {http.StatusTooManyRequests, 30 * time.Second},
+		"503 with Retry-After": {http.StatusServiceUnavailable, 30 * time.Second},
+		"200 with Retry-After": {http.StatusOK, 0},
+	} {
+		t.Run(name, func(t *testing.T) {
+			c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Retry-After", "30")
+				w.WriteHeader(tc.status)
+				_, _ = io.WriteString(w, oversized)
+			})
+			req, err := http.NewRequestWithContext(withDiagnosticRequest(context.Background(), nil),
+				http.MethodPost, c.gqlURL, strings.NewReader(`{}`))
+			if err != nil {
+				t.Fatalf("build request: %v", err)
+			}
+			body, status, retryAfter, err := doGQLOnceWithClient(c.client, req)
+			if err == nil || body != nil || status != tc.status {
+				t.Fatalf("capped %d: body=%v status=%d err=%v; want a refusal carrying the status", tc.status, body, status, err)
+			}
+			if retryAfter != tc.want {
+				t.Fatalf("retryAfter = %v, want %v: a capped transient answer must keep its Retry-After", retryAfter, tc.want)
+			}
+		})
 	}
 }

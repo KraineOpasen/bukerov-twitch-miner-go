@@ -471,12 +471,10 @@ func withDiagnosticRequest(ctx context.Context, allowance *DiagnosticAllowance) 
 	return context.WithValue(ctx, diagnosticRequestKey{}, &diagnosticRequest{allowance: allowance})
 }
 
-// diagnosticRequestOf returns the diagnostic value ctx carries, or nil for a
-// nil or unmarked (business) context.
+// diagnosticRequestOf returns the diagnostic value ctx carries, or nil for an
+// unmarked (business) context. Like every other context consumer in this
+// package it requires a non-nil ctx.
 func diagnosticRequestOf(ctx context.Context) *diagnosticRequest {
-	if ctx == nil {
-		return nil
-	}
 	dr, _ := ctx.Value(diagnosticRequestKey{}).(*diagnosticRequest)
 	return dr
 }
@@ -1387,7 +1385,8 @@ func (c *TwitchClient) rememberWorkingClientID(operation, clientID string, viaFa
 // BUSINESS rotation promotes another - followed by the remaining shipped
 // candidates, and it never moves that default itself. When every
 // candidate returns PersistedQueryNotFound the request has genuinely failed
-// because the hash itself is stale — one ERROR is logged and
+// because the hash itself is stale — one ERROR is logged for a business read (a
+// diagnostic read logs the same summary at DEBUG, see logStaleHashExhausted) and
 // ErrPersistedQueryNotFound is returned so the caller keeps its last-known state
 // instead of parsing an error body as "no data".
 func (c *TwitchClient) doGQLRequestWithClientIDFallback(ctx context.Context, body []byte, operationLabel, token string) ([]byte, int, error) {
@@ -1434,14 +1433,15 @@ func (c *TwitchClient) doGQLRequestWithClientIDFallback(ctx context.Context, bod
 		// A DIAGNOSTIC read stops here on any non-2xx, before the body is
 		// treated as evidence of anything.
 		//
-		// gql.IsPersistedQueryNotFound is a raw substring test over the whole
-		// body and does not consult the status, so a rejected response that
-		// merely CONTAINS "PersistedQueryNotFound" would otherwise drive the
-		// candidate loop: the authenticated request would be re-sent under
-		// every client ID this project ships, and an endpoint answering each
-		// with the same marker would end the read as UNSUPPORTED_QUERY -
-		// amplifying the request threefold and naming the wrong cause. The
-		// status is the authority on whether a body is worth reading at all.
+		// The structured APQ detector this path uses
+		// (diagnosticPersistedQueryNotFound, below) reads the body and does
+		// not consult the status, so a rejected response whose body is SHAPED
+		// like a structured rejection would otherwise drive the candidate
+		// loop: the authenticated request would be re-sent under every client
+		// ID this project ships, and an endpoint answering each with the same
+		// shape would end the read as UNSUPPORTED_QUERY - amplifying the
+		// request threefold and naming the wrong cause. The status is the
+		// authority on whether a body is worth reading at all.
 		//
 		// The BODY is dropped, not just the iteration stopped. An earlier
 		// version handed it back "unchanged, so gqlSingleRoundTrip keeps
@@ -1478,13 +1478,16 @@ func (c *TwitchClient) doGQLRequestWithClientIDFallback(ctx context.Context, bod
 			// downstream cannot help, because they only ever see the lossy
 			// decoded map.
 			//
-			// This runs BEFORE the APQ detector, not after, and the order is
-			// the whole point: that detector is a raw substring test, so a body
-			// carrying duplicate members AND the marker would otherwise be
-			// treated as authoritative APQ evidence, drive the candidate loop
-			// under every client ID, and end as UNSUPPORTED_QUERY - never
-			// reaching this refusal at all. An ambiguous body is not evidence
-			// of anything, the marker included.
+			// This runs BEFORE the structured APQ detector, not after, and the
+			// order is the whole point: that detector decodes the body, and
+			// encoding/json keeps the LAST duplicate member, so a benign errors
+			// array followed by an APQ-shaped one would present as an
+			// authoritative rejection, drive the candidate loop under every
+			// client ID and end as UNSUPPORTED_QUERY - while the reverse member
+			// order would erase a real rejection into NO_DATA_NODE - never
+			// reaching this refusal at all. The peer would pick the recorded
+			// class by member ORDER. An ambiguous body is not evidence of
+			// anything, the marker included.
 			// Size first: this scan is what keeps the two below - and the
 			// decode after them - from being handed a document that makes them
 			// expensive. jsonObjectKeysAreUnique builds a key set per object,
@@ -1502,6 +1505,13 @@ func (c *TwitchClient) doGQLRequestWithClientIDFallback(ctx context.Context, bod
 				// value it reads and this body is precisely the one too large
 				// to hand it. Nothing is lost by skipping it: a body that does
 				// not decode cannot be recorded as an observation either way.
+				// The two json.Unmarshal calls that still follow - the
+				// structured APQ detector's and gqlSingleRoundTrip's - are
+				// safe because encoding/json validates the whole input before
+				// allocating anything, so a malformed body fails without
+				// materialising; TestAMalformedOversizedBodyIsStillBounded
+				// pins that cost, so a decoder that does not share the
+				// property cannot be substituted silently.
 
 			default:
 				if diagnosticJSONHasDuplicateMembers(respBody) {
@@ -1805,7 +1815,14 @@ func doGQLOnceWithClient(client *http.Client, req *http.Request) ([]byte, int, t
 		return nil, resp.StatusCode, 0, fmt.Errorf("failed to read response: %w", err)
 	}
 	if diagnostic && len(respBody) > maxDiagnosticResponseBytes {
-		return nil, resp.StatusCode, 0, fmt.Errorf(
+		// A transient status keeps its Retry-After even when the body is
+		// refused, so a capped 429 is retried on the peer's schedule rather
+		// than on the computed backoff.
+		retryAfter := time.Duration(0)
+		if gql.IsTransientStatus(resp.StatusCode) {
+			retryAfter = gql.ParseRetryAfter(resp.Header.Get("Retry-After"), time.Now())
+		}
+		return nil, resp.StatusCode, retryAfter, fmt.Errorf(
 			"response body exceeded the %d-byte diagnostic limit", maxDiagnosticResponseBytes)
 	}
 

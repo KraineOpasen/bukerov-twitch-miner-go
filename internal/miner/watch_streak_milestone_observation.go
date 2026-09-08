@@ -98,7 +98,10 @@ const (
 // the pure stall the old comment described, and under the cycle allowance
 // (three dispatches, fewer than the ladder's gqlMaxRetries+1) the ladder never
 // reaches its final attempt through this stage either: a pre-response stall
-// ends as ALLOWANCE_EXHAUSTED or as the stage's own DEADLINE_EXCEEDED. What
+// ends as the stage's own DEADLINE_EXCEEDED (the 30s client timeout plus one
+// backoff put the second dispatch past the 40s budget before a third permit
+// could be charged), while a FAST-failing transient - an immediate 5xx or a
+// refused connection, not a stall - is what ends as ALLOWANCE_EXHAUSTED. What
 // DOES reach TRANSPORT_TIMEOUT through this stage is a body stall: a 2xx
 // status received and then a body that never completes, which Client.Timeout
 // ends as a non-transient read error on the FIRST dispatch (pinned by
@@ -227,8 +230,13 @@ const (
 // ladder and reports which wire field it compared.
 //
 // basePoints is the frame's own baseline_points when that field was present and
-// exactly representable — the pre-multiplier amount the ladder actually
-// describes — and totalPoints is the credited amount #303 accounts. Preferring
+// exactly representable, read as the base amount the ladder describes, and
+// totalPoints is the credited amount #303 accounts. The field's PRESENCE is
+// evidenced by this repository's points-earned fixtures (total_points,
+// baseline_points, reason_code and multipliers, with baseline == total when
+// multipliers is empty); its PRE-MULTIPLIER meaning is an ASSUMPTION drawn from
+// the field's name and the multipliers array beside it, pending a captured
+// multiplied frame, and SPECIFICATIONS.md states it as such. Preferring
 // the baseline is what keeps a subscriber's multiplied +675 from being reported
 // as "off-ladder" when it is a perfectly ordinary 5-or-more streak; when no
 // baseline is available the comparison falls back to the total and SAYS SO, so
@@ -316,8 +324,11 @@ type milestoneCycle struct {
 
 // milestoneDeadlineSource names which bound produced a stage's deadline. Kept
 // on the budget record so a short cycle can be read as "the business pass ran
-// long" (NEXT_TICK) rather than "Twitch was slow" (STAGE_BUDGET) or "the
-// process is going away" (OWNER).
+// long" (NEXT_TICK) rather than "Twitch was slow" (STAGE_BUDGET). OWNER is
+// reported only on a COUNT cutoff reached while the owner is still alive (its
+// deadline was the nearest bound but had not yet fired): a cycle ended by the
+// owner's own deadline or cancellation emits no record at all, and the
+// production owner (the signal context) carries no deadline.
 type milestoneDeadlineSource string
 
 const (
@@ -499,7 +510,10 @@ func (m *Miner) observeWatchStreakMilestones(owner context.Context, cycle milest
 				continue
 			}
 			// The deadline landed between the check above and the dispatch,
-			// or the client found the allowance spent. Keeps its turn.
+			// or the client found the allowance spent. Keeps its turn. This is
+			// a race-window path with no deterministic falsifier: the window
+			// is the few instructions between two checks of the same context,
+			// and the suite states that rather than faking a seam for it.
 			cutoff, next = milestoneCutoffTime, i
 			if obs.FailureClass == twitch.MilestoneFailureAllowanceExhausted {
 				cutoff = milestoneCutoffCount
@@ -931,7 +945,9 @@ func (m *Miner) logWatchStreakGrantCorrelation(
 		exactPoints = strconv.Itoa(total)
 	}
 
-	// baseline_points is the frame's PRE-MULTIPLIER amount. It is read here for
+	// baseline_points is read as the frame's base (pre-multiplier) amount - an
+	// assumption from the field's name and the multipliers array beside it, not
+	// an attested wire fact; see officialLadderConsistency. It is read here for
 	// the ladder label only — the exact ledger still accounts total_points, and
 	// #303's accounting is untouched.
 	baseline, baselineExact := exactWirePoints(pointGain["baseline_points"])
