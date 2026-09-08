@@ -3721,7 +3721,16 @@ func TestTheShippedClientIDSetFitsTheCycleAllowance(t *testing.T) {
 // are generous so wording changes do not fail the build; the logged sizes are
 // what SPECIFICATIONS.md derives its footprint from.
 func TestRecordFootprintIsMeasuredAndBounded(t *testing.T) {
-	const observationCap, budgetCap = 1536, 512
+	// One cap per documented figure, plus one for the WHOLE unaccepted-hash
+	// cycle and its line count, so that a new diagnostic line or a grown
+	// summary cannot exceed the documented cycle measurement unnoticed and
+	// silently invalidate the derived retention estimate.
+	const (
+		observationCap = 1536
+		budgetCap      = 512
+		cycleCap       = 2048
+		wantCycleLines = 3 // the observation record, the all-candidates summary, the budget record
+	)
 
 	logs := captureLogs(t)
 	logins := milestoneLogins(t, 1)
@@ -3755,10 +3764,17 @@ func TestRecordFootprintIsMeasuredAndBounded(t *testing.T) {
 	if len(budget) != 1 {
 		t.Fatalf("budget records = %d, want 1 (two targets, one complete traversal)", len(budget))
 	}
-	t.Logf("unaccepted-hash cycle: %d bytes across %d lines; budget record: %d bytes",
-		cycle, len(strings.Split(strings.TrimSpace(logs.String()), "\n")), len(budget[0]))
+	cycleLines := len(strings.Split(strings.TrimSpace(logs.String()), "\n"))
+	t.Logf("unaccepted-hash cycle: %d bytes across %d lines; budget record: %d bytes", cycle, cycleLines, len(budget[0]))
 	if len(budget[0]) > budgetCap {
 		t.Errorf("a budget record is %d bytes, over the %d-byte documented bound", len(budget[0]), budgetCap)
+	}
+	if cycleLines != wantCycleLines {
+		t.Errorf("an unaccepted-hash cycle wrote %d lines, want %d; a new line per cycle changes the documented "+
+			"footprint and must be re-measured:\n%s", cycleLines, wantCycleLines, logs.String())
+	}
+	if cycle > cycleCap {
+		t.Errorf("an unaccepted-hash cycle is %d bytes, over the %d-byte documented bound", cycle, cycleCap)
 	}
 }
 
