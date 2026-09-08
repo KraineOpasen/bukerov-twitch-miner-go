@@ -21,6 +21,7 @@ import (
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/analytics"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/auth"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/config"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/constants"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/database"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/models"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/pubsub"
@@ -65,6 +66,10 @@ type milestoneRoundTripper struct {
 	// body — the BUSINESS read, used to prove the diagnostic-only suppressions
 	// do not leak onto it.
 	contextBody string
+
+	// contextDelay, when set, holds every ChannelPointsContext answer for that
+	// long, so a test can make the BUSINESS pass consume the whole poll period.
+	contextDelay time.Duration
 
 	// offerClaim makes the context read advertise an available bonus, so the
 	// business pass performs a real ClaimCommunityPoints mutation — the
@@ -154,6 +159,7 @@ func (rt *milestoneRoundTripper) RoundTrip(req *http.Request) (*http.Response, e
 	respond := rt.rewardListRespond
 	rewardBody := rt.rewardListBody
 	contextBody := rt.contextBody
+	contextDelay := rt.contextDelay
 	offerClaim := rt.offerClaim
 	rt.mu.Unlock()
 
@@ -161,6 +167,9 @@ func (rt *milestoneRoundTripper) RoundTrip(req *http.Request) (*http.Response, e
 	response := `{"data":{}}`
 	switch operation.Name {
 	case "ChannelPointsContext":
+		if contextDelay > 0 {
+			time.Sleep(contextDelay)
+		}
 		response = `{"data":{"community":{"channel":{"self":{"communityPoints":{"balance":777,"availableClaim":null}}}}}}`
 		if offerClaim {
 			response = `{"data":{"community":{"channel":{"self":{"communityPoints":{"balance":777,` +
@@ -3529,4 +3538,251 @@ func TestCursorFollowsTheLastStartedTargetWhateverItsOutcome(t *testing.T) {
 			assertRewardSequence(t, rt, []string{ids[0], ids[1], ids[2], ids[0], ids[1], ids[2]})
 		})
 	}
+}
+
+// TestBonusPollLoopHandsTheStageTheServicedTickNotNow is the loop-level half of
+// D1, and the falsifier for it: a business pass that consumes the whole poll
+// period must leave the stage NO slack. If the loop handed the stage a fresh
+// timestamp (or a padded period) instead of the serviced tick's, every such
+// cycle would be granted a full 40s of diagnostics on top of the late business
+// pass - exactly what D1 forbids.
+func TestBonusPollLoopHandsTheStageTheServicedTickNotNow(t *testing.T) {
+	// The loop writes records from its own goroutine while this test polls
+	// for them, so the capture must be synchronized; captureLogs's plain
+	// buffer is only safe to read after the loop has stopped.
+	logs := &lockedLogBuffer{}
+	previousLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(previousLogger) })
+	logins := milestoneLogins(t, 1)
+	rt := &milestoneRoundTripper{contextDelay: 250 * time.Millisecond}
+	m, _ := newMilestoneMiner(t, rt, logins, logins)
+
+	previousInterval := bonusPollInterval
+	bonusPollInterval = 200 * time.Millisecond // shorter than the business pass
+	t.Cleanup(func() { bonusPollInterval = previousInterval })
+	logs.Reset()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		m.bonusPollLoop(ctx)
+	}()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if len(recordLines(logs.String(), milestoneBudgetRecord)) >= 3 {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	cancel()
+	<-done
+
+	ops, _ := rt.counts()
+	business := 0
+	for _, op := range ops {
+		if op == "ChannelPointsContext" {
+			business++
+		}
+	}
+	if business < 3 {
+		t.Fatalf("only %d business passes ran; the fixture did not drive enough cycles. Logs:\n%s", business, logs.String())
+	}
+	if got := rt.rewardTotal(); got != 0 {
+		t.Fatalf("%d RewardList dispatch(es) on cycles whose business pass consumed the period: the loop granted "+
+			"the stage slack it did not have (D1 violated at the loop)", got)
+	}
+	budget := recordLines(logs.String(), milestoneBudgetRecord)
+	if len(budget) < 3 {
+		t.Fatalf("budget records = %d, want >= 3 (one per consumed cycle)", len(budget))
+	}
+	for _, line := range budget {
+		if attrValue(line, "cutoff") != "TIME" || attrValue(line, "deadlineSource") != "NEXT_TICK" || attrValue(line, "startedTargets") != "0" {
+			t.Errorf("budget record is not a next-tick TIME cutoff with nothing started: %s", line)
+		}
+	}
+}
+
+// TestAZeroTickOrPeriodAdmitsNothing pins the documented fail-closed reading of
+// a zero milestoneCycle: a zero Tick is maximally overdue and a zero Period
+// leaves no slack, so neither admits a dispatch and neither is silently given
+// the stage budget instead.
+func TestAZeroTickOrPeriodAdmitsNothing(t *testing.T) {
+	now := time.Date(2026, 9, 8, 12, 0, 0, 0, time.UTC)
+	if deadline, source := milestoneStageDeadline(context.Background(), time.Time{}, bonusPollInterval, now); source != milestoneDeadlineNextTick || !deadline.Before(now) {
+		t.Errorf("zero tick: source %q, deadline %v; want NEXT_TICK in the past", source, deadline)
+	}
+	if deadline, source := milestoneStageDeadline(context.Background(), now, 0, now); source != milestoneDeadlineNextTick || deadline.After(now) {
+		t.Errorf("zero period: source %q, deadline %v; want NEXT_TICK with no slack", source, deadline)
+	}
+
+	logs := captureLogs(t)
+	logins := milestoneLogins(t, 2)
+	rt := &milestoneRoundTripper{}
+	m, _ := newMilestoneMiner(t, rt, logins, logins)
+	logs.Reset()
+	if next := m.observeWatchStreakMilestones(context.Background(), milestoneCycle{Cursor: 1}); next != 1 || rt.rewardTotal() != 0 {
+		t.Fatalf("zero cycle: next %d, dispatches %d; want 1/0", next, rt.rewardTotal())
+	}
+	if next := m.observeWatchStreakMilestones(context.Background(), milestoneCycle{Tick: time.Now(), Period: 0, Cursor: 1}); next != 1 || rt.rewardTotal() != 0 {
+		t.Fatalf("zero period: next %d, dispatches %d; want 1/0", next, rt.rewardTotal())
+	}
+	if got := len(recordLines(logs.String(), milestoneBudgetRecord)); got != 2 {
+		t.Errorf("budget records = %d, want 2 (one per refused cycle)", got)
+	}
+}
+
+// TestIneligibleEntriesAndMidCycleChangesLeaveTheCursorAndMaskAlone pins three
+// D2 rules that the happy paths cannot observe: an ineligible tail entry does
+// not move the cursor on its own; eligibility is decided ONCE, up front, so a
+// target that goes offline while an earlier request is in flight is still
+// dispatched and still counted; and a target that loses its channel identity
+// mid-cycle is skipped without ending the roster, without a record and without
+// moving the cursor on its behalf.
+func TestIneligibleEntriesAndMidCycleChangesLeaveTheCursorAndMaskAlone(t *testing.T) {
+	t.Run("an ineligible tail entry does not move the cursor", func(t *testing.T) {
+		captureLogs(t)
+		logins := milestoneLogins(t, 2)
+		rt := &milestoneRoundTripper{}
+		m, streamers := newMilestoneMiner(t, rt, logins, logins[:1])
+		next := m.observeWatchStreakMilestones(context.Background(), milestoneCycleNow(0))
+		assertRewardSequence(t, rt, []string{streamers[logins[0]].ChannelID})
+		if next != 1 {
+			t.Fatalf("cursor = %d, want 1: the cursor sits after the started target, on the ineligible entry's "+
+				"position, which the skip must not advance past", next)
+		}
+	})
+
+	t.Run("the eligibility mask is taken once", func(t *testing.T) {
+		logs := captureLogs(t)
+		logins := milestoneLogins(t, 3)
+		rt := &milestoneRoundTripper{}
+		m, streamers := newMilestoneMiner(t, rt, logins, logins)
+		rt.onRewardList = func(n int) {
+			if n == 1 {
+				streamers[logins[1]].SetConfirmedOffline() // after the mask, before its turn
+			}
+		}
+		logs.Reset()
+		next := m.observeWatchStreakMilestones(context.Background(), milestoneCycleNow(0))
+		assertRewardSequence(t, rt, milestoneChannelIDs(streamers, logins...))
+		if next != 0 {
+			t.Errorf("cursor = %d, want 0", next)
+		}
+		if got := len(recordLines(logs.String(), milestoneBudgetRecord)); got != 0 {
+			t.Errorf("a finished roster emitted %d budget record(s)", got)
+		}
+	})
+
+	t.Run("a target that loses its channel identity mid-cycle is skipped", func(t *testing.T) {
+		logs := captureLogs(t)
+		logins := milestoneLogins(t, 3)
+		rt := &milestoneRoundTripper{}
+		m, streamers := newMilestoneMiner(t, rt, logins, logins)
+		ids := milestoneChannelIDs(streamers, logins...)
+		rt.onRewardList = func(n int) {
+			if n == 1 {
+				streamers[logins[1]].ChannelID = ""
+			}
+		}
+		logs.Reset()
+		next := m.observeWatchStreakMilestones(context.Background(), milestoneCycleNow(0))
+		assertRewardSequence(t, rt, []string{ids[0], ids[2]})
+		if next != 0 {
+			t.Errorf("cursor = %d, want 0: the roster was finished (the skipped target did not end it)", next)
+		}
+		obs := recordLines(logs.String(), milestoneObservationRecord)
+		if len(obs) != 2 {
+			t.Errorf("observation records = %d, want 2: a target refused for no channel identity is not observed", len(obs))
+		}
+		if got := len(recordLines(logs.String(), milestoneBudgetRecord)); got != 0 {
+			t.Errorf("a skipped target produced %d budget record(s); nothing was cut off", got)
+		}
+	})
+}
+
+// TestTheShippedClientIDSetFitsTheCycleAllowance is the miner-side half of the
+// premise that a complete client-ID traversal fits one cycle: the shipped
+// candidate set is bounded by the allowance THIS package chooses, so lowering
+// the allowance below the set (or growing the set) fails here first.
+func TestTheShippedClientIDSetFitsTheCycleAllowance(t *testing.T) {
+	if got := len(constants.GQLClientIDFallbacks); got > milestoneCycleDispatchAllowance {
+		t.Fatalf("%d shipped client IDs exceed the %d-dispatch cycle allowance: a complete APQ traversal no "+
+			"longer fits one cycle and UNSUPPORTED_QUERY becomes unreachable through the stage",
+			got, milestoneCycleDispatchAllowance)
+	}
+}
+
+// TestRecordFootprintIsMeasuredAndBounded pins the per-record sizes the
+// documentation quotes, with the method stated: one slog TextHandler at DEBUG
+// (the shape internal/logger uses for the file), one OBSERVED record from the
+// default fixture, one unaccepted-hash cycle, and one budget record. The bounds
+// are generous so wording changes do not fail the build; the logged sizes are
+// what SPECIFICATIONS.md derives its footprint from.
+func TestRecordFootprintIsMeasuredAndBounded(t *testing.T) {
+	const observationCap, budgetCap = 1536, 512
+
+	logs := captureLogs(t)
+	logins := milestoneLogins(t, 1)
+	m, _ := newMilestoneMiner(t, &milestoneRoundTripper{}, logins, logins)
+	logs.Reset()
+	m.observeWatchStreakMilestones(context.Background(), milestoneCycleNow(0))
+	observed := recordLines(logs.String(), milestoneObservationRecord)
+	if len(observed) != 1 {
+		t.Fatalf("observation records = %d, want 1", len(observed))
+	}
+	t.Logf("OBSERVED record: %d bytes", len(observed[0]))
+	if len(observed[0]) > observationCap {
+		t.Errorf("an OBSERVED record is %d bytes, over the %d-byte documented bound", len(observed[0]), observationCap)
+	}
+
+	logs.Reset()
+	rt := &milestoneRoundTripper{rewardListBody: milestonePQNFBody}
+	m2, _ := newMilestoneMiner(t, rt, milestoneLogins(t, 2), nil)
+	for _, s := range m2.streamers.All() {
+		s.SetConfirmedOnline()
+	}
+	logs.Reset()
+	m2.observeWatchStreakMilestones(context.Background(), milestoneCycleNow(0))
+	cycle := 0
+	for _, line := range strings.Split(logs.String(), "\n") {
+		if line != "" {
+			cycle += len(line) + 1
+		}
+	}
+	budget := recordLines(logs.String(), milestoneBudgetRecord)
+	if len(budget) != 1 {
+		t.Fatalf("budget records = %d, want 1 (two targets, one complete traversal)", len(budget))
+	}
+	t.Logf("unaccepted-hash cycle: %d bytes across %d lines; budget record: %d bytes",
+		cycle, len(strings.Split(strings.TrimSpace(logs.String()), "\n")), len(budget[0]))
+	if len(budget[0]) > budgetCap {
+		t.Errorf("a budget record is %d bytes, over the %d-byte documented bound", len(budget[0]), budgetCap)
+	}
+}
+
+// lockedLogBuffer is a bytes.Buffer safe to read while another goroutine
+// logs into it.
+type lockedLogBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *lockedLogBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *lockedLogBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+func (b *lockedLogBuffer) Reset() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.buf.Reset()
 }

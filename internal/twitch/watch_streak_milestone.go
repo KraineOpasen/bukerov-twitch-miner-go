@@ -306,10 +306,11 @@ const (
 	MilestoneFailureContextDone      MilestoneFailureClass = "CONTEXT_ALREADY_DONE"
 	// MilestoneFailureNoDataNode: the response carried no top-level GraphQL
 	// errors AND no data object. A GraphQL data response always has one, so
-	// this is an edge/proxy rejection body (a 4xx or a gateway page with a JSON
-	// payload) that the shared transport returns verbatim for statuses it does
-	// not special-case. Reporting it as OBSERVED would record "Twitch answered
-	// and there is no milestone" when the request was in fact rejected.
+	// this is an edge/proxy body served at a 2xx status (a gateway page with a
+	// JSON payload); a non-2xx never reaches this check, because the diagnostic
+	// transport branch drops its body and it is refused as HTTP_STATUS.
+	// Reporting it as OBSERVED would record "Twitch answered and there is no
+	// milestone" when the request was in fact rejected.
 	MilestoneFailureNoDataNode MilestoneFailureClass = "NO_DATA_NODE"
 	// MilestoneFailureMalformedErrors: an `errors` node was PRESENT but was not
 	// an array. A GraphQL errors node is only ever valid as a list, so every
@@ -318,11 +319,12 @@ const (
 	// string, a number or null - so without this the rejection would be walked
 	// past and its accompanying data recorded as an observed milestone.
 	MilestoneFailureMalformedErrors MilestoneFailureClass = "MALFORMED_ERRORS_NODE"
-	// MilestoneFailureHTTPStatus: the response did not carry a 2xx status. The
-	// shared read transport special-cases only 401 and 403 and hands back any
-	// other non-2xx JSON body verbatim, so a 400, a 404 or a redirect page whose
-	// payload happens to contain a data object would otherwise satisfy the
-	// data-presence check and be recorded as evidence.
+	// MilestoneFailureHTTPStatus: the response did not carry a 2xx status. For
+	// a diagnostic read the shared transport special-cases only 401 and 403;
+	// every other non-2xx has its body DROPPED in doGQLRequestWithClientIDFallback
+	// and surfaces as an error, which this reader refines to the status class.
+	// So a 400, a 404 or a redirect page is refused on its status alone and
+	// its payload is never parsed or trusted, whatever data object it carried.
 	MilestoneFailureHTTPStatus MilestoneFailureClass = "HTTP_STATUS"
 
 	// MilestoneFailureOversizedCollection marks a response whose milestone
@@ -407,7 +409,7 @@ func (o WatchStreakMilestoneObservation) Duration() time.Duration {
 	return o.RequestEnd.Sub(o.RequestStart)
 }
 
-// ObserveWatchStreakMilestone performs at most ONE read-only RewardList request
+// ObserveWatchStreakMilestone performs ONE logical read-only RewardList read
 // for channelID and returns the resulting diagnostic record.
 //
 // It never returns an error, by design. Every failure mode — cancelled,
@@ -416,13 +418,19 @@ func (o WatchStreakMilestoneObservation) Duration() time.Duration {
 // accidentally turn an observation failure into a business failure: there is no
 // error to propagate, no state to roll back and no decision to skip.
 //
-// Request amplification is exactly the shared read transport's existing
-// contract and nothing more: one postGQLRequest call, whose bounded internals
-// (per-operation client-ID candidates, gqlMaxRetries transient retries with
-// interruptible backoff, and at most one auth-recovery replay of the identical
-// body) are the same ones every other read operation in this package already
-// uses. This function adds no retry, no backoff and no second request of its
-// own.
+// Request amplification is the shared read transport's contract NARROWED for
+// a diagnostic read: one postGQLRequestWithStatus call, whose internals walk
+// the per-operation client-ID candidates and the transient-retry schedule with
+// interruptible backoff, but charge one permit of allowance immediately before
+// EVERY explicit http.Client.Do they make (first attempt, retry and client-ID
+// fallback alike) and stop with ALLOWANCE_EXHAUSTED when it is spent; a nil
+// allowance leaves the transport's own gqlMaxRetries ladder as the only bound.
+// A diagnostic read never replays on an auth rejection (a 401 returns
+// UNAUTHORIZED at once, with no credential recovery), never follows a
+// redirect, and applies the body, value and collection bounds and the
+// structured APQ recognition that business reads do not. Dispatches reports
+// what one call actually spent. This function adds no retry, no backoff and no
+// second request of its own.
 //
 // The request is marked DIAGNOSTIC (see diagnosticRequestKey), so its outcome
 // is invisible to the shared connectivity accounting in both directions: it
@@ -532,7 +540,11 @@ func (c *TwitchClient) ObserveWatchStreakMilestone(ctx context.Context, channelI
 				// {"error":"Unauthorized"} and HTTP 400 with
 				// {"errors":[{"message":"Unauthorized"}]} both recorded
 				// UNAUTHORIZED, so the peer chose the class the status had
-				// already settled.
+				// already settled. The same rule now holds at a 2xx too:
+				// gqlSingleRoundTrip settles authorization on the status alone
+				// for a diagnostic read, so a 200 whose body merely says
+				// "Unauthorized" reaches the top-level-error refusal below and
+				// is recorded GRAPHQL_TOP_LEVEL_ERRORS, never UNAUTHORIZED.
 				//
 				// Stated honestly, because a test cannot currently tell the two
 				// guards apart: this branch is UNREACHABLE through the transport
@@ -560,11 +572,17 @@ func (c *TwitchClient) ObserveWatchStreakMilestone(ctx context.Context, channelI
 		return obs
 	}
 
-	// Success is judged on the STATUS, not on the shape of what came back. The
-	// shared transport special-cases only 401 and 403 and returns every other
-	// non-2xx JSON body verbatim, so a 400, a 404 or a redirect page carrying a
-	// data object would otherwise pass the data-presence check below and be
-	// recorded as an observed milestone. A refused request is not evidence.
+	// Success is judged on the STATUS, not on the shape of what came back. A
+	// refused request is not evidence. Stated honestly: for a diagnostic read
+	// this branch is UNREACHABLE through the transport today, because
+	// doGQLRequestWithClientIDFallback drops the body of every non-2xx it does
+	// not special-case and the round trip then surfaces an error, which the
+	// err != nil path above refines to HTTP_STATUS. It is kept for the same
+	// reason as the UNAUTHORIZED case: the rule "at a non-2xx the status names
+	// the failure" belongs at the layer that records the failure, so that if
+	// a later change ever hands that body back, a 400, a 404 or a redirect
+	// page carrying a data object still cannot pass the data-presence check
+	// below and be recorded as an observed milestone.
 	if statusCode < 200 || statusCode > 299 {
 		obs.Outcome, obs.FailureClass = MilestoneUnavailable, MilestoneFailureHTTPStatus
 		return obs
@@ -727,9 +745,11 @@ func parseWatchStreakMilestone(resp map[string]interface{}) WatchStreakMilestone
 //
 // The structs bought nothing. The record prints exact COUNTS and a sample of
 // at most a few identifiers, so every element past the sample exists only to be
-// tallied. The limit is set orders of magnitude above any credible RewardList -
-// a real missedStreams holds a handful - and orders of magnitude below the
-// cardinality that makes this expensive.
+// tallied. The limit is sized by margin, not by observation: no live RewardList
+// response has been captured (acceptance is PENDING), so how many elements a
+// real missedStreams holds is unverified; the limit is expected to sit far
+// above it and is set orders of magnitude below the cardinality that makes
+// this expensive.
 const maxMilestoneCollectionElements = 4096
 
 // milestoneCollectionsWithinLimit reports whether the decoded response's
@@ -945,8 +965,10 @@ func milestoneInt(parent map[string]interface{}, key string) MilestoneIntField {
 	return milestoneIntFromNumber(number)
 }
 
-// milestoneNumericStringOrInt classifies one integer-valued field that Twitch
-// sends in EITHER JSON encoding, recording which one arrived.
+// milestoneNumericStringOrInt classifies one integer-valued field, accepting
+// EITHER JSON encoding and recording which one arrived. The string form is the
+// donor-attested wire fact; the number form is tolerance only and is not
+// attested for this field.
 //
 // This is protocol tolerance, not interpretation. RewardList's milestone value
 // node is string-encoded on the wire, so reading only the number form would

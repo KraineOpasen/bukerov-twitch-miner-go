@@ -95,15 +95,22 @@ const (
 // a production seam for a test's benefit.
 //
 // So MilestoneFailureTransportTimeout is not reachable through this stage for
-// the pure stall the old comment described. It stays reachable for a caller
-// giving ObserveWatchStreakMilestone a longer-lived context, and through a
-// narrow race where the stall lands on the final attempt inside the budget.
-// The class is kept because it still names a real, distinguishable outcome at
-// the client boundary - not because this stage produces it.
+// the pure stall the old comment described, and under the cycle allowance
+// (three dispatches, fewer than the ladder's gqlMaxRetries+1) the ladder never
+// reaches its final attempt through this stage either: a pre-response stall
+// ends as ALLOWANCE_EXHAUSTED or as the stage's own DEADLINE_EXCEEDED. What
+// DOES reach TRANSPORT_TIMEOUT through this stage is a body stall: a 2xx
+// status received and then a body that never completes, which Client.Timeout
+// ends as a non-transient read error on the FIRST dispatch (pinned by
+// TestABodyStallAfterA2xxReadsTransportTimeoutOnTheFirstDispatch in
+// internal/twitch). It also stays reachable for a caller passing a nil
+// allowance with a longer-lived context. The class is kept because it names a
+// real, distinguishable outcome at the client boundary.
 //
-// Making it reachable here would need a budget exceeding the whole retry
-// schedule, which is far past bonusPollInterval and defeats the bound. That is
-// a cadence decision, not a comment fix, so the comment is what changed.
+// Making the pure-stall route reachable here would need a budget exceeding
+// the whole retry schedule, which is far past bonusPollInterval and defeats
+// the bound. That is a cadence decision, not a comment fix, so the comment is
+// what changed.
 //
 // "Alone" is deliberate. This budget starts when the stage does, not at the
 // tick, so on its own it would let a long business pass and a full stage ADD:
@@ -144,13 +151,14 @@ const milestoneLogIDSample = 8
 //
 // Source: Twitch, "Viewer Channel Point Guide"
 // (https://help.twitch.tv/s/article/viewer-channel-point-guide), supplied as
-// owner evidence and recorded 2026-09-06. Independently corroborated by the
-// already-audited donor mpforce1/Twitch-Channel-Points-Miner (ref
-// f1dda17ad61562ca2e93d975ee0a24e8b2f7ea0c, README blob
+// owner evidence and recorded 2026-09-06. Corroborated against the donor
+// mpforce1/Twitch-Channel-Points-Miner at ref
+// f1dda17ad61562ca2e93d975ee0a24e8b2f7ea0c (README blob
 // d5b60c22c5e6387cbe69c3e7e951b32d946672f6), which lists the same four reward
-// AMOUNTS. Stated exactly, because the earlier wording ("states the same
-// progression", "independently corroborated") claimed more than the donor
-// supports: the amounts are corroborated, the streak-count-to-amount MAPPING
+// AMOUNTS; no separate audit record of that donor exists in this repository,
+// so the corroboration is exactly that blob at that ref and nothing more.
+// Stated exactly, because the earlier wording ("states the same progression",
+// "independently corroborated") claimed more than the donor supports: the amounts are corroborated, the streak-count-to-amount MAPPING
 // and the flat "5 or more" rung rest on the Twitch guide alone. That is why
 // provenStreakCount reads UNKNOWN on every record - a second source for the
 // amounts is not a second source for what they mean. The same guide documents that a qualifying stream must run at
@@ -479,11 +487,21 @@ func (m *Miner) observeWatchStreakMilestones(owner context.Context, cycle milest
 		s := targets[i]
 		obs := m.client.ObserveWatchStreakMilestone(ctx, s.ChannelID, s.GetUsername(), allowance)
 		if obs.Dispatches == 0 {
-			// Refused at the client boundary before any request left (the
-			// deadline landed between the check above and the dispatch). Not
-			// observed, not reported as observed, keeps its turn.
+			// Refused at the client boundary before any request left. Not
+			// observed and not reported as observed; the class says why, and
+			// the stage answers each in kind.
+			if obs.FailureClass == twitch.MilestoneFailureNoChannelID {
+				// The target lost its channel identity after the eligibility
+				// mask was taken. Nothing was spent and nothing is exhausted,
+				// so the roster continues; the target was not started and is
+				// counted among the unexamined, and the cursor is not moved
+				// on its behalf.
+				continue
+			}
+			// The deadline landed between the check above and the dispatch,
+			// or the client found the allowance spent. Keeps its turn.
 			cutoff, next = milestoneCutoffTime, i
-			if allowance.Remaining() == 0 {
+			if obs.FailureClass == twitch.MilestoneFailureAllowanceExhausted {
 				cutoff = milestoneCutoffCount
 			}
 			break

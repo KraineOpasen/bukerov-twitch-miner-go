@@ -530,10 +530,11 @@ func TestObservationFailsClosedOnAMalformedErrorsNode(t *testing.T) {
 // TestObservationRequiresAnHTTPSuccessStatus covers a rejection whose body
 // merely LOOKS like a GraphQL response.
 //
-// The shared transport special-cases only 401 and 403; every other non-2xx body
-// that happens to be JSON comes back verbatim. So a 400 or 404 whose payload
+// The shared transport special-cases only 401 and 403; for a diagnostic read
+// every other non-2xx has its body dropped one layer down and surfaces as an
+// error refined to HTTP_STATUS. Without that, a 400 or 404 whose payload
 // carries an object-valued data key would satisfy the data-presence check and
-// be recorded as an observation. A hostile endpoint or proxy could therefore
+// be recorded as an observation, so a hostile endpoint or proxy could
 // manufacture diagnostic evidence out of a request the server refused.
 func TestObservationRequiresAnHTTPSuccessStatus(t *testing.T) {
 	for _, status := range []int{http.StatusBadRequest, http.StatusNotFound,
@@ -1845,10 +1846,10 @@ func TestParseWatchStreakMilestoneSelfNodeAbsence(t *testing.T) {
 // proxy rejection body is reported as UNAVAILABLE, not as an observation in
 // which every field happened to be missing.
 //
-// The shared transport special-cases only 401 and 403; any other non-2xx body
-// that parses as JSON is returned verbatim as a result. Without the data-node
-// check, a 404 or a gateway error page would be recorded as OBSERVED with every
-// node MISSING — indistinguishable in the retained log from Twitch genuinely
+// The shared transport special-cases only 401 and 403; a diagnostic non-2xx
+// body is dropped and refused on its status, and a 2xx gateway page carries no
+// data node. Without the data-node check, such a page at 200 would be recorded
+// as OBSERVED with every node MISSING — indistinguishable in the retained log from Twitch genuinely
 // answering "this channel has no milestone", which is the exact confusion this
 // feature exists to prevent.
 func TestObserveWatchStreakMilestoneNonGraphQLBodyIsUnavailable(t *testing.T) {
@@ -2471,6 +2472,35 @@ func TestOversizedCollectionsAreRefusedBeforeTheyAreBuilt(t *testing.T) {
 		return assertReachesTheCollectionBound(t, b.String())
 	}
 
+	// The bound is inclusive on the accept side: exactly 4096 elements is
+	// still observed. Without this case an off-by-one that refused a body AT
+	// the documented limit would ship unnoticed.
+	atLimitBody := func(t *testing.T) string {
+		t.Helper()
+		var b strings.Builder
+		b.WriteString(`{"data":{"channel":{"id":"12345","self":{"watchStreakMilestone":{"missedStreams":[`)
+		for i := 0; i < maxMilestoneCollectionElements; i++ {
+			if i > 0 {
+				b.WriteString(",")
+			}
+			b.WriteString(`{}`)
+		}
+		b.WriteString(`]}}}}}`)
+		return assertReachesTheCollectionBound(t, b.String())
+	}
+	t.Run("exactly the limit is still observed", func(t *testing.T) {
+		body := atLimitBody(t)
+		c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+			_, _ = io.WriteString(w, body)
+		})
+		obs := c.ObserveWatchStreakMilestone(context.Background(), "12345", "somestreamer", nil)
+		if obs.Outcome != MilestoneObserved {
+			t.Fatalf("a collection of exactly %d elements was refused as %q/%q; the bound is inclusive",
+				maxMilestoneCollectionElements, obs.Outcome, obs.FailureClass)
+		}
+	})
+
 	for _, tc := range []struct {
 		name string
 		body func(*testing.T) string
@@ -2770,15 +2800,48 @@ func TestTheAPQMarkerIsOnlyHonouredWhereARejectionPutsIt(t *testing.T) {
 			wantRequest: 3,
 		},
 		{
+			// The null-is-absent rule applies to the code itself: an explicit
+			// null code says "no code", so the message decides, exactly as a
+			// null extensions object does. Refusing it hid a genuine rejection
+			// behind GRAPHQL_TOP_LEVEL_ERRORS after one dispatch.
+			name:        "a null extensions code falls back to the message",
+			body:        `{"errors":[{"message":"PersistedQueryNotFound","extensions":{"code":null}}]}`,
+			wantOutcome: MilestoneUnsupported,
+			wantClass:   MilestoneFailureQueryNotFound,
+			wantRequest: 3,
+		},
+		{
 			// A top-level "error" sits BESIDE the errors array and is an
 			// explicit rejection in its own right. Refusing the APQ reading
-			// lets the response say what it actually said: the shared
-			// transport recognises "Unauthorized" here, so the recorded class
-			// is the specific one rather than a fabricated APQ result.
+			// lets the response say what it actually said - and at a 2xx
+			// what it said is a GraphQL-level rejection, not a token
+			// rejection: a diagnostic read settles UNAUTHORIZED on the HTTP
+			// status alone, so the peer's "Unauthorized" string cannot pick
+			// that class.
 			name:        "a top-level error member beside the array is a rejection",
 			body:        `{"error":"Unauthorized","errors":[{"message":"PersistedQueryNotFound"}]}`,
-			wantOutcome: MilestoneUnavailable,
-			wantClass:   MilestoneFailureUnauthorized,
+			wantOutcome: MilestoneGraphQLError,
+			wantClass:   MilestoneFailureGraphQLTopLevel,
+			wantRequest: 1,
+		},
+		{
+			// A null data member is absent, as everywhere else in this read:
+			// the GraphQL execution-error shape with data: null is still a
+			// rejection.
+			name:        "a null data member beside the rejection is absent",
+			body:        `{"data":null,"errors":[{"message":"PersistedQueryNotFound"}]}`,
+			wantOutcome: MilestoneUnsupported,
+			wantClass:   MilestoneFailureQueryNotFound,
+			wantRequest: 3,
+		},
+		{
+			// An EMPTY data object is present, not absent: the detector
+			// refuses on any non-null data member, and this row pins that
+			// the documented rule is "non-null", not "usable".
+			name:        "an empty data object beside the rejection is present",
+			body:        `{"data":{},"errors":[{"message":"PersistedQueryNotFound"}]}`,
+			wantOutcome: MilestoneGraphQLError,
+			wantClass:   MilestoneFailureGraphQLTopLevel,
 			wantRequest: 1,
 		},
 		{
@@ -3432,10 +3495,16 @@ func TestPartialClientIDTraversalIsIncompleteNotUnsupported(t *testing.T) {
 	assertEmptySnapshot(t, obs.Snapshot)
 	// The stale-hash exhaustion summary is a statement about EVERY candidate
 	// and must not be written for a traversal that did not reach every one.
-	if strings.Contains(logs.String(), "exhausted") && strings.Contains(logs.String(), "client ID") {
+	// Asserted on the message the transport actually emits, so that logging
+	// it here cannot slip past a grep for a word it never contained.
+	if strings.Contains(logs.String(), staleHashAllCandidatesSummary) {
 		t.Errorf("a partial traversal logged a candidates-exhausted summary:\n%s", logs.String())
 	}
 }
+
+// staleHashAllCandidatesSummary is the DEBUG summary a diagnostic read writes
+// after a COMPLETE candidate walk, and only then.
+const staleHashAllCandidatesSummary = "PersistedQueryNotFound on all known client IDs"
 
 // TestCompleteClientIDTraversalKeepsUnsupportedQuery is the other half: when
 // the allowance covers the whole candidate set, actual APQ exhaustion is still
@@ -3454,6 +3523,7 @@ func TestCompleteClientIDTraversalKeepsUnsupportedQuery(t *testing.T) {
 		_, _ = io.WriteString(w, persistedQueryNotFoundBody)
 	})
 	candidates := len(c.candidateClientIDs("RewardList"))
+	logs := captureClientLogs(t)
 
 	allowance := NewDiagnosticAllowance(3)
 	obs := c.ObserveWatchStreakMilestone(context.Background(), "12345", "somestreamer", allowance)
@@ -3461,6 +3531,12 @@ func TestCompleteClientIDTraversalKeepsUnsupportedQuery(t *testing.T) {
 	if obs.Outcome != MilestoneUnsupported || obs.FailureClass != MilestoneFailureQueryNotFound {
 		t.Fatalf("outcome = %q/%q, want UNSUPPORTED_QUERY/PERSISTED_QUERY_NOT_FOUND after a complete traversal",
 			obs.Outcome, obs.FailureClass)
+	}
+	// The complete walk is the one place the all-candidates summary belongs,
+	// so its presence here is what gives the partial-traversal test's absence
+	// assertion its meaning.
+	if !strings.Contains(logs.String(), staleHashAllCandidatesSummary) {
+		t.Errorf("a complete traversal did not log the all-candidates summary; logs:\n%s", logs.String())
 	}
 	mu.Lock()
 	got := attempts
@@ -3769,5 +3845,199 @@ func TestAllowanceExhaustionIsItsOwnClassNotATransportFault(t *testing.T) {
 				t.Errorf("%s: allowance exhaustion was classified as a transient transport failure", name)
 			}
 		}
+	}
+}
+
+// TestA2xxBodySayingUnauthorizedIsAGraphQLErrorNotATokenRejection pins that a
+// diagnostic read settles UNAUTHORIZED on the HTTP status alone at EVERY
+// status. isAuthError also answers true for a 2xx body carrying the exact
+// string "Unauthorized"; for a business read that body is trusted evidence and
+// drives credential recovery, but for a diagnostic read of an untrusted body it
+// would let the peer pick the recorded class with a string a 200 can carry.
+func TestA2xxBodySayingUnauthorizedIsAGraphQLErrorNotATokenRejection(t *testing.T) {
+	for name, body := range map[string]string{
+		"singular error member": `{"error":"Unauthorized"}`,
+		"errors array message":  `{"errors":[{"message":"Unauthorized"}]}`,
+		"padded message":        `{"errors":[{"message":"  Unauthorized  "}]}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			var (
+				mu       sync.Mutex
+				requests int
+			)
+			c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+				mu.Lock()
+				requests++
+				mu.Unlock()
+				w.WriteHeader(http.StatusOK)
+				_, _ = io.WriteString(w, body)
+			})
+
+			obs := c.ObserveWatchStreakMilestone(context.Background(), "12345", "somestreamer", NewDiagnosticAllowance(3))
+
+			if obs.Outcome != MilestoneGraphQLError || obs.FailureClass != MilestoneFailureGraphQLTopLevel {
+				t.Fatalf("outcome = %q/%q, want GRAPHQL_ERROR/GRAPHQL_TOP_LEVEL_ERRORS: at a 2xx the body chose "+
+					"the recorded class", obs.Outcome, obs.FailureClass)
+			}
+			mu.Lock()
+			got := requests
+			mu.Unlock()
+			if got != 1 {
+				t.Errorf("requests = %d, want 1", got)
+			}
+			// The business half of the same round trip keeps the body rule,
+			// because a token rejection there must still drive recovery.
+			raw := []byte(`{"operationName":"ChannelPointsContext"}`)
+			_, _, businessAuth, err := c.gqlSingleRoundTrip(context.Background(), raw, "ChannelPointsContext", "token")
+			if err != nil || !businessAuth {
+				t.Errorf("business round trip: authRejected=%v err=%v, want true/nil (isAuthError's body rule is "+
+					"a business-read property)", businessAuth, err)
+			}
+			_, _, diagnosticAuth, err := c.gqlSingleRoundTrip(withDiagnosticRequest(context.Background(), nil), raw, "RewardList", "token")
+			if err != nil || diagnosticAuth {
+				t.Errorf("diagnostic round trip: authRejected=%v err=%v, want false/nil", diagnosticAuth, err)
+			}
+		})
+	}
+}
+
+// TestABodyStallAfterA2xxReadsTransportTimeoutOnTheFirstDispatch pins the one
+// route by which TRANSPORT_TIMEOUT is reachable through the observation stage:
+// a 2xx status received and then a body that never completes. Client.Timeout
+// ends that as a NON-transient read error (the status is 200), so it is
+// returned on the first dispatch with the owner alive - unlike a pre-response
+// stall, which is retried and ends as the stage's own deadline or the
+// allowance.
+func TestABodyStallAfterA2xxReadsTransportTimeoutOnTheFirstDispatch(t *testing.T) {
+	var (
+		mu       sync.Mutex
+		attempts int
+	)
+	stopHandlers := make(chan struct{})
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		attempts++
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		// Headers are out; the body never comes.
+		select {
+		case <-r.Context().Done():
+		case <-stopHandlers:
+		}
+	})
+	t.Cleanup(func() { close(stopHandlers) })
+	c.client.Timeout = 40 * time.Millisecond
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	obs := c.ObserveWatchStreakMilestone(ctx, "12345", "somestreamer", NewDiagnosticAllowance(3))
+
+	mu.Lock()
+	got := attempts
+	mu.Unlock()
+	if got != 1 {
+		t.Fatalf("attempts = %d, want 1: a read error after a 2xx is not transient and must not be retried", got)
+	}
+	if obs.Outcome != MilestoneUnavailable || obs.FailureClass != MilestoneFailureTransportTimeout {
+		t.Fatalf("outcome = %q/%q, want UNAVAILABLE/TRANSPORT_TIMEOUT", obs.Outcome, obs.FailureClass)
+	}
+	if obs.Dispatches != 1 {
+		t.Errorf("obs.Dispatches = %d, want 1", obs.Dispatches)
+	}
+}
+
+// TestADiagnosticReadStartsFromThePromotedDefault pins the candidate order a
+// diagnostic read actually uses: it caches nothing of its own, so it starts
+// from the CURRENT process-wide default - the shipped ID until a business
+// rotation promotes another - and never moves that default itself.
+func TestADiagnosticReadStartsFromThePromotedDefault(t *testing.T) {
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, persistedQueryNotFoundBody)
+	})
+	shipped := c.candidateClientIDs("RewardList")
+	if len(shipped) == 0 || shipped[0] != constants.ClientIDTV {
+		t.Fatalf("before any rotation the first candidate is %q, want the shipped default", shipped)
+	}
+
+	// A BUSINESS rotation promotes the process-wide default.
+	c.rememberWorkingClientID("SomeBusinessOp", constants.ClientIDMobile, true)
+
+	order := c.candidateClientIDs("RewardList")
+	if len(order) == 0 || order[0] != constants.ClientIDMobile {
+		t.Fatalf("after a business promotion the diagnostic candidate order is %v, want the promoted default first", order)
+	}
+	var seen []string
+	c2 := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		seen = append(seen, r.Header.Get("Client-Id"))
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, persistedQueryNotFoundBody)
+	})
+	c2.rememberWorkingClientID("SomeBusinessOp", constants.ClientIDMobile, true)
+	_ = c2.ObserveWatchStreakMilestone(context.Background(), "12345", "somestreamer", NewDiagnosticAllowance(3))
+	if len(seen) != 3 || seen[0] != constants.ClientIDMobile {
+		t.Fatalf("diagnostic dispatch order = %v, want the promoted default first across a complete walk", seen)
+	}
+	// And the diagnostic walk moved nothing.
+	if got := c2.ActiveClientID(); got != "Mobile" {
+		t.Errorf("active client ID after the diagnostic walk = %q, want the promoted default untouched", got)
+	}
+}
+
+// pqnfCancellingTransport answers PersistedQueryNotFound and cancels the
+// owner during its FIRST call, so the cancellation lands exactly between one
+// candidate's answer and the next.
+type pqnfCancellingTransport struct {
+	mu     sync.Mutex
+	calls  int
+	cancel context.CancelFunc
+}
+
+func (p *pqnfCancellingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	p.mu.Lock()
+	p.calls++
+	first := p.calls == 1
+	p.mu.Unlock()
+	if first {
+		p.cancel()
+	}
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     make(http.Header),
+		Body:       io.NopCloser(strings.NewReader(persistedQueryNotFoundBody)),
+		Request:    req,
+	}, nil
+}
+
+// TestOwnerCancellationBetweenCandidatesIsCancelledNotExhausted pins the
+// owner-first ordering at the candidate loop and before the charge: an owner
+// that goes away while candidate 1's PersistedQueryNotFound is being returned
+// must be recorded CANCELLED after exactly one dispatch - never walked to a
+// full-traversal UNSUPPORTED_QUERY verdict, and never charged for requests a
+// dead owner would refuse.
+func TestOwnerCancellationBetweenCandidatesIsCancelledNotExhausted(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {})
+	transport := &pqnfCancellingTransport{cancel: cancel}
+	c.client.Transport = transport
+
+	allowance := NewDiagnosticAllowance(3)
+	obs := c.ObserveWatchStreakMilestone(ctx, "12345", "somestreamer", allowance)
+
+	transport.mu.Lock()
+	calls := transport.calls
+	transport.mu.Unlock()
+	if calls != 1 {
+		t.Fatalf("transport calls = %d, want 1: the walk continued after the owner was cancelled", calls)
+	}
+	if obs.Outcome != MilestoneCancelled || obs.FailureClass != MilestoneFailureCancelled {
+		t.Fatalf("outcome = %q/%q, want CANCELLED/CANCELLED", obs.Outcome, obs.FailureClass)
+	}
+	if obs.Dispatches != 1 || allowance.Spent() != 1 {
+		t.Errorf("dispatches %d, spent %d; want 1/1", obs.Dispatches, allowance.Spent())
 	}
 }

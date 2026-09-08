@@ -387,8 +387,17 @@ func isAuthError(statusCode int, result map[string]interface{}) bool {
 // update internal/constants/gql.go when nothing had resolved. A BUSINESS
 // rotation still promotes and still warns, unchanged.
 //
-// Everything else about the request — its client-ID candidates, its retries and
-// its returned error — is identical to a business read.
+// What a diagnostic read SHARES with a business read is the candidate order,
+// the transient-retry schedule and gqlMaxRetries. It additionally (see
+// doGQLRequestWithClientIDFallback, doGQLRequestWithRetry, doGQLOnceWithClient
+// and gqlSingleRoundTrip): draws every explicit dispatch from a per-cycle
+// DiagnosticAllowance, so candidates and retries stop when it is spent; never
+// follows a redirect; caps the body at maxDiagnosticResponseBytes; stops the
+// candidate loop and drops the body on any non-2xx; refuses oversized or
+// ambiguous JSON; recognises PersistedQueryNotFound structurally; settles
+// authorization on the HTTP status alone; never replays on an auth rejection;
+// and can return errDiagnosticAllowanceExhausted, errAmbiguousDiagnosticJSON
+// or errOversizedDiagnosticJSON, none of which a business read ever sees.
 type diagnosticRequestKey struct{}
 
 // DiagnosticAllowance caps the explicit authenticated diagnostic HTTP dispatches
@@ -535,6 +544,16 @@ func (c *TwitchClient) gqlSingleRoundTrip(ctx context.Context, body []byte, oper
 		return nil, statusCode, false, fmt.Errorf("failed to unmarshal %s response: %w", operationName, err)
 	}
 
+	// A diagnostic read settles authorization on the STATUS alone. A 401 was
+	// answered above; a 2xx body that merely says "Unauthorized" is a string
+	// the peer chose, not a token rejection, and letting it pick the recorded
+	// class is exactly the peer-controlled misclassification this read
+	// refuses everywhere else. isAuthError's body rule stays for business
+	// reads, whose responses are not attacker-shaped text and whose token
+	// rejections must still drive credential recovery.
+	if isDiagnosticRequest(ctx) {
+		return result, statusCode, false, nil
+	}
 	return result, statusCode, isAuthError(statusCode, result), nil
 }
 
@@ -549,12 +568,13 @@ func (c *TwitchClient) postGQLRequest(ctx context.Context, operation constants.G
 // postGQLRequestWithStatus is postGQLRequest plus the HTTP status of the
 // response it parsed.
 //
-// The shared transport special-cases only 401 and 403; every other non-2xx body
-// that happens to be JSON is returned verbatim as a result. A caller that
-// treats "this decoded into the shape I expected" as proof of success would
-// therefore accept a 400, a 404 or a redirect page as data. The status is
-// exposed so such a caller can refuse first and decide on evidence rather than
-// on shape.
+// The shared transport special-cases only 401 and 403. For a BUSINESS caller
+// every other non-2xx body that happens to be JSON is returned verbatim as a
+// result, so a caller that treats "this decoded into the shape I expected" as
+// proof of success would accept a 400, a 404 or a redirect page as data. For a
+// DIAGNOSTIC caller doGQLRequestWithClientIDFallback drops any non-2xx body
+// instead and the round trip surfaces an error; the status is exposed so that
+// caller can name the failure by status rather than by shape.
 func (c *TwitchClient) postGQLRequestWithStatus(ctx context.Context, operation constants.GQLOperation) (map[string]interface{}, int, error) {
 	if isBonusMutationOperation(operation) {
 		return nil, 0, ErrDirectBonusMutation
@@ -799,11 +819,15 @@ func strictPersistedQueryNotFound(respBody []byte) bool {
 // counted only scalars and was therefore blind to the cheapest amplification
 // available: a body that is nothing but delimiters.
 //
-// Set generously above any credible diagnostic response - a real RewardList
-// carries a few dozen values - and, deliberately, above the milestone
-// collection limit, so a merely implausible collection is still decoded and
-// refused with the precise OVERSIZED_COLLECTION evidence rather than being
-// rejected here as an unreadable body.
+// Sized by MARGIN, not by observation. No live RewardList response has been
+// captured (acceptance is PENDING) and the donor's model covers only the
+// watchStreakMilestone subtree, so the value count of a real document is
+// unverified; the limit is expected to sit far above it, and that expectation
+// is an assumption this comment does not upgrade to a fact. It is set,
+// deliberately, above the milestone collection limit, so a merely implausible
+// collection is still decoded and refused with the precise
+// OVERSIZED_COLLECTION evidence rather than being rejected here as an
+// unreadable body.
 const maxDiagnosticJSONValues = 8192
 
 // diagnosticJSONValueVerdict is what diagnosticJSONValueCount answers. The
@@ -956,8 +980,10 @@ func diagnosticJSONHasDuplicateMembers(body []byte) bool {
 // real milestone data it carried.
 //
 // So the marker must be where a rejection actually puts it: a top-level errors
-// array, every element an object carrying the APQ marker, with no usable data
-// beside it. Both attested spellings count - "message" and the extensions code
+// array, every element an object carrying the APQ marker, with no non-null data
+// member beside it (an empty data object is PRESENT, and refuses the reading;
+// an explicit null is absent, as everywhere else in this read). Both attested
+// spellings count - "message" and the extensions code
 // - because a genuine PersistedQueryNotFound is the EXPECTED steady state for
 // this operation, and failing to recognise one would replace an honest
 // UNSUPPORTED_QUERY with a confusing NO_DATA_NODE.
@@ -1023,7 +1049,14 @@ func diagnosticPersistedQueryNotFound(body []byte) bool {
 			if !isObject {
 				return false
 			}
-			if code, carried := extensions["code"]; carried {
+			//
+			// The same null-is-absent rule applies to the code itself: an
+			// explicit "code": null says "no code", not "a contradicting code",
+			// so it falls through to the message exactly as a null extensions
+			// object does. Refusing it cost the same evidence in the same
+			// direction: a genuine rejection wearing a null code was recorded
+			// GRAPHQL_TOP_LEVEL_ERRORS after one dispatch.
+			if code, carried := extensions["code"]; carried && code != nil {
 				if code != "PERSISTED_QUERY_NOT_FOUND" {
 					return false
 				}
@@ -1104,6 +1137,19 @@ func scanJSONValueForDuplicateKeys(decoder *json.Decoder) (bool, error) {
 	return false, nil
 }
 
+// noRedirectClient returns a request-local copy of the shared HTTP client that
+// refuses to follow redirects. The copy shares the transport and the timeout;
+// only the copy's redirect policy changes, so the shared client - and every
+// caller that follows redirects - is untouched. Both the side-effect
+// mutations and the diagnostic read dispatch through it.
+func (c *TwitchClient) noRedirectClient() *http.Client {
+	client := *c.client
+	client.CheckRedirect = func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
+	return &client
+}
+
 func (c *TwitchClient) doGQLMutationOnce(body []byte, operationName, clientID, token string) ([]byte, int, bool, error) {
 	req, err := http.NewRequest(http.MethodPost, c.gqlURL, bytes.NewReader(body))
 	if err != nil {
@@ -1111,11 +1157,7 @@ func (c *TwitchClient) doGQLMutationOnce(body []byte, operationName, clientID, t
 	}
 	c.setGQLHeaders(req, clientID, token)
 
-	client := *c.client
-	client.CheckRedirect = func(*http.Request, []*http.Request) error {
-		return http.ErrUseLastResponse
-	}
-	respBody, statusCode, _, err := doGQLOnceWithClient(&client, req)
+	respBody, statusCode, _, err := doGQLOnceWithClient(c.noRedirectClient(), req)
 	if err != nil {
 		return respBody, statusCode, true, err
 	}
@@ -1341,7 +1383,9 @@ func (c *TwitchClient) rememberWorkingClientID(operation, clientID string, viaFa
 // known-good ID first, then the promoted default, then the rest. On success a
 // BUSINESS read caches the working ID for the operation
 // (rememberWorkingClientID); a DIAGNOSTIC read caches nothing at all, so it
-// always starts from the shipped default. When every
+// starts from the current process-wide default - the shipped one until a
+// BUSINESS rotation promotes another - followed by the remaining shipped
+// candidates, and it never moves that default itself. When every
 // candidate returns PersistedQueryNotFound the request has genuinely failed
 // because the hash itself is stale — one ERROR is logged and
 // ErrPersistedQueryNotFound is returned so the caller keeps its last-known state
@@ -1368,9 +1412,18 @@ func (c *TwitchClient) doGQLRequestWithClientIDFallback(ctx context.Context, bod
 		// every candidate answered PersistedQueryNotFound, and a traversal cut
 		// short by the allowance has not established it. UNSUPPORTED_QUERY
 		// stays reachable only through the full walk.
-		if dr != nil && dr.allowance != nil && dr.allowance.Remaining() == 0 {
-			return nil, 0, fmt.Errorf("%w: after %d of %d client IDs",
-				errDiagnosticAllowanceExhausted, i, len(candidates))
+		//
+		// The owner is consulted FIRST, as on the retry path: a cancellation
+		// or deadline that lands between one candidate's answer and the next
+		// must read CANCELLED, never as an allowance stop.
+		if diagnostic {
+			if cerr := ctx.Err(); cerr != nil {
+				return nil, 0, cerr
+			}
+			if dr.allowance != nil && dr.allowance.Remaining() == 0 {
+				return nil, 0, fmt.Errorf("%w: after %d of %d client IDs",
+					errDiagnosticAllowanceExhausted, i, len(candidates))
+			}
 		}
 
 		respBody, statusCode, err = c.doGQLRequestWithRetry(ctx, body, operationLabel, clientID, token)
@@ -1585,15 +1638,11 @@ func (c *TwitchClient) doGQLRequestWithRetry(ctx context.Context, body []byte, o
 			// A diagnostic read never follows a redirect. The shared client
 			// follows up to ten, each one another authenticated request that
 			// no permit above would have counted and that the byte cap cannot
-			// see. The copy is request-local and made at dispatch time, as
-			// doGQLMutationOnce already does, so the shared client's policy -
-			// and every business read's - is untouched. The 3xx then comes
-			// back as an ordinary non-2xx and is refused on its status.
-			noFollow := *c.client
-			noFollow.CheckRedirect = func(*http.Request, []*http.Request) error {
-				return http.ErrUseLastResponse
-			}
-			respBody, statusCode, retryAfter, err = doGQLOnceWithClient(&noFollow, req)
+			// see. noRedirectClient is request-local and made at dispatch
+			// time, as doGQLMutationOnce already does, so the shared client's
+			// policy - and every business read's - is untouched. The 3xx then
+			// comes back as an ordinary non-2xx and is refused on its status.
+			respBody, statusCode, retryAfter, err = doGQLOnceWithClient(c.noRedirectClient(), req)
 		}
 		if err == nil {
 			// A diagnostic read repeats for every target on every cycle, so its
@@ -1735,10 +1784,13 @@ func doGQLOnceWithClient(client *http.Client, req *http.Request) ([]byte, int, t
 	// it. Business reads stay unbounded as they were; this is a property of the
 	// diagnostic caller, not a change to the shared contract.
 	//
-	// The limit is orders of magnitude above a real RewardList response (~1-2 KB),
-	// so a legitimate body is never refused; one that exceeds it is refused whole
-	// and reported as a transport failure, which is the honest outcome for a
-	// response this read declines to trust.
+	// The limit is sized by margin, not by observation: no live RewardList
+	// response has been captured (acceptance is PENDING), so its real size is
+	// unverified and the limit is only EXPECTED to sit far above it. A body
+	// that exceeds it is refused whole and reported as a transport failure,
+	// which is the honest outcome for a response this read declines to trust;
+	// if a legitimate response ever exceeded it, that channel would be refused
+	// on every cycle and the record could not tell it from a hostile one.
 	//
 	// Reading limit+1 is what makes the overflow visible - see
 	// maxDiagnosticResponseBytes. This is the same shape fetchSpadeAsset uses.
