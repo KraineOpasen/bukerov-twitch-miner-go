@@ -11,6 +11,7 @@ import (
 	"math"
 	"net/http"
 	"reflect"
+	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
@@ -386,6 +387,21 @@ func captureClientLogs(t *testing.T) *bytes.Buffer {
 	return buf
 }
 
+// textLogAttr returns the value of one attribute in a slog TextHandler line
+// (the level, the message, or any key), unquoted; "" when the key is absent.
+func textLogAttr(line, key string) string {
+	m := regexp.MustCompile(`(?:^|\s)` + regexp.QuoteMeta(key) + `=("(?:[^"\\]|\\.)*"|\S+)`).FindStringSubmatch(line)
+	if m == nil {
+		return ""
+	}
+	if strings.HasPrefix(m[1], `"`) {
+		if unquoted, err := strconv.Unquote(m[1]); err == nil {
+			return unquoted
+		}
+	}
+	return m[1]
+}
+
 // TestDiagnosticReadDoesNotRotateTheSharedClientIDDefault is the isolation
 // proof for the one piece of shared transport state a diagnostic read could
 // still move.
@@ -566,42 +582,92 @@ func TestObservationRequiresAnHTTPSuccessStatus(t *testing.T) {
 // which is exactly what "arbitrary raw error strings are never logged" rules
 // out. A bounded status is enough to diagnose a retry.
 func TestDiagnosticRetryTraceCarriesNoRawErrorText(t *testing.T) {
-	const retryMsg = "GQL request failed, retrying"
+	const (
+		retryMsg               = "GQL request failed, retrying"
+		diagnosticExhaustedMsg = "Diagnostic GQL request exhausted all retries"
+		businessExhaustedMsg   = "GQL request exhausted all retries, skipping this cycle"
+	)
 
 	logs := captureClientLogs(t)
 	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 		_, _ = io.WriteString(w, `{"message":"boom"}`)
 	})
+	logs.Reset()
 	_ = c.ObserveWatchStreakMilestone(context.Background(), "12345", "somestreamer", nil)
 
+	// Presence AND level are both pinned: the ladder ran (one retry line per
+	// wait, then one exhausted summary), every line of it is DEBUG and carries
+	// no raw error text, and nothing the diagnostic read did reached WARN or
+	// ERROR. The level matters because FileLevel defaults to DEBUG: a retry
+	// line that drifted back to WARN would reach the console view on every
+	// transient failure of every online streamer, every cycle.
+	retries, exhausted := 0, 0
 	for _, line := range strings.Split(logs.String(), "\n") {
-		if !strings.Contains(line, retryMsg) {
-			continue
+		switch {
+		case strings.Contains(line, retryMsg):
+			retries++
+			if strings.Contains(line, "error=") {
+				t.Errorf("a diagnostic retry trace carried a raw transport error string:\n%s", line)
+			}
+			if lvl := textLogAttr(line, "level"); lvl != "DEBUG" {
+				t.Errorf("a diagnostic retry trace is at level %q, want DEBUG:\n%s", lvl, line)
+			}
+		case strings.Contains(line, diagnosticExhaustedMsg):
+			exhausted++
+			if lvl := textLogAttr(line, "level"); lvl != "DEBUG" {
+				t.Errorf("the diagnostic exhausted summary is at level %q, want DEBUG:\n%s", lvl, line)
+			}
+			if got := textLogAttr(line, "attempts"); got != strconv.Itoa(gqlMaxRetries+1) {
+				t.Errorf("the diagnostic exhausted summary reports attempts=%q, want %d", got, gqlMaxRetries+1)
+			}
 		}
-		if strings.Contains(line, "error=") {
-			t.Errorf("a diagnostic retry trace carried a raw transport error string:\n%s", line)
+		if lvl := textLogAttr(line, "level"); lvl == "WARN" || lvl == "ERROR" {
+			t.Errorf("a diagnostic read emitted a %s line:\n%s", lvl, line)
 		}
 	}
+	if retries != gqlMaxRetries {
+		t.Errorf("diagnostic retry traces = %d, want %d (one per wait): the trace is absent or duplicated", retries, gqlMaxRetries)
+	}
+	if exhausted != 1 {
+		t.Errorf("diagnostic exhausted summaries = %d, want exactly 1", exhausted)
+	}
 
-	// The business half keeps its full trace: the raw error is actionable there
-	// and the operator is meant to see it.
+	// The business half keeps its full trace at its own levels: the raw error
+	// is actionable there and the operator is meant to see it, the retry is a
+	// WARN and the exhausted ladder is an ERROR.
 	logs.Reset()
 	business := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 		_, _ = io.WriteString(w, `{"message":"boom"}`)
 	})
+	logs.Reset()
 	_ = business.LoadChannelPointsContext(newTestStreamer("somestreamer"))
 
-	sawBusinessError := false
+	businessRetries, businessExhausted := 0, 0
 	for _, line := range strings.Split(logs.String(), "\n") {
-		if strings.Contains(line, retryMsg) && strings.Contains(line, "error=") {
-			sawBusinessError = true
+		switch {
+		case strings.Contains(line, retryMsg):
+			businessRetries++
+			if !strings.Contains(line, "error=") {
+				t.Errorf("a business retry trace no longer carries its error; the diagnostic bound leaked "+
+					"onto the business path:\n%s", line)
+			}
+			if lvl := textLogAttr(line, "level"); lvl != "WARN" {
+				t.Errorf("a business retry trace is at level %q, want WARN:\n%s", lvl, line)
+			}
+		case strings.Contains(line, businessExhaustedMsg):
+			businessExhausted++
+			if lvl := textLogAttr(line, "level"); lvl != "ERROR" {
+				t.Errorf("the business exhausted summary is at level %q, want ERROR:\n%s", lvl, line)
+			}
 		}
 	}
-	if !sawBusinessError {
-		t.Error("a business retry trace no longer carries its error; the diagnostic bound leaked " +
-			"onto the business path")
+	if businessRetries != gqlMaxRetries {
+		t.Errorf("business retry traces = %d, want %d", businessRetries, gqlMaxRetries)
+	}
+	if businessExhausted != 1 {
+		t.Errorf("business exhausted summaries = %d, want exactly 1", businessExhausted)
 	}
 }
 
@@ -2505,6 +2571,37 @@ func TestOversizedCollectionsAreRefusedBeforeTheyAreBuilt(t *testing.T) {
 		b.WriteString(`]}}}}}`)
 		return assertReachesTheCollectionBound(t, b.String())
 	}
+	// The same inclusive edge one level down: the top-level entry plus its
+	// nested identifiers total exactly the limit. Pins the nested accumulation
+	// separately, because the top-level case cannot see an exclusive nested
+	// comparison.
+	atLimitNestedBody := func(t *testing.T) string {
+		t.Helper()
+		var b strings.Builder
+		b.WriteString(`{"data":{"channel":{"id":"12345","self":{"watchStreakMilestone":{"missedStreams":[`)
+		b.WriteString(`{"broadcastIdentifiers":[`)
+		for i := 0; i < maxMilestoneCollectionElements-1; i++ {
+			if i > 0 {
+				b.WriteString(",")
+			}
+			b.WriteString(`{}`)
+		}
+		b.WriteString(`]}]}}}}}`)
+		return assertReachesTheCollectionBound(t, b.String())
+	}
+	t.Run("exactly the limit across nesting is still observed", func(t *testing.T) {
+		body := atLimitNestedBody(t)
+		c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+			_, _ = io.WriteString(w, body)
+		})
+		obs := c.ObserveWatchStreakMilestone(context.Background(), "12345", "somestreamer", nil)
+		if obs.Outcome != MilestoneObserved {
+			t.Fatalf("one entry with %d nested identifiers (exactly %d elements in total) was refused as %q/%q; "+
+				"the nested bound is inclusive", maxMilestoneCollectionElements-1, maxMilestoneCollectionElements,
+				obs.Outcome, obs.FailureClass)
+		}
+	})
 	t.Run("exactly the limit is still observed", func(t *testing.T) {
 		body := atLimitBody(t)
 		c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
@@ -2772,6 +2869,19 @@ func TestTheAPQMarkerIsOnlyHonouredWhereARejectionPutsIt(t *testing.T) {
 			name: "a contradictory extensions code beats the message",
 			body: `{"errors":[{"message":"PersistedQueryNotFound",` +
 				`"extensions":{"code":"UNAUTHORIZED"}}]}`,
+			wantOutcome: MilestoneGraphQLError,
+			wantClass:   MilestoneFailureGraphQLTopLevel,
+			wantRequest: 1,
+		},
+		{
+			// A rejection-shaped array the structural detector does NOT accept
+			// (an empty data object is present, so it is not an APQ rejection)
+			// is refused by the reader on its non-empty errors array, BEFORE
+			// the reader looks for a data node: one dispatch, and the class is
+			// GRAPHQL_TOP_LEVEL_ERRORS, never NO_DATA_NODE. This is the sentence
+			// diagnosticPersistedQueryNotFound's rationale states.
+			name:        "an APQ array beside an empty data object is a GraphQL error, not NO_DATA_NODE",
+			body:        `{"errors":[{"message":"PersistedQueryNotFound"}],"data":{}}`,
 			wantOutcome: MilestoneGraphQLError,
 			wantClass:   MilestoneFailureGraphQLTopLevel,
 			wantRequest: 1,
@@ -3570,8 +3680,19 @@ func TestCompleteClientIDTraversalKeepsUnsupportedQuery(t *testing.T) {
 	// The complete walk is the one place the all-candidates summary belongs,
 	// so its presence here is what gives the partial-traversal test's absence
 	// assertion its meaning.
-	if !strings.Contains(logs.String(), staleHashAllCandidatesSummary) {
-		t.Errorf("a complete traversal did not log the all-candidates summary; logs:\n%s", logs.String())
+	summaries := 0
+	for _, line := range strings.Split(logs.String(), "\n") {
+		if !strings.Contains(line, staleHashAllCandidatesSummary) {
+			continue
+		}
+		summaries++
+		if lvl := textLogAttr(line, "level"); lvl != "DEBUG" {
+			t.Errorf("the all-candidates summary of a DIAGNOSTIC read is at level %q, want DEBUG (the business "+
+				"stale-hash ERROR must not fire for it):\n%s", lvl, line)
+		}
+	}
+	if summaries != 1 {
+		t.Errorf("all-candidates summaries = %d, want exactly 1; logs:\n%s", summaries, logs.String())
 	}
 	mu.Lock()
 	got := attempts
@@ -4053,27 +4174,44 @@ func (p *pqnfCancellingTransport) RoundTrip(req *http.Request) (*http.Response, 
 // must be recorded CANCELLED after exactly one dispatch - never walked to a
 // full-traversal UNSUPPORTED_QUERY verdict, and never charged for requests a
 // dead owner would refuse.
+//
+// The three-permit case cannot see the ORDER of the two loop-top checks: the
+// allowance still has permits, so either order reads CANCELLED. The one-permit
+// case is the falsifier of the order itself: the cancelled candidate spent the
+// last permit, so at the next loop top the owner's cancellation and the
+// allowance's exhaustion are both true, and only owner-first reads CANCELLED
+// (checking the allowance first records ALLOWANCE_EXHAUSTED for a dead owner).
 func TestOwnerCancellationBetweenCandidatesIsCancelledNotExhausted(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {})
-	transport := &pqnfCancellingTransport{cancel: cancel}
-	c.client.Transport = transport
+	for _, tc := range []struct {
+		name    string
+		permits int
+	}{
+		{"three permits: the allowance is not a factor", 3},
+		{"one permit: the cancelled candidate spent the last one", 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {})
+			transport := &pqnfCancellingTransport{cancel: cancel}
+			c.client.Transport = transport
 
-	allowance := NewDiagnosticAllowance(3)
-	obs := c.ObserveWatchStreakMilestone(ctx, "12345", "somestreamer", allowance)
+			allowance := NewDiagnosticAllowance(tc.permits)
+			obs := c.ObserveWatchStreakMilestone(ctx, "12345", "somestreamer", allowance)
 
-	transport.mu.Lock()
-	calls := transport.calls
-	transport.mu.Unlock()
-	if calls != 1 {
-		t.Fatalf("transport calls = %d, want 1: the walk continued after the owner was cancelled", calls)
-	}
-	if obs.Outcome != MilestoneCancelled || obs.FailureClass != MilestoneFailureCancelled {
-		t.Fatalf("outcome = %q/%q, want CANCELLED/CANCELLED", obs.Outcome, obs.FailureClass)
-	}
-	if obs.Dispatches != 1 || allowance.Spent() != 1 {
-		t.Errorf("dispatches %d, spent %d; want 1/1", obs.Dispatches, allowance.Spent())
+			transport.mu.Lock()
+			calls := transport.calls
+			transport.mu.Unlock()
+			if calls != 1 {
+				t.Fatalf("transport calls = %d, want 1: the walk continued after the owner was cancelled", calls)
+			}
+			if obs.Outcome != MilestoneCancelled || obs.FailureClass != MilestoneFailureCancelled {
+				t.Fatalf("outcome = %q/%q, want CANCELLED/CANCELLED", obs.Outcome, obs.FailureClass)
+			}
+			if obs.Dispatches != 1 || allowance.Spent() != 1 {
+				t.Errorf("dispatches %d, spent %d; want 1/1", obs.Dispatches, allowance.Spent())
+			}
+		})
 	}
 }
 
@@ -4108,6 +4246,57 @@ func TestACappedTransientAnswerKeepsItsRetryAfter(t *testing.T) {
 			}
 			if retryAfter != tc.want {
 				t.Fatalf("retryAfter = %v, want %v: a capped transient answer must keep its Retry-After", retryAfter, tc.want)
+			}
+		})
+	}
+}
+
+// TestABusinessRoundTripKeepsItsRetryAfterAndItsWholeBody is the business
+// counterpart of TestACappedTransientAnswerKeepsItsRetryAfter: through the same
+// round trip, an UNMARKED (business) request still honours Retry-After on a
+// transient status and still reads its body unbounded, so hoisting the
+// Retry-After parse above the diagnostic size check moved nothing for business
+// callers. The oversize 200 case is the falsifier for "business reads stay
+// unbounded": with the cap applied to every read it would be refused.
+func TestABusinessRoundTripKeepsItsRetryAfterAndItsWholeBody(t *testing.T) {
+	oversized := strings.Repeat("x", maxDiagnosticResponseBytes+1)
+	for name, tc := range map[string]struct {
+		status         int
+		body           string
+		wantRetryAfter time.Duration
+		wantBodyLen    int // -1: a refusal, no body
+	}{
+		"429 with Retry-After":            {http.StatusTooManyRequests, `{"message":"slow down"}`, 30 * time.Second, -1},
+		"503 with Retry-After, oversized": {http.StatusServiceUnavailable, oversized, 30 * time.Second, -1},
+		"200 oversized":                   {http.StatusOK, oversized, 0, maxDiagnosticResponseBytes + 1},
+		"200 small":                       {http.StatusOK, `{"data":{}}`, 0, len(`{"data":{}}`)},
+	} {
+		t.Run(name, func(t *testing.T) {
+			c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Retry-After", "30")
+				w.WriteHeader(tc.status)
+				_, _ = io.WriteString(w, tc.body)
+			})
+			req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, c.gqlURL, strings.NewReader(`{}`))
+			if err != nil {
+				t.Fatalf("build request: %v", err)
+			}
+			body, status, retryAfter, err := doGQLOnceWithClient(c.client, req)
+			if status != tc.status {
+				t.Fatalf("status = %d, want %d", status, tc.status)
+			}
+			if retryAfter != tc.wantRetryAfter {
+				t.Fatalf("retryAfter = %v, want %v: a business transient answer must keep its Retry-After", retryAfter, tc.wantRetryAfter)
+			}
+			if tc.wantBodyLen < 0 {
+				if err == nil || body != nil {
+					t.Fatalf("transient %d: body=%d bytes err=%v; want a refusal carrying the status", tc.status, len(body), err)
+				}
+				return
+			}
+			if err != nil || len(body) != tc.wantBodyLen {
+				t.Fatalf("business 200: err=%v, body=%d bytes; want nil and %d bytes (the diagnostic cap must not apply)",
+					err, len(body), tc.wantBodyLen)
 			}
 		})
 	}

@@ -71,6 +71,11 @@ type milestoneRoundTripper struct {
 	// long, so a test can make the BUSINESS pass consume the whole poll period.
 	contextDelay time.Duration
 
+	// contextDelays, when set, holds the n-th ChannelPointsContext answer for
+	// contextDelays[(n-1) % len], so a test can alternate long and short
+	// business passes and tell a scheduled tick stamp from a receipt stamp.
+	contextDelays []time.Duration
+
 	// offerClaim makes the context read advertise an available bonus, so the
 	// business pass performs a real ClaimCommunityPoints mutation — the
 	// operation the contract says an observation must never be inserted
@@ -160,6 +165,9 @@ func (rt *milestoneRoundTripper) RoundTrip(req *http.Request) (*http.Response, e
 	rewardBody := rt.rewardListBody
 	contextBody := rt.contextBody
 	contextDelay := rt.contextDelay
+	if len(rt.contextDelays) > 0 && operation.Name == "ChannelPointsContext" {
+		contextDelay = rt.contextDelays[(len(rt.contextOrder)-1)%len(rt.contextDelays)]
+	}
 	offerClaim := rt.offerClaim
 	rt.mu.Unlock()
 
@@ -3235,8 +3243,11 @@ func TestCursorRotatesTheRosterAcrossCycles(t *testing.T) {
 		// Remove one entry BEFORE the cursor position and re-add another: the
 		// cursor is a position in the snapshot, not a streamer, so the entry
 		// that slides into the position is served and the one that slid past
-		// it waits one cycle. That is the documented cost of owning no
-		// per-streamer state.
+		// it is served only when the cursor comes round to it again. Here the
+		// whole three-entry roster fits one cycle, so the round completes
+		// within the cycle; the unaccepted-hash case below shows the same rule
+		// costing a full roster round. That is the documented cost of owning
+		// no per-streamer state.
 		apply(logins[0], logins[1], logins[2], logins[3])
 		cursor = 2                             // logins[2] is due next
 		apply(logins[1], logins[2], logins[3]) // remove logins[0], before the cursor
@@ -3266,6 +3277,54 @@ func TestCursorRotatesTheRosterAcrossCycles(t *testing.T) {
 			t.Fatalf("cursor = %d, want 1", cursor)
 		}
 	})
+}
+
+// TestARemovalBeforeTheCursorCostsUpToARosterRound pins the D2 cost statement
+// as SPECIFICATIONS.md words it: after an entry before the cursor position is
+// removed, the entry that slid past the position is served only when the cursor
+// comes round to it again. In the unaccepted-hash steady state every started
+// target spends the whole allowance (three candidates, all PersistedQueryNotFound),
+// so one target starts per cycle and the displaced entry waits a full round of
+// the remaining roster - two cycles here, not "one cycle".
+func TestARemovalBeforeTheCursorCostsUpToARosterRound(t *testing.T) {
+	captureLogs(t)
+	logins := milestoneLogins(t, 4)
+	rt := &milestoneRoundTripper{rewardListBody: milestonePQNFBody}
+	m, streamers := newMilestoneMiner(t, rt, logins, logins)
+	candidates := len(constants.GQLClientIDFallbacks)
+
+	// Roster [0 1 2 3], cursor 2: target 2 is due. Remove target 0 through the
+	// same runtime path a settings change uses; the snapshot becomes [1 2 3]
+	// and position 2 is now target 3.
+	var keep []config.StreamerConfig
+	for _, login := range logins[1:] {
+		keep = append(keep, config.StreamerConfig{Username: login})
+	}
+	if _, removed, _, _ := m.streamers.ApplySettings(keep, m.config.StreamerSettings); len(removed) != 1 {
+		t.Fatalf("removed %d streamers, want 1", len(removed))
+	}
+	ids := milestoneChannelIDs(streamers, logins[1:]...) // [1 2 3]
+
+	cursor := 2
+	var served []string
+	for cycle := 0; cycle < 3; cycle++ {
+		before := rt.rewardTotal()
+		cursor = m.observeWatchStreakMilestones(context.Background(), milestoneCycleNow(cursor))
+		seq := rt.rewardSequence()[before:]
+		if len(seq) != candidates {
+			t.Fatalf("cycle %d dispatched %d times, want %d (one started target spending the whole allowance)", cycle+1, len(seq), candidates)
+		}
+		served = append(served, seq[0])
+	}
+	// Cycle 1 serves the entry that slid into position 2 (target 3), the
+	// cursor wraps, cycle 2 serves target 1, and only cycle 3 reaches the
+	// displaced target 2: it waited a full round of the remaining roster.
+	if want := []string{ids[2], ids[0], ids[1]}; !reflect.DeepEqual(served, want) {
+		t.Fatalf("served order = %v, want %v", served, want)
+	}
+	if cursor != 2 {
+		t.Fatalf("cursor after three cycles = %d, want 2", cursor)
+	}
 }
 
 // TestASlowFirstTargetCannotMonopolizeTheRoster: without a cursor, a first
@@ -3607,11 +3666,20 @@ func TestBonusPollLoopHandsTheStageTheServicedTickNotNow(t *testing.T) {
 	slog.SetDefault(slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug})))
 	t.Cleanup(func() { slog.SetDefault(previousLogger) })
 	logins := milestoneLogins(t, 1)
-	rt := &milestoneRoundTripper{contextDelay: 250 * time.Millisecond}
+	// Long and short business passes alternate. A long pass (650ms) overruns
+	// the 500ms period, so the NEXT tick is read at least 150ms late. The
+	// short pass (450ms) that follows fits the period, but not the period
+	// MINUS that lag: with the ticker's scheduled stamp, tick+period is still
+	// in the past when the stage starts (slack <= -100ms, and scheduling noise
+	// only makes it more negative), so nothing is admitted. A stamp taken at
+	// RECEIPT would credit the short cycle with ~50ms of slack it does not
+	// have and admit a dispatch, which is what this fixture exists to catch;
+	// a stamp taken after the business pass would admit one on every cycle.
+	rt := &milestoneRoundTripper{contextDelays: []time.Duration{650 * time.Millisecond, 450 * time.Millisecond}}
 	m, _ := newMilestoneMiner(t, rt, logins, logins)
 
 	previousInterval := bonusPollInterval
-	bonusPollInterval = 200 * time.Millisecond // shorter than the business pass
+	bonusPollInterval = 500 * time.Millisecond
 	t.Cleanup(func() { bonusPollInterval = previousInterval })
 	logs.Reset()
 
@@ -3621,9 +3689,9 @@ func TestBonusPollLoopHandsTheStageTheServicedTickNotNow(t *testing.T) {
 		defer close(done)
 		m.bonusPollLoop(ctx)
 	}()
-	deadline := time.Now().Add(10 * time.Second)
+	deadline := time.Now().Add(15 * time.Second)
 	for time.Now().Before(deadline) {
-		if len(recordLines(logs.String(), milestoneBudgetRecord)) >= 3 {
+		if len(recordLines(logs.String(), milestoneBudgetRecord)) >= 4 {
 			break
 		}
 		time.Sleep(20 * time.Millisecond)
@@ -3638,16 +3706,18 @@ func TestBonusPollLoopHandsTheStageTheServicedTickNotNow(t *testing.T) {
 			business++
 		}
 	}
-	if business < 3 {
-		t.Fatalf("only %d business passes ran; the fixture did not drive enough cycles. Logs:\n%s", business, logs.String())
+	if business < 4 {
+		t.Fatalf("only %d business passes ran; the fixture did not drive enough cycles (at least two long and "+
+			"two short passes are needed). Logs:\n%s", business, logs.String())
 	}
 	if got := rt.rewardTotal(); got != 0 {
-		t.Fatalf("%d RewardList dispatch(es) on cycles whose business pass consumed the period: the loop granted "+
-			"the stage slack it did not have (D1 violated at the loop)", got)
+		t.Fatalf("%d RewardList dispatch(es) on cycles whose business pass consumed the period (or the period "+
+			"minus the lag a coalesced tick carries): the loop granted the stage slack it did not have "+
+			"(D1 violated at the loop)", got)
 	}
 	budget := recordLines(logs.String(), milestoneBudgetRecord)
-	if len(budget) < 3 {
-		t.Fatalf("budget records = %d, want >= 3 (one per consumed cycle)", len(budget))
+	if len(budget) < 4 {
+		t.Fatalf("budget records = %d, want >= 4 (one per consumed cycle)", len(budget))
 	}
 	for _, line := range budget {
 		if attrValue(line, "cutoff") != "TIME" || attrValue(line, "deadlineSource") != "NEXT_TICK" || attrValue(line, "startedTargets") != "0" {
@@ -3750,6 +3820,39 @@ func TestIneligibleEntriesAndMidCycleChangesLeaveTheCursorAndMaskAlone(t *testin
 		}
 		if got := len(recordLines(logs.String(), milestoneBudgetRecord)); got != 0 {
 			t.Errorf("a skipped target produced %d budget record(s); nothing was cut off", got)
+		}
+	})
+
+	t.Run("a target that loses its channel identity mid-cycle is still counted unexamined", func(t *testing.T) {
+		// Five eligible targets, three permits. Target 1 loses its identity
+		// after the mask; targets 0, 2 and 3 start; target 4 is refused by
+		// the exhausted allowance. The budget record counts BOTH refused
+		// targets as unexamined - the identity loss does not shrink the
+		// eligible set it was counted in - and the cursor rests on target 4.
+		logs := captureLogs(t)
+		logins := milestoneLogins(t, 5)
+		rt := &milestoneRoundTripper{}
+		m, streamers := newMilestoneMiner(t, rt, logins, logins)
+		ids := milestoneChannelIDs(streamers, logins...)
+		rt.onRewardList = func(n int) {
+			if n == 1 {
+				streamers[logins[1]].ChannelID = ""
+			}
+		}
+		logs.Reset()
+		next := m.observeWatchStreakMilestones(context.Background(), milestoneCycleNow(0))
+		assertRewardSequence(t, rt, []string{ids[0], ids[2], ids[3]})
+		if next != 4 {
+			t.Errorf("cursor = %d, want 4: the allowance refused target 4 before its first dispatch, so it keeps its turn", next)
+		}
+		budget := recordLines(logs.String(), milestoneBudgetRecord)
+		if len(budget) != 1 {
+			t.Fatalf("budget records = %d, want 1 (COUNT); logs:\n%s", len(budget), logs.String())
+		}
+		if attrValue(budget[0], "cutoff") != "COUNT" || attrValue(budget[0], "startedTargets") != "3" ||
+			attrValue(budget[0], "unexaminedTargets") != "2" {
+			t.Errorf("budget record is not COUNT with 3 started and 2 unexamined (the identity-less target and "+
+				"the refused one): %s", budget[0])
 		}
 	})
 }

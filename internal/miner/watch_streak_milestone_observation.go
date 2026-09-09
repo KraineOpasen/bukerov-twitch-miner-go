@@ -307,9 +307,12 @@ const milestoneCycleDispatchAllowance = 3
 //   - Tick is the timestamp carried by the serviced ticker event. A
 //     time.Ticker stamps each event with its SCHEDULED fire time, so a tick
 //     read late (coalesced behind a long business pass) still reports when it
-//     was due, which is what the next-tick bound needs. A zero Tick is
-//     maximally overdue and admits nothing: the loop is the only production
-//     caller and always passes the serviced tick.
+//     was due. For such a tick, Tick+Period is a LOWER bound on the real next
+//     tick and already in the past, so the cycle serviced on it admits nothing
+//     even if some real slack remains before that next tick fires: the
+//     overdue rule, never a fresh budget. A zero Tick is maximally overdue and
+//     admits nothing: the loop is the only production caller and always
+//     passes the serviced tick.
 //   - Period is the loop's ticker period, so the stage can compute when the
 //     NEXT business tick is due without owning a ticker of its own.
 //   - Cursor is the loop-owned roster position the previous cycle returned.
@@ -541,7 +544,9 @@ func (m *Miner) observeWatchStreakMilestones(owner context.Context, cycle milest
 // truncated, and naming the streamers that were NOT looked at would add
 // per-cycle volume without adding evidence. startedTargets is how many
 // targets made at least one dispatch; unexaminedTargets is how many eligible
-// targets did not, which is exactly the set the cursor will revisit first.
+// targets did not, which is the set the cursor will revisit first, except a
+// target whose channel identity disappeared after the mask was taken (counted
+// here, skipped without moving the cursor).
 // DEBUG for the same reason the observation record is: this recurs once per
 // degraded cycle.
 func logWatchStreakMilestoneCutoff(cutoff milestoneCutoff, source milestoneDeadlineSource, slack time.Duration,

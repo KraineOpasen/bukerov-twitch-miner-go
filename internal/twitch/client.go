@@ -984,7 +984,10 @@ func diagnosticJSONHasDuplicateMembers(body []byte) bool {
 // spellings count - "message" and the extensions code
 // - because a genuine PersistedQueryNotFound is the EXPECTED steady state for
 // this operation, and failing to recognise one would replace an honest
-// UNSUPPORTED_QUERY with a confusing NO_DATA_NODE.
+// UNSUPPORTED_QUERY with GRAPHQL_TOP_LEVEL_ERRORS after a single dispatch: the
+// unrecognised body still carries a non-empty errors array, which the reader
+// refuses before it ever looks for a data node, so the stale shipped hash
+// would hide among ordinary service errors.
 //
 // Deliberately not strictPersistedQueryNotFound: that one authorizes a mutation
 // REPLAY and demands the extensions code specifically, so it would answer false
@@ -1447,8 +1450,8 @@ func (c *TwitchClient) doGQLRequestWithClientIDFallback(ctx context.Context, bod
 		// version handed it back "unchanged, so gqlSingleRoundTrip keeps
 		// deciding 401 and 403" - but neither of those branches reads the body,
 		// so nothing needed it, and returning it walked the response straight
-		// past the pre-decode value bound twenty-five lines below into
-		// json.Unmarshal. Measured on one 1,048,567-byte dense array: 44.9 MB
+		// past the pre-decode value bound (the diagnosticJSONValueCount switch
+		// below) into json.Unmarshal. Measured on one 1,048,567-byte dense array: 44.9 MB
 		// at HTTP 404 against 3.2 MB for the identical body at HTTP 200 - a
 		// 14x amplification on the bonus poll goroutine, selected purely by the
 		// peer's status code, in the one place this feature's stated order
@@ -1814,20 +1817,20 @@ func doGQLOnceWithClient(client *http.Client, req *http.Request) ([]byte, int, t
 	if err != nil {
 		return nil, resp.StatusCode, 0, fmt.Errorf("failed to read response: %w", err)
 	}
+	// A transient status keeps its Retry-After even when the body is refused
+	// below, so a capped 429 is retried on the peer's schedule rather than on
+	// the computed backoff. Parsed once, before the size check, so the two
+	// returns that carry it cannot drift apart.
+	retryAfter := time.Duration(0)
+	if gql.IsTransientStatus(resp.StatusCode) {
+		retryAfter = gql.ParseRetryAfter(resp.Header.Get("Retry-After"), time.Now())
+	}
 	if diagnostic && len(respBody) > maxDiagnosticResponseBytes {
-		// A transient status keeps its Retry-After even when the body is
-		// refused, so a capped 429 is retried on the peer's schedule rather
-		// than on the computed backoff.
-		retryAfter := time.Duration(0)
-		if gql.IsTransientStatus(resp.StatusCode) {
-			retryAfter = gql.ParseRetryAfter(resp.Header.Get("Retry-After"), time.Now())
-		}
 		return nil, resp.StatusCode, retryAfter, fmt.Errorf(
 			"response body exceeded the %d-byte diagnostic limit", maxDiagnosticResponseBytes)
 	}
 
 	if gql.IsTransientStatus(resp.StatusCode) {
-		retryAfter := gql.ParseRetryAfter(resp.Header.Get("Retry-After"), time.Now())
 		return nil, resp.StatusCode, retryAfter, fmt.Errorf("transient GQL error: status %d", resp.StatusCode)
 	}
 

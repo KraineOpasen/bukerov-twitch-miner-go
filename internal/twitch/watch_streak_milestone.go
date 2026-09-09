@@ -258,19 +258,21 @@ const (
 	// MilestoneObserved: a response was received and parsed. The snapshot's own
 	// presence fields say how much of it was actually there.
 	MilestoneObserved WatchStreakMilestoneOutcome = "OBSERVED"
-	// MilestoneGraphQLError: HTTP succeeded but Twitch returned a top-level
-	// GraphQL errors array, so there is no authoritative data. Nothing is
-	// parsed from such a response.
+	// MilestoneGraphQLError: HTTP succeeded but the body carried a top-level
+	// GraphQL errors array, or a present non-null singular error member, so
+	// there is no authoritative data. Nothing is parsed from such a response.
 	MilestoneGraphQLError WatchStreakMilestoneOutcome = "GRAPHQL_ERROR"
 	// MilestoneUnsupported: every candidate client ID answered
 	// PersistedQueryNotFound. The shipped hash is not accepted right now. This
 	// is the outcome that would falsify the RewardList protocol premise; it is
 	// reported, never worked around.
 	MilestoneUnsupported WatchStreakMilestoneOutcome = "UNSUPPORTED_QUERY"
-	// MilestoneUnavailable: the request failed at the transport/auth layer, or
-	// the cycle's diagnostic dispatch allowance ran out AFTER at least one
-	// dispatch had been made for this target (ALLOWANCE_EXHAUSTED), so what was
-	// learned is incomplete.
+	// MilestoneUnavailable: the request failed at the transport/auth layer, the
+	// cycle's diagnostic dispatch allowance ran out AFTER at least one dispatch
+	// had been made for this target (ALLOWANCE_EXHAUSTED), or the response was
+	// refused before parsing (a non-2xx status, a malformed errors node,
+	// ambiguous or oversized JSON, no data object), so what was learned is
+	// incomplete. FailureClass names which.
 	MilestoneUnavailable WatchStreakMilestoneOutcome = "UNAVAILABLE"
 	// MilestoneCancelled: the owning context was cancelled; the request was
 	// released rather than completed.
@@ -515,11 +517,13 @@ func (c *TwitchClient) ObserveWatchStreakMilestone(ctx context.Context, channelI
 		//
 		// Transient statuses keep TRANSPORT deliberately. After the retry
 		// schedule gives up the transport reports status 0, not the last
-		// transient status, so this clause is defence in depth for a status
-		// that does not reach it today; it is kept so a future path that
-		// surfaces a 429 or a 5xx here with the generic class is not refined
-		// into HTTP_STATUS, because "the schedule ran and gave up" is the more
-		// useful fact than the last status seen.
+		// transient status; the allowance stop before a retry wait does carry
+		// the last transient status here, but only under ALLOWANCE_EXHAUSTED,
+		// which this switch never touches. So no transient status arrives with
+		// the generic class today, and the clause is defence in depth, kept so
+		// a future path that surfaces a 429 or a 5xx here with the generic
+		// class is not refined into HTTP_STATUS, because "the schedule ran and
+		// gave up" is the more useful fact than the last status seen.
 		if statusCode != 0 && (statusCode < 200 || statusCode > 299) &&
 			!gql.IsTransientStatus(statusCode) {
 			switch obs.FailureClass {
