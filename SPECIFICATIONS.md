@@ -2821,6 +2821,17 @@ it is not a captured `rand` draw, no seed is recorded or invented, and the
 derivation authorizes no entropy reuse for any other outcome, stake or
 strategy.
 
+Outcome identifiers are stored verbatim. Unlike the routing identities (channel
+id, event id, login), which are matched through a trimming comparison and are
+therefore stored trimmed, an outcome id is never normalized anywhere else on the
+path: the model keeps what the frame carried and the placement mutation sends
+exactly those bytes. An id the sanitizer would have to alter — padded, or over
+the frozen string ceiling only because of that padding — refuses the whole fact
+and is counted as a drop, on the same rule that refuses a truncated one: a
+changed identifier names a different outcome than the bet did, and storing it
+would let a record be hashed and witnessed as complete while misnaming the
+decision it claims to explain.
+
 `TopPoints` deserves an explicit note, because it is the one value in the
 envelope that describes an individual rather than a pool. It is the largest
 single stake among a round's top predictors — one viewer's wager amount, not an

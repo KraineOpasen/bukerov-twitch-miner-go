@@ -335,9 +335,10 @@ func sanitizeObservationDecisionEnvelope(in *ObservationDecisionEnvelope) (*Obse
 		FinalAmount:  copyInt64Ptr(in.FinalAmount),
 	}
 
-	// The chosen outcome id is a bounded identifier: over the ceiling the fact
-	// is refused, never truncated. A shortened id names a different outcome.
-	if id, idOK := boundedIdentifier(in.ChoiceOutcomeID); idOK {
+	// The chosen outcome id is stored verbatim: over the ceiling, or altered by
+	// any normalization, the fact is refused rather than stored changed. A
+	// shortened or trimmed id names a different outcome than the bet did.
+	if id, idOK := verbatimIdentifier(in.ChoiceOutcomeID); idOK {
 		out.ChoiceOutcomeID = id
 	} else {
 		return nil, false
@@ -380,7 +381,7 @@ func sanitizeObservationDecisionEnvelope(in *ObservationDecisionEnvelope) (*Obse
 				!observationFiniteFloat(o.OddsPercentage) {
 				return nil, false
 			}
-			id, idOK := boundedIdentifier(o.ID)
+			id, idOK := verbatimIdentifier(o.ID)
 			if !idOK {
 				return nil, false
 			}
@@ -435,4 +436,29 @@ func copyBoolPtr(v *bool) *bool {
 	}
 	out := *v
 	return &out
+}
+
+// verbatimIdentifier bounds an opaque outcome id WITHOUT normalizing it.
+//
+// boundedIdentifier trims before it measures. That is right for the routing
+// identities it was written for — a channel id, an event id, a login — because
+// those are matched through comparableIdentity, which trims too, so the stored
+// form and every form they are compared against agree.
+//
+// An outcome id is not one of those. Nothing normalizes it anywhere else: the
+// model keeps whatever the frame carried and the placement mutation sends
+// exactly those bytes to Twitch. So a padded id would be stored trimmed while
+// the bet named the untrimmed one — a record that is hashed, witnessed and
+// counted as complete while naming a different outcome than the decision chose,
+// which is precisely what this file refuses to do for a truncated id. Worse,
+// trimming first also lets an id that is over the frozen ceiling BECAUSE of its
+// padding slip under it, turning a refusal into an acceptance.
+//
+// So refuse anything normalization would change, rather than storing the
+// changed form. A real Twitch outcome id is an unpadded UUID, and an absent
+// choice is the empty string; neither is altered by trimming, so no legitimate
+// decision is refused here.
+func verbatimIdentifier(v string) (string, bool) {
+	bounded, ok := boundedIdentifier(v)
+	return v, ok && bounded == v
 }

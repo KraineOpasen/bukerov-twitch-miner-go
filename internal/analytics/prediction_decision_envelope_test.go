@@ -1437,3 +1437,150 @@ func TestAWorstCaseEnvelopeStaysUnderThePayloadCeiling(t *testing.T) {
 			len(sanitized.Payload.DecisionEnvelope.Outcomes))
 	}
 }
+
+// TestAnOutcomeIDThatNormalizationWouldChangeRefusesTheFact regresses a
+// substitution defect in the one field of the envelope that names something
+// outside the record.
+//
+// The envelope's outcome ids used to go through boundedIdentifier, which trims
+// before it measures and returns the TRIMMED id as valid. Nothing else on the
+// path normalizes an outcome id: the model keeps what the frame carried and the
+// placement mutation sends exactly that. So a padded id was stored, hashed,
+// witnessed and counted as a complete record of a decision while naming an
+// outcome the bet never named — the same class of defect as a truncated id,
+// which this file already refuses in the loudest possible terms.
+//
+// The second half is the sharper one: an id that is over the frozen ceiling
+// ONLY because of its padding was trimmed under the ceiling and accepted, so
+// the ceiling that must refuse was turned into a ceiling that admits.
+//
+// Every case here is unreachable from real Twitch traffic. That is the point of
+// a sanitizer: it is the boundary that must hold when the frame is not what the
+// protocol says it is, and it is the last place the record's own claim about
+// itself can still be made true.
+func TestAnOutcomeIDThatNormalizationWouldChangeRefusesTheFact(t *testing.T) {
+	atCeiling := strings.Repeat("A", MaxObservationString)
+
+	for _, tc := range []struct {
+		name   string
+		build  func() *ObservationDecisionEnvelope
+		wantOK bool
+	}{
+		{
+			name: "a padded chosen outcome id refuses the fact",
+			build: func() *ObservationDecisionEnvelope {
+				e := fullDecisionEnvelope()
+				e.ChoiceOutcomeID = " outcome-1 "
+				return e
+			},
+		},
+		{
+			name: "a chosen outcome id with a trailing newline refuses the fact",
+			build: func() *ObservationDecisionEnvelope {
+				e := fullDecisionEnvelope()
+				e.ChoiceOutcomeID = "outcome-1\n"
+				return e
+			},
+		},
+		{
+			name: "a chosen outcome id over the ceiling only by padding still refuses the fact",
+			build: func() *ObservationDecisionEnvelope {
+				e := fullDecisionEnvelope()
+				// Trimmed this fits exactly; raw it is over the frozen ceiling.
+				e.ChoiceOutcomeID = " " + atCeiling + " "
+				return e
+			},
+		},
+		{
+			name: "a padded model outcome id refuses the fact",
+			build: func() *ObservationDecisionEnvelope {
+				e := fullDecisionEnvelope()
+				e.Outcomes = []ObservationModelOutcome{
+					{Present: true, ID: "outcome-1"},
+					{Present: true, ID: "\toutcome-2"},
+				}
+				e.ChoiceIndex = envInt(0)
+				e.ChoiceOutcomeID = "outcome-1"
+				return e
+			},
+		},
+		{
+			name: "a model outcome id over the ceiling only by padding still refuses the fact",
+			build: func() *ObservationDecisionEnvelope {
+				e := fullDecisionEnvelope()
+				e.Outcomes = []ObservationModelOutcome{{Present: true, ID: atCeiling + " "}}
+				e.ChoiceIndex = envInt(0)
+				e.ChoiceOutcomeID = "outcome-1"
+				return e
+			},
+		},
+		{
+			name: "an ordinary unpadded id is untouched",
+			build: func() *ObservationDecisionEnvelope {
+				e := fullDecisionEnvelope()
+				e.ChoiceOutcomeID = "8b5a2e19-0c7f-4a6b-9d1e-2f3c4b5a6d7e"
+				return e
+			},
+			wantOK: true,
+		},
+		{
+			name: "an absent choice carries no id and is not a breach",
+			build: func() *ObservationDecisionEnvelope {
+				e := fullDecisionEnvelope()
+				e.ChoiceOutcomeID = ""
+				e.ChoiceIndex = envInt(-1)
+				return e
+			},
+			wantOK: true,
+		},
+		{
+			name: "an absent model outcome carries no id and is not a breach",
+			build: func() *ObservationDecisionEnvelope {
+				e := fullDecisionEnvelope()
+				e.Outcomes = []ObservationModelOutcome{
+					{Present: true, ID: "outcome-1"},
+					{Present: false},
+				}
+				e.ChoiceIndex = envInt(0)
+				e.ChoiceOutcomeID = "outcome-1"
+				return e
+			},
+			wantOK: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			in := tc.build()
+			wantChoice := in.ChoiceOutcomeID
+			wantOutcomes := append([]ObservationModelOutcome(nil), in.Outcomes...)
+
+			out, ok := sanitizeObservationPayload(envelopeFact(in, nil).Payload)
+			if ok != tc.wantOK {
+				if tc.wantOK {
+					t.Fatal("an id no normalization would change was refused: a legal decision " +
+						"record is being lost and counted as a drop")
+				}
+				t.Fatal("an id that normalization ALTERED was accepted: the fact is now stored, " +
+					"hashed and witnessed as a complete record while naming an outcome other " +
+					"than the one the bet was placed on")
+			}
+			if !ok {
+				if out.DecisionEnvelope != nil {
+					t.Fatalf("a refused fact still produced an envelope %+v; a substituted "+
+						"identifier must never escape the sanitizer", out.DecisionEnvelope)
+				}
+				return
+			}
+			// Accepted ids must survive byte for byte, so the guard cannot be
+			// satisfied by quietly normalizing everything into agreement.
+			if got := out.DecisionEnvelope.ChoiceOutcomeID; got != wantChoice {
+				t.Fatalf("choiceOutcomeId stored as %q, want %q verbatim", got, wantChoice)
+			}
+			for i, o := range out.DecisionEnvelope.Outcomes {
+				if o.ID != wantOutcomes[i].ID {
+					t.Fatalf("model outcome %d stored id %q, want %q verbatim",
+						i, o.ID, wantOutcomes[i].ID)
+				}
+			}
+		})
+	}
+}
