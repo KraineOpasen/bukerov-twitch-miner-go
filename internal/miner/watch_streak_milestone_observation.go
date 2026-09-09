@@ -88,8 +88,10 @@ const (
 // caller - it is retried, up to gqlMaxRetries+1 attempts plus backoff. The
 // budget therefore expires during attempt 2, the error this stage sees is its
 // own context's, and the record reads CANCELLED/DEADLINE_EXCEEDED. Reproduced
-// against a transport that never answers: 40.009s, DEADLINE_EXCEEDED. The
-// retry half of that mechanism is pinned by
+// once by hand against a transport that never answers, with the shipped 30s
+// client timeout and this 40s budget: 40.009s, DEADLINE_EXCEEDED - a one-off
+// figure, not pinned by any test in the tree. The retry half of that
+// mechanism is pinned by
 // TestAClientTimeoutIsRetriedRatherThanReturned in internal/twitch, the only
 // package that can shorten the client's hard-coded 30s timeout without adding
 // a production seam for a test's benefit.
@@ -134,10 +136,16 @@ const (
 // it, and it is deliberately not a settings surface.
 var milestoneObservationCycleBudget = 40 * time.Second
 
-// unknownLink is the single vocabulary for a relationship this feature cannot
-// prove. It is printed explicitly rather than omitted, so a reader sees that
-// the question was asked and answered UNKNOWN — not that it was never asked.
+// unknownLink is the single UNKNOWN vocabulary for any fact this feature cannot
+// state - the relationships it cannot prove and the amounts and timestamps it
+// cannot read exactly. It is printed explicitly rather than omitted, so a
+// reader sees that the question was asked and answered UNKNOWN — not that it
+// was never asked.
 const unknownLink = "UNKNOWN"
+
+// noProvenBroadcast is the correlation record's positive answer that an
+// admitted grant fact carries no proven broadcast; see provenBroadcastId.
+const noProvenBroadcast = "NONE"
 
 // milestoneLogStringCap bounds every free-form observed string reaching a log
 // record. Twitch's milestone fields are short identifiers and timestamps; a
@@ -328,10 +336,13 @@ type milestoneCycle struct {
 // milestoneDeadlineSource names which bound produced a stage's deadline. Kept
 // on the budget record so a short cycle can be read as "the business pass ran
 // long" (NEXT_TICK) rather than "Twitch was slow" (STAGE_BUDGET). OWNER is
-// reported only on a COUNT cutoff reached while the owner is still alive (its
-// deadline was the nearest bound but had not yet fired): a cycle ended by the
-// owner's own deadline or cancellation emits no record at all, and the
-// production owner (the signal context) carries no deadline.
+// reported when the owner's deadline was the nearest bound and the record is
+// written while owner.Err() is still nil - normally a COUNT cutoff; a TIME
+// cutoff can carry it in the instant between the derived deadline firing and
+// the owner's own timer firing, because context.WithDeadline on an equal
+// deadline creates a second timer. A cycle observed to be ended by the owner's
+// own deadline or cancellation emits no record at all, and the production
+// owner (the signal context) carries no deadline.
 type milestoneDeadlineSource string
 
 const (
@@ -667,7 +678,7 @@ func logWatchStreakMilestoneObservation(obs twitch.WatchStreakMilestoneObservati
 		// reward ladder is documented (officialWatchStreakLadder), but WHICH of
 		// the fields above carries the authoritative streak count is not — so
 		// no observation here may be read as a streak-count measurement.
-		"localBroadcastContextOnly", truncateForLog(localBroadcast),
+		"localBroadcastContextOnly", renderWireString(localBroadcast),
 		"grantLink", unknownLink,
 		"streakCountField", unknownLink,
 	)
@@ -755,7 +766,7 @@ func milestoneBroadcastIdentifierSummary(missed twitch.MilestoneMissedStreams) m
 		}
 		for _, id := range entry.BroadcastIdentifiers.IDs {
 			if len(out.Sample) < milestoneLogIDSample {
-				out.Sample = append(out.Sample, truncateForLog(id))
+				out.Sample = append(out.Sample, renderWireString(id))
 			}
 		}
 	}
@@ -768,20 +779,42 @@ func milestoneBroadcastIdentifierSummary(missed twitch.MilestoneMissedStreams) m
 
 // milestoneLogString renders a string field for a log record. A field that was
 // not validly observed prints as its presence classification in angle brackets
-// — never as an empty string that could be misread as an observed empty value,
-// and never ambiguous with a Twitch string that happens to READ like a
-// classification (a state field whose observed value is literally "MISSING"
-// prints as MISSING; an absent one prints as <MISSING>).
+// — never as an empty string that could be misread as an observed empty value.
+// A validly observed value that would READ like a classification is not
+// allowed to: the brackets are printable, so a wire string spelled "<MISSING>"
+// survives sanitizeForLog byte-for-byte and would let the peer choose which
+// presence class the record SHOWS. renderWireString therefore quotes any such
+// value (an absent state prints as <MISSING>; an observed state spelled
+// "<MISSING>" prints as "\"<MISSING>\""; an observed state spelled MISSING,
+// with no brackets, prints as MISSING).
 //
 // Because the classification is carried in the value itself, the record does
 // not also emit a separate <field>Presence attribute for every scalar. That is
 // not lost information — it is the same information, once instead of twice, in
-// a record emitted for every online streamer on every bonus cycle.
+// a record emitted every cycle for up to three targets.
 func milestoneLogString(f twitch.MilestoneStringField) string {
 	if f.Presence != twitch.MilestoneFieldValid {
 		return presenceToken(f.Presence)
 	}
-	return truncateForLog(f.Value)
+	return renderWireString(f.Value)
+}
+
+// renderWireString renders a validly observed WIRE string for a log record so
+// that it can never be read as one of the record's own sentinels. The closed
+// vocabulary - the bracketed presence tokens, the UNKNOWN and NONE relationship
+// sentinels and the truncation marker - is made of printable characters, so
+// sanitizeForLog passes a wire value spelled like one of them straight through.
+// A value that would collide is rendered quoted (strconv.Quote), which no
+// sentinel ever is; every other value renders exactly as before. The check
+// runs on the sanitized, untruncated value, so a genuinely truncated long value
+// keeps its plain marker and only a wire value that SPELLS the marker is quoted.
+func renderWireString(v string) string {
+	s := sanitizeForLog(v)
+	rendered := boundForLog(s)
+	if strings.HasPrefix(s, "<") || s == unknownLink || s == noProvenBroadcast || strings.HasSuffix(s, truncatedMarker) {
+		return strconv.Quote(rendered)
+	}
+	return rendered
 }
 
 // milestoneLogInt renders an integer field for a log record. A field that was
@@ -842,7 +875,15 @@ func presenceToken(p twitch.MilestoneFieldPresence) string {
 // split a multi-byte UTF-8 sequence — and marks the truncation so a reader
 // never mistakes a cut value for a complete one.
 func truncateForLog(v string) string {
-	v = sanitizeForLog(v)
+	return boundForLog(sanitizeForLog(v))
+}
+
+// truncatedMarker is appended to a value cut by boundForLog.
+const truncatedMarker = "...(truncated)"
+
+// boundForLog cuts an already-sanitized value to milestoneLogStringCap on a
+// rune boundary and marks the cut.
+func boundForLog(v string) string {
 	if len(v) <= milestoneLogStringCap {
 		return v
 	}
@@ -850,7 +891,7 @@ func truncateForLog(v string) string {
 	for cut > 0 && !utf8.RuneStart(v[cut]) {
 		cut--
 	}
-	return v[:cut] + "...(truncated)"
+	return v[:cut] + truncatedMarker
 }
 
 // sanitizeForLog replaces non-printable and invalid runes with U+FFFD, leaving
@@ -964,7 +1005,7 @@ func (m *Miner) logWatchStreakGrantCorrelation(
 
 	wireTimestamp := unknownLink
 	if ts, ok := msg.Data["timestamp"].(string); ok && ts != "" {
-		wireTimestamp = truncateForLog(ts)
+		wireTimestamp = renderWireString(ts)
 	}
 
 	// One lookup for the whole record. admittedGrantFact is a linear scan over
@@ -993,9 +1034,10 @@ func (m *Miner) logWatchStreakGrantCorrelation(
 	// printing NONE there would assert an absence this code cannot see.
 	provenBroadcast := unknownLink
 	if haveFact {
-		provenBroadcast = "NONE"
+		provenBroadcast = noProvenBroadcast
 		if fact.BroadcastID != "" {
-			provenBroadcast = fact.BroadcastID
+			// A wire value, rendered so it can never spell a sentinel.
+			provenBroadcast = renderWireString(fact.BroadcastID)
 		}
 	}
 
@@ -1032,8 +1074,8 @@ func (m *Miner) logWatchStreakGrantCorrelation(
 		"ledgerOutcome", string(ledger),
 
 		// Relationships this feature cannot prove, printed explicitly.
-		"provenBroadcastId", truncateForLog(provenBroadcast),
-		"localBroadcastContextOnly", truncateForLog(localBroadcast),
+		"provenBroadcastId", provenBroadcast,
+		"localBroadcastContextOnly", renderWireString(localBroadcast),
 		"milestoneLink", unknownLink,
 	)
 }

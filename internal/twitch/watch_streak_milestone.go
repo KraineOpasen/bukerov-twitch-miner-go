@@ -290,6 +290,9 @@ const (
 type MilestoneFailureClass string
 
 const (
+	// MilestoneFailureNone is the zero value: an OBSERVED outcome carries no
+	// failure class. It is named so the empty string is never mistaken for a
+	// missing classification.
 	MilestoneFailureNone      MilestoneFailureClass = ""
 	MilestoneFailureCancelled MilestoneFailureClass = "CANCELLED"
 	MilestoneFailureDeadline  MilestoneFailureClass = "DEADLINE_EXCEEDED"
@@ -322,12 +325,15 @@ const (
 	// past and its accompanying data recorded as an observed milestone.
 	MilestoneFailureMalformedErrors MilestoneFailureClass = "MALFORMED_ERRORS_NODE"
 	// MilestoneFailureHTTPStatus: the response did not carry a 2xx status. For
-	// a diagnostic read EVERY non-2xx body is DROPPED in
-	// doGQLRequestWithClientIDFallback; 401 and 403 are then settled by status
-	// in gqlSingleRoundTrip, and every other status surfaces as an error which
-	// this reader refines to the status class. So a 400, a 404 or a redirect
-	// page is refused on its status alone and its payload is never parsed or
-	// trusted, whatever data object it carried.
+	// a diagnostic read every non-2xx body that reaches
+	// doGQLRequestWithClientIDFallback is DROPPED there; 401 and 403 are then
+	// settled by status in gqlSingleRoundTrip, and every other NON-TRANSIENT
+	// status surfaces as an error which this reader refines to the status
+	// class. So a 400, a 404 or a redirect page is refused on its status alone
+	// and its payload is never parsed or trusted, whatever data object it
+	// carried. A transient status (429, 5xx) never gets here: the retry
+	// schedule consumes it one layer down, and it ends as ALLOWANCE_EXHAUSTED
+	// or TRANSPORT (see the refinement in ObserveWatchStreakMilestone).
 	MilestoneFailureHTTPStatus MilestoneFailureClass = "HTTP_STATUS"
 
 	// MilestoneFailureOversizedCollection marks a response whose milestone

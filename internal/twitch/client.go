@@ -417,7 +417,7 @@ type DiagnosticAllowance struct {
 	spent     int
 }
 
-// NewDiagnosticAllowance returns an allowance of permits explicit dispatches.
+// NewDiagnosticAllowance returns an allowance of `permits` explicit dispatches.
 func NewDiagnosticAllowance(permits int) *DiagnosticAllowance {
 	if permits < 0 {
 		permits = 0
@@ -506,9 +506,12 @@ func isBonusMutationOperation(operation constants.GQLOperation) bool {
 
 // gqlSingleRoundTrip performs one complete single-operation GQL cycle (client
 // ID fallback + transient retry + parse) signed with the given token, and
-// reports whether the outcome was an authoritative auth rejection. The
-// marshaled body is reused verbatim across recovery replays, so a replayed
-// request is byte-identical to the original.
+// reports the HTTP status of the response it judged (0 when none was
+// received) and whether the outcome was an authoritative auth rejection. The
+// status is what postGQLRequestWithStatus exposes, so a diagnostic caller can
+// name a refusal by status rather than by body shape. The marshaled body is
+// reused verbatim across recovery replays, so a replayed request is
+// byte-identical to the original.
 func (c *TwitchClient) gqlSingleRoundTrip(ctx context.Context, body []byte, operationName, token string) (result map[string]interface{}, statusCode int, authRejected bool, err error) {
 	respBody, statusCode, err := c.doGQLRequestWithClientIDFallback(ctx, body, operationName, token)
 	if err != nil {
@@ -566,10 +569,12 @@ func (c *TwitchClient) postGQLRequest(ctx context.Context, operation constants.G
 // postGQLRequestWithStatus is postGQLRequest plus the HTTP status of the
 // response it parsed.
 //
-// The shared transport special-cases only 401 and 403. For a BUSINESS caller
-// every other non-2xx body that happens to be JSON is returned verbatim as a
-// result, so a caller that treats "this decoded into the shape I expected" as
-// proof of success would accept a 400, a 404 or a redirect page as data. For a
+// The shared transport special-cases 401 and 403 here and the transient
+// statuses (429/5xx) one layer down, in doGQLRequestWithRetry. For a BUSINESS
+// caller every other non-2xx body that happens to be JSON is returned verbatim
+// as a result, so a caller that treats "this decoded into the shape I
+// expected" as proof of success would accept a 400, a 404 or a redirect page
+// as data. For a
 // DIAGNOSTIC caller doGQLRequestWithClientIDFallback drops any non-2xx body
 // instead and the round trip surfaces an error; the status is exposed so that
 // caller can name the failure by status rather than by shape.
@@ -821,11 +826,19 @@ func strictPersistedQueryNotFound(respBody []byte) bool {
 // captured (acceptance is PENDING) and the donor's model covers only the
 // watchStreakMilestone subtree, so the value count of a real document is
 // unverified; the limit is expected to sit far above it, and that expectation
-// is an assumption this comment does not upgrade to a fact. It is set,
-// deliberately, above the milestone collection limit, so a merely implausible
-// collection is still decoded and refused with the precise
-// OVERSIZED_COLLECTION evidence rather than being rejected here as an
-// unreadable body.
+// is an assumption this comment does not upgrade to a fact.
+//
+// The number is above the milestone collection limit (8192 values against
+// 4096 elements), but that is NOT an ordering of evidence: a body refused here
+// and a body refused by milestoneCollectionsWithinLimit record the same
+// OVERSIZED_COLLECTION class (see classifyMilestoneRequestError), with no
+// snapshot either way. For entries of the documented shape,
+// {"broadcastIdentifiers":[{"id":...}]} - about six values each - THIS scan is
+// the operative cardinality bound: it refuses at roughly 1,360 such entries,
+// long before 4096 elements. The collection bound is reached first only by
+// degenerate elements (empty objects, scalars, nulls). This scan runs first
+// because it is cheaper - it refuses before anything is decoded - not because
+// its evidence is more precise.
 const maxDiagnosticJSONValues = 8192
 
 // diagnosticJSONValueVerdict is what diagnosticJSONValueCount answers. The
@@ -956,7 +969,10 @@ func diagnosticJSONHasDuplicateMembers(body []byte) bool {
 	// json.Valid accepts 1e10000 as a well-formed number while the decode that
 	// follows fails on it, because interface{} decoding puts numbers in a
 	// float64. Syntax is the wrong question here - the operative one is
-	// whether the value the rest of this read works with can exist at all.
+	// whether the document decodes at all. Whether it then has the object
+	// shape the rest of this read wants is a further question the following
+	// decode answers on its own (a top-level array decodes here and fails
+	// there; Twitch never answers a single operation with one).
 	//
 	// Affordable precisely here: the value bound above has already passed, so
 	// this document is at most maxDiagnosticJSONValues values. The value scan
@@ -1050,7 +1066,6 @@ func diagnosticPersistedQueryNotFound(body []byte) bool {
 			if !isObject {
 				return false
 			}
-			//
 			// The same null-is-absent rule applies to the code itself: an
 			// explicit "code": null says "no code", not "a contradicting code",
 			// so it falls through to the message exactly as a null extensions
@@ -1139,7 +1154,8 @@ func scanJSONValueForDuplicateKeys(decoder *json.Decoder) (bool, error) {
 }
 
 // noRedirectClient returns a request-local copy of the shared HTTP client that
-// refuses to follow redirects. The copy shares the transport and the timeout;
+// refuses to follow redirects. The copy shares the transport, the timeout and
+// the cookie jar (nil on the shared client: no cookie state exists to share);
 // only the copy's redirect policy changes, so the shared client - and every
 // caller that follows redirects - is untouched. Both the side-effect
 // mutations and the diagnostic read dispatch through it.
@@ -1821,8 +1837,9 @@ func doGQLOnceWithClient(client *http.Client, req *http.Request) ([]byte, int, t
 	// below, so a capped 429 is retried on the peer's schedule rather than on
 	// the computed backoff. Parsed once, before the size check, so the two
 	// returns that carry it cannot drift apart.
+	transient := gql.IsTransientStatus(resp.StatusCode)
 	retryAfter := time.Duration(0)
-	if gql.IsTransientStatus(resp.StatusCode) {
+	if transient {
 		retryAfter = gql.ParseRetryAfter(resp.Header.Get("Retry-After"), time.Now())
 	}
 	if diagnostic && len(respBody) > maxDiagnosticResponseBytes {
@@ -1830,7 +1847,7 @@ func doGQLOnceWithClient(client *http.Client, req *http.Request) ([]byte, int, t
 			"response body exceeded the %d-byte diagnostic limit", maxDiagnosticResponseBytes)
 	}
 
-	if gql.IsTransientStatus(resp.StatusCode) {
+	if transient {
 		return nil, resp.StatusCode, retryAfter, fmt.Errorf("transient GQL error: status %d", resp.StatusCode)
 	}
 

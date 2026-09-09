@@ -2417,37 +2417,61 @@ func TestDiagnosticRefusesAmbiguousJSON(t *testing.T) {
 	})
 }
 
-// TestAmbiguousJSONIsRefusedBeforeTheAPQDetector pins the ORDER of the two
-// diagnostic refusals, which is load-bearing rather than incidental.
+// TestAmbiguousJSONIsRefusedBeforeTheAPQDetector pins the ORDER of two
+// refusals on the diagnostic path: the duplicate-member scan runs BEFORE the
+// structured APQ detector. The detector decodes the body, and encoding/json
+// keeps the LAST duplicate member, so a benign errors array followed by an
+// APQ-shaped one would present as authoritative APQ evidence and drive the
+// client-ID candidate loop to UNSUPPORTED_QUERY; checked first, the duplicate
+// scan refuses it as AMBIGUOUS_JSON after one request under one client ID.
 //
-// gql.IsPersistedQueryNotFound is a raw substring test over the whole body. A
-// response carrying duplicate object members AND the marker is ambiguous first
-// and APQ evidence second, so checking uniqueness after the detector lets the
-// ambiguous body drive the client-ID candidate loop and end as
-// UNSUPPORTED_QUERY — never reaching the AMBIGUOUS_JSON refusal at all. Found
-// independently by two reviewers on the commit that introduced the guard.
+// The benign-first fixture is the falsifier of the order itself: with the
+// detector consulted first it is misclassified. The APQ-first fixture (the
+// shape two reviewers originally found) decodes to an empty errors array beside
+// a data object, which the detector refuses under either order, so it pins the
+// refusal but not the order; it is kept as the second case.
 func TestAmbiguousJSONIsRefusedBeforeTheAPQDetector(t *testing.T) {
-	var requests int
-	clientIDs := map[string]struct{}{}
-	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
-		requests++
-		clientIDs[r.Header.Get("Client-Id")] = struct{}{}
-		w.WriteHeader(http.StatusOK)
-		_, _ = io.WriteString(w, `{"errors":[{"message":"PersistedQueryNotFound"}],"errors":[],`+
-			`"data":{"channel":{"id":"12345","self":{"watchStreakMilestone":null}}}}`)
-	})
+	for _, tc := range []struct {
+		name string
+		body string
+	}{
+		{"benign errors array first, APQ-shaped last, no data",
+			`{"errors":[],"errors":[{"message":"PersistedQueryNotFound"}]}`},
+		{"APQ-shaped first, benign last, beside data",
+			`{"errors":[{"message":"PersistedQueryNotFound"}],"errors":[],` +
+				`"data":{"channel":{"id":"12345","self":{"watchStreakMilestone":null}}}}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var (
+				mu        sync.Mutex
+				requests  int
+				clientIDs = map[string]struct{}{}
+			)
+			c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+				mu.Lock()
+				requests++
+				clientIDs[r.Header.Get("Client-Id")] = struct{}{}
+				mu.Unlock()
+				w.WriteHeader(http.StatusOK)
+				_, _ = io.WriteString(w, tc.body)
+			})
 
-	obs := c.ObserveWatchStreakMilestone(context.Background(), "12345", "somestreamer", nil)
+			obs := c.ObserveWatchStreakMilestone(context.Background(), "12345", "somestreamer", nil)
 
-	if obs.Outcome != MilestoneUnavailable || obs.FailureClass != MilestoneFailureAmbiguousJSON {
-		t.Errorf("outcome = %q/%q, want UNAVAILABLE/%s", obs.Outcome, obs.FailureClass,
-			MilestoneFailureAmbiguousJSON)
+			if obs.Outcome != MilestoneUnavailable || obs.FailureClass != MilestoneFailureAmbiguousJSON {
+				t.Errorf("outcome = %q/%q, want UNAVAILABLE/%s", obs.Outcome, obs.FailureClass,
+					MilestoneFailureAmbiguousJSON)
+			}
+			mu.Lock()
+			got, ids := requests, len(clientIDs)
+			mu.Unlock()
+			if got != 1 || ids != 1 {
+				t.Errorf("sent %d requests under %d client IDs; an ambiguous body is not APQ evidence and "+
+					"must not drive the candidate loop", got, ids)
+			}
+			assertEmptySnapshot(t, obs.Snapshot)
+		})
 	}
-	if requests != 1 {
-		t.Errorf("sent %d requests under %d client IDs; an ambiguous body is not APQ evidence and "+
-			"must not drive the candidate loop", requests, len(clientIDs))
-	}
-	assertEmptySnapshot(t, obs.Snapshot)
 }
 
 // TestAnOversizedBodyCannotChangeATokenRejectionsClass pins that the recorded
@@ -2589,6 +2613,40 @@ func TestOversizedCollectionsAreRefusedBeforeTheyAreBuilt(t *testing.T) {
 		b.WriteString(`]}]}}}}}`)
 		return assertReachesTheCollectionBound(t, b.String())
 	}
+	// Entries of the DOCUMENTED shape are bounded by the pre-decode value scan
+	// long before the 4096-element collection bound: about six values each, so
+	// 2,000 entries (4,000 elements, under the collection limit) exceed the
+	// 8192-value limit and are refused under the same OVERSIZED_COLLECTION
+	// class. This pins the comment on maxDiagnosticJSONValues: the value scan
+	// is the operative cardinality bound for realistic entries, and the two
+	// bounds do not differ in the evidence they record.
+	t.Run("documented-shape entries meet the value bound first", func(t *testing.T) {
+		var b strings.Builder
+		b.WriteString(`{"data":{"channel":{"id":"12345","self":{"watchStreakMilestone":{"missedStreams":[`)
+		for i := 0; i < 2000; i++ {
+			if i > 0 {
+				b.WriteString(",")
+			}
+			b.WriteString(`{"broadcastIdentifiers":[{"id":"b"}]}`)
+		}
+		b.WriteString(`]}}}}}`)
+		body := b.String()
+		if len(body) > maxDiagnosticResponseBytes {
+			t.Fatalf("fixture is %d bytes, over the byte limit", len(body))
+		}
+		if got := diagnosticJSONValueCount([]byte(body)); got != diagnosticJSONOverLimit {
+			t.Fatalf("value verdict = %v, want over-limit: 2,000 documented-shape entries no longer exceed the "+
+				"%d-value limit, so the comment on maxDiagnosticJSONValues is stale", got, maxDiagnosticJSONValues)
+		}
+		c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+			_, _ = io.WriteString(w, body)
+		})
+		obs := c.ObserveWatchStreakMilestone(context.Background(), "12345", "somestreamer", nil)
+		if obs.Outcome != MilestoneUnavailable || obs.FailureClass != MilestoneFailureOversizedCollection {
+			t.Fatalf("outcome = %q/%q, want UNAVAILABLE/OVERSIZED_COLLECTION from the value bound", obs.Outcome, obs.FailureClass)
+		}
+	})
 	t.Run("exactly the limit across nesting is still observed", func(t *testing.T) {
 		body := atLimitNestedBody(t)
 		c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {

@@ -1764,9 +1764,122 @@ func TestBusinessStaleHashStillRaisesTheOperatorError(t *testing.T) {
 		t.Errorf("business read error = %v, want ErrPersistedQueryNotFound", err)
 	}
 
-	if !strings.Contains(logs.String(), "PersistedQueryNotFound on all known client IDs") {
-		t.Error("a business read no longer raises the stale-hash ERROR; the diagnostic silence leaked")
+	// The BUSINESS summary is matched by its own message, not by the substring
+	// the diagnostic DEBUG summary shares with it, and its level is asserted:
+	// a business stale hash lowered to DEBUG would otherwise pass unnoticed.
+	const businessStaleHash = "persisted-query hashes are stale"
+	summaries := 0
+	for _, line := range strings.Split(logs.String(), "\n") {
+		if !strings.Contains(line, businessStaleHash) {
+			continue
+		}
+		summaries++
+		if got := attrValue(line, "level"); got != "ERROR" {
+			t.Errorf("the business stale-hash summary is at level %q, want ERROR:\n%s", got, line)
+		}
 	}
+	if summaries != 1 {
+		t.Errorf("business stale-hash summaries = %d, want exactly 1; the diagnostic silence leaked. Logs:\n%s", summaries, logs.String())
+	}
+}
+
+// TestForgedSentinelsCannotSpellTheRecordVocabulary pins renderWireString: a
+// wire string spelled like one of the record's own sentinels - a bracketed
+// presence token, UNKNOWN, NONE or the truncation marker - is rendered quoted,
+// so a reader keying on the closed vocabulary can never be handed a peer-chosen
+// classification. A genuinely absent field still renders as its plain token,
+// and a value that merely reads like a token without the brackets is untouched.
+func TestForgedSentinelsCannotSpellTheRecordVocabulary(t *testing.T) {
+	t.Run("observation record", func(t *testing.T) {
+		logs := captureLogs(t)
+		logins := milestoneLogins(t, 1)
+		forged := `{"data":{"channel":{"id":"12345","self":{"watchStreakMilestone":{` +
+			`"watchStreakThreshold":3,"watchStreakCopoBonus":450,"state":"<MISSING>","expiresAt":"<MALFORMED>",` +
+			`"missedStreams":[{"broadcastIdentifiers":[{"id":"<NULL>"}]}],` +
+			`"watchStreakMilestone":{"id":"<NULL>","value":"4","achievementTimestamp":"UNKNOWN","shareStatus":"MISSING"}}}}}}`
+		rt := &milestoneRoundTripper{rewardListBody: forged}
+		m, _ := newMilestoneMiner(t, rt, logins, logins)
+		logs.Reset()
+		m.observeWatchStreakMilestones(context.Background(), milestoneCycleNow(0))
+		obs := recordLines(logs.String(), milestoneObservationRecord)
+		if len(obs) != 1 {
+			t.Fatalf("observation records = %d, want 1; logs:\n%s", len(obs), logs.String())
+		}
+		line := obs[0]
+		if attrValue(line, "outcome") != "OBSERVED" {
+			t.Fatalf("the forged body was not OBSERVED (the parser is honest about VALID strings): %s", line)
+		}
+		for _, want := range []string{
+			` state="\"<MISSING>\""`,
+			` expiresAt="\"<MALFORMED>\""`,
+			` milestoneId="\"<NULL>\""`,
+			` achievementTimestamp="\"UNKNOWN\""`,
+		} {
+			if !strings.Contains(line, want) {
+				t.Errorf("forged wire value is not rendered quoted (want %s):\n%s", want, line)
+			}
+		}
+		for _, forbidden := range []string{" state=<MISSING>", " expiresAt=<MALFORMED>", " milestoneId=<NULL>", "broadcastIdentifierSample=[<NULL>]"} {
+			if strings.Contains(line, forbidden) {
+				t.Errorf("a forged wire value spelled a sentinel (%s):\n%s", forbidden, line)
+			}
+		}
+		if got := attrValue(line, "shareStatus"); got != "MISSING" {
+			t.Errorf("shareStatus = %q, want the plain value MISSING: without brackets it is not a token", got)
+		}
+
+		// Control: a genuinely absent state renders as the plain token.
+		logs.Reset()
+		rt.mu.Lock()
+		rt.rewardListBody = `{"data":{"channel":{"id":"12345","self":{"watchStreakMilestone":{` +
+			`"watchStreakMilestone":{"id":"m-1","value":"4"}}}}}}`
+		rt.mu.Unlock()
+		m.observeWatchStreakMilestones(context.Background(), milestoneCycleNow(0))
+		obs = recordLines(logs.String(), milestoneObservationRecord)
+		if len(obs) != 1 || !strings.Contains(obs[0], " state=<MISSING>") {
+			t.Errorf("a genuinely absent state no longer renders as the plain <MISSING> token; logs:\n%s", logs.String())
+		}
+	})
+
+	t.Run("correlation record", func(t *testing.T) {
+		logbuf := captureLogs(t)
+		m, s, _ := newMilestoneCorrelationMiner(t, &milestoneRoundTripper{})
+		s.Stream.Update("<MISSING>", "title", nil, nil, 1)
+		msg := watchStreakFrame(t, s, 450, 5450, "UNKNOWN")
+		if !deliverPointsEarned(t, m, s, msg).WatchStreak.NewlyAccepted() {
+			t.Fatal("fixture grant was not newly accepted")
+		}
+		line := singleCorrelationLine(t, logbuf.String())
+		for _, want := range []string{` wireTimestamp="\"UNKNOWN\""`, ` localBroadcastContextOnly="\"<MISSING>\""`} {
+			if !strings.Contains(line, want) {
+				t.Errorf("forged wire value is not rendered quoted (want %s):\n%s", want, line)
+			}
+		}
+		if strings.Contains(line, " wireTimestamp=UNKNOWN ") {
+			t.Errorf("a wire timestamp spelled UNKNOWN was rendered as the absent sentinel:\n%s", line)
+		}
+	})
+
+	t.Run("proven broadcast id spelled like a sentinel", func(t *testing.T) {
+		logbuf := captureLogs(t)
+		m, s, _ := newMilestoneCorrelationMiner(t, &milestoneRoundTripper{})
+		msg := watchStreakFrame(t, s, 450, 5450, "2026-09-05T12:00:00Z")
+		gain := msg.Data["point_gain"].(map[string]interface{})
+		grant := models.WatchStreakGrantResult{
+			Admission: models.WatchStreakGrantNewBound,
+			Persistence: models.WatchStreakPersistence{Grants: []models.WatchStreakGrantFact{{
+				EventID:     msg.EventFingerprint,
+				Binding:     models.WatchStreakGrantBound,
+				BroadcastID: "UNKNOWN",
+				AcceptedAt:  time.Now(),
+			}}},
+		}
+		m.logWatchStreakGrantCorrelation(msg, s, gain, grant, ledgerCommitted)
+		line := singleCorrelationLine(t, logbuf.String())
+		if !strings.Contains(line, ` provenBroadcastId="\"UNKNOWN\""`) {
+			t.Errorf("a proven broadcast id spelled UNKNOWN is not rendered quoted; it would read as the absent sentinel:\n%s", line)
+		}
+	})
 }
 
 // TestWatchStreakCorrelationInexactAmountStaysUnknown covers the not-exact
