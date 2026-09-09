@@ -56,6 +56,36 @@ func TestObservationAdapterIsFieldComplete(t *testing.T) {
 			},
 			Counters: map[string]int64{"stake": 250},
 			Presence: map[string]string{"event": pubsub.ObsPresent},
+			DecisionEnvelope: &pubsub.ObservationDecision{
+				AttemptID:      7,
+				SettingsStage:  pubsub.ObsStageExecuted,
+				Settings:       pubsubSettingsFixture(),
+				CalculateStage: pubsub.ObsStageExecuted,
+				Balance:        int64Value(10000),
+				Outcomes: []pubsub.ObservationModelOutcome{{
+					Slot: 1, Present: true, ID: "o2", TotalUsers: 2, TotalPoints: 200,
+					TopPoints: 5000, PercentageUsers: 40, Odds: 2.5, OddsPercentage: 40,
+				}},
+				BetTotalUsers:       int64Value(5),
+				BetTotalPoints:      int64Value(500),
+				ChoiceIndex:         intValue(1),
+				ChoiceOutcomeID:     "o2",
+				ChoiceAmount:        int64Value(500),
+				SkipStage:           pubsub.ObsStageExecuted,
+				SkipResult:          boolValue(true),
+				SkipCompared:        float64Value(12.5),
+				HealthStage:         pubsub.ObsHealthAllowed,
+				HealthReason:        "health_gql_api_degraded",
+				StakeStage:          pubsub.ObsStageExecuted,
+				RiskMaxStakePercent: intValue(10),
+				RiskReservePoints:   intValue(100),
+				StakeAllowed:        int64Value(500),
+				StakeReason:         "max_stake_percent",
+				StakeLimit:          int64Value(500),
+				ClampApplied:        boolValue(true),
+				FinalAmount:         int64Value(500),
+			},
+			AdmissionSettings: pubsubSettingsFixture(),
 		},
 	}
 
@@ -102,12 +132,68 @@ func TestObservationAdapterIsFieldComplete(t *testing.T) {
 			},
 			Counters: map[string]int64{"stake": 250},
 			Presence: map[string]string{"event": "PRESENT"},
+			DecisionEnvelope: &analytics.ObservationDecisionEnvelope{
+				AttemptID:      7,
+				SettingsStage:  analytics.DecisionStageExecuted,
+				Settings:       analyticsSettingsFixture(),
+				CalculateStage: analytics.DecisionStageExecuted,
+				Balance:        int64Value(10000),
+				Outcomes: []analytics.ObservationModelOutcome{{
+					Slot: 1, Present: true, ID: "o2", TotalUsers: 2, TotalPoints: 200,
+					TopPoints: 5000, PercentageUsers: 40, Odds: 2.5, OddsPercentage: 40,
+				}},
+				BetTotalUsers:       int64Value(5),
+				BetTotalPoints:      int64Value(500),
+				ChoiceIndex:         intValue(1),
+				ChoiceOutcomeID:     "o2",
+				ChoiceAmount:        int64Value(500),
+				SkipStage:           analytics.DecisionStageExecuted,
+				SkipResult:          boolValue(true),
+				SkipCompared:        float64Value(12.5),
+				HealthStage:         analytics.DecisionHealthAllowed,
+				HealthReason:        "health_gql_api_degraded",
+				StakeStage:          analytics.DecisionStageExecuted,
+				RiskMaxStakePercent: intValue(10),
+				RiskReservePoints:   intValue(100),
+				StakeAllowed:        int64Value(500),
+				StakeReason:         "max_stake_percent",
+				StakeLimit:          int64Value(500),
+				ClampApplied:        boolValue(true),
+				FinalAmount:         int64Value(500),
+			},
+			AdmissionSettings: analyticsSettingsFixture(),
 		},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("adapter dropped or altered a field:\n got=%+v\nwant=%+v", got, want)
 	}
 }
+
+// pubsubSettingsFixture / analyticsSettingsFixture are the SAME nine-field
+// snapshot on either side of the seam, with every field non-zero so
+// assertNoZeroFields can prove none of them is silently dropped.
+func pubsubSettingsFixture() *pubsub.ObservationBetSettings {
+	return &pubsub.ObservationBetSettings{
+		Strategy: "SMART", Percentage: 5, PercentageGap: 20, MaxPoints: 50000,
+		MinimumPoints: 10, StealthMode: true, Delay: 6, DelayMode: "FROM_END",
+		FilterCondition: &pubsub.ObservationFilterCondition{
+			By: "total_users", Where: "GT", Value: 100,
+		},
+	}
+}
+
+func analyticsSettingsFixture() *analytics.ObservationBetSettings {
+	return &analytics.ObservationBetSettings{
+		Strategy: "SMART", Percentage: 5, PercentageGap: 20, MaxPoints: 50000,
+		MinimumPoints: 10, StealthMode: true, Delay: 6, DelayMode: "FROM_END",
+		FilterCondition: &analytics.ObservationFilterCondition{
+			By: "total_users", Where: "GT", Value: 100,
+		},
+	}
+}
+
+func int64Value(v int64) *int64       { return &v }
+func float64Value(v float64) *float64 { return &v }
 
 // assertNoZeroFields fails when any exported field of a struct is still its
 // zero value, so a field-completeness fixture cannot rot into a partial one.

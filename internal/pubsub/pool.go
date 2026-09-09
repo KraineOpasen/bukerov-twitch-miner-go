@@ -290,6 +290,13 @@ type WebSocketPool struct {
 	// action. Observation-only: nothing in the placement path reads it.
 	manualActions atomic.Uint64
 
+	// autoAttempts mints the discriminator for one automatic decision attempt,
+	// exactly as manualActions does for an operator action. Observation-only:
+	// nothing in the decision or placement path reads it, and it exists here —
+	// on the pool that already owns the observation identities — so no
+	// business state owner gains a field for observability's sake.
+	autoAttempts atomic.Uint64
+
 	// roundAdmissions counts the rounds THIS pool instance has admitted. It is
 	// the second half of a round incarnation and is never reset, so a counter
 	// value is used once per pool instance.
@@ -1160,6 +1167,12 @@ func (p *WebSocketPool) handlePredictionChannel(msg *PubSubMessage, streamer *mo
 		// later, and a round admitted with an unobserved prefix does not
 		// acquire one retroactively.
 		p.freezeRoundProvenance(control.incarnation, streamer.ChannelID, streamer.GetUsername())
+		// The settings the round was ADMITTED with, deep-copied from the value
+		// NewEventPrediction already read at this stage — not a second read of
+		// the streamer's settings. It is recorded as its own fact and is never
+		// merged with, or asserted equal to, the decision-time snapshot the
+		// attempt records later.
+		admissionSettings := captureBetSettings(event.Bet.Settings)
 		p.mu.Unlock()
 
 		slog.Info("Prediction event scheduled",
@@ -1169,7 +1182,7 @@ func (p *WebSocketPool) handlePredictionChannel(msg *PubSubMessage, streamer *mo
 		)
 		p.observeScheduleDecisionOfRound(msg, streamer, eventID, control.incarnation, eventStatus,
 			"SCHEDULE_ACCEPTED", "PLACE", "OK",
-			map[string]int64{"closingBetAfterSeconds": int64(closingBetAfter)})
+			map[string]int64{"closingBetAfterSeconds": int64(closingBetAfter)}, admissionSettings)
 
 		// The timer is a producer episode of its own: the pool's Close joins
 		// its connections, not this goroutine. Registering BEFORE it starts
@@ -1499,8 +1512,23 @@ func (p *WebSocketPool) placeAutoBetScheduled(eventID, scheduled string) {
 	default:
 		dueReason = "CONFLICT"
 	}
+	// One attempt, one discriminator, minted before the first fact about it.
+	// Every fact below — the due fact, whichever skip ends the attempt, the
+	// decision, and both placement calls — carries it, so the attempt's facts
+	// are linked by an identity this pool minted rather than by a timestamp or
+	// an event id that a later admission of the same Twitch event could reuse.
+	attemptID := p.newAutoAttemptID()
+	env := newDecisionEnvelope(attemptID)
+	attemptCounters := func(extra map[string]int64) map[string]int64 {
+		out := map[string]int64{obsCounterAutoAttemptID: int64(attemptID)}
+		for k, v := range extra {
+			out[k] = v
+		}
+		return out
+	}
 	p.observeRoundFact(eventID, obsChannel, obsLogin, ObsKindAutoDecision, ObservationPayload{
 		Phase: "AUTO_DUE", ReasonCode: dueReason, Manual: boolPtr(false),
+		Counters: attemptCounters(nil),
 	})
 
 	// Placement-time gate: re-evaluate the CURRENT user settings and eligibility
@@ -1512,7 +1540,7 @@ func (p *WebSocketPool) placeAutoBetScheduled(eventID, scheduled string) {
 	// untouched, and nothing re-schedules the skipped placement on re-enable.
 	if d := pointsEligibility.EvaluatePointsTask(event.Streamer, eligibility.TaskPrediction); !d.Eligible {
 		logSkippedPointsAction(event.Streamer, "auto prediction placement", d)
-		p.observeAutoSkip(eventID, obsChannel, obsLogin, "NOT_ELIGIBLE", nil)
+		p.observeAutoSkip(eventID, obsChannel, obsLogin, "NOT_ELIGIBLE", attemptCounters(nil), env)
 		return
 	}
 
@@ -1532,23 +1560,56 @@ func (p *WebSocketPool) placeAutoBetScheduled(eventID, scheduled string) {
 		case placed:
 			reason = "ALREADY_PLACED"
 		}
-		p.observeAutoSkipState(eventID, obsChannel, obsLogin, reason, state)
+		p.observeAutoSkipState(eventID, obsChannel, obsLogin, reason, state, env)
 		return
 	}
 	balance := event.Streamer.GetChannelPoints()
+	// The model state Calculate is ABOUT to read, deep-copied under the lock
+	// that owns it (event-updated mutates the same outcomes under p.mu). It is
+	// taken before the call, from the model itself, so it is what Calculate
+	// consulted rather than a later frame reconstructed after the fact — and it
+	// keeps the derived values the model had accumulated, which the newest
+	// channel_event cannot supply because UpdateOutcomes refreshes them only
+	// under its own conditions.
+	envOutcomes := captureModelOutcomes(event.Bet.Outcomes)
+	envBetUsers, envBetPoints := int64(event.Bet.TotalUsers), int64(event.Bet.TotalPoints)
 	decision := event.Bet.Calculate(balance)
 	skip, comparedValue := event.Bet.Skip()
 	settings := event.Bet.Settings
 	streamer := event.Streamer.GetUsername()
 	gate := p.betHealth
 	risk := p.risk
+	// Record what the three business reads above ALREADY returned. No source is
+	// consulted a second time, and settings is deep-copied here because its
+	// filter condition is a pointer the round keeps sharing.
+	env.SettingsStage, env.Settings = ObsStageExecuted, captureBetSettings(settings)
+	env.CalculateStage = ObsStageExecuted
+	env.Balance = int64Ptr(int64(balance))
+	env.Outcomes = envOutcomes
+	env.BetTotalUsers, env.BetTotalPoints = &envBetUsers, &envBetPoints
+	env.ChoiceIndex, env.ChoiceOutcomeID = intPtr(decision.Choice), decision.ID
+	env.ChoiceAmount = int64Ptr(int64(decision.Amount))
+	env.SkipStage, env.SkipResult, env.SkipCompared = ObsStageExecuted, boolPtr(skip), floatPtr(comparedValue)
 	p.mu.Unlock()
 
 	// Prediction risk gates (auto-bet only; manual bets set Decision directly and
 	// are never gated). Fixed reason priority: health > reserve > percent. The
 	// absolute cap (MaxPoints) is applied per-streamer inside Calculate.
+	// The gate is skipped for two structurally different reasons, and when it
+	// does run it has two outcomes: all four are recorded distinctly, because
+	// "no gate ran" and "the gate allowed it" are not the same fact. The single
+	// existing AutoBetDecision call is bound once and reused — the verdict is
+	// read from that one call, never obtained by asking the gate again.
+	if !risk.HealthGateEnabled {
+		env.HealthStage = ObsHealthDisabled
+	} else if gate == nil {
+		env.HealthStage = ObsHealthNoGate
+	}
 	if risk.HealthGateEnabled && gate != nil {
-		if d := gate.AutoBetDecision(); !d.Allowed {
+		d := gate.AutoBetDecision()
+		env.HealthStage, env.HealthReason = ObsHealthAllowed, string(d.Reason)
+		if !d.Allowed {
+			env.HealthStage = ObsHealthDenied
 			slog.Warn("Auto-bet gated",
 				"reason", string(d.Reason),
 				"limit", 0, "proposed", decision.Amount, "allowed", 0, "streamer", streamer)
@@ -1556,37 +1617,56 @@ func (p *WebSocketPool) placeAutoBetScheduled(eventID, scheduled string) {
 			// The two used to emit byte-identical facts, so a reader could not
 			// tell why the bet did not happen.
 			p.observeAutoSkip(eventID, obsChannel, obsLogin, "HEALTH_GATED",
-				map[string]int64{"stake": int64(decision.Amount)})
+				attemptCounters(map[string]int64{"stake": int64(decision.Amount)}), env)
 			return
 		}
 	}
 	allowed, reason, limit := models.EvaluateStake(decision.Amount, balance, risk.MaxStakePercent, risk.ReservePoints)
+	// EvaluateStake's inputs and its COMPLETE return, recorded before the switch
+	// below decides what the caller does with them. StakeAllowed is what the
+	// function returned; whether the caller adopted it is ClampApplied, set at
+	// the assignment itself — the two differ whenever the gate is not the
+	// percent gate, which is exactly the case a derived flag would get wrong.
+	env.StakeStage = ObsStageExecuted
+	env.RiskMaxStakePercent, env.RiskReservePoints = intPtr(risk.MaxStakePercent), intPtr(risk.ReservePoints)
+	env.StakeAllowed, env.StakeReason, env.StakeLimit = int64Ptr(int64(allowed)), string(reason), int64Ptr(int64(limit))
+	env.ClampApplied = boolPtr(false)
 	switch reason {
 	case models.GateReserveViolation:
 		// Reserve is a floor, not a cap: skip the bet entirely rather than shrink it.
 		slog.Warn("Auto-bet gated",
 			"reason", string(reason),
 			"limit", limit, "proposed", decision.Amount, "allowed", 0, "streamer", streamer)
+		// FinalAmount stays absent: this exit returns from INSIDE the gate
+		// block, so the caller never reached a post-gate stake. StakeReason
+		// says why, and ChoiceAmount still carries what the strategy proposed.
 		p.observeAutoSkip(eventID, obsChannel, obsLogin, "RESERVE_VIOLATION",
-			map[string]int64{"stake": int64(decision.Amount), "balance": int64(balance)})
+			attemptCounters(map[string]int64{"stake": int64(decision.Amount), "balance": int64(balance)}), env)
 		return
 	case models.GatePercent:
 		slog.Info("Auto-bet gated",
 			"reason", string(reason),
 			"limit", limit, "proposed", decision.Amount, "allowed", allowed, "streamer", streamer)
 		decision.Amount = allowed
+		// Recorded AT the assignment, not inferred from the gate reason.
+		env.ClampApplied = boolPtr(true)
 	}
+	// The stake the caller carries out of the gate block: the original proposal
+	// unless the clamp above replaced it. This is what the two exits below are
+	// judged against, and it is a different fact from both Calculate's proposal
+	// and EvaluateStake's returned allowance.
+	env.FinalAmount = int64Ptr(int64(decision.Amount))
 
 	if decision.Amount < minPredictionBet {
 		slog.Info("Bet amount too low", "amount", decision.Amount)
 		p.observeAutoSkip(eventID, obsChannel, obsLogin, "BELOW_MINIMUM_POINTS",
-			map[string]int64{"stake": int64(decision.Amount)})
+			attemptCounters(map[string]int64{"stake": int64(decision.Amount)}), env)
 		return
 	}
 	if skip {
 		slog.Info("Skipping bet", "filter", settings.FilterCondition, "value", comparedValue)
 		p.observeAutoSkip(eventID, obsChannel, obsLogin, "FILTER_REJECTED",
-			map[string]int64{"stake": int64(decision.Amount)})
+			attemptCounters(map[string]int64{"stake": int64(decision.Amount)}), env)
 		return
 	}
 
@@ -1606,18 +1686,23 @@ func (p *WebSocketPool) placeAutoBetScheduled(eventID, scheduled string) {
 
 	p.observeRoundFact(eventID, obsChannel, obsLogin, ObsKindAutoDecision, ObservationPayload{
 		Phase: "AUTO_DECIDED", Decision: "PLACE", ReasonCode: "OK", Manual: boolPtr(false),
-		OutcomeSlot: intPtr(decision.Choice),
-		Counters:    map[string]int64{"stake": int64(decision.Amount), "balance": int64(balance)},
+		OutcomeSlot:      intPtr(decision.Choice),
+		Counters:         attemptCounters(map[string]int64{"stake": int64(decision.Amount), "balance": int64(balance)}),
+		DecisionEnvelope: env,
 	})
 	// CALL_STARTED immediately before the ONE existing placement call, and
 	// CALL_RETURNED immediately after it. Neither adds, removes, retries or
 	// reorders a call, and neither inspects its arguments beyond the stake and
 	// outcome slot already decided above.
-	p.observePlacementCall(eventID, obsChannel, obsLogin, "CALL_STARTED", false, "NONE",
-		decision.Choice, decision.Amount)
+	// Both placement facts carry the attempt discriminator, so the call that
+	// actually went to Twitch is linked to the decision envelope that produced
+	// its arguments — by the identity this pool minted, not by an event id a
+	// later admission could reuse.
+	p.observePlacementCallOf(eventID, obsChannel, obsLogin, "CALL_STARTED", false, "NONE",
+		decision.Choice, decision.Amount, attemptCounters(nil))
 	err := p.placer.PlacePredictionBet(event, decision.ID, decision.Amount)
-	p.observePlacementCall(eventID, obsChannel, obsLogin, "CALL_RETURNED", err == nil, placementErrorClass(err),
-		decision.Choice, decision.Amount)
+	p.observePlacementCallOf(eventID, obsChannel, obsLogin, "CALL_RETURNED", err == nil, placementErrorClass(err),
+		decision.Choice, decision.Amount, attemptCounters(nil))
 	if err != nil {
 		slog.Error("Failed to make prediction", "error", err)
 		return
