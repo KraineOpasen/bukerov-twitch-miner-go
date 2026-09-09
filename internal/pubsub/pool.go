@@ -1530,19 +1530,34 @@ func (p *WebSocketPool) placeAutoBetScheduled(eventID, scheduled string) {
 	// decision, and both placement calls — carries it, so the attempt's facts
 	// are linked by an identity this pool minted rather than by a timestamp or
 	// an event id that a later admission of the same Twitch event could reuse.
-	attemptID := p.newAutoAttemptID()
-	env := newDecisionEnvelope(attemptID)
+	//
+	// ALL of it is observation-only state, so none of it is built when no sink
+	// is wired: not the discriminator, not the envelope, not the counter map.
+	// Read observing() ONCE here rather than per statement, so one attempt
+	// either records itself or does not — a sink wired midway through would
+	// otherwise leave an attempt half-described. A round admitted while capture
+	// was inactive already carries that fact in its frozen capture provenance.
+	//
 	// Every fact of this attempt is filed under rc.incarnation — the admission
 	// this attempt actually resolved — never under a fresh lookup of eventID. A
 	// cleanup and re-admission of the same Twitch event can land between this
 	// point and the terminal fact, and a re-lookup would then file the whole
 	// decision envelope against a round it was never about, or against none.
-	attemptCounters := func(extra map[string]int64) map[string]int64 {
-		out := map[string]int64{obsCounterAutoAttemptID: int64(attemptID)}
-		for k, v := range extra {
-			out[k] = v
+	observing := p.observing()
+	var env *ObservationDecision
+	// Without a sink the counters pass straight through, so the merged map is
+	// never allocated either. The caller's own map is pre-existing behaviour.
+	attemptCounters := func(extra map[string]int64) map[string]int64 { return extra }
+	if observing {
+		attemptID := p.newAutoAttemptID()
+		env = newDecisionEnvelope(attemptID)
+		attemptCounters = func(extra map[string]int64) map[string]int64 {
+			out := map[string]int64{obsCounterAutoAttemptID: int64(attemptID)}
+			for k, v := range extra {
+				out[k] = v
+			}
+			return out
 		}
-		return out
 	}
 	p.observeRoundFactOf(eventID, obsChannel, obsLogin, rc.incarnation, ObsKindAutoDecision, ObservationPayload{
 		Phase: "AUTO_DUE", ReasonCode: dueReason, Manual: boolPtr(false),
@@ -1590,9 +1605,8 @@ func (p *WebSocketPool) placeAutoBetScheduled(eventID, scheduled string) {
 	// channel_event cannot supply because UpdateOutcomes refreshes them only
 	// under its own conditions.
 	//
-	// Gated on observing() for the same reason as the admission snapshot: with
-	// no sink wired this is work nobody can read, and it would run inside p.mu.
-	observing := p.observing()
+	// Skipped entirely when nothing observes: this is work nobody can read, and
+	// it would run inside p.mu.
 	var envOutcomes []ObservationModelOutcome
 	if observing {
 		envOutcomes = captureModelOutcomes(event.Bet.Outcomes)
@@ -1627,16 +1641,22 @@ func (p *WebSocketPool) placeAutoBetScheduled(eventID, scheduled string) {
 	// "no gate ran" and "the gate allowed it" are not the same fact. The single
 	// existing AutoBetDecision call is bound once and reused — the verdict is
 	// read from that one call, never obtained by asking the gate again.
-	if !risk.HealthGateEnabled {
-		env.HealthStage = ObsHealthDisabled
-	} else if gate == nil {
-		env.HealthStage = ObsHealthNoGate
+	if env != nil {
+		if !risk.HealthGateEnabled {
+			env.HealthStage = ObsHealthDisabled
+		} else if gate == nil {
+			env.HealthStage = ObsHealthNoGate
+		}
 	}
 	if risk.HealthGateEnabled && gate != nil {
 		d := gate.AutoBetDecision()
-		env.HealthStage, env.HealthReason = ObsHealthAllowed, string(d.Reason)
+		if env != nil {
+			env.HealthStage, env.HealthReason = ObsHealthAllowed, string(d.Reason)
+		}
 		if !d.Allowed {
-			env.HealthStage = ObsHealthDenied
+			if env != nil {
+				env.HealthStage = ObsHealthDenied
+			}
 			slog.Warn("Auto-bet gated",
 				"reason", string(d.Reason),
 				"limit", 0, "proposed", decision.Amount, "allowed", 0, "streamer", streamer)
@@ -1654,10 +1674,12 @@ func (p *WebSocketPool) placeAutoBetScheduled(eventID, scheduled string) {
 	// function returned; whether the caller adopted it is ClampApplied, set at
 	// the assignment itself — the two differ whenever the gate is not the
 	// percent gate, which is exactly the case a derived flag would get wrong.
-	env.StakeStage = ObsStageExecuted
-	env.RiskMaxStakePercent, env.RiskReservePoints = intPtr(risk.MaxStakePercent), intPtr(risk.ReservePoints)
-	env.StakeAllowed, env.StakeReason, env.StakeLimit = int64Ptr(int64(allowed)), string(reason), int64Ptr(int64(limit))
-	env.ClampApplied = boolPtr(false)
+	if env != nil {
+		env.StakeStage = ObsStageExecuted
+		env.RiskMaxStakePercent, env.RiskReservePoints = intPtr(risk.MaxStakePercent), intPtr(risk.ReservePoints)
+		env.StakeAllowed, env.StakeReason, env.StakeLimit = int64Ptr(int64(allowed)), string(reason), int64Ptr(int64(limit))
+		env.ClampApplied = boolPtr(false)
+	}
 	switch reason {
 	case models.GateReserveViolation:
 		// Reserve is a floor, not a cap: skip the bet entirely rather than shrink it.
@@ -1676,13 +1698,17 @@ func (p *WebSocketPool) placeAutoBetScheduled(eventID, scheduled string) {
 			"limit", limit, "proposed", decision.Amount, "allowed", allowed, "streamer", streamer)
 		decision.Amount = allowed
 		// Recorded AT the assignment, not inferred from the gate reason.
-		env.ClampApplied = boolPtr(true)
+		if env != nil {
+			env.ClampApplied = boolPtr(true)
+		}
 	}
 	// The stake the caller carries out of the gate block: the original proposal
 	// unless the clamp above replaced it. This is what the two exits below are
 	// judged against, and it is a different fact from both Calculate's proposal
 	// and EvaluateStake's returned allowance.
-	env.FinalAmount = int64Ptr(int64(decision.Amount))
+	if env != nil {
+		env.FinalAmount = int64Ptr(int64(decision.Amount))
+	}
 
 	if decision.Amount < minPredictionBet {
 		slog.Info("Bet amount too low", "amount", decision.Amount)

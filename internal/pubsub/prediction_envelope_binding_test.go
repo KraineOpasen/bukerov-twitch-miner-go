@@ -159,13 +159,19 @@ func TestCapturedInputsDoNotFollowALaterMutation(t *testing.T) {
 }
 
 // TestCaptureCostsNothingWhenNobodyIsObserving regresses a "pure observer"
-// leak: the envelope's deep copies ran unconditionally, so a deployment with
-// analytics switched off still paid for them — inside the pool lock that
-// serializes all inbound PubSub handling.
+// leak: the envelope work ran unconditionally, so a deployment with analytics
+// switched off still minted an attempt id, allocated an envelope and a counter
+// map, and wrote envelope fields on every gate — some of it inside the pool
+// lock that serializes all inbound PubSub handling.
 //
-// Every other observation call site is short-circuited by p.observing(); the
-// capture work was not. This asserts the decision path still produces the same
-// result with no sink wired, and that the capture is gated.
+// Every other observation call site is short-circuited by p.observing(); this
+// state was not. An earlier version of this test asserted only the placement
+// result, which cannot detect any of that — it passed while the leak was
+// present, so it did not test its own name.
+//
+// The attempt counter is the precise witness: it is incremented once per
+// attempt and ONLY as part of building the observation state, so a pool that
+// never observed and still advanced it has done work nobody can read.
 func TestCaptureCostsNothingWhenNobodyIsObserving(t *testing.T) {
 	placer := &fakePlacer{}
 	p := newTestPool(placer)
@@ -178,11 +184,27 @@ func TestCaptureCostsNothingWhenNobodyIsObserving(t *testing.T) {
 	}
 	p.placeAutoBet("off-1")
 
+	if got := p.autoAttempts.Load(); got != 0 {
+		t.Fatalf("the attempt counter advanced to %d with no sink wired: the attempt id, the "+
+			"envelope and its counter map were built for a reader that does not exist, so "+
+			"observation is not free when nobody observes", got)
+	}
 	if placer.callCount() != 1 {
 		t.Fatalf("Twitch calls = %d, want 1: the decision must be identical with capture off",
 			placer.callCount())
 	}
 	if ep.Bet.Decision.Amount != 5000 {
 		t.Fatalf("decision amount = %d, want 5000 with capture off", ep.Bet.Decision.Amount)
+	}
+
+	// And with a sink wired the same round DOES build the state, so the check
+	// above is a real gate rather than a counter that never moves.
+	p2, _ := observedPool(t, &fakePlacer{})
+	s2 := newTestStreamer(100000)
+	ep2 := admitRound(p2, s2, "on-1")
+	ep2.Bet.Settings = autoBetSettings(5)
+	p2.placeAutoBet("on-1")
+	if got := p2.autoAttempts.Load(); got != 1 {
+		t.Fatalf("attempt counter = %d with a sink wired, want 1", got)
 	}
 }
