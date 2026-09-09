@@ -9,13 +9,23 @@ package predictioneval
 // exists to hold would be gone on the first import line.
 //
 // The cost of the mirror is drift, and it is paid for explicitly: the reader
-// package's TestSourceRecordMirrorsEveryStoredEnvelopeField walks the store's
-// envelope with reflection and fails if the store grows a field this mirror
-// does not carry. A silent field loss is exactly the failure a replay must
-// not have, so it is a compile-and-test-time error rather than a runtime one.
+// package's TestTheReplayMirrorCarriesAFieldForEveryFieldTheStoreCanPersist
+// walks the store's ENVELOPE types with reflection — the envelope itself, its
+// settings, its filter condition and its model outcomes — and fails if any of
+// them grows a field this mirror does not carry. A silent field loss is exactly
+// the failure a replay must not have, so it is a test failure rather than a
+// wrong number.
 //
-// Everything here is a VALUE. Nothing aliases live model state, nothing is a
-// pointer into the store, and no method mutates a receiver.
+// Note the bound on that guarantee, because overstating it would be the same
+// mistake in a comment: the reflection check covers the envelope types, NOT the
+// whole ObservationPayload, from which this mirror deliberately drops the wire
+// Outcomes and the Presence map. Neither is a replay input.
+//
+// Everything here is a VALUE, and materialization deep-copies before it bounds
+// an attempt's slice, so nothing downstream aliases the caller's dataset — a
+// property TestMaterializedInputsDoNotAliasTheCallersDataset holds, because the
+// common-input digest deliberately does not hash payload contents and an alias
+// could otherwise change what a replay reads while its digest stayed identical.
 
 // SourceDataset is the bounded, coherent slice of persisted facts a reader
 // acquired, together with the session classification the store applied to it.

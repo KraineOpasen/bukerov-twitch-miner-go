@@ -42,11 +42,14 @@ package predictioneval_test
 // suite and is not part of the shipped import graph.
 
 import (
+	"go/ast"
 	"go/build"
 	"go/parser"
 	"go/token"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -309,4 +312,92 @@ func transitiveStdlibClosure(t *testing.T, roots []string) map[string]bool {
 		walk(r)
 	}
 	return seen
+}
+
+// TestEveryTestNamedInACommentActuallyExists closes a drift this package kept
+// producing.
+//
+// The comments here routinely say "this invariant is held by TestX" — that
+// citation is the reader's only evidence that a claim is mechanically enforced
+// rather than merely asserted. Four such citations pointed at tests that did
+// not exist under those names, and one of them named a test whose real scope
+// was narrower than the citation implied. Nothing catches that: the compiler
+// does not read comments, and a reviewer following the citation finds nothing
+// and reasonably concludes the invariant is unenforced.
+//
+// So the citations are checked. Any Test-shaped identifier mentioned in a
+// non-test file of this package or its reader must be a test that exists
+// somewhere in internal/.
+func TestEveryTestNamedInACommentActuallyExists(t *testing.T) {
+	cited := map[string][]string{}
+	for _, dir := range []string{"../predictioneval", "../predictioneval/reader"} {
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			t.Fatalf("read %s: %v", dir, err)
+		}
+		for _, e := range entries {
+			name := e.Name()
+			if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+				continue
+			}
+			path := filepath.Join(dir, name)
+			body, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatalf("read %s: %v", path, err)
+			}
+			for _, ident := range testIdentifierPattern.FindAllString(string(body), -1) {
+				cited[ident] = append(cited[ident], path)
+			}
+		}
+	}
+	if len(cited) == 0 {
+		t.Fatal("no test citations were found at all; this check would pass vacuously")
+	}
+
+	defined := definedTestNames(t, "..")
+	for name, where := range cited {
+		if !defined[name] {
+			t.Errorf("%s is cited in %v but no such test exists. A citation is the only evidence "+
+				"a reader has that an invariant is mechanically enforced; a dangling one is worse "+
+				"than no comment, because it reads as proof.", name, where)
+		}
+	}
+	t.Logf("%d cited test names, all defined", len(cited))
+}
+
+// testIdentifierPattern matches a Go test function name mentioned in prose.
+var testIdentifierPattern = regexp.MustCompile(`\bTest[A-Z][A-Za-z0-9_]+`)
+
+// definedTestNames collects every top-level Test function under root.
+func definedTestNames(t *testing.T, root string) map[string]bool {
+	t.Helper()
+	out := map[string]bool{}
+	fset := token.NewFileSet()
+	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() || !strings.HasSuffix(path, "_test.go") {
+			return nil
+		}
+		f, perr := parser.ParseFile(fset, path, nil, parser.SkipObjectResolution)
+		if perr != nil {
+			// A file this walk cannot parse is not evidence of a missing test.
+			return nil
+		}
+		for _, decl := range f.Decls {
+			fn, ok := decl.(*ast.FuncDecl)
+			if ok && fn.Recv == nil && strings.HasPrefix(fn.Name.Name, "Test") {
+				out[fn.Name.Name] = true
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walk %s: %v", root, err)
+	}
+	if len(out) == 0 {
+		t.Fatalf("no test functions found under %s; the check would pass vacuously", root)
+	}
+	return out
 }
