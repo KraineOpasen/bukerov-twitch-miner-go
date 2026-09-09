@@ -1461,7 +1461,7 @@ func TestEveryReferenceFieldOfAnEnvelopeIsActuallyDeepCopied(t *testing.T) {
 	for i := 0; i < rt.NumField(); i++ {
 		f := rv.Field(i)
 		switch f.Kind() {
-		case reflect.Ptr, reflect.Slice, reflect.Map:
+		case reflect.Pointer, reflect.Slice, reflect.Map:
 			if f.IsNil() {
 				t.Fatalf("field %s is nil in the fixture, so it cannot be checked for "+
 					"aliasing. populatedEnvelope must set every reference field.", rt.Field(i).Name)
@@ -1480,7 +1480,7 @@ func TestEveryReferenceFieldOfAnEnvelopeIsActuallyDeepCopied(t *testing.T) {
 		name := rt.Field(i).Name
 		orig, copied := rv.Field(i), cv.Field(i)
 		switch orig.Kind() {
-		case reflect.Ptr, reflect.Slice, reflect.Map:
+		case reflect.Pointer, reflect.Slice, reflect.Map:
 			if orig.Pointer() == copied.Pointer() {
 				t.Errorf("field %s of the copied envelope still points at the caller's memory. "+
 					"deepCopyEnvelope copies each reference field explicitly, so a field added "+
