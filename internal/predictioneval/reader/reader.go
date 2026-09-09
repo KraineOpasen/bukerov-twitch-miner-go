@@ -30,6 +30,22 @@ import (
 // this should ask for it explicitly and know why.
 const DefaultMaxRecords = 20000
 
+// MaxLoadLimit is the largest bound LoadSession will honour.
+//
+// It exists because the bound has to survive the arithmetic that implements it.
+// LoadSession probes with limit+1 so a session AT the bound stays
+// distinguishable from one over it; at the platform maximum that addition wraps
+// negative, and the store applies its SQL LIMIT only when the value is
+// positive — so the whole session got scanned, decoded and allocated, and the
+// len(rows) > limit guard could not fire either, because no slice length
+// exceeds MaxInt. A caller asking for the largest possible bound received no
+// bound at all.
+//
+// The ceiling is far above any real collector session and far below the
+// overflow, so it costs a legitimate caller nothing and closes the hole for
+// every value, not just the exact maximum.
+const MaxLoadLimit = 1 << 20
+
 var (
 	// ErrSessionNotFound reports an epoch with no session row.
 	ErrSessionNotFound = errors.New("predictioneval/reader: no collector session for that epoch")
@@ -47,6 +63,9 @@ var (
 	// an error rather than a silent truncation: a truncated dataset would look
 	// exactly like a complete one to every stage downstream.
 	ErrLimitExceeded = errors.New("predictioneval/reader: session holds more facts than the requested bound")
+	// ErrLimitOutOfRange reports a bound this reader will not honour, because
+	// honouring it would mean not bounding the read at all. See MaxLoadLimit.
+	ErrLimitOutOfRange = errors.New("predictioneval/reader: requested bound exceeds the maximum this reader can enforce")
 )
 
 // ObservationSource is the read surface this package needs. It is an interface
@@ -72,6 +91,9 @@ type ObservationSource interface {
 func LoadSession(ctx context.Context, src ObservationSource, epoch int64, limit int) (predictioneval.SourceDataset, error) {
 	if limit <= 0 {
 		limit = DefaultMaxRecords
+	}
+	if limit > MaxLoadLimit {
+		return predictioneval.SourceDataset{}, ErrLimitOutOfRange
 	}
 
 	before, found, err := src.ReadObservationSession(ctx, epoch)
