@@ -2872,7 +2872,12 @@ Acquiring data is the separate job of `internal/predictioneval/reader`, the only
 part that touches SQLite. The four core stages reach no database, network,
 Twitch, PubSub, live setting, environment variable, wall clock or global RNG,
 and a dependency-fence test enforces that over the package's whole transitive
-import graph rather than by convention.
+import graph rather than by convention. The fence pins that graph EXACTLY rather
+than screening it against a list of packages someone thought to name: any
+reachable package that is not pinned fails, so a capability nobody anticipated
+cannot arrive unnoticed. A Go toolchain upgrade that changes what those imports
+drag in is expected to trip it, which is the point — that change is reviewed,
+not absorbed.
 
 **Causal separation.** The producer persists an attempt's inputs and its results
 in one terminal envelope, so the reader performs the split the writer could not.
@@ -2932,6 +2937,18 @@ either (the counter and the envelope shipped in the same commit), so it is
 refused by name as a legacy-contract fact rather than as a fact whose attempt
 never began.
 
+The strength of the integrity check has a bound, and the replay states it
+rather than trading on it: the store's row witness is an UNKEYED SHA-256 stored
+beside the data it covers. It detects accidental corruption — a torn write, a
+bad page, a partial restore — and it does not authenticate against an adversary
+who can write to the database file, who can recompute the witness after editing
+a payload and repair the session counters to match. The common-input digest
+inherits exactly that property and adds no authenticity of its own; what it does
+hold against a hostile store is narrower and still useful, namely that a case,
+an evaluation and a settlement cannot be recombined across attempts. Detecting
+malicious edits would need a MAC or signature keyed outside the database, which
+is a producer change.
+
 Session integrity, truncation and witness verification are consumed from
 `ReadObservationSession` rather than re-implemented — the reader-facing
 projection COALESCEs NULL parent ids and re-marshals the payload, so it could
@@ -2967,6 +2984,27 @@ missing or unusable input makes its stage `UNSUPPORTED` or `INDETERMINATE` —
 never `0`, `false`, `SMART` or "skip" — and a stake the pinned policy's `int`
 arithmetic could not represent or would wrap is reported explicitly instead of
 being silently truncated.
+
+**Attribution, not coincidence.** An affirmative settlement requires the
+recorded placement to be *this* attempt's. Three things are checked and none of
+them alone is enough. The placement facts must have the SHAPE the producer
+writes — exactly one `CALL_STARTED` followed by exactly one `CALL_RETURNED`,
+both carrying the stake and outcome slot the producer puts on both, and both
+carrying the same ones; anything else is `INCOHERENT` and settles nothing,
+because a stake read from one call beside an acceptance read from another is
+not one observed call. Those arguments must be the ones the replay derived. And
+the facts must be stamped by `ProjectSettlementFacts` with the attempt key and
+common-input digest of the case being scored, because a stake and a two-option
+slot are low-cardinality enough that a different attempt on the same round can
+carry the same pair by coincidence — matching arguments are evidence, not
+identity.
+
+The recorded terminal fact must also NAME its action. The producer writes
+`PLACE` beside `AUTO_DECIDED` and `SKIP` beside `AUTO_SKIPPED` on every terminal
+auto fact it emits, so a blank decision is a record it cannot have written: the
+case is refused as `INCOMPLETE_TERMINAL_RECORD`, and the phase and decision are
+compared unconditionally rather than skipped when absent — a value that produces
+no comparison agrees with every replayed action.
 
 How a round SETTLED is not attributable to an attempt at this producer revision.
 The discriminator that links an attempt's facts is absent from the

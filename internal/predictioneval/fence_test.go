@@ -127,6 +127,116 @@ var sensitiveWatchlist = []string{
 	"time",
 }
 
+// knownStdlibClosure is the COMPLETE transitive standard-library closure of
+// the core's direct imports, pinned exactly.
+//
+// The watchlist above cannot carry the guarantee on its own, and the gap is
+// worth stating plainly: it is a hand-maintained list of names, so a package
+// nobody thought to name — crypto/rand, say, or a capability package a future
+// toolchain introduces — could become reachable and intersect with nothing.
+// The residue check would still pass, and the fence would still claim the
+// capability set cannot grow silently.
+//
+// So every package in the closure is classified, not just the ones anticipated.
+// Anything reachable that is not pinned here fails, whether or not it was
+// foreseen and whether or not it looks dangerous.
+//
+// This is EXPECTED to trip on a Go toolchain upgrade, and that is the design:
+// a change to what these six imports drag in is exactly the event that should
+// be reviewed rather than absorbed. The fix is to re-derive the set, confirm
+// nothing capability-bearing appeared, and update this list in the same commit
+// as the upgrade.
+var knownStdlibClosure = []string{
+	"bytes",
+	"cmp",
+	"crypto",
+	"crypto/cipher",
+	"crypto/fips140",
+	"crypto/internal/boring",
+	"crypto/internal/boring/sig",
+	"crypto/internal/constanttime",
+	"crypto/internal/entropy/v1.0.0",
+	"crypto/internal/fips140",
+	"crypto/internal/fips140/aes",
+	"crypto/internal/fips140/aes/gcm",
+	"crypto/internal/fips140/alias",
+	"crypto/internal/fips140/check",
+	"crypto/internal/fips140/drbg",
+	"crypto/internal/fips140/hmac",
+	"crypto/internal/fips140/sha256",
+	"crypto/internal/fips140/sha3",
+	"crypto/internal/fips140/sha512",
+	"crypto/internal/fips140/subtle",
+	"crypto/internal/fips140deps/byteorder",
+	"crypto/internal/fips140deps/cpu",
+	"crypto/internal/fips140deps/godebug",
+	"crypto/internal/fips140deps/time",
+	"crypto/internal/fips140only",
+	"crypto/internal/impl",
+	"crypto/internal/sysrand",
+	"crypto/sha256",
+	"crypto/subtle",
+	"errors",
+	"hash",
+	"internal/abi",
+	"internal/asan",
+	"internal/bisect",
+	"internal/bytealg",
+	"internal/byteorder",
+	"internal/chacha8rand",
+	"internal/coverage/rtcov",
+	"internal/cpu",
+	"internal/filepathlite",
+	"internal/goarch",
+	"internal/godebug",
+	"internal/godebugs",
+	"internal/goexperiment",
+	"internal/goos",
+	"internal/msan",
+	"internal/oserror",
+	"internal/poll",
+	"internal/profilerecord",
+	"internal/race",
+	"internal/reflectlite",
+	"internal/runtime/atomic",
+	"internal/runtime/cgroup",
+	"internal/runtime/exithook",
+	"internal/runtime/gc",
+	"internal/runtime/gc/scan",
+	"internal/runtime/maps",
+	"internal/runtime/math",
+	"internal/runtime/pprof/label",
+	"internal/runtime/sys",
+	"internal/runtime/syscall/linux",
+	"internal/strconv",
+	"internal/stringslite",
+	"internal/sync",
+	"internal/synctest",
+	"internal/syscall/execenv",
+	"internal/syscall/unix",
+	"internal/testlog",
+	"internal/trace/tracev2",
+	"internal/unsafeheader",
+	"io",
+	"io/fs",
+	"iter",
+	"math",
+	"math/bits",
+	"os",
+	"path",
+	"runtime",
+	"slices",
+	"sort",
+	"strconv",
+	"strings",
+	"sync",
+	"sync/atomic",
+	"syscall",
+	"time",
+	"unicode",
+	"unicode/utf8",
+}
+
 func TestProductionCoreDependencyFence(t *testing.T) {
 	direct := directImportsOfProductionFiles(t, "../predictioneval")
 
@@ -159,6 +269,38 @@ func TestProductionCoreDependencyFence(t *testing.T) {
 		if denied[pkg] {
 			t.Errorf("the production core transitively reaches %q", pkg)
 		}
+	}
+
+	// ---- Rule D: every reachable package is classified. -----------------
+	// The denied set and the watchlist both enumerate names someone predicted.
+	// This one does not: it fails on ANY package in the closure that is not
+	// pinned, which is what closes the "nobody named crypto/rand" hole.
+	pinned := map[string]bool{}
+	for _, p := range knownStdlibClosure {
+		pinned[p] = true
+	}
+	var unexpected, vanished []string
+	for pkg := range closure {
+		if !pinned[pkg] {
+			unexpected = append(unexpected, pkg)
+		}
+	}
+	for _, p := range knownStdlibClosure {
+		if !closure[p] {
+			vanished = append(vanished, p)
+		}
+	}
+	sort.Strings(unexpected)
+	sort.Strings(vanished)
+	if len(unexpected) > 0 {
+		t.Errorf("the core's transitive closure gained %v.\n"+
+			"Every reachable package is pinned precisely so an UNFORESEEN one cannot slip "+
+			"through the watchlist. Confirm none of these carries a capability the core must "+
+			"not have, then pin them.", unexpected)
+	}
+	if len(vanished) > 0 {
+		t.Errorf("the core's transitive closure no longer reaches %v.\n"+
+			"Drop them from the pin rather than leaving it overstated.", vanished)
 	}
 
 	// ---- The residue, asserted exactly and in BOTH directions. ---------

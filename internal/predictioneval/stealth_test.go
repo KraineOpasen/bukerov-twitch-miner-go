@@ -266,6 +266,15 @@ func TestScoreCountsAConditionedStealthComparisonApartFromIndependentEvidence(t 
 			HealthStage:    predictioneval.HealthAllowed,
 		},
 	}
+	// The terminal ACTION, which is now compared unconditionally. Derived from
+	// the replayed action rather than hardcoded, so this fixture keeps saying
+	// "the record agrees" if the case ever stops being a placement.
+	c.Recorded.TerminalPhase, c.Recorded.TerminalDecision =
+		predictioneval.PhaseAutoSkipped, "SKIP"
+	if ev.Action == predictioneval.ActionWouldAttemptPlacement {
+		c.Recorded.TerminalPhase, c.Recorded.TerminalDecision =
+			predictioneval.PhaseAutoDecided, "PLACE"
+	}
 	sc := predictioneval.Score(c, ev, predictioneval.SettlementFacts{})
 
 	var choiceAmount predictioneval.Comparison
@@ -311,10 +320,10 @@ func TestScoreCountsAConditionedStealthComparisonApartFromIndependentEvidence(t 
 	// alone no longer attributes a settlement to a case.
 	slot := ev.Choice.Index
 	stake := int64(ev.Clamp.FinalAmount)
-	sc2 := predictioneval.Score(c, ev, predictioneval.SettlementFacts{
+	sc2 := predictioneval.Score(c, ev, ncBoundFacts(c, predictioneval.SettlementFacts{
 		PlacementCallStarted: true, PlacementCallReturned: true, PlacementAccepted: true,
 		PlacementStake: &stake, PlacementSlot: &slot,
-	})
+	}))
 	if ev.Action == predictioneval.ActionWouldAttemptPlacement &&
 		sc2.Settlement.Assessment != predictioneval.SettlementConditional {
 		t.Fatalf("settlement assessment = %q, want CONDITIONAL_ON_STEALTH_REALIZATION",

@@ -333,7 +333,13 @@ func fixtureAttemptFacts() []analytics.PredictionObservation {
 		Phase:      "CALL_RETURNED",
 		ReasonCode: "OK",
 		ErrorClass: "NONE",
-		Counters:   map[string]int64{"autoAttemptId": attempt, "stake": 800},
+		// The slot is on BOTH placement facts because the producer puts it
+		// there: observePlacementCallOf writes OutcomeSlot and the stake
+		// unconditionally, from the same two arguments, on CALL_STARTED and
+		// CALL_RETURNED alike. A fixture that omitted it here described a call
+		// the producer does not make.
+		OutcomeSlot: intOf(1),
+		Counters:    map[string]int64{"autoAttemptId": attempt, "stake": 800},
 	}
 
 	return []analytics.PredictionObservation{schedule, due, decided, callStarted, callReturned}

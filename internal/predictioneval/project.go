@@ -44,6 +44,12 @@ const (
 	IneligibleInconsistentStageStates = "INCONSISTENT_STAGE_STATES"
 	IneligibleUnknownStageState       = "UNKNOWN_STAGE_STATE"
 	IneligibleNoEnvelope              = "NO_DECISION_ENVELOPE"
+	// IneligibleIncompleteTerminalRecord — the terminal fact does not name the
+	// action it recorded. The pinned producer writes a decision of SKIP or
+	// PLACE on every terminal auto fact it emits, so a blank one is not an
+	// absence to tolerate: it is a record that cannot have come from the
+	// producer this model is bound to.
+	IneligibleIncompleteTerminalRecord = "INCOMPLETE_TERMINAL_RECORD"
 )
 
 // DecisionInputs is everything the pinned policy READ, and nothing it produced.
@@ -279,6 +285,13 @@ func ProjectDecisionCase(a AttemptKnowledge) (DecisionCase, error) {
 	}
 	if inconsistentStages(env) {
 		reasons = append(reasons, IneligibleInconsistentStageStates)
+	}
+	// The terminal fact has to name the action it recorded. Without it the
+	// comparison against the replayed action has nothing to compare, and a
+	// blank value silently agreeing with everything is how an incomplete
+	// record reaches an affirmative settlement.
+	if out.Recorded.TerminalPhase == "" || out.Recorded.TerminalDecision == "" {
+		reasons = append(reasons, IneligibleIncompleteTerminalRecord)
 	}
 
 	out.Inputs.HealthState = env.HealthStage

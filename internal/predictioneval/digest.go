@@ -8,18 +8,35 @@ import (
 
 // The common-input digest.
 //
-// This is NOT the store's row digest and never replaces it. The store's digest
-// witnesses that a row was not altered after it was written; this one
-// witnesses something the store cannot: that the set of facts a replay treated
-// as an attempt's inputs is exactly the causally-closed prefix that existed
-// when the attempt ended, and did not change when later facts were appended.
+// This is NOT the store's row digest and never replaces it. This one witnesses
+// something the store cannot: that the set of facts a replay treated as an
+// attempt's inputs is exactly the causally-closed prefix that existed when the
+// attempt ended, and did not change when later facts were appended.
 //
 // It therefore hashes each fact's IDENTITY and the store's own row witness,
 // rather than re-deriving the row's contents. Re-deriving would duplicate P1's
 // sanitizer and digest algorithms — two implementations of one contract that
-// could drift — while achieving nothing extra: if a row's bytes changed, its
-// stored witness no longer matches it, and the reader has already established
-// that separately.
+// could drift — while achieving nothing extra: if a row's bytes changed
+// without its witness being updated to match, the reader has already
+// established that separately.
+//
+// The strength of that check has a bound worth stating exactly, because
+// overstating it is the same class of error this package exists to avoid. The
+// store's row witness is an UNKEYED SHA-256 over data stored beside it. It
+// therefore detects accidental corruption — a truncated write, a bad page, a
+// partial restore — and it does NOT authenticate anything against an adversary
+// with write access to the database file, who can recompute the witness after
+// editing a payload and repair the session counters to match. Hashing that
+// witness in here inherits exactly that property and adds no authenticity of
+// its own.
+//
+// What this digest does hold against a hostile store is narrower and still
+// worth having: it binds a scorecard to the specific fact set it was computed
+// from, so a case, an evaluation and a settlement cannot be recombined across
+// attempts. Detecting malicious EDITS would need a MAC or signature whose key
+// lives outside the database — a producer-side change, not a reader-side one,
+// and outside this module's scope. Nothing here should be read as claiming a
+// row was proven genuine.
 //
 // Length-prefixed parts, matching the store's own convention: a separator can
 // be forged by a field containing it, a length prefix cannot.

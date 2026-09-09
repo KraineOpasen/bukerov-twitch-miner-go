@@ -62,10 +62,32 @@ func ncAgreeingCase() (predictioneval.DecisionCase, predictioneval.Evaluation) {
 			ClampApplied: false, ClampAppliedRecorded: true,
 			FinalAmount: 50, FinalAmountRecorded: true,
 			TerminalReason: "OK",
-			HealthStage:    predictioneval.HealthAllowed,
+			// The terminal ACTION, not only its reason. Both are compared
+			// unconditionally now: a blank decision beside a matching phase
+			// and reason used to raise no disagreement at all, which is how an
+			// incomplete record reached an affirmative settlement.
+			TerminalPhase:    predictioneval.PhaseAutoDecided,
+			TerminalDecision: "PLACE",
+			HealthStage:      predictioneval.HealthAllowed,
 		},
 	}
 	return c, ev
+}
+
+// ncBoundFacts stamps hand-built settlement facts with the case's identity and
+// the one placement shape the pinned producer writes.
+//
+// Score refuses to make an affirmative assessment from facts that carry
+// neither, because a stake and a two-option slot are low-cardinality enough
+// that a DIFFERENT attempt on the same round can carry the same pair.
+func ncBoundFacts(c predictioneval.DecisionCase, s predictioneval.SettlementFacts) predictioneval.SettlementFacts {
+	key := c.Key
+	s.Attempt = &key
+	s.CommonInputDigest = c.CommonInputDigest
+	if s.PlacementCoherence == "" {
+		s.PlacementCoherence = predictioneval.PlacementShapeCoherent
+	}
+	return s
 }
 
 // TestScoreActuallyReportsADisagreementWhenTheRecordContradictsTheReplay is the
@@ -350,17 +372,13 @@ func TestARejectedPlacementIsReadAsRejected(t *testing.T) {
 			terminal.Payload.ReasonCode = "OK"
 			terminal.Payload.DecisionEnvelope = peMinimalEnvelope(7)
 
-			returned := peRecord(4, predictioneval.KindPlacement, predictioneval.PhaseCallReturned, 7)
-			returned.Payload.ReasonCode = tc.reason
-			returned.Payload.ErrorClass = tc.errorClass
-
 			pk, err := predictioneval.MaterializePairedKnowledge(predictioneval.SourceDataset{
 				Source: peProvenance(),
 				Records: []predictioneval.SourceRecord{
 					peRecord(1, predictioneval.KindAutoDecision, predictioneval.PhaseAutoDue, 7),
 					terminal,
-					peRecord(3, predictioneval.KindPlacement, predictioneval.PhaseCallStarted, 7),
-					returned,
+					pePlacement(3, 7, predictioneval.PhaseCallStarted, 50, 0, "OK", "NONE"),
+					pePlacement(4, 7, predictioneval.PhaseCallReturned, 50, 0, tc.reason, tc.errorClass),
 				},
 			})
 			if err != nil || len(pk.Attempts) != 1 {
@@ -645,11 +663,56 @@ func TestASettlementNeedsThePlacementThisReplayDerived(t *testing.T) {
 		}, predictioneval.SettlementAppliesToReplay},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			sc := predictioneval.Score(c, ev, tc.facts)
+			sc := predictioneval.Score(c, ev, ncBoundFacts(c, tc.facts))
 			if sc.Settlement.Assessment != tc.want {
 				t.Errorf("settlement = %q, want %q. Acceptance alone attributes nothing: the "+
 					"recorded call has to be the one this replay derived",
 					sc.Settlement.Assessment, tc.want)
+			}
+		})
+	}
+
+	// Matching arguments are not attribution on their own. The same stake and
+	// slot belonging to a DIFFERENT attempt — a routine collision on a
+	// two-option round — must not produce an affirmative settlement.
+	right := predictioneval.SettlementFacts{
+		PlacementCallStarted: true, PlacementCallReturned: true, PlacementAccepted: true,
+		PlacementStake: &rightStake, PlacementSlot: &rightSlot,
+	}
+	for _, tc := range []struct {
+		name string
+		mut  func(predictioneval.SettlementFacts) predictioneval.SettlementFacts
+		want string
+	}{
+		{"facts carrying no identity at all", func(s predictioneval.SettlementFacts) predictioneval.SettlementFacts {
+			s.PlacementCoherence = predictioneval.PlacementShapeCoherent
+			return s
+		}, predictioneval.SettlementUnknown},
+		{"facts stamped with another attempt", func(s predictioneval.SettlementFacts) predictioneval.SettlementFacts {
+			s = ncBoundFacts(c, s)
+			other := *s.Attempt
+			other.AttemptID++
+			s.Attempt = &other
+			return s
+		}, predictioneval.SettlementUnknown},
+		{"facts stamped with another slice's digest", func(s predictioneval.SettlementFacts) predictioneval.SettlementFacts {
+			s = ncBoundFacts(c, s)
+			s.CommonInputDigest = "some-other-slice"
+			return s
+		}, predictioneval.SettlementUnknown},
+		{"an incoherent placement shape", func(s predictioneval.SettlementFacts) predictioneval.SettlementFacts {
+			s = ncBoundFacts(c, s)
+			s.PlacementCoherence = predictioneval.PlacementShapeIncoherent
+			return s
+		}, predictioneval.SettlementUnknown},
+		{"this attempt's own coherent facts", func(s predictioneval.SettlementFacts) predictioneval.SettlementFacts {
+			return ncBoundFacts(c, s)
+		}, predictioneval.SettlementAppliesToReplay},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sc := predictioneval.Score(c, ev, tc.mut(right))
+			if sc.Settlement.Assessment != tc.want {
+				t.Errorf("settlement = %q, want %q", sc.Settlement.Assessment, tc.want)
 			}
 		})
 	}
@@ -808,5 +871,190 @@ func TestTwoTerminalPhasesAreTwoEndingsEvenWhenOneCarriesNoEnvelope(t *testing.T
 	}
 	if !found {
 		t.Fatalf("no %q exclusion: %+v", predictioneval.ExclusionMultipleTerminalFacts, pk.Excluded)
+	}
+}
+
+// TestPlacementFactsMustBeOneCoherentPair closes an attribution hole where two
+// unrelated placement facts combined into one affirmative settlement.
+//
+// ProjectSettlementFacts folded facts in as it walked them: the stake and slot
+// came from any CALL_STARTED, acceptance came from any CALL_RETURNED, and
+// neither the count, the order, nor the arguments recorded on the RETURNED
+// fact were examined. So a corrupt slice holding a CALL_STARTED with the
+// replay's arguments plus an unrelated accepted CALL_RETURNED passed every
+// check and reached APPLIES_TO_REPLAY, although no single observed call
+// supported it.
+//
+// The producer emits exactly one CALL_STARTED immediately before the one
+// existing call and exactly one CALL_RETURNED immediately after it, passing
+// the SAME stake and outcome slot to both. Anything else is a shape it cannot
+// have written.
+func TestPlacementFactsMustBeOneCoherentPair(t *testing.T) {
+	const attempt = 7
+	terminal := peRecord(2, predictioneval.KindAutoDecision, predictioneval.PhaseAutoDecided, attempt)
+	terminal.Payload.ReasonCode = "OK"
+	terminal.Payload.Decision = "PLACE"
+	terminal.Payload.DecisionEnvelope = peMinimalEnvelope(attempt)
+
+	started := func(seq int64, stake int64, slot int) predictioneval.SourceRecord {
+		return pePlacement(seq, attempt, predictioneval.PhaseCallStarted, stake, slot, "OK", "NONE")
+	}
+	returned := func(seq int64, stake int64, slot int) predictioneval.SourceRecord {
+		return pePlacement(seq, attempt, predictioneval.PhaseCallReturned, stake, slot, "OK", "NONE")
+	}
+
+	for _, tc := range []struct {
+		name  string
+		post  []predictioneval.SourceRecord
+		want  string
+		bound bool // the pair is the one the producer writes
+	}{
+		{"the pair the producer writes", []predictioneval.SourceRecord{
+			started(3, 50, 0), returned(4, 50, 0),
+		}, predictioneval.PlacementShapeCoherent, true},
+
+		{"no placement at all", nil, predictioneval.PlacementShapeAbsent, false},
+
+		{"two calls started", []predictioneval.SourceRecord{
+			started(3, 50, 0), started(4, 90, 1), returned(5, 90, 1),
+		}, predictioneval.PlacementShapeIncoherent, false},
+
+		{"two calls returned", []predictioneval.SourceRecord{
+			started(3, 50, 0), returned(4, 50, 0), returned(5, 50, 0),
+		}, predictioneval.PlacementShapeIncoherent, false},
+
+		{"a return with no start", []predictioneval.SourceRecord{
+			returned(3, 50, 0),
+		}, predictioneval.PlacementShapeIncoherent, false},
+
+		{"a start with no return", []predictioneval.SourceRecord{
+			started(3, 50, 0),
+		}, predictioneval.PlacementShapeIncoherent, false},
+
+		{"the return precedes the start", []predictioneval.SourceRecord{
+			returned(3, 50, 0), started(4, 50, 0),
+		}, predictioneval.PlacementShapeIncoherent, false},
+
+		// The one the old fold could not see: both facts present, in order,
+		// but describing DIFFERENT calls.
+		{"the two facts disagree on the stake", []predictioneval.SourceRecord{
+			started(3, 50, 0), returned(4, 90, 0),
+		}, predictioneval.PlacementShapeIncoherent, false},
+
+		{"the two facts disagree on the slot", []predictioneval.SourceRecord{
+			started(3, 50, 0), returned(4, 50, 1),
+		}, predictioneval.PlacementShapeIncoherent, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			records := []predictioneval.SourceRecord{
+				peRecord(1, predictioneval.KindAutoDecision, predictioneval.PhaseAutoDue, attempt),
+				terminal,
+			}
+			records = append(records, tc.post...)
+
+			pk, err := predictioneval.MaterializePairedKnowledge(predictioneval.SourceDataset{
+				Source: peProvenance(), Records: records,
+			})
+			if err != nil || len(pk.Attempts) != 1 {
+				t.Fatalf("materialize: %v (%d attempts)", err, len(pk.Attempts))
+			}
+
+			facts := predictioneval.ProjectSettlementFacts(pk.Attempts[0])
+			if facts.PlacementCoherence != tc.want {
+				t.Fatalf("placement coherence = %q, want %q (facts %+v)",
+					facts.PlacementCoherence, tc.want, facts)
+			}
+
+			// An incoherent or absent shape must never carry arguments
+			// downstream, because arguments are what an affirmative settlement
+			// is built from.
+			if !tc.bound && (facts.PlacementStake != nil || facts.PlacementSlot != nil ||
+				facts.PlacementAccepted) {
+				t.Fatalf("a %s shape still carried placement arguments or acceptance: %+v",
+					tc.want, facts)
+			}
+
+			dc, err := predictioneval.ProjectDecisionCase(pk.Attempts[0])
+			if err != nil {
+				t.Fatalf("project: %v", err)
+			}
+			ev := predictioneval.Evaluate(dc.Inputs, dc.Observed)
+			sc := predictioneval.Score(dc, ev, facts)
+
+			want := predictioneval.SettlementUnknown
+			if tc.bound && ev.Action == predictioneval.ActionWouldAttemptPlacement {
+				want = predictioneval.SettlementAppliesToReplay
+			}
+			if sc.Settlement.Assessment != want {
+				t.Fatalf("settlement = %q, want %q for a %s placement shape",
+					sc.Settlement.Assessment, want, tc.want)
+			}
+		})
+	}
+}
+
+// TestATerminalFactThatNamesNoActionIsRefused closes a hole where a blank
+// value agreed with everything.
+//
+// terminalDecision was compared only when the recorded value was non-empty, so
+// a terminal fact carrying a matching phase and reason but NO decision produced
+// no comparison at all — and therefore no disagreement. A placement case could
+// reach an affirmative settlement on a record that never said what it did.
+//
+// The producer writes SKIP or PLACE on every terminal auto fact, at both of its
+// terminal write sites, so a blank decision is not an absence to tolerate.
+func TestATerminalFactThatNamesNoActionIsRefused(t *testing.T) {
+	// Leg 1: the projection refuses such a record outright.
+	terminal := peRecord(2, predictioneval.KindAutoDecision, predictioneval.PhaseAutoDecided, 7)
+	terminal.Payload.ReasonCode = "OK"
+	terminal.Payload.Decision = "" // the producer never writes this
+	terminal.Payload.DecisionEnvelope = peMinimalEnvelope(7)
+
+	pk, err := predictioneval.MaterializePairedKnowledge(predictioneval.SourceDataset{
+		Source: peProvenance(),
+		Records: []predictioneval.SourceRecord{
+			peRecord(1, predictioneval.KindAutoDecision, predictioneval.PhaseAutoDue, 7),
+			terminal,
+		},
+	})
+	if err != nil || len(pk.Attempts) != 1 {
+		t.Fatalf("materialize: %v (%d attempts)", err, len(pk.Attempts))
+	}
+	dc, err := predictioneval.ProjectDecisionCase(pk.Attempts[0])
+	if err != nil {
+		t.Fatalf("project: %v", err)
+	}
+	if dc.Eligibility.Eligible {
+		t.Fatal("a terminal fact naming no action produced an eligible case")
+	}
+	if !containsString(dc.Eligibility.Reasons, predictioneval.IneligibleIncompleteTerminalRecord) {
+		t.Fatalf("eligibility reasons = %v, want %q",
+			dc.Eligibility.Reasons, predictioneval.IneligibleIncompleteTerminalRecord)
+	}
+
+	// Leg 2: even handed straight to Score as an eligible case — which is how
+	// a caller assembling its own case would reach it — the blank decision
+	// DISAGREES rather than being skipped.
+	c, ev := ncAgreeingCase()
+	if ev.Action != predictioneval.ActionWouldAttemptPlacement {
+		t.Fatalf("fixture action = %q, want WOULD_ATTEMPT_PLACEMENT", ev.Action)
+	}
+	c.Recorded.TerminalDecision = ""
+
+	slot := ev.Choice.Index
+	stake := int64(ev.Clamp.FinalAmount)
+	sc := predictioneval.Score(c, ev, ncBoundFacts(c, predictioneval.SettlementFacts{
+		PlacementCallStarted: true, PlacementCallReturned: true, PlacementAccepted: true,
+		PlacementStake: &stake, PlacementSlot: &slot,
+	}))
+
+	cmp := findComparison(t, sc, "terminalDecision")
+	if cmp.Verdict != predictioneval.VerdictDisagree {
+		t.Fatalf("terminalDecision verdict = %q, want DISAGREE. A blank recorded action that "+
+			"produces no comparison agrees with every replayed action", cmp.Verdict)
+	}
+	if sc.Settlement.Assessment != predictioneval.SettlementUnknown {
+		t.Fatalf("settlement = %q, want UNKNOWN: the record never said what it did",
+			sc.Settlement.Assessment)
 	}
 }

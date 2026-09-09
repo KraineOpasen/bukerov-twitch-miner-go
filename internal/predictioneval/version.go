@@ -55,9 +55,10 @@ const (
 
 	// CommonInputDigestVersion versions the canonical encoding used for a
 	// case's common-input digest. It is this package's own artifact and is
-	// deliberately NOT the store's row digest: that one witnesses a row
-	// against tampering, this one witnesses that a replay's inputs did not
-	// change when later facts were appended.
+	// deliberately NOT the store's row digest: that one is an unkeyed checksum
+	// detecting accidental corruption of a row, this one witnesses that a
+	// replay's inputs did not change when later facts were appended. Neither
+	// authenticates against an editor of the database file; see digest.go.
 	CommonInputDigestVersion = "pe-cid/v1"
 
 	// PinnedMinimumStake is Twitch's minimum accepted prediction stake as the

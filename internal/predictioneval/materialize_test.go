@@ -102,6 +102,15 @@ func mzDue(seq, attemptID int64) SourceRecord {
 func mzTerminal(seq, attemptID int64, phase, reason string, env *SourceDecisionEnvelope) SourceRecord {
 	r := mzFact(seq, KindAutoDecision, phase, attemptID)
 	r.Payload.ReasonCode = reason
+	// The producer names the ACTION on every terminal auto fact it writes:
+	// PLACE beside AUTO_DECIDED, SKIP beside AUTO_SKIPPED, at both of its two
+	// terminal write sites. A fixture that left it blank described a record
+	// the producer cannot emit — and the projection now refuses such a record,
+	// because a blank decision agreed with every replayed action.
+	r.Payload.Decision = "SKIP"
+	if phase == PhaseAutoDecided {
+		r.Payload.Decision = "PLACE"
+	}
 	if env != nil {
 		// The producer writes the fact's counter and the envelope's own
 		// discriminator from ONE minted value, so they cannot disagree in data

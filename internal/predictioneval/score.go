@@ -129,8 +129,44 @@ type SettlementFacts struct {
 	Payout            *int64 `json:"payout,omitempty"`
 	ReturnedStake     *int64 `json:"returnedStake,omitempty"`
 
+	// PlacementCoherence says whether the attempt's placement facts have the
+	// SHAPE the pinned producer writes: exactly one CALL_STARTED followed by
+	// exactly one CALL_RETURNED, both carrying a stake and an outcome slot,
+	// and both carrying the SAME ones.
+	//
+	// The producer emits the pair around the one existing call and passes the
+	// same arguments to both, so anything else is a corrupt or edited slice.
+	// Reading the stake from any started fact and acceptance from any returned
+	// fact would combine two unrelated calls into one affirmative settlement.
+	PlacementCoherence string `json:"placementCoherence"`
+
+	// Attempt and CommonInputDigest bind these facts to the case they were
+	// projected from.
+	//
+	// Matching arguments are NOT attribution. A stake and a two-option slot are
+	// low-cardinality enough that a different attempt on the same round can
+	// carry the same pair by coincidence, so a caller handing Score another
+	// attempt's facts would otherwise pass every argument check. The binding is
+	// stamped by ProjectSettlementFacts and verified by Score; facts built by
+	// hand carry none and can never be affirmative.
+	Attempt           *AttemptKey `json:"attempt,omitempty"`
+	CommonInputDigest string      `json:"commonInputDigest,omitempty"`
+
 	PostDecisionFacts int `json:"postDecisionFacts"`
 }
+
+// Placement-shape verdicts.
+const (
+	// PlacementShapeCoherent is the one shape the pinned producer writes.
+	PlacementShapeCoherent = "COHERENT"
+	// PlacementShapeAbsent is an attempt with no placement facts at all — an
+	// ordinary state for every exit that did not reach a call.
+	PlacementShapeAbsent = "ABSENT"
+	// PlacementShapeIncoherent is any other shape: duplicated, unordered,
+	// half-present, missing arguments, or arguments that disagree between the
+	// two facts of one call.
+	PlacementShapeIncoherent = "INCOHERENT"
+)
 
 // ResolutionNotLinkableToAttempt is the only value ResolutionLinkage takes
 // under the pinned producer revision.
@@ -380,13 +416,21 @@ func Score(c DecisionCase, ev Evaluation, s SettlementFacts) Scorecard {
 		// contradicting itself, and comparing only the reason code would count
 		// that as agreement — the phase and the decision were projected and
 		// then never looked at.
+		//
+		// Both are compared UNCONDITIONALLY. Guarding on a non-empty recorded
+		// value made an empty one produce no comparison at all, so a terminal
+		// fact with a blank decision but a matching phase and reason raised no
+		// disagreement and could carry a placement case to an affirmative
+		// settlement. The producer writes SKIP or PLACE on every terminal auto
+		// fact it emits, so blank is not an absence to be tolerated — it is a
+		// record that cannot have come from it, and a disagreement is the
+		// honest reading. ProjectDecisionCase also refuses such a case
+		// outright; this is the second of the two.
 		phase, decision := expectedTerminalShape(ev)
-		add(compareString("terminalPhase", rec.TerminalPhase, phase, rec.TerminalPhase != "",
+		add(compareString("terminalPhase", rec.TerminalPhase, phase, true,
 			terminalBasis(ev, derived), ""))
-		if rec.TerminalDecision != "" {
-			add(compareString("terminalDecision", rec.TerminalDecision, decision, true,
-				terminalBasis(ev, derived), ""))
-		}
+		add(compareString("terminalDecision", rec.TerminalDecision, decision, true,
+			terminalBasis(ev, derived), ""))
 	}
 
 	for _, cmp := range sc.Comparisons {
@@ -431,24 +475,68 @@ func ProjectSettlementFacts(a AttemptKnowledge) SettlementFacts {
 		// it. See ResolutionLinkage.
 		ResolutionLinkage: ResolutionNotLinkableToAttempt,
 	}
+	key := a.Key
+	out.Attempt = &key
+	out.CommonInputDigest = a.CommonInputDigest
+
+	// Collect the two placement facts rather than folding them in as they go
+	// past. Folding is what allowed a stake read from one call and an
+	// acceptance read from another to become a single affirmative settlement.
+	var started, returned []SourceRecord
+	startedFirst := true
+	seenReturned := false
 	for _, r := range a.PostDecision {
-		switch {
-		case r.Kind == KindPlacement && r.Payload.Phase == PhaseCallStarted:
-			out.PlacementCallStarted = true
-			if v, ok := r.Payload.Counters[CounterStake]; ok {
-				stake := v
-				out.PlacementStake = &stake
+		if r.Kind != KindPlacement {
+			continue
+		}
+		switch r.Payload.Phase {
+		case PhaseCallStarted:
+			if seenReturned {
+				// A start after a return is not this call's start.
+				startedFirst = false
 			}
-			if r.Payload.OutcomeSlot != nil {
-				slot := *r.Payload.OutcomeSlot
-				out.PlacementSlot = &slot
-			}
-		case r.Kind == KindPlacement && r.Payload.Phase == PhaseCallReturned:
-			out.PlacementCallReturned = true
-			out.PlacementAccepted = r.Payload.ReasonCode == "OK"
-			out.PlacementErrorClass = r.Payload.ErrorClass
+			started = append(started, r)
+		case PhaseCallReturned:
+			seenReturned = true
+			returned = append(returned, r)
 		}
 	}
+
+	if len(started) == 0 && len(returned) == 0 {
+		out.PlacementCoherence = PlacementShapeAbsent
+		return out
+	}
+
+	out.PlacementCallStarted = len(started) > 0
+	out.PlacementCallReturned = len(returned) > 0
+
+	if len(started) != 1 || len(returned) != 1 || !startedFirst {
+		// Duplicated, unordered or half-present. Report the shape and stop:
+		// there is no single call here whose arguments could be read.
+		out.PlacementCoherence = PlacementShapeIncoherent
+		return out
+	}
+
+	sStake, sHasStake := started[0].Payload.Counters[CounterStake]
+	rStake, rHasStake := returned[0].Payload.Counters[CounterStake]
+	sSlot, rSlot := started[0].Payload.OutcomeSlot, returned[0].Payload.OutcomeSlot
+
+	// The producer passes the SAME stake and slot to both facts of one call, so
+	// arguments that disagree between them describe no call it made. Both are
+	// required: reading only the started fact left the returned fact's
+	// arguments — which the producer does write — unexamined.
+	if !sHasStake || !rHasStake || sStake != rStake ||
+		sSlot == nil || rSlot == nil || *sSlot != *rSlot {
+		out.PlacementCoherence = PlacementShapeIncoherent
+		return out
+	}
+
+	out.PlacementCoherence = PlacementShapeCoherent
+	stake, slot := sStake, *sSlot
+	out.PlacementStake = &stake
+	out.PlacementSlot = &slot
+	out.PlacementAccepted = returned[0].Payload.ReasonCode == "OK"
+	out.PlacementErrorClass = returned[0].Payload.ErrorClass
 	return out
 }
 
@@ -463,6 +551,17 @@ func assessSettlement(sc Scorecard, ev Evaluation, conditioned bool, s Settlemen
 		out.Assessment = SettlementUnknown
 	case ev.Action != ActionWouldAttemptPlacement:
 		out.Assessment = SettlementNotApplicable
+	case s.PlacementCoherence != PlacementShapeCoherent:
+		// No single coherent call is recorded, so nothing here describes the
+		// one this replay derived. ABSENT and INCOHERENT are different facts
+		// about the store and the same answer about the settlement.
+		out.Assessment = SettlementUnknown
+	case s.Attempt == nil || *s.Attempt != sc.Key || s.CommonInputDigest != sc.CommonInputDigest:
+		// Matching arguments are not attribution: a stake and a two-option
+		// slot are low-cardinality enough for a DIFFERENT attempt on the same
+		// round to carry the same pair. Only facts stamped by
+		// ProjectSettlementFacts with this case's identity may be affirmative.
+		out.Assessment = SettlementUnknown
 	case !s.PlacementCallReturned || !s.PlacementAccepted:
 		// A call that Twitch REJECTED settled nothing. Reporting the recorded
 		// settlement as describing the replayed decision in that case would

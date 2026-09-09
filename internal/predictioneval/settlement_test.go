@@ -35,8 +35,8 @@ func TestTheRoundsVerdictIsNotAttributedToAnAttemptItCannotBeLinkedTo(t *testing
 		Records: []predictioneval.SourceRecord{
 			peRecord(1, predictioneval.KindAutoDecision, predictioneval.PhaseAutoDue, 7),
 			terminal,
-			peRecord(4, predictioneval.KindPlacement, predictioneval.PhaseCallStarted, 7),
-			peRecord(5, predictioneval.KindPlacement, predictioneval.PhaseCallReturned, 7),
+			pePlacement(4, 7, predictioneval.PhaseCallStarted, 50, 0, "OK", "NONE"),
+			pePlacement(5, 7, predictioneval.PhaseCallReturned, 50, 0, "OK", "NONE"),
 			// The round's verdict. It carries a payout and NO attempt id,
 			// exactly as the pinned producer writes it.
 			peSettlementRecord(6),
@@ -191,6 +191,27 @@ func peRecord(seq int64, kind, phase string, attemptID int64) predictioneval.Sou
 			Counters: map[string]int64{predictioneval.CounterAutoAttemptID: attemptID},
 		},
 	}
+}
+
+// pePlacement is one placement fact the way the producer writes it.
+//
+// observePlacementCallOf puts the stake AND the outcome slot on both facts of
+// one call, from the same two arguments, at both of its call sites. A fixture
+// that omitted either described a call the producer does not make — and the
+// projection now refuses such a pair, because a stake read from one call
+// beside an acceptance read from another is not one observed placement.
+func pePlacement(seq int64, attemptID int64, phase string, stake int64, slot int,
+	reason, errorClass string) predictioneval.SourceRecord {
+	r := peRecord(seq, predictioneval.KindPlacement, phase, attemptID)
+	r.Payload.ReasonCode = reason
+	r.Payload.ErrorClass = errorClass
+	s := slot
+	r.Payload.OutcomeSlot = &s
+	r.Payload.Counters = map[string]int64{
+		predictioneval.CounterAutoAttemptID: attemptID,
+		predictioneval.CounterStake:         stake,
+	}
+	return r
 }
 
 // peSettlementRecord is the round's verdict as the pinned producer writes it:

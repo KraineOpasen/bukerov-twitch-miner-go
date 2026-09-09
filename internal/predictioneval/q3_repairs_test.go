@@ -257,6 +257,11 @@ func TestCappedMeansMaxPointsActuallyBoundTheStake(t *testing.T) {
 func peDataset(src predictioneval.SourceProvenance) predictioneval.SourceDataset {
 	terminal := peRecord(2, predictioneval.KindAutoDecision, predictioneval.PhaseAutoDecided, 7)
 	terminal.Payload.ReasonCode = "OK"
+	// The producer names the ACTION on every terminal auto fact, at both of
+	// its terminal write sites: PLACE beside AUTO_DECIDED, SKIP beside
+	// AUTO_SKIPPED. A blank decision is a record it cannot emit, and the
+	// projection refuses one rather than letting it agree with everything.
+	terminal.Payload.Decision = "PLACE"
 	terminal.Payload.DecisionEnvelope = peMinimalEnvelope(7)
 
 	ds := predictioneval.SourceDataset{
@@ -438,10 +443,10 @@ func TestARejectedPlacementSettlesNothing(t *testing.T) {
 	// decision they belong to.
 	slot := ev.Choice.Index
 	stake := int64(ev.Clamp.FinalAmount)
-	accepted := predictioneval.Score(dc, ev, predictioneval.SettlementFacts{
+	accepted := predictioneval.Score(dc, ev, ncBoundFacts(dc, predictioneval.SettlementFacts{
 		PlacementCallStarted: true, PlacementCallReturned: true, PlacementAccepted: true,
 		PlacementStake: &stake, PlacementSlot: &slot,
-	})
+	}))
 	if accepted.Settlement.Assessment != predictioneval.SettlementAppliesToReplay {
 		t.Errorf("an ACCEPTED placement produced settlement %q, want APPLIES_TO_REPLAY",
 			accepted.Settlement.Assessment)
