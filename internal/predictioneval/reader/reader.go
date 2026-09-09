@@ -82,6 +82,17 @@ func LoadSession(ctx context.Context, src ObservationSource, epoch int64, limit 
 		return predictioneval.SourceDataset{}, ErrSessionNotFound
 	}
 
+	// A session the store has already classified as corrupt yields no cases, so
+	// there is nothing to gain by reading its rows — and something to lose. The
+	// row scan decodes payload_json for every fact it returns, and the byte
+	// ceiling on that column is enforced by the WRITER; a tampered store can
+	// hold a payload past it. Refusing before the read keeps the failure
+	// bounded instead of paying for content that was already going to be
+	// thrown away.
+	if before.Reading == analytics.ReadingIntegrityError {
+		return predictioneval.SourceDataset{Source: convertProvenance(before)}, nil
+	}
+
 	// Ask for one more than the bound, so a session AT the bound is
 	// distinguishable from one over it. Silently returning the first `limit`
 	// facts of a longer session would hand the replay a prefix that looks

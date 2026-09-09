@@ -68,6 +68,15 @@ const (
 	// ExclusionOutcomeVectorOverCeiling — more outcomes than the store could
 	// ever have persisted whole.
 	ExclusionOutcomeVectorOverCeiling = "OUTCOME_VECTOR_OVER_CEILING"
+	// ExclusionAttemptIDDisagreesWithEnvelope — the fact's counter and the
+	// envelope's own discriminator name different attempts.
+	//
+	// The producer writes both from one minted value, so they cannot disagree
+	// in data it wrote. They CAN disagree in a corrupt or edited store, and the
+	// consequence is specific: grouping follows the counter, so the case would
+	// carry one attempt's key and placement facts while evaluating another
+	// attempt's inputs. The redundancy exists precisely so a reader can notice.
+	ExclusionAttemptIDDisagreesWithEnvelope = "ATTEMPT_ID_DISAGREES_WITH_ENVELOPE"
 )
 
 // Dataset-level anomalies. These qualify the whole reading rather than one
@@ -380,6 +389,12 @@ func materializeAttempt(key AttemptKey, recs []SourceRecord, src SourceProvenanc
 	}
 
 	env := slice[terminal].Payload.DecisionEnvelope
+	if env != nil && env.AttemptID != key.AttemptID {
+		return nil, append(excl, Exclusion{
+			Key:    &key,
+			Reason: ExclusionAttemptIDDisagreesWithEnvelope,
+		})
+	}
 	if env != nil && len(env.Outcomes) > PinnedMaxOutcomes {
 		return nil, append(excl, Exclusion{
 			Key:    &key,

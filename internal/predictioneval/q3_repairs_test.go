@@ -289,3 +289,181 @@ func peScoreOneCase(t *testing.T, src predictioneval.SourceProvenance) predictio
 	return predictioneval.Score(dc, predictioneval.Evaluate(dc.Inputs, dc.Observed),
 		predictioneval.ProjectSettlementFacts(pk.Attempts[0]))
 }
+
+// TestAnEnvelopeThatNamesADifferentAttemptIsRefused regresses a corrupt-store
+// path that external review found.
+//
+// The producer writes the fact's autoAttemptId counter and the envelope's own
+// AttemptID from ONE minted value, so they cannot disagree in data it wrote.
+// They can disagree in a tampered store, and the consequence is specific:
+// grouping follows the counter, so without this check the case would carry one
+// attempt's key and one attempt's placement facts while evaluating a DIFFERENT
+// attempt's inputs — a self-consistent scorecard attributed to the wrong
+// decision. The redundancy exists so a reader can notice; now it does.
+func TestAnEnvelopeThatNamesADifferentAttemptIsRefused(t *testing.T) {
+	ds := peDataset(peProvenance())
+	// The terminal fact's counter still says attempt 7; its envelope now says 9.
+	for i := range ds.Records {
+		if env := ds.Records[i].Payload.DecisionEnvelope; env != nil {
+			env.AttemptID = 9
+		}
+	}
+
+	pk, err := predictioneval.MaterializePairedKnowledge(ds)
+	if err != nil {
+		t.Fatalf("materialize: %v", err)
+	}
+	if len(pk.Attempts) != 0 {
+		t.Fatalf("a fact whose envelope names another attempt produced %d cases, want 0",
+			len(pk.Attempts))
+	}
+	found := false
+	for _, e := range pk.Excluded {
+		if e.Reason == predictioneval.ExclusionAttemptIDDisagreesWithEnvelope {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("no %q exclusion: %+v",
+			predictioneval.ExclusionAttemptIDDisagreesWithEnvelope, pk.Excluded)
+	}
+
+	// The agreeing case still materializes, so the check did not simply refuse
+	// everything.
+	ok, err := predictioneval.MaterializePairedKnowledge(peDataset(peProvenance()))
+	if err != nil || len(ok.Attempts) != 1 {
+		t.Fatalf("an agreeing envelope yielded %d attempts (err %v), want 1", len(ok.Attempts), err)
+	}
+}
+
+// TestScoringAnEvaluationFromAnotherCaseIsRefused regresses a silent
+// mis-pairing.
+//
+// Score takes the case and the evaluation separately, so a batch caller can pair
+// the wrong two. Both carry the common-input digest of the slice they came
+// from, so the mismatch is detectable — and worth detecting, because if the two
+// decisions happen to produce the same values every comparison would be counted
+// as an agreement and a settlement declared applicable, on evidence belonging
+// to something else entirely.
+func TestScoringAnEvaluationFromAnotherCaseIsRefused(t *testing.T) {
+	pk, err := predictioneval.MaterializePairedKnowledge(peDataset(peProvenance()))
+	if err != nil || len(pk.Attempts) != 1 {
+		t.Fatalf("materialize: %v (%d attempts)", err, len(pk.Attempts))
+	}
+	dc, err := predictioneval.ProjectDecisionCase(pk.Attempts[0])
+	if err != nil {
+		t.Fatalf("project: %v", err)
+	}
+
+	// An evaluation whose provenance points at a different slice.
+	foreign := dc.Inputs
+	foreign.CommonInputDigest = "0000000000000000000000000000000000000000000000000000000000000000"
+	ev := predictioneval.Evaluate(foreign, dc.Observed)
+
+	sc := predictioneval.Score(dc, ev, predictioneval.SettlementFacts{
+		PlacementCallStarted: true, PlacementCallReturned: true, PlacementAccepted: true,
+	})
+
+	if !containsString(sc.Limitations, predictioneval.LimitationEvaluationCaseMismatch) {
+		t.Fatalf("a mismatched evaluation was scored without the %q limitation: %v",
+			predictioneval.LimitationEvaluationCaseMismatch, sc.Limitations)
+	}
+	if sc.IndependentAgree != 0 || sc.ConditionedAgree != 0 {
+		t.Errorf("a mismatched evaluation produced %d independent and %d conditioned agreements; "+
+			"agreement on evidence that belongs to another case is not evidence",
+			sc.IndependentAgree, sc.ConditionedAgree)
+	}
+	if sc.Settlement.Assessment != predictioneval.SettlementUnknown {
+		t.Errorf("settlement = %q, want UNKNOWN", sc.Settlement.Assessment)
+	}
+
+	// The correctly paired evaluation still scores.
+	good := predictioneval.Score(dc, predictioneval.Evaluate(dc.Inputs, dc.Observed),
+		predictioneval.SettlementFacts{})
+	if containsString(good.Limitations, predictioneval.LimitationEvaluationCaseMismatch) {
+		t.Error("a correctly paired evaluation was flagged as mismatched")
+	}
+	if good.IndependentAgree == 0 {
+		t.Error("the correctly paired evaluation produced no independent agreement")
+	}
+}
+
+// TestARejectedPlacementSettlesNothing regresses an overstated settlement.
+//
+// A CALL_RETURNED fact means the placement call finished, not that Twitch
+// accepted it. Reporting APPLIES_TO_REPLAY on a rejected call attributes an
+// outcome to a bet that was never taken.
+func TestARejectedPlacementSettlesNothing(t *testing.T) {
+	pk, err := predictioneval.MaterializePairedKnowledge(peDataset(peProvenance()))
+	if err != nil || len(pk.Attempts) != 1 {
+		t.Fatalf("materialize: %v", err)
+	}
+	dc, err := predictioneval.ProjectDecisionCase(pk.Attempts[0])
+	if err != nil {
+		t.Fatalf("project: %v", err)
+	}
+	ev := predictioneval.Evaluate(dc.Inputs, dc.Observed)
+	if ev.Action != predictioneval.ActionWouldAttemptPlacement {
+		t.Fatalf("fixture action = %q, want WOULD_ATTEMPT_PLACEMENT", ev.Action)
+	}
+
+	rejected := predictioneval.Score(dc, ev, predictioneval.SettlementFacts{
+		PlacementCallStarted: true, PlacementCallReturned: true,
+		PlacementAccepted: false, PlacementErrorClass: "REJECTED_BY_TWITCH",
+	})
+	if rejected.Settlement.Assessment != predictioneval.SettlementUnknown {
+		t.Errorf("a REJECTED placement produced settlement %q, want UNKNOWN",
+			rejected.Settlement.Assessment)
+	}
+
+	accepted := predictioneval.Score(dc, ev, predictioneval.SettlementFacts{
+		PlacementCallStarted: true, PlacementCallReturned: true, PlacementAccepted: true,
+	})
+	if accepted.Settlement.Assessment != predictioneval.SettlementAppliesToReplay {
+		t.Errorf("an ACCEPTED placement produced settlement %q, want APPLIES_TO_REPLAY",
+			accepted.Settlement.Assessment)
+	}
+	// Even then, the round's verdict stays unattributable.
+	if accepted.Settlement.ROI != predictioneval.SettlementUnknown {
+		t.Errorf("ROI = %q, want UNKNOWN", accepted.Settlement.ROI)
+	}
+}
+
+// TestAnActionWithNoProducerCounterpartIsUnavailableNotADisagreement regresses
+// a manufactured disagreement.
+//
+// A legacy failure, an indeterminate stage and an unsupported input have no
+// producer terminal reason at all. Comparing them against an empty expected
+// string turned "the model correctly declined to predict an ending" into an
+// INDEPENDENT disagreement — which then also suppressed the settlement.
+func TestAnActionWithNoProducerCounterpartIsUnavailableNotADisagreement(t *testing.T) {
+	// SMART with one outcome leaves the choice at -1, and a decision-scoped
+	// filter then reproduces the pinned policy's panic.
+	in := gi(predictioneval.StrategySmart, 5, 20, 50_000, 1000, 0, 0,
+		[]predictioneval.OutcomeInput{go1(0, "only", 6, 600, 90, 60, 1.66, 60.24)},
+		&predictioneval.SourceFilterCondition{
+			By: predictioneval.OutcomePercentageUsers, Where: predictioneval.ConditionGT, Value: 1,
+		}, false)
+	in.CommonInputDigest = "case-digest"
+
+	ev := predictioneval.Evaluate(in, predictioneval.ObservedRealization{})
+	if ev.Action != predictioneval.ActionLegacyFailure {
+		t.Fatalf("fixture action = %q, want LEGACY_FAILURE", ev.Action)
+	}
+
+	sc := predictioneval.Score(predictioneval.DecisionCase{
+		CommonInputDigest: "case-digest",
+		Eligibility:       predictioneval.CaseEligibility{Eligible: true, ExercisesPolicy: true},
+		Recorded:          predictioneval.RecordedResults{TerminalReason: "OK"},
+	}, ev, predictioneval.SettlementFacts{})
+
+	cmp := findComparison(t, sc, "terminalReason")
+	if cmp.Verdict != predictioneval.VerdictUnavailable || cmp.Basis != predictioneval.BasisUnavailable {
+		t.Errorf("terminalReason = %s/%s, want UNAVAILABLE/UNAVAILABLE: the pinned policy panicked, "+
+			"so there is no producer ending to compare against", cmp.Verdict, cmp.Basis)
+	}
+	if sc.IndependentDisagree != 0 {
+		t.Errorf("a legacy failure produced %d independent disagreement(s); declining to predict "+
+			"an ending is not a wrong prediction", sc.IndependentDisagree)
+	}
+}

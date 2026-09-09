@@ -37,10 +37,13 @@ import (
 	"strings"
 	"testing"
 
+	"fmt"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/analytics"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/database"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/predictioneval"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/predictioneval/reader"
+	"strconv"
+	"sync/atomic"
 )
 
 // observationTestDir is the directory the process-wide database singleton is
@@ -62,7 +65,12 @@ func TestMain(m *testing.M) {
 		panic(err)
 	}
 	code := m.Run()
-	_ = os.RemoveAll(dir)
+	if err := os.RemoveAll(dir); err != nil && code == 0 {
+		// Only escalate on an otherwise-green run: a cleanup failure is worth
+		// knowing about, and is not worth masking a real test failure.
+		fmt.Fprintf(os.Stderr, "predictioneval/reader: could not remove %s: %v\n", dir, err)
+		code = 1
+	}
 	os.Exit(code)
 }
 
@@ -120,8 +128,22 @@ func observationStore(t *testing.T) *analytics.SQLiteRepository {
 // run. The store requires the id to be unique (a UNIQUE column) and otherwise
 // treats it as opaque, so a deterministic derivation keeps the fixtures
 // reproducible without weakening anything the store checks.
+// sessionIDSeq makes every fixture session id unique within the test binary.
+var sessionIDSeq atomic.Uint64
+
 func collectorSessionID(label string) string {
-	sum := sha256.Sum256([]byte("predictioneval/reader fixture session: " + label))
+	// Unique per CALL, not per label. The store enforces a UNIQUE
+	// collector_session_id, `go test -count=N` re-runs every test in the SAME
+	// process against the SAME database (database.Open is a sync.Once
+	// singleton, which is why TestMain opens one directory for the whole
+	// binary), and the fixtures are not torn down between repetitions. A
+	// label-derived constant therefore collides on the second repetition and
+	// the suite fails inside OpenObservationSession — on the fixture, not on
+	// the code under test. Both call sites use the returned value rather than
+	// re-deriving it, so per-call uniqueness is safe.
+	n := sessionIDSeq.Add(1)
+	sum := sha256.Sum256([]byte(
+		"predictioneval/reader fixture session: " + label + "#" + strconv.FormatUint(n, 10)))
 	return "obs-" + hex.EncodeToString(sum[:16])
 }
 

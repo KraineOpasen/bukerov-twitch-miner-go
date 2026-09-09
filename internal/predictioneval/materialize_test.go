@@ -102,6 +102,17 @@ func mzDue(seq, attemptID int64) SourceRecord {
 func mzTerminal(seq, attemptID int64, phase, reason string, env *SourceDecisionEnvelope) SourceRecord {
 	r := mzFact(seq, KindAutoDecision, phase, attemptID)
 	r.Payload.ReasonCode = reason
+	if env != nil {
+		// The producer writes the fact's counter and the envelope's own
+		// discriminator from ONE minted value, so they cannot disagree in data
+		// it wrote. Keeping the fixture faithful to that matters: the reader
+		// now refuses a mismatch as a corrupt-store signal, and a fixture that
+		// disagreed with itself would be exercising that refusal by accident
+		// instead of exercising the case it names.
+		clone := *env
+		clone.AttemptID = uint64(attemptID)
+		env = &clone
+	}
 	r.Payload.DecisionEnvelope = env
 	return r
 }

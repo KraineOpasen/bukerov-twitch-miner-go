@@ -492,12 +492,17 @@ func TestARealStealthDecisionIsReplayedAsConditionedNotProven(t *testing.T) {
 		t.Fatalf("stealth outcome = %q, want CONDITIONED_ON_OBSERVED_REALIZATION",
 			d.evaluated.Stealth.Outcome)
 	}
-	if d.harness.PlacementCalls() == 1 {
-		_, stake := d.harness.LastPlacement()
-		if d.evaluated.Clamp.FinalAmount != stake {
-			t.Errorf("replay reconstructed stake %d; the real Twitch call carried %d",
-				d.evaluated.Clamp.FinalAmount, stake)
-		}
+	// Require the placement rather than tolerating its absence: guarding the
+	// comparison with `if calls == 1` meant a zero- or multi-placement
+	// regression would silently skip the one assertion this test exists for
+	// while everything around it still passed.
+	if calls := d.harness.PlacementCalls(); calls != 1 {
+		t.Fatalf("the stealth fixture made %d placement calls, want exactly 1; the stake "+
+			"reconstruction below would otherwise not be checked at all", calls)
+	}
+	if _, stake := d.harness.LastPlacement(); d.evaluated.Clamp.FinalAmount != stake {
+		t.Errorf("replay reconstructed stake %d; the real Twitch call carried %d",
+			d.evaluated.Clamp.FinalAmount, stake)
 	}
 	// The reduction must be one the policy could actually have drawn.
 	if d.evaluated.Stealth.Reduction < 1 || d.evaluated.Stealth.Reduction > 4 {

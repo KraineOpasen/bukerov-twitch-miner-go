@@ -49,8 +49,13 @@ const (
 	// the replayed decision.
 	SettlementUnknown = "UNKNOWN"
 	// SettlementAppliesToReplay — the replay independently reproduced the
-	// recorded decision, so the recorded settlement describes the replayed one
-	// too.
+	// recorded decision AND the placement it produced was accepted, so the
+	// recorded PLACEMENT describes the replayed decision too.
+	//
+	// It says nothing about how the round resolved: that verdict is not
+	// attributable to an attempt at this producer revision (see
+	// SettlementFacts.ResolutionLinkage), so payout and profitability stay
+	// UNKNOWN even here.
 	SettlementAppliesToReplay = "APPLIES_TO_REPLAY"
 	// SettlementConditional — as above, but the stake depended on the
 	// conditioned stealth realization, so the correspondence is conditional on
@@ -68,6 +73,9 @@ const (
 	LimitationCaptureGap    = "ROUND_ADMITTED_WITH_INCOMPLETE_CAPTURE"
 	LimitationNoDueFact     = "ATTEMPT_OPENING_FACT_ABSENT_FROM_SLICE"
 	LimitationPolicyNotRun  = "ATTEMPT_EXITED_BEFORE_THE_POLICY_RAN"
+	// LimitationEvaluationCaseMismatch marks a scorecard whose evaluation was
+	// produced from DIFFERENT evidence than the case it is scored against.
+	LimitationEvaluationCaseMismatch = "EVALUATION_DOES_NOT_BELONG_TO_THIS_CASE"
 )
 
 // Comparison is one recorded value set against one computed value.
@@ -195,6 +203,21 @@ func Score(c DecisionCase, ev Evaluation, s SettlementFacts) Scorecard {
 		Limitations:        append([]string(nil), ev.Limitations...),
 	}
 	sc.Limitations = appendOnce(sc.Limitations, LimitationNoROIComputed)
+
+	// A batch caller can pair the wrong evaluation with a case. Both carry the
+	// common-input digest of the slice they came from, so the mismatch is
+	// detectable — and worth detecting, because if the two decisions happen to
+	// produce the same values every comparison would be counted as an
+	// agreement and a settlement declared applicable, on evidence that belongs
+	// to something else. The scorecard is emitted with no comparisons rather
+	// than with confident ones.
+	if ev.CommonInputDigest != c.CommonInputDigest {
+		sc.Limitations = appendOnce(sc.Limitations, LimitationEvaluationCaseMismatch)
+		sc.Settlement = SettlementAssessment{
+			Facts: s, ROI: SettlementUnknown, Assessment: SettlementUnknown,
+		}
+		return sc
+	}
 	if !c.Eligibility.Eligible {
 		sc.Limitations = appendOnce(sc.Limitations, LimitationCaseExcluded)
 	}
@@ -291,8 +314,26 @@ func Score(c DecisionCase, ev Evaluation, s SettlementFacts) Scorecard {
 	}
 
 	// ---- The terminal action.
-	add(compareString("terminalReason", rec.TerminalReason, expectedTerminalReason(ev), true,
-		terminalBasis(ev, derived), ""))
+	//
+	// A legacy failure, an indeterminate stage and an unsupported input have no
+	// producer counterpart at all: the pinned producer either crashed or this
+	// model could not get far enough to predict an ending. Comparing them
+	// against an empty expected reason manufactured an INDEPENDENT
+	// disagreement out of a case where the model correctly declined to
+	// predict — which then suppressed the settlement too. The test is on the
+	// ACTION, not on the expected string being empty, because a pre-decision
+	// exit can legitimately carry an empty reason.
+	switch ev.Action {
+	case ActionLegacyFailure, ActionIndeterminate, ActionUnsupported:
+		add(Comparison{
+			Field: "terminalReason", Verdict: VerdictUnavailable, Basis: BasisUnavailable,
+			Recorded: rec.TerminalReason,
+			Note:     "the replayed action has no producer terminal reason to compare against",
+		})
+	default:
+		add(compareString("terminalReason", rec.TerminalReason, expectedTerminalReason(ev), true,
+			terminalBasis(ev, derived), ""))
+	}
 
 	for _, cmp := range sc.Comparisons {
 		switch {
@@ -368,7 +409,10 @@ func assessSettlement(sc Scorecard, ev Evaluation, conditioned bool, s Settlemen
 		out.Assessment = SettlementUnknown
 	case ev.Action != ActionWouldAttemptPlacement:
 		out.Assessment = SettlementNotApplicable
-	case !s.PlacementCallReturned:
+	case !s.PlacementCallReturned || !s.PlacementAccepted:
+		// A call that Twitch REJECTED settled nothing. Reporting the recorded
+		// settlement as describing the replayed decision in that case would
+		// attribute an outcome to a bet that was never taken.
 		out.Assessment = SettlementUnknown
 	case conditioned:
 		out.Assessment = SettlementConditional
