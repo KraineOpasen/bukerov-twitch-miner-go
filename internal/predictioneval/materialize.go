@@ -341,12 +341,20 @@ const (
 func materializeAttempt(key AttemptKey, recs []SourceRecord, src SourceProvenance, anomalies []string) (*AttemptKnowledge, []Exclusion) {
 	var excl []Exclusion
 
+	// Count terminal PHASES, not terminal phases that happen to carry an
+	// envelope. An attempt has one ending; if two facts claim to be it, the
+	// dataset is inconsistent whether or not both carry their inputs.
+	//
+	// Counting only enveloped facts hid exactly one shape: an ending without an
+	// envelope followed by an ending with one counted as a single terminal, so
+	// the attempt materialized and the FIRST ending stayed silently inside the
+	// second one's input prefix — an extra claimed ending, treated as an input.
 	terminal := -1
 	terminals := 0
 	for i, r := range recs {
-		if isTerminalFact(r) {
+		if r.Kind == KindAutoDecision && isTerminalPhase(r.Payload.Phase) {
 			terminals++
-			if terminal < 0 {
+			if terminal < 0 && isTerminalFact(r) {
 				terminal = i
 			}
 		}
@@ -436,9 +444,23 @@ func isTerminalPhase(phase string) bool {
 	return phase == PhaseAutoDecided || phase == PhaseAutoSkipped
 }
 
+// isLegacyProducer reports the KNOWN pre-envelope contract.
+//
+// The match is on a complete version component, not on a byte prefix. A bare
+// prefix test also accepts "obs-v10|…" and "obs-v11|…" — plausible future
+// revisions, and anything an edited store cares to write — which would classify
+// an unknown contract as the one known readable exception and replay it under
+// obs-v2 invariants. That is precisely the refusal the revision binding exists
+// to perform, defeated by string arithmetic.
 func isLegacyProducer(revision string) bool {
-	return len(revision) >= len(LegacyProducerRevisionPrefix) &&
-		revision[:len(LegacyProducerRevisionPrefix)] == LegacyProducerRevisionPrefix
+	if revision == LegacyProducerRevisionPrefix {
+		return true
+	}
+	// Hand-rolled rather than strings.HasPrefix: the purity allowlist is only
+	// worth anything while it stays deliberately tiny, and the fence rejected
+	// the import — correctly — the moment it appeared.
+	const delimited = LegacyProducerRevisionPrefix + "|"
+	return len(revision) >= len(delimited) && revision[:len(delimited)] == delimited
 }
 
 // attemptIDOf reads the minted discriminator. A zero value is not an attempt

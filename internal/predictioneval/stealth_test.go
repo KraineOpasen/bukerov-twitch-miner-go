@@ -250,6 +250,7 @@ func TestScoreCountsAConditionedStealthComparisonApartFromIndependentEvidence(t 
 	}
 
 	c := predictioneval.DecisionCase{
+		Model:       predictioneval.CurrentModelProvenance(),
 		Eligibility: predictioneval.CaseEligibility{Eligible: true, ExercisesPolicy: true},
 		Recorded: predictioneval.RecordedResults{
 			ChoiceIndex: 0, ChoiceIndexRecorded: true,
@@ -306,8 +307,13 @@ func TestScoreCountsAConditionedStealthComparisonApartFromIndependentEvidence(t 
 		t.Fatal("no independent evidence at all was recorded for a case that has some")
 	}
 	// The settlement of a conditioned replay is conditional, never asserted.
+	// The placement arguments must be the ones this replay derived; acceptance
+	// alone no longer attributes a settlement to a case.
+	slot := ev.Choice.Index
+	stake := int64(ev.Clamp.FinalAmount)
 	sc2 := predictioneval.Score(c, ev, predictioneval.SettlementFacts{
 		PlacementCallStarted: true, PlacementCallReturned: true, PlacementAccepted: true,
+		PlacementStake: &stake, PlacementSlot: &slot,
 	})
 	if ev.Action == predictioneval.ActionWouldAttemptPlacement &&
 		sc2.Settlement.Assessment != predictioneval.SettlementConditional {

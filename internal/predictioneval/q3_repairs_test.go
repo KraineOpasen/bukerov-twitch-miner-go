@@ -273,6 +273,23 @@ func peDataset(src predictioneval.SourceProvenance) predictioneval.SourceDataset
 	return ds
 }
 
+// peLegacyDataset is the same round as [peDataset] shaped the way the
+// PRE-ENVELOPE producer actually wrote it: an AUTO_DUE and an AUTO_DECIDED
+// carrying neither a decision envelope nor the autoAttemptId discriminator,
+// because that build minted no attempt identity and persisted no inputs.
+//
+// Reusing the obs-v2 fixture under an obs-v1 session would be a counterfactual
+// dataset — facts the named contract could not have produced — so any verdict
+// drawn from it would describe this model's behaviour on impossible input.
+func peLegacyDataset(src predictioneval.SourceProvenance) predictioneval.SourceDataset {
+	ds := peDataset(src)
+	for i := range ds.Records {
+		ds.Records[i].Payload.DecisionEnvelope = nil
+		delete(ds.Records[i].Payload.Counters, predictioneval.CounterAutoAttemptID)
+	}
+	return ds
+}
+
 func peScoreOneCase(t *testing.T, src predictioneval.SourceProvenance) predictioneval.Scorecard {
 	t.Helper()
 	pk, err := predictioneval.MaterializePairedKnowledge(peDataset(src))
@@ -416,8 +433,14 @@ func TestARejectedPlacementSettlesNothing(t *testing.T) {
 			rejected.Settlement.Assessment)
 	}
 
+	// Acceptance alone is no longer enough: the recorded call must carry the
+	// arguments this replay derived, or the facts say nothing about which
+	// decision they belong to.
+	slot := ev.Choice.Index
+	stake := int64(ev.Clamp.FinalAmount)
 	accepted := predictioneval.Score(dc, ev, predictioneval.SettlementFacts{
 		PlacementCallStarted: true, PlacementCallReturned: true, PlacementAccepted: true,
+		PlacementStake: &stake, PlacementSlot: &slot,
 	})
 	if accepted.Settlement.Assessment != predictioneval.SettlementAppliesToReplay {
 		t.Errorf("an ACCEPTED placement produced settlement %q, want APPLIES_TO_REPLAY",
@@ -452,6 +475,7 @@ func TestAnActionWithNoProducerCounterpartIsUnavailableNotADisagreement(t *testi
 	}
 
 	sc := predictioneval.Score(predictioneval.DecisionCase{
+		Model:             predictioneval.CurrentModelProvenance(),
 		CommonInputDigest: "case-digest",
 		Eligibility:       predictioneval.CaseEligibility{Eligible: true, ExercisesPolicy: true},
 		Recorded:          predictioneval.RecordedResults{TerminalReason: "OK"},

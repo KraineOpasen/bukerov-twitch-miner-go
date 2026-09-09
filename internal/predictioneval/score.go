@@ -76,6 +76,13 @@ const (
 	// LimitationEvaluationCaseMismatch marks a scorecard whose evaluation was
 	// produced from DIFFERENT evidence than the case it is scored against.
 	LimitationEvaluationCaseMismatch = "EVALUATION_DOES_NOT_BELONG_TO_THIS_CASE"
+	// LimitationModelProvenanceMismatch marks a scorecard whose case and
+	// evaluation were produced by different builds of this model, or by a build
+	// other than the one scoring them.
+	LimitationModelProvenanceMismatch = "MODEL_PROVENANCE_DOES_NOT_MATCH"
+	// LimitationPlacementNotAttributable marks a settlement whose recorded
+	// placement arguments do not match what the replay derived.
+	LimitationPlacementNotAttributable = "PLACEMENT_ARGUMENTS_DO_NOT_MATCH_THE_REPLAY"
 )
 
 // Comparison is one recorded value set against one computed value.
@@ -218,6 +225,26 @@ func Score(c DecisionCase, ev Evaluation, s SettlementFacts) Scorecard {
 		}
 		return sc
 	}
+
+	// The digest alone is not enough. A case and an evaluation serialized by an
+	// OLDER build carry the same old digest as each other, so the check above
+	// passes — while the scorecard is stamped with this build's provenance and
+	// its comparisons are read as this model's work. Everything scored here has
+	// to have been produced by the model doing the scoring.
+	current := CurrentModelProvenance()
+	if c.Model != current || ev.Model != current {
+		sc.Limitations = appendOnce(sc.Limitations, LimitationModelProvenanceMismatch)
+		sc.Settlement = SettlementAssessment{
+			Facts: s, ROI: SettlementUnknown, Assessment: SettlementUnknown,
+		}
+		return sc
+	}
+
+	// An ineligible case has, by definition, an input this model could not use.
+	// Scoring it anyway produced UNAVAILABLE comparisons — which are not
+	// disagreements — so an accepted placement could still carry it all the way
+	// to APPLIES_TO_REPLAY. A scorecard that calls a case unevaluable and then
+	// affirmatively claims its settlement is contradicting itself.
 	if !c.Eligibility.Eligible {
 		sc.Limitations = appendOnce(sc.Limitations, LimitationCaseExcluded)
 	}
@@ -229,6 +256,17 @@ func Score(c DecisionCase, ev Evaluation, s SettlementFacts) Scorecard {
 	}
 	if !c.SawDueFact {
 		sc.Limitations = appendOnce(sc.Limitations, LimitationNoDueFact)
+	}
+	// The refusal is placed AFTER the remaining limitations are recorded and
+	// BEFORE any comparison is emitted. An unevaluable case is still worth
+	// describing — a capture gap and a missing AUTO_DUE are why an operator
+	// would look at it — but nothing it could compare may be counted, and no
+	// settlement may be affirmed on comparisons that were never made.
+	if !c.Eligibility.Eligible {
+		sc.Settlement = SettlementAssessment{
+			Facts: s, ROI: SettlementUnknown, Assessment: SettlementUnknown,
+		}
+		return sc
 	}
 
 	// Downstream of a conditioned stealth stage every derived quantity
@@ -330,9 +368,25 @@ func Score(c DecisionCase, ev Evaluation, s SettlementFacts) Scorecard {
 			Recorded: rec.TerminalReason,
 			Note:     "the replayed action has no producer terminal reason to compare against",
 		})
+		add(Comparison{
+			Field: "terminalPhase", Verdict: VerdictUnavailable, Basis: BasisUnavailable,
+			Recorded: rec.TerminalPhase,
+		})
 	default:
 		add(compareString("terminalReason", rec.TerminalReason, expectedTerminalReason(ev), true,
 			terminalBasis(ev, derived), ""))
+		// The reason alone is not the action. A record whose phase says
+		// AUTO_SKIPPED/SKIP while its envelope replays to a placement is
+		// contradicting itself, and comparing only the reason code would count
+		// that as agreement — the phase and the decision were projected and
+		// then never looked at.
+		phase, decision := expectedTerminalShape(ev)
+		add(compareString("terminalPhase", rec.TerminalPhase, phase, rec.TerminalPhase != "",
+			terminalBasis(ev, derived), ""))
+		if rec.TerminalDecision != "" {
+			add(compareString("terminalDecision", rec.TerminalDecision, decision, true,
+				terminalBasis(ev, derived), ""))
+		}
 	}
 
 	for _, cmp := range sc.Comparisons {
@@ -414,12 +468,35 @@ func assessSettlement(sc Scorecard, ev Evaluation, conditioned bool, s Settlemen
 		// settlement as describing the replayed decision in that case would
 		// attribute an outcome to a bet that was never taken.
 		out.Assessment = SettlementUnknown
+	case !placementMatchesReplay(ev, s):
+		// Acceptance alone is not attribution. SettlementFacts carries no
+		// attempt key of its own, so a batch caller can hand over another
+		// attempt's facts — and a corrupt post-decision slice can hold an
+		// accepted call with the wrong stake or slot. Requiring the recorded
+		// call's ARGUMENTS to be the ones the replay derived is what ties the
+		// settlement to this decision rather than to some accepted bet.
+		out.Assessment = SettlementUnknown
 	case conditioned:
 		out.Assessment = SettlementConditional
 	default:
 		out.Assessment = SettlementAppliesToReplay
 	}
 	return out
+}
+
+// placementMatchesReplay reports whether the recorded placement call carried
+// the arguments this replay derived.
+//
+// A missing stake or slot is not a match: the facts then say nothing about
+// which decision they belong to, and "nothing" must not read as "yes".
+func placementMatchesReplay(ev Evaluation, s SettlementFacts) bool {
+	if s.PlacementStake == nil || s.PlacementSlot == nil {
+		return false
+	}
+	if !ev.Clamp.HasFinal || *s.PlacementStake != int64(ev.Clamp.FinalAmount) {
+		return false
+	}
+	return *s.PlacementSlot == ev.Choice.Index
 }
 
 // expectedTerminalReason maps a replayed action onto the reason code the
@@ -444,6 +521,16 @@ func expectedTerminalReason(ev Evaluation) string {
 		// not get far enough to predict an ending.
 		return ""
 	}
+}
+
+// expectedTerminalShape is the phase and decision the pinned producer records
+// for a replayed action. AUTO_DECIDED/PLACE is the only shape that means a bet
+// was reached; every exit is AUTO_SKIPPED/SKIP.
+func expectedTerminalShape(ev Evaluation) (phase, decision string) {
+	if ev.Action == ActionWouldAttemptPlacement {
+		return PhaseAutoDecided, "PLACE"
+	}
+	return PhaseAutoSkipped, "SKIP"
 }
 
 // terminalBasis keeps a witnessed pre-decision exit out of the independent

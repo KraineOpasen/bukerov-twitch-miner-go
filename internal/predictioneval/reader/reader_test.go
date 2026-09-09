@@ -924,6 +924,11 @@ func TestThePersistedSessionReplaysThroughEveryStageWithTheIndependentComparison
 		"skipResult": false, "skipCompared": false,
 		"stakeAllowed": false, "stakeReason": false, "stakeLimit": false,
 		"clampApplied": false, "finalAmount": false, "terminalReason": false,
+		// The terminal REASON alone is not the terminal action. A record whose
+		// phase says AUTO_SKIPPED/SKIP while its envelope replays to a
+		// placement contradicts itself, and comparing only the reason code
+		// would count that as agreement.
+		"terminalPhase": false, "terminalDecision": false,
 	}
 	for _, cmp := range sc.Comparisons {
 		if cmp.Verdict != predictioneval.VerdictAgree {

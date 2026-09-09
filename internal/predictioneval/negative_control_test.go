@@ -44,6 +44,9 @@ func ncAgreeingCase() (predictioneval.DecisionCase, predictioneval.Evaluation) {
 
 	compared := 0.0
 	c := predictioneval.DecisionCase{
+		// Model provenance is now part of what Score checks: a case and an
+		// evaluation from a different build must not be scored together.
+		Model:             predictioneval.CurrentModelProvenance(),
 		CommonInputDigest: "nc-digest",
 		Eligibility:       predictioneval.CaseEligibility{Eligible: true, ExercisesPolicy: true},
 		Recorded: predictioneval.RecordedResults{
@@ -501,4 +504,309 @@ func disagreementsOf(sc predictioneval.Scorecard) []predictioneval.Comparison {
 		}
 	}
 	return out
+}
+
+// The second Codex code review found six more ways the model could claim more
+// than it proved. Each is reproduced here as the case that would otherwise slip
+// through.
+
+// TestAnEvaluationFromAnotherBuildIsNotScored closes the gap the digest check
+// left open.
+//
+// A case and an evaluation serialized by an OLDER build carry the same old
+// common-input digest as each other, so the digest check passes — while the
+// scorecard is stamped with THIS build's provenance and its comparisons are
+// read as this model's work.
+func TestAnEvaluationFromAnotherBuildIsNotScored(t *testing.T) {
+	c, ev := ncAgreeingCase()
+
+	for _, tc := range []struct {
+		name   string
+		mutate func(*predictioneval.DecisionCase, *predictioneval.Evaluation)
+	}{
+		{"the case was produced by another model version", func(dc *predictioneval.DecisionCase, _ *predictioneval.Evaluation) {
+			dc.Model.ModelVersion = "predictioneval/v0"
+		}},
+		{"the evaluation was produced by another model version", func(_ *predictioneval.DecisionCase, e *predictioneval.Evaluation) {
+			e.Model.ModelVersion = "predictioneval/v0"
+		}},
+		{"the evaluation replays another policy revision", func(_ *predictioneval.DecisionCase, e *predictioneval.Evaluation) {
+			e.Model.PolicyRevision = "policy-0000000000000000000000000000000000000000"
+		}},
+		{"the case was read under another producer contract", func(dc *predictioneval.DecisionCase, _ *predictioneval.Evaluation) {
+			dc.Model.SupportedProducerRevision = "obs-v3|policy-whatever"
+		}},
+		{"the evaluation came from a different int width", func(_ *predictioneval.DecisionCase, e *predictioneval.Evaluation) {
+			e.Model.PlatformIntBits = 32
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dc, e := c, ev
+			tc.mutate(&dc, &e)
+
+			sc := predictioneval.Score(dc, e, predictioneval.SettlementFacts{
+				PlacementCallStarted: true, PlacementCallReturned: true, PlacementAccepted: true,
+			})
+			if !containsString(sc.Limitations, predictioneval.LimitationModelProvenanceMismatch) {
+				t.Fatalf("scored without the %q limitation: %v",
+					predictioneval.LimitationModelProvenanceMismatch, sc.Limitations)
+			}
+			if sc.IndependentAgree != 0 || sc.ConditionedAgree != 0 {
+				t.Errorf("counted %d independent and %d conditioned agreements across builds",
+					sc.IndependentAgree, sc.ConditionedAgree)
+			}
+			if sc.Settlement.Assessment != predictioneval.SettlementUnknown {
+				t.Errorf("settlement = %q, want UNKNOWN", sc.Settlement.Assessment)
+			}
+		})
+	}
+
+	// The matching pair still scores, so the guard did not refuse everything.
+	good := predictioneval.Score(c, ev, predictioneval.SettlementFacts{})
+	if containsString(good.Limitations, predictioneval.LimitationModelProvenanceMismatch) {
+		t.Error("a matching case and evaluation were flagged as a provenance mismatch")
+	}
+	if good.IndependentAgree == 0 {
+		t.Error("the matching pair produced no independent agreement")
+	}
+}
+
+// TestAnIneligibleCaseNeverClaimsAnAffirmativeSettlement closes a
+// self-contradiction.
+//
+// An ineligible case has an input the model could not use. Scoring it anyway
+// produced UNAVAILABLE comparisons — which are not disagreements — so an
+// accepted placement could carry it all the way to APPLIES_TO_REPLAY. A
+// scorecard calling a case unevaluable while affirmatively claiming its
+// settlement is contradicting itself in the same document.
+func TestAnIneligibleCaseNeverClaimsAnAffirmativeSettlement(t *testing.T) {
+	c, ev := ncAgreeingCase()
+	c.Eligibility = predictioneval.CaseEligibility{
+		Eligible:        false,
+		Reasons:         []string{predictioneval.IneligibleInconsistentStageStates},
+		ExercisesPolicy: true,
+	}
+	if ev.Action != predictioneval.ActionWouldAttemptPlacement {
+		t.Fatalf("fixture action = %q; the point of this test is an ineligible case whose "+
+			"inputs still replay to a placement", ev.Action)
+	}
+
+	slot := ev.Choice.Index
+	stake := int64(ev.Clamp.FinalAmount)
+	sc := predictioneval.Score(c, ev, predictioneval.SettlementFacts{
+		PlacementCallStarted: true, PlacementCallReturned: true, PlacementAccepted: true,
+		PlacementStake: &stake, PlacementSlot: &slot,
+	})
+
+	if sc.Settlement.Assessment != predictioneval.SettlementUnknown {
+		t.Fatalf("an ineligible case produced settlement %q, want UNKNOWN",
+			sc.Settlement.Assessment)
+	}
+	if !containsString(sc.Limitations, predictioneval.LimitationCaseExcluded) {
+		t.Errorf("the scorecard did not say the case was unevaluable: %v", sc.Limitations)
+	}
+	if sc.IndependentAgree != 0 {
+		t.Errorf("an unevaluable case produced %d independent agreements", sc.IndependentAgree)
+	}
+}
+
+// TestASettlementNeedsThePlacementThisReplayDerived closes attribution by
+// acceptance alone.
+//
+// SettlementFacts carries no attempt key of its own, so batch code can hand
+// over another attempt's facts, and a corrupt post-decision slice can hold an
+// accepted call with the wrong stake or slot. Acceptance is not attribution.
+func TestASettlementNeedsThePlacementThisReplayDerived(t *testing.T) {
+	c, ev := ncAgreeingCase()
+	rightSlot := ev.Choice.Index
+	rightStake := int64(ev.Clamp.FinalAmount)
+	wrongSlot := rightSlot + 1
+	wrongStake := rightStake + 1
+
+	for _, tc := range []struct {
+		name  string
+		facts predictioneval.SettlementFacts
+		want  string
+	}{
+		{"the recorded stake is not the replayed one", predictioneval.SettlementFacts{
+			PlacementCallReturned: true, PlacementAccepted: true,
+			PlacementStake: &wrongStake, PlacementSlot: &rightSlot,
+		}, predictioneval.SettlementUnknown},
+		{"the recorded slot is not the replayed one", predictioneval.SettlementFacts{
+			PlacementCallReturned: true, PlacementAccepted: true,
+			PlacementStake: &rightStake, PlacementSlot: &wrongSlot,
+		}, predictioneval.SettlementUnknown},
+		{"the facts carry no arguments at all", predictioneval.SettlementFacts{
+			PlacementCallReturned: true, PlacementAccepted: true,
+		}, predictioneval.SettlementUnknown},
+		{"the arguments are the replayed ones", predictioneval.SettlementFacts{
+			PlacementCallReturned: true, PlacementAccepted: true,
+			PlacementStake: &rightStake, PlacementSlot: &rightSlot,
+		}, predictioneval.SettlementAppliesToReplay},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sc := predictioneval.Score(c, ev, tc.facts)
+			if sc.Settlement.Assessment != tc.want {
+				t.Errorf("settlement = %q, want %q. Acceptance alone attributes nothing: the "+
+					"recorded call has to be the one this replay derived",
+					sc.Settlement.Assessment, tc.want)
+			}
+		})
+	}
+}
+
+// TestARecordedTerminalActionIsComparedNotJustItsReason closes a hole where the
+// reason code agreed and the action did not.
+func TestARecordedTerminalActionIsComparedNotJustItsReason(t *testing.T) {
+	c, ev := ncAgreeingCase()
+	if ev.Action != predictioneval.ActionWouldAttemptPlacement {
+		t.Fatalf("fixture action = %q, want WOULD_ATTEMPT_PLACEMENT", ev.Action)
+	}
+
+	// A record whose reason still says OK while its phase and decision say the
+	// attempt was skipped. Before the phase was compared, this counted as
+	// agreement.
+	c.Recorded.TerminalPhase = predictioneval.PhaseAutoSkipped
+	c.Recorded.TerminalDecision = "SKIP"
+
+	sc := predictioneval.Score(c, ev, predictioneval.SettlementFacts{})
+
+	phase := findComparison(t, sc, "terminalPhase")
+	if phase.Verdict != predictioneval.VerdictDisagree {
+		t.Errorf("terminalPhase = %s (recorded %q, computed %q), want DISAGREE",
+			phase.Verdict, phase.Recorded, phase.Computed)
+	}
+	decision := findComparison(t, sc, "terminalDecision")
+	if decision.Verdict != predictioneval.VerdictDisagree {
+		t.Errorf("terminalDecision = %s, want DISAGREE", decision.Verdict)
+	}
+	if sc.IndependentDisagree == 0 {
+		t.Error("a record whose action contradicts the replay produced no disagreement")
+	}
+	if sc.Settlement.Assessment != predictioneval.SettlementUnknown {
+		t.Errorf("settlement = %q despite a contradicted action", sc.Settlement.Assessment)
+	}
+}
+
+// TestAFutureRevisionIsNotMistakenForTheLegacyOne closes a string-arithmetic
+// hole in the revision binding.
+//
+// "obs-v10|…" and "obs-v11|…" begin with "obs-v1". A byte-prefix test therefore
+// classified them as the one KNOWN readable exception and let them through the
+// binding, to be replayed under obs-v2 invariants.
+func TestAFutureRevisionIsNotMistakenForTheLegacyOne(t *testing.T) {
+	for _, tc := range []struct {
+		revision string
+		legacy   bool
+	}{
+		{"obs-v1|policy-deadbeef", true},
+		{"obs-v1", true},
+		{"obs-v10|policy-deadbeef", false},
+		{"obs-v11|policy-deadbeef", false},
+		{"obs-v1x", false},
+		{"obs-v2|policy-378d05d6ccc7d2a914730a1e1d023ff754bcf873", false}, // the supported one
+	} {
+		t.Run(tc.revision, func(t *testing.T) {
+			src := peProvenance()
+			src.ProducerRevision = tc.revision
+
+			// The legacy leg gets a dataset the legacy producer could
+			// actually have written. Handing it the shared obs-v2 fixture
+			// would ask what this model does with facts that cannot exist,
+			// and would answer with a full replay of an envelope the
+			// pre-envelope contract never wrote.
+			ds := peDataset(src)
+			if tc.legacy {
+				ds = peLegacyDataset(src)
+			}
+
+			pk, err := predictioneval.MaterializePairedKnowledge(ds)
+			if err != nil {
+				t.Fatalf("materialize: %v", err)
+			}
+
+			supported := tc.revision == predictioneval.SupportedProducerRevision
+			switch {
+			case supported:
+				if len(pk.Attempts) != 1 {
+					t.Fatalf("the supported revision yielded %d attempts, want 1", len(pk.Attempts))
+				}
+				return
+			case tc.legacy:
+				// Readable: the facts are refused by NAME, not as an unknown
+				// contract, and never as an unsupported revision.
+				named := false
+				for _, e := range pk.Excluded {
+					if e.Reason == predictioneval.ExclusionUnsupportedProducerRevision {
+						t.Fatalf("the KNOWN pre-envelope contract was refused as unsupported: %+v", e)
+					}
+					if e.Reason == predictioneval.ExclusionLegacyProducerNoEnvelope {
+						named = true
+					}
+				}
+				if !named {
+					t.Fatalf("the pre-envelope contract produced no %q exclusion: %+v",
+						predictioneval.ExclusionLegacyProducerNoEnvelope, pk.Excluded)
+				}
+			default:
+				found := false
+				for _, e := range pk.Excluded {
+					if e.Reason == predictioneval.ExclusionUnsupportedProducerRevision {
+						found = true
+					}
+				}
+				if !found {
+					t.Fatalf("%q was not refused as an unsupported revision: %+v. A revision that "+
+						"merely starts with the legacy one may have changed what a field means",
+						tc.revision, pk.Excluded)
+				}
+			}
+			if len(pk.Attempts) != 0 {
+				t.Fatalf("%q yielded %d attempts, want 0", tc.revision, len(pk.Attempts))
+			}
+		})
+	}
+}
+
+// TestTwoTerminalPhasesAreTwoEndingsEvenWhenOneCarriesNoEnvelope closes a
+// counting hole.
+//
+// isTerminalFact requires an envelope, so an ending WITHOUT one followed by an
+// ending WITH one counted as a single terminal: the attempt materialized, and
+// the first ending stayed silently inside the second one's input prefix — an
+// extra claimed ending, read as an input.
+func TestTwoTerminalPhasesAreTwoEndingsEvenWhenOneCarriesNoEnvelope(t *testing.T) {
+	// An ending with no envelope, then the real one.
+	envelopeless := peRecord(2, predictioneval.KindAutoDecision, predictioneval.PhaseAutoSkipped, 7)
+	envelopeless.Payload.ReasonCode = "NOT_ELIGIBLE"
+
+	terminal := peRecord(3, predictioneval.KindAutoDecision, predictioneval.PhaseAutoDecided, 7)
+	terminal.Payload.ReasonCode = "OK"
+	terminal.Payload.DecisionEnvelope = peMinimalEnvelope(7)
+
+	pk, err := predictioneval.MaterializePairedKnowledge(predictioneval.SourceDataset{
+		Source: peProvenance(),
+		Records: []predictioneval.SourceRecord{
+			peRecord(1, predictioneval.KindAutoDecision, predictioneval.PhaseAutoDue, 7),
+			envelopeless,
+			terminal,
+		},
+	})
+	if err != nil {
+		t.Fatalf("materialize: %v", err)
+	}
+	if len(pk.Attempts) != 0 {
+		t.Fatalf("an attempt with two endings materialized (%d); the envelope-less ending would "+
+			"have been read as an input to the other one. Slice: %v",
+			len(pk.Attempts), pk.Attempts[0].CommonInputSlice)
+	}
+	found := false
+	for _, e := range pk.Excluded {
+		if e.Reason == predictioneval.ExclusionMultipleTerminalFacts {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("no %q exclusion: %+v", predictioneval.ExclusionMultipleTerminalFacts, pk.Excluded)
+	}
 }
