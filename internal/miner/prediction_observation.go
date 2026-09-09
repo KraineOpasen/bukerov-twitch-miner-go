@@ -111,6 +111,9 @@ func toAnalyticsObservationPayload(in pubsub.ObservationPayload) analytics.Obser
 		OutcomeSlot: in.OutcomeSlot,
 		Counters:    in.Counters,
 		Presence:    in.Presence,
+
+		DecisionEnvelope:  toAnalyticsDecisionEnvelope(in.DecisionEnvelope),
+		AdmissionSettings: toAnalyticsBetSettings(in.AdmissionSettings),
 	}
 	if len(in.Outcomes) > 0 {
 		out.Outcomes = make([]analytics.ObservationOutcome, 0, len(in.Outcomes))
@@ -127,6 +130,138 @@ func toAnalyticsObservationPayload(in pubsub.ObservationPayload) analytics.Obser
 		}
 	}
 	return out
+}
+
+// toAnalyticsBetSettings translates one bet-settings snapshot. Like every
+// other part of this adapter it makes no policy decision: it copies the nine
+// fields and deep-copies the optional filter condition, and the store's
+// sanitizer is what decides which values are admissible. A nil snapshot stays
+// nil, because "this round had no such snapshot" and "this round had an empty
+// one" are different facts.
+func toAnalyticsBetSettings(in *pubsub.ObservationBetSettings) *analytics.ObservationBetSettings {
+	if in == nil {
+		return nil
+	}
+	out := &analytics.ObservationBetSettings{
+		Strategy:      in.Strategy,
+		Percentage:    in.Percentage,
+		PercentageGap: in.PercentageGap,
+		MaxPoints:     in.MaxPoints,
+		MinimumPoints: in.MinimumPoints,
+		StealthMode:   in.StealthMode,
+		Delay:         in.Delay,
+		DelayMode:     in.DelayMode,
+	}
+	if in.FilterCondition != nil {
+		out.FilterCondition = &analytics.ObservationFilterCondition{
+			By:    in.FilterCondition.By,
+			Where: in.FilterCondition.Where,
+			Value: in.FilterCondition.Value,
+		}
+	}
+	return out
+}
+
+// toAnalyticsDecisionEnvelope translates one auto-decision envelope. Every
+// pointer is copied by value rather than aliased, so the stored fact cannot
+// share memory with anything the producer still holds.
+func toAnalyticsDecisionEnvelope(in *pubsub.ObservationDecision) *analytics.ObservationDecisionEnvelope {
+	if in == nil {
+		return nil
+	}
+	out := &analytics.ObservationDecisionEnvelope{
+		AttemptID:     in.AttemptID,
+		SettingsStage: in.SettingsStage,
+		Settings:      toAnalyticsBetSettings(in.Settings),
+
+		CalculateStage: in.CalculateStage,
+		Balance:        copyInt64(in.Balance),
+		BetTotalUsers:  copyInt64(in.BetTotalUsers),
+		BetTotalPoints: copyInt64(in.BetTotalPoints),
+
+		ChoiceIndex:     copyInt(in.ChoiceIndex),
+		ChoiceOutcomeID: in.ChoiceOutcomeID,
+		ChoiceAmount:    copyInt64(in.ChoiceAmount),
+
+		SkipStage:    in.SkipStage,
+		SkipResult:   copyBool(in.SkipResult),
+		SkipCompared: copyFloat64(in.SkipCompared),
+
+		HealthStage:  in.HealthStage,
+		HealthReason: in.HealthReason,
+
+		StakeStage:          in.StakeStage,
+		RiskMaxStakePercent: copyInt(in.RiskMaxStakePercent),
+		RiskReservePoints:   copyInt(in.RiskReservePoints),
+		StakeAllowed:        copyInt64(in.StakeAllowed),
+		StakeReason:         in.StakeReason,
+		StakeLimit:          copyInt64(in.StakeLimit),
+
+		ClampApplied: copyBool(in.ClampApplied),
+		FinalAmount:  copyInt64(in.FinalAmount),
+	}
+	if len(in.Outcomes) > 0 {
+		out.Outcomes = make([]analytics.ObservationModelOutcome, 0, len(in.Outcomes))
+		for _, o := range in.Outcomes {
+			out.Outcomes = append(out.Outcomes, analytics.ObservationModelOutcome{
+				Slot:            o.Slot,
+				Present:         o.Present,
+				ID:              o.ID,
+				TotalUsers:      o.TotalUsers,
+				TotalPoints:     o.TotalPoints,
+				TopPoints:       o.TopPoints,
+				PercentageUsers: o.PercentageUsers,
+				Odds:            o.Odds,
+				OddsPercentage:  o.OddsPercentage,
+			})
+		}
+	}
+	return out
+}
+
+func copyInt64(v *int64) *int64 {
+	if v == nil {
+		return nil
+	}
+	out := *v
+	return &out
+}
+
+func copyInt(v *int) *int {
+	if v == nil {
+		return nil
+	}
+	out := *v
+	return &out
+}
+
+func copyBool(v *bool) *bool {
+	if v == nil {
+		return nil
+	}
+	out := *v
+	return &out
+}
+
+func copyFloat64(v *float64) *float64 {
+	if v == nil {
+		return nil
+	}
+	out := *v
+	return &out
+}
+
+// NewPredictionObservationSink returns the production adapter that carries
+// facts from the Prediction producer to the analytics collector.
+//
+// The miner wires this itself for a live process; it is exported so the P1.5
+// capture contract can be proved END TO END through the REAL adapter — the
+// pool's producer, this translation, the collector, the store and the public
+// reader — rather than by hand-building a payload on one side of the seam and
+// reading it back on the other, which would prove nothing about the path a
+// real decision actually takes.
+func NewPredictionObservationSink(svc *analytics.Service) pubsub.PredictionObservationSink {
+	return predictionObservationSink{svc: svc}
 }
 
 // attachPredictionObservations wires the observation sink onto a freshly built

@@ -962,7 +962,7 @@ func TestObservationStoreStatsMeasuresCaps(t *testing.T) {
 // the exact producer contract the rows were written under, and that a session
 // written under a different contract is never read as authoritative.
 func TestObservationProducerRevisionIsPinned(t *testing.T) {
-	if ObservationProducerRevision != "obs-v1|policy-0f98c316a8bcc24e055e2a0006ca6f96d1ff3a42" {
+	if ObservationProducerRevision != "obs-v2|policy-378d05d6ccc7d2a914730a1e1d023ff754bcf873" {
 		t.Fatalf("producer revision drifted: %q", ObservationProducerRevision)
 	}
 	svc, repo := newObservationService(t)

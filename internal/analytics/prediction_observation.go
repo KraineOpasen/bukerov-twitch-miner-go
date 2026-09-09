@@ -61,7 +61,7 @@ import (
 // generation and the policy base commit that authorized it. A reader that
 // finds an unfamiliar revision knows the rows were produced by a different
 // contract and must not assume this one's invariants.
-const ObservationProducerRevision = "obs-v1|policy-0f98c316a8bcc24e055e2a0006ca6f96d1ff3a42"
+const ObservationProducerRevision = "obs-v2|policy-378d05d6ccc7d2a914730a1e1d023ff754bcf873"
 
 // ObservationPayloadVersion is the version of the closed typed projection
 // stored in payload_json. It is bumped only when the projection's meaning
@@ -384,6 +384,11 @@ var (
 		// monotonic number that ties a manual root to its descendants even
 		// when the round they name never existed locally.
 		"manualActionId",
+		// The discriminator of ONE automatic decision attempt: the automatic
+		// counterpart of manualActionId, carried by every fact of the attempt
+		// including its placement calls, so the attempt's facts link by a
+		// minted identity rather than by a reusable event id.
+		"autoAttemptId",
 	}
 	observationPresenceKeys = []string{
 		// "event" and "prediction" are the two envelope keys the two
@@ -474,6 +479,22 @@ type ObservationPayload struct {
 	// Presence records whether a structural part of the frame was there,
 	// without recording any of its content.
 	Presence map[string]string `json:"presence,omitempty"`
+
+	// DecisionEnvelope is the inputs and original results of ONE automatic
+	// decision attempt (P1.5). Nil on every other kind of fact, and nil on an
+	// auto fact written under the previous producer contract — which is why
+	// the producer revision moved: an absent envelope in an older session is a
+	// contract fact, never a decision computed from nothing.
+	//
+	// Appended LAST, and omitted when nil, so a fact without an envelope
+	// renders byte-identical JSON to what the previous contract wrote.
+	DecisionEnvelope *ObservationDecisionEnvelope `json:"decisionEnvelope,omitempty"`
+
+	// AdmissionSettings is the bet settings a round was ADMITTED with. It is a
+	// deliberately separate fact from DecisionEnvelope.Settings: the two are
+	// recorded independently and never merged, so a reader can establish
+	// whether they agree rather than being told to assume they must.
+	AdmissionSettings *ObservationBetSettings `json:"admissionSettings,omitempty"`
 }
 
 // PredictionObservation is the immutable fact a producer hands to the
@@ -812,6 +833,20 @@ func sanitizeObservationPayload(in ObservationPayload) (ObservationPayload, bool
 			out.Presence = nil
 		}
 	}
+	// The decision envelope and the admission snapshot refuse the whole fact on
+	// a ceiling breach, exactly as the outcome and predictor ceilings do: a
+	// decision record that silently lost an input, or carries a substituted
+	// number, is indistinguishable from a complete one to every reader.
+	envelope, envelopeOK := sanitizeObservationDecisionEnvelope(in.DecisionEnvelope)
+	if !envelopeOK {
+		return out, false
+	}
+	out.DecisionEnvelope = envelope
+	admission, admissionOK := sanitizeObservationBetSettings(in.AdmissionSettings)
+	if !admissionOK {
+		return out, false
+	}
+	out.AdmissionSettings = admission
 	return out, true
 }
 
@@ -2538,8 +2573,20 @@ func classifyObservationSession(s ObservationSessionRecord, facts observationSes
 	// the revision is bumped, destroying the trail's whole value across an
 	// upgrade. The reading stands; the caller is told which contract's
 	// invariants apply.
+	//
+	// The note is APPENDED, never substituted. Before the first revision bump
+	// this branch could not fire for a locally-produced session, so replacing
+	// Detail was harmless; the moment the revision moves it fires for every
+	// session already in the database — and an INCOMPLETE session would have
+	// lost the sentence saying it lost facts, which is the one thing a reader
+	// most needs to be told.
 	if s.ProducerRevision != ObservationProducerRevision {
-		out.Detail = "session was produced under a different observation contract: read its facts under that contract's invariants"
+		const foreign = "session was produced under a different observation contract: read its facts under that contract's invariants"
+		if out.Detail == "" {
+			out.Detail = foreign
+		} else {
+			out.Detail += "; " + foreign
+		}
 	}
 	return out
 }

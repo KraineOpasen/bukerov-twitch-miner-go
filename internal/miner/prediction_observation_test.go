@@ -2,6 +2,7 @@ package miner
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"reflect"
 	"strings"
@@ -48,14 +49,48 @@ func TestObservationAdapterIsFieldComplete(t *testing.T) {
 			ErrorClass:  "NONE",
 			Manual:      boolValue(true),
 			OutcomeSlot: intValue(1),
+			// Slots are 1 and 2 rather than 0 and 1: slot 0 is a legitimate
+			// value, but a zero leaves that element unexercised by the
+			// completeness guard below, which is exactly the blind spot this
+			// fixture exists to close. The adapter copies the slot verbatim.
 			Outcomes: []pubsub.ObservationOutcome{
-				{Slot: 0, Color: "BLUE", ColorState: "PRESENT", TotalPoints: 300,
+				{Slot: 1, Color: "BLUE", ColorState: "PRESENT", TotalPoints: 300,
 					TotalUsers: 3, TopPredictorsExamined: 2, TopPredictors: "PRESENT"},
-				{Slot: 1, Color: "PINK", ColorState: "PRESENT", TotalPoints: 200,
+				{Slot: 2, Color: "PINK", ColorState: "PRESENT", TotalPoints: 200,
 					TotalUsers: 2, TopPredictorsExamined: 1, TopPredictors: "PRESENT"},
 			},
 			Counters: map[string]int64{"stake": 250},
 			Presence: map[string]string{"event": pubsub.ObsPresent},
+			DecisionEnvelope: &pubsub.ObservationDecision{
+				AttemptID:      7,
+				SettingsStage:  pubsub.ObsStageExecuted,
+				Settings:       pubsubSettingsFixture(),
+				CalculateStage: pubsub.ObsStageExecuted,
+				Balance:        int64Value(10000),
+				Outcomes: []pubsub.ObservationModelOutcome{{
+					Slot: 1, Present: true, ID: "o2", TotalUsers: 2, TotalPoints: 200,
+					TopPoints: 5000, PercentageUsers: 40, Odds: 2.5, OddsPercentage: 40,
+				}},
+				BetTotalUsers:       int64Value(5),
+				BetTotalPoints:      int64Value(500),
+				ChoiceIndex:         intValue(1),
+				ChoiceOutcomeID:     "o2",
+				ChoiceAmount:        int64Value(500),
+				SkipStage:           pubsub.ObsStageExecuted,
+				SkipResult:          boolValue(true),
+				SkipCompared:        float64Value(12.5),
+				HealthStage:         pubsub.ObsHealthAllowed,
+				HealthReason:        "health_gql_api_degraded",
+				StakeStage:          pubsub.ObsStageExecuted,
+				RiskMaxStakePercent: intValue(10),
+				RiskReservePoints:   intValue(100),
+				StakeAllowed:        int64Value(500),
+				StakeReason:         "max_stake_percent",
+				StakeLimit:          int64Value(500),
+				ClampApplied:        boolValue(true),
+				FinalAmount:         int64Value(500),
+			},
+			AdmissionSettings: pubsubSettingsFixture(),
 		},
 	}
 
@@ -95,19 +130,75 @@ func TestObservationAdapterIsFieldComplete(t *testing.T) {
 			Manual:      boolValue(true),
 			OutcomeSlot: intValue(1),
 			Outcomes: []analytics.ObservationOutcome{
-				{Slot: 0, Color: "BLUE", ColorState: "PRESENT", TotalPoints: 300,
+				{Slot: 1, Color: "BLUE", ColorState: "PRESENT", TotalPoints: 300,
 					TotalUsers: 3, TopPredictorsExamined: 2, TopPredictors: "PRESENT"},
-				{Slot: 1, Color: "PINK", ColorState: "PRESENT", TotalPoints: 200,
+				{Slot: 2, Color: "PINK", ColorState: "PRESENT", TotalPoints: 200,
 					TotalUsers: 2, TopPredictorsExamined: 1, TopPredictors: "PRESENT"},
 			},
 			Counters: map[string]int64{"stake": 250},
 			Presence: map[string]string{"event": "PRESENT"},
+			DecisionEnvelope: &analytics.ObservationDecisionEnvelope{
+				AttemptID:      7,
+				SettingsStage:  analytics.DecisionStageExecuted,
+				Settings:       analyticsSettingsFixture(),
+				CalculateStage: analytics.DecisionStageExecuted,
+				Balance:        int64Value(10000),
+				Outcomes: []analytics.ObservationModelOutcome{{
+					Slot: 1, Present: true, ID: "o2", TotalUsers: 2, TotalPoints: 200,
+					TopPoints: 5000, PercentageUsers: 40, Odds: 2.5, OddsPercentage: 40,
+				}},
+				BetTotalUsers:       int64Value(5),
+				BetTotalPoints:      int64Value(500),
+				ChoiceIndex:         intValue(1),
+				ChoiceOutcomeID:     "o2",
+				ChoiceAmount:        int64Value(500),
+				SkipStage:           analytics.DecisionStageExecuted,
+				SkipResult:          boolValue(true),
+				SkipCompared:        float64Value(12.5),
+				HealthStage:         analytics.DecisionHealthAllowed,
+				HealthReason:        "health_gql_api_degraded",
+				StakeStage:          analytics.DecisionStageExecuted,
+				RiskMaxStakePercent: intValue(10),
+				RiskReservePoints:   intValue(100),
+				StakeAllowed:        int64Value(500),
+				StakeReason:         "max_stake_percent",
+				StakeLimit:          int64Value(500),
+				ClampApplied:        boolValue(true),
+				FinalAmount:         int64Value(500),
+			},
+			AdmissionSettings: analyticsSettingsFixture(),
 		},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("adapter dropped or altered a field:\n got=%+v\nwant=%+v", got, want)
 	}
 }
+
+// pubsubSettingsFixture / analyticsSettingsFixture are the SAME nine-field
+// snapshot on either side of the seam, with every field non-zero so
+// assertNoZeroFields can prove none of them is silently dropped.
+func pubsubSettingsFixture() *pubsub.ObservationBetSettings {
+	return &pubsub.ObservationBetSettings{
+		Strategy: "SMART", Percentage: 5, PercentageGap: 20, MaxPoints: 50000,
+		MinimumPoints: 10, StealthMode: true, Delay: 6, DelayMode: "FROM_END",
+		FilterCondition: &pubsub.ObservationFilterCondition{
+			By: "total_users", Where: "GT", Value: 100,
+		},
+	}
+}
+
+func analyticsSettingsFixture() *analytics.ObservationBetSettings {
+	return &analytics.ObservationBetSettings{
+		Strategy: "SMART", Percentage: 5, PercentageGap: 20, MaxPoints: 50000,
+		MinimumPoints: 10, StealthMode: true, Delay: 6, DelayMode: "FROM_END",
+		FilterCondition: &analytics.ObservationFilterCondition{
+			By: "total_users", Where: "GT", Value: 100,
+		},
+	}
+}
+
+func int64Value(v int64) *int64       { return &v }
+func float64Value(v float64) *float64 { return &v }
 
 // assertNoZeroFields fails when any exported field of a struct is still its
 // zero value, so a field-completeness fixture cannot rot into a partial one.
@@ -117,12 +208,34 @@ func assertNoZeroFields(t *testing.T, v reflect.Value, path string) {
 	for i := 0; i < v.NumField(); i++ {
 		f := v.Field(i)
 		name := path + "." + typ.Field(i).Name
-		if f.Kind() == reflect.Struct {
-			assertNoZeroFields(t, f, name)
-			continue
-		}
 		if f.IsZero() {
 			t.Fatalf("%s is still the zero value; the adapter fixture must exercise every field", name)
+		}
+		assertNoZeroValue(t, f, name)
+	}
+}
+
+// assertNoZeroValue walks INTO a non-zero field.
+//
+// Recursing on struct alone was not enough. The payload's decision envelope is
+// a POINTER and its outcome vector is a SLICE, so a non-nil pointer and a
+// non-empty slice both satisfied IsZero and were never opened — which meant a
+// field added to any of the nested envelope types could go unset in the fixture
+// and, being unset on both sides, still compare equal. The adapter could drop
+// it and this test would pass. Opening pointers and slice elements is what
+// makes "every field" mean every field.
+func assertNoZeroValue(t *testing.T, v reflect.Value, path string) {
+	t.Helper()
+	switch v.Kind() {
+	case reflect.Struct:
+		assertNoZeroFields(t, v, path)
+	case reflect.Pointer:
+		if !v.IsNil() {
+			assertNoZeroValue(t, v.Elem(), path+"->")
+		}
+	case reflect.Slice:
+		for i := 0; i < v.Len(); i++ {
+			assertNoZeroValue(t, v.Index(i), fmt.Sprintf("%s[%d]", path, i))
 		}
 	}
 }

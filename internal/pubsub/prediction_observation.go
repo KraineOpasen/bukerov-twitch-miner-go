@@ -139,6 +139,24 @@ type ObservationPayload struct {
 	Outcomes    []ObservationOutcome
 	Counters    map[string]int64
 	Presence    map[string]string
+
+	// DecisionEnvelope carries the inputs and original results of ONE
+	// automatic decision attempt (P1.5). It is nil on every other kind of
+	// fact, and nil on an auto fact produced before this contract — an
+	// additive optional field, so the payload projection's meaning is
+	// unchanged and ObservationPayloadVersion does not move. The producer
+	// revision does, because a reader must be able to tell a session that
+	// COULD carry an envelope from one that never could.
+	DecisionEnvelope *ObservationDecision
+
+	// AdmissionSettings is the bet settings the round was ADMITTED with, taken
+	// from the value NewEventPrediction already read at that stage. It is a
+	// deliberately separate fact from the decision-time snapshot in
+	// DecisionEnvelope.Settings: the two are recorded independently and never
+	// merged, so a reader can establish whether they agree instead of being
+	// told to assume they must. Nil on every fact that is not a round
+	// admission.
+	AdmissionSettings *ObservationBetSettings
 }
 
 // PredictionObservation is one immutable fact as this package produces it.
@@ -707,16 +725,20 @@ func (p *WebSocketPool) observeChannelEvent(msg *PubSubMessage, streamer streame
 // observeScheduleDecision records whether a newly seen round was scheduled for
 // an auto-bet, and why not when it was not. It is emitted AFTER the decision
 // the existing code already made — it never participates in making it.
+// A skipped round was never admitted, so it has no admission settings snapshot
+// to carry.
 func (p *WebSocketPool) observeScheduleDecision(msg *PubSubMessage, streamer streamerIdentity, eventID, status, phase, decision, reason string, counters map[string]int64) {
 	p.observeScheduleDecisionOfRound(msg, streamer, eventID, p.roundIncarnation(eventID),
-		status, phase, decision, reason, counters)
+		status, phase, decision, reason, counters, nil)
 }
 
 // observeScheduleDecisionOfRound is observeScheduleDecision for the one caller
 // that has just admitted the round and therefore holds its incarnation
 // directly. Reading it back through the map would be a second lookup that a
 // concurrent cleanup could lose.
-func (p *WebSocketPool) observeScheduleDecisionOfRound(msg *PubSubMessage, streamer streamerIdentity, eventID, incarnation, status, phase, decision, reason string, counters map[string]int64) {
+// admission, when non-nil, is the bet settings the round was admitted with,
+// deep-copied by the caller from the value the admission path already built.
+func (p *WebSocketPool) observeScheduleDecisionOfRound(msg *PubSubMessage, streamer streamerIdentity, eventID, incarnation, status, phase, decision, reason string, counters map[string]int64, admission *ObservationBetSettings) {
 	if !p.observing() {
 		return
 	}
@@ -725,12 +747,13 @@ func (p *WebSocketPool) observeScheduleDecisionOfRound(msg *PubSubMessage, strea
 	obs.EventID = eventID
 	obs.RoundIncarnationID = incarnation
 	obs.Payload = ObservationPayload{
-		Phase:      phase,
-		RoundState: status,
-		Decision:   decision,
-		ReasonCode: reason,
-		Manual:     boolPtr(false),
-		Counters:   counters,
+		Phase:             phase,
+		RoundState:        status,
+		Decision:          decision,
+		ReasonCode:        reason,
+		Manual:            boolPtr(false),
+		Counters:          counters,
+		AdmissionSettings: admission,
 	}
 	p.observe(obs)
 }
@@ -764,40 +787,53 @@ func (p *WebSocketPool) observeUserFrameOfRound(msg *PubSubMessage, streamer str
 }
 
 // observeAutoSkip records that the automated path declined to place, with the
-// closed reason the existing code already acted on.
-func (p *WebSocketPool) observeAutoSkip(eventID, channelID, login, reason string, counters map[string]int64) {
-	p.observeRoundFact(eventID, channelID, login, ObsKindAutoDecision, ObservationPayload{
-		Phase:      "AUTO_SKIPPED",
-		Decision:   "SKIP",
-		ReasonCode: reason,
-		Manual:     boolPtr(false),
-		Counters:   counters,
+// closed reason the existing code already acted on and the envelope of the
+// attempt that declined. The envelope is the attempt's ONE terminal record:
+// every stage it never reached says so explicitly, so a skip is never read as
+// a decision computed from zeroes.
+// incarnation is the admission this attempt is ABOUT, carried from the
+// roundControl the attempt already resolved. It is never re-looked-up: a
+// concurrent cleanup and re-admission of the same Twitch event would otherwise
+// file this decision against a round it was never about.
+func (p *WebSocketPool) observeAutoSkip(eventID, channelID, login, incarnation, reason string, counters map[string]int64, env *ObservationDecision) {
+	p.observeRoundFactOf(eventID, channelID, login, incarnation, ObsKindAutoDecision, ObservationPayload{
+		Phase:            "AUTO_SKIPPED",
+		Decision:         "SKIP",
+		ReasonCode:       reason,
+		Manual:           boolPtr(false),
+		Counters:         counters,
+		DecisionEnvelope: env,
 	})
 }
 
 // observeAutoSkipState is observeAutoSkip for the branch that also knows the
 // round's lifecycle state.
-func (p *WebSocketPool) observeAutoSkipState(eventID, channelID, login, reason, roundState string) {
-	p.observeRoundFact(eventID, channelID, login, ObsKindAutoDecision, ObservationPayload{
-		Phase:      "AUTO_SKIPPED",
-		Decision:   "SKIP",
-		ReasonCode: reason,
-		RoundState: roundState,
-		Manual:     boolPtr(false),
+// It carries the attempt counters for the same reason observeAutoSkip does: a
+// terminal fact without the attempt discriminator leaves the attempt with a due
+// fact and no visible ending, and a reader joining by that counter would silently
+// find nothing for NOT_ACTIVE, ROUND_SUPPRESSED or ALREADY_PLACED.
+func (p *WebSocketPool) observeAutoSkipState(eventID, channelID, login, incarnation, reason, roundState string, counters map[string]int64, env *ObservationDecision) {
+	p.observeRoundFactOf(eventID, channelID, login, incarnation, ObsKindAutoDecision, ObservationPayload{
+		Phase:            "AUTO_SKIPPED",
+		Decision:         "SKIP",
+		ReasonCode:       reason,
+		RoundState:       roundState,
+		Manual:           boolPtr(false),
+		Counters:         counters,
+		DecisionEnvelope: env,
 	})
 }
 
-// observePlacementCall records one side of the SINGLE Twitch placement call.
+// observePlacementCallOf records one side of the SINGLE Twitch placement call.
 // It carries the stake and outcome slot already decided, an ok flag, and a
 // CLOSED error class — never the error itself, which can carry a provider
 // message or a Twitch transaction identifier.
-func (p *WebSocketPool) observePlacementCall(eventID, channelID, login, phase string, ok bool, errorClass string, slot, amount int) {
-	p.observePlacementCallOf(eventID, channelID, login, phase, ok, errorClass, slot, amount, nil)
-}
-
-// observePlacementCallOf is observePlacementCall for a manual action, which
-// also reports the correlation token the operator's action carries.
-func (p *WebSocketPool) observePlacementCallOf(eventID, channelID, login, phase string, ok bool, errorClass string, slot, amount int, extra map[string]int64) {
+//
+// extra carries the correlation counter of whichever action produced the call:
+// manualActionId for an operator action, autoAttemptId for an automatic
+// decision attempt. Both paths supply one, which is why there is no
+// counter-less variant.
+func (p *WebSocketPool) observePlacementCallOf(eventID, channelID, login, incarnation, phase string, ok bool, errorClass string, slot, amount int, extra map[string]int64) {
 	reason := "OK"
 	if !ok && phase == "CALL_RETURNED" {
 		reason = "REJECTED"
@@ -806,7 +842,7 @@ func (p *WebSocketPool) observePlacementCallOf(eventID, channelID, login, phase 
 	for k, v := range extra {
 		counters[k] = v
 	}
-	p.observeRoundFact(eventID, channelID, login, ObsKindPlacement, ObservationPayload{
+	p.observeRoundFactOf(eventID, channelID, login, incarnation, ObsKindPlacement, ObservationPayload{
 		Phase:       phase,
 		ReasonCode:  reason,
 		ErrorClass:  errorClass,
@@ -940,7 +976,7 @@ func (a manualAction) skip(eventID, channelID, login, reason, roundState string)
 }
 
 func (a manualAction) placementCall(eventID, channelID, login, phase string, ok bool, errorClass string, slot, amount int) {
-	a.pool.observePlacementCallOf(eventID, channelID, login, phase, ok, errorClass, slot, amount, a.counters(nil))
+	a.pool.observePlacementCallOf(eventID, channelID, login, a.pool.roundIncarnation(eventID), phase, ok, errorClass, slot, amount, a.counters(nil))
 }
 
 // observeRoundCleanup records a tracked round's state being dropped.

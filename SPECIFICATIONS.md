@@ -2776,6 +2776,87 @@ representable path into a row. Outcome projections carry aggregate figures and
 the *count* of top predictors examined; **zero** predictor identities are
 retained.
 
+#### The auto-decision envelope
+
+The trail records what an automatic decision *was*, and — since producer
+revision `obs-v2` — what it was computed *from*. An `auto_decision` fact now
+carries a `decisionEnvelope` inside `payload_json`: the effective bet settings
+the decision consumed (all nine fields, with a deep copy of the optional filter
+condition), the ordered model outcome state read at `Calculate` entry
+(identity, totals, `TopPoints`, and the derived `odds` / `oddsPercentage` /
+`percentageUsers` exactly as the model held them), the points balance, the two
+global stake gates the attempt was measured against (`maxStakePercent` and
+`reservePoints` — whether the health gate was enabled is recoverable from the
+recorded health state rather than stored as a setting), and the original
+results of each stage. A `schedule_decision`
+fact for an admitted round carries `admissionSettings`, the snapshot the round
+was admitted with — recorded independently and never merged with, or asserted
+equal to, the decision-time snapshot.
+
+The envelope separates facts a single number would conflate: `choiceAmount` is
+what the strategy proposed, `stakeAllowed` is what the stake gate returned,
+`clampApplied` is whether the caller actually adopted that allowance (recorded
+at the assignment, not derived from the gate reason), and `finalAmount` is the
+stake carried out of the gate block — absent when the attempt returned from
+inside it. Both results of the filter's single evaluation are recorded, so
+"the filter ran and passed" is no longer indistinguishable from "the filter
+never ran". A stage the attempt never reached carries an explicit
+`NOT_REACHED`, never a zero: 0, `false` and `""` are all legitimate results of
+a stage that *did* run. The health gate distinguishes four states — `DISABLED`,
+`NO_GATE`, `ALLOWED`, `DENIED` — because "no gate ran" and "the gate allowed
+it" are different facts. Every fact of one attempt, including both placement
+calls, carries an `autoAttemptId` counter minted by the observer, so an attempt
+is reassembled by a minted identity rather than by a timestamp or an event id a
+re-admitted round would reuse.
+
+Capture adds no business read. Every value is the one the existing path already
+computed, retained at its original position under the lock that owns it and
+deep-copied, so a later settings edit, outcome update or round replacement
+cannot alter a fact already recorded. `Calculate`, `Skip`, the eligibility
+check, the health gate and `EvaluateStake` are each still invoked exactly once,
+in the same order. Stealth mode is observed, never reconstructed: the envelope
+carries the complete inputs and the original post-`Calculate` stake, from which
+the effective integer reduction is derivable for that exact input and choice —
+it is not a captured `rand` draw, no seed is recorded or invented, and the
+derivation authorizes no entropy reuse for any other outcome, stake or
+strategy.
+
+Outcome identifiers are stored verbatim. Unlike the routing identities (channel
+id, event id, login), which are matched through a trimming comparison and are
+therefore stored trimmed, an outcome id is never normalized anywhere else on the
+path: the model keeps what the frame carried and the placement mutation sends
+exactly those bytes. An id the sanitizer would have to alter — padded, or over
+the frozen string ceiling only because of that padding — refuses the whole fact
+and is counted as a drop, on the same rule that refuses a truncated one: a
+changed identifier names a different outcome than the bet did, and storing it
+would let a record be hashed and witnessed as complete while misnaming the
+decision it claims to explain.
+
+`TopPoints` deserves an explicit note, because it is the one value in the
+envelope that describes an individual rather than a pool. It is the largest
+single stake among a round's top predictors — one viewer's wager amount, not an
+aggregate. It is stored because `SMART_MONEY` selects on it and stealth mode
+reduces below it, so a decision that read it cannot be replayed without it. No
+predictor identity is stored with it, and the wire projection alongside it still
+keeps only a *count* of top predictors, never their contents.
+
+`ObservationPayloadVersion` stays `1`: the envelope is an additive optional
+field, a fact without one renders byte-identical JSON, and the constant is
+hashed into every row's digest from its compile-time value while witness
+verification re-reads the stored bytes — so bumping it would make every
+historical row fail its own witness. `ObservationProducerRevision` moves to
+`obs-v2` instead, which is the safe dial: a foreign revision is not an
+integrity failure, it only tells a reader which contract's invariants apply. An
+absent envelope in an `obs-v1` session is therefore a contract fact, never a
+decision computed from nothing, and rows written under the old contract are
+never backfilled. A ceiling breach or a non-finite number refuses the whole
+fact and is counted as a drop, exactly as the outcome and predictor ceilings
+already do — a decision record that silently lost an input is indistinguishable
+from a complete one. The envelope's only identifier is the round-scoped outcome
+id needed to link a choice to its placement call. Outcome titles and colours are
+not projected, and beyond the `TopPoints` figure described above no predictor
+data is retained.
+
 ### Event Types for Series
 
 Reasons tagged on balance-timeline samples (`points.event_type`, display form
