@@ -122,15 +122,17 @@ func observationStore(t *testing.T) *analytics.SQLiteRepository {
 	return repo
 }
 
-// collectorSessionID mints a session id in the shape the store's own
-// newCollectorSessionID produces — the literal prefix "obs-" followed by 32
-// hex characters — but DERIVED from a label so the value is identical on every
-// run. The store requires the id to be unique (a UNIQUE column) and otherwise
-// treats it as opaque, so a deterministic derivation keeps the fixtures
-// reproducible without weakening anything the store checks.
 // sessionIDSeq makes every fixture session id unique within the test binary.
 var sessionIDSeq atomic.Uint64
 
+// collectorSessionID mints a session id in the shape the store's own
+// newCollectorSessionID produces — the literal prefix "obs-" followed by 32
+// hex characters — derived from a label and a per-call counter. The store
+// requires the id to be unique (a UNIQUE column) and otherwise treats it as
+// opaque, so the derivation satisfies that constraint without weakening
+// anything the store checks.
+//
+// The label alone is deliberately NOT the whole input; see below.
 func collectorSessionID(label string) string {
 	// Unique per CALL, not per label. The store enforces a UNIQUE
 	// collector_session_id, `go test -count=N` re-runs every test in the SAME

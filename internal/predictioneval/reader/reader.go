@@ -46,6 +46,23 @@ const DefaultMaxRecords = 20000
 // every value, not just the exact maximum.
 const MaxLoadLimit = 1 << 20
 
+// MaxSessionPayloadBytes bounds the AGGREGATE payload bytes one load will
+// accept, measured before a single payload is materialized.
+//
+// The row count is not a memory bound on its own. analytics enforces
+// MaxObservationPayloadBytes (64 KiB) in the WRITER, which is the right place
+// for it while the store is the only thing filling the table and no bound at
+// all against a tampered or foreign database file — the exact input a reader
+// most needs to bound. Under that ceiling DefaultMaxRecords already admits
+// 20000 x 64 KiB = 1.25 GiB, and without it a single row is unbounded, so the
+// row count permits an allocation neither this package nor its caller chose.
+//
+// 128 MiB is far above any real collector session (a 20000-fact session of
+// typical envelopes is a few tens of megabytes) and far below what a refusal
+// is supposed to prevent. A session over it is refused, not truncated: a
+// prefix would look exactly like a complete dataset downstream.
+const MaxSessionPayloadBytes = 128 << 20
+
 var (
 	// ErrSessionNotFound reports an epoch with no session row.
 	ErrSessionNotFound = errors.New("predictioneval/reader: no collector session for that epoch")
@@ -66,6 +83,10 @@ var (
 	// ErrLimitOutOfRange reports a bound this reader will not honour, because
 	// honouring it would mean not bounding the read at all. See MaxLoadLimit.
 	ErrLimitOutOfRange = errors.New("predictioneval/reader: requested bound exceeds the maximum this reader can enforce")
+	// ErrPayloadBudgetExceeded reports a session whose stored payloads exceed
+	// MaxSessionPayloadBytes. It is raised from a measurement, so the refusal
+	// costs the size of the answer rather than the size of the data.
+	ErrPayloadBudgetExceeded = errors.New("predictioneval/reader: session payloads exceed the maximum this reader will load")
 )
 
 // ObservationSource is the read surface this package needs. It is an interface
@@ -76,6 +97,10 @@ var (
 type ObservationSource interface {
 	ReadObservationSession(ctx context.Context, epoch int64) (analytics.ObservationSessionReading, bool, error)
 	ObservationsBySession(ctx context.Context, sessionID string, limit int) ([]analytics.ObservationRecord, error)
+	// ObservationSessionSizeBySession measures what a load would cost without
+	// paying it. It is part of the read surface rather than an optimization:
+	// the byte bound below cannot be enforced after the rows are in memory.
+	ObservationSessionSizeBySession(ctx context.Context, sessionID string) (analytics.ObservationSessionSize, error)
 }
 
 // LoadSession reads one collector session as a bounded, coherent dataset.
@@ -115,10 +140,35 @@ func LoadSession(ctx context.Context, src ObservationSource, epoch int64, limit 
 		return predictioneval.SourceDataset{Source: convertProvenance(before)}, nil
 	}
 
+	// Measure before loading. ObservationsBySession scans payload_json for
+	// every row it returns and json.Unmarshals it, so by the time a bound
+	// could be applied to the returned slice the memory has already been
+	// spent. The row count bounds how MANY facts arrive and says nothing about
+	// how large they are; the per-payload ceiling that would is enforced by
+	// the writer and therefore absent from a tampered store.
+	//
+	// The measurement is an aggregate the database computes without handing
+	// any payload across the driver boundary, so asking is bounded whatever
+	// the table holds.
+	size, err := src.ObservationSessionSizeBySession(ctx, before.Session.CollectorSessionID)
+	if err != nil {
+		return predictioneval.SourceDataset{}, err
+	}
+	if size.Rows > int64(limit) {
+		return predictioneval.SourceDataset{}, ErrLimitExceeded
+	}
+	if size.PayloadBytes > MaxSessionPayloadBytes {
+		return predictioneval.SourceDataset{}, ErrPayloadBudgetExceeded
+	}
+
 	// Ask for one more than the bound, so a session AT the bound is
 	// distinguishable from one over it. Silently returning the first `limit`
 	// facts of a longer session would hand the replay a prefix that looks
 	// complete.
+	//
+	// The count is re-checked on the returned rows rather than trusted from
+	// the measurement: the two statements are separate reads, and a session
+	// that grew between them must still be refused rather than truncated.
 	rows, err := src.ObservationsBySession(ctx, before.Session.CollectorSessionID, limit+1)
 	if err != nil {
 		return predictioneval.SourceDataset{}, err

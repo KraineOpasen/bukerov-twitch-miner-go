@@ -2943,6 +2943,22 @@ names the session, the witness counts and the loss counters it was read under,
 so a result from a truncated, unwitnessed session is never mistaken for one from
 a fully verified run.
 
+**Bounded acquisition.** A load is bounded twice, and both bounds are enforced
+before the data they bound is materialized. The row count is capped
+(`DefaultMaxRecords` 20000, ceiling `MaxLoadLimit` 2^20 — a bound large enough
+to overflow the `limit+1` probe is not a bound and is refused), and the
+AGGREGATE size of the session's `payload_json` is measured and capped
+(`MaxSessionPayloadBytes`, 128 MiB) by a `COUNT`/`SUM(LENGTH(CAST(... AS
+BLOB)))` aggregate the database evaluates without handing any payload across
+the driver boundary. The byte bound is not redundant with the row bound:
+`MaxObservationPayloadBytes` is enforced by the WRITER, so it bounds a store
+the writer filled and bounds nothing in a tampered or foreign database file —
+and even where it holds, 20000 facts at 64 KiB is 1.25 GiB. A session over
+either bound is refused, never truncated, because a prefix is indistinguishable
+from a complete dataset to every stage downstream. A session the store already
+classified `INTEGRITY_ERROR` is refused before the rows are read at all: it was
+going to yield no cases, so there is nothing to gain by paying for its content.
+
 Neither a `COMPLETE` session nor a verified digest is ever treated as proof that
 an individual decision case is complete: the envelope's own stage states are
 checked against the producer's structural invariants, and a snapshot that breaks
