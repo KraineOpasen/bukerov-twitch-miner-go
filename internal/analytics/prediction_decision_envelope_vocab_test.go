@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
 	"testing"
 )
 
@@ -26,7 +27,10 @@ import (
 // cannot be observed at runtime, and it is what makes a NEW constant fail here
 // rather than in production data months later.
 func TestTheEnvelopeVocabulariesCoverEveryDomainConstant(t *testing.T) {
-	betSrc := readDomainFile(t, "bet.go")
+	// Every file of the domain package, not just bet.go: a constant of one of
+	// these types added elsewhere in internal/models would otherwise be
+	// invisible to this guard, which is exactly the drift it exists to catch.
+	betSrc := readDomainPackage(t)
 
 	for _, tc := range []struct {
 		name    string
@@ -82,14 +86,34 @@ func TestTheEnvelopeVocabulariesCoverEveryDomainConstant(t *testing.T) {
 	}
 }
 
-// readDomainFile reads a file from internal/models as source text.
-func readDomainFile(t *testing.T, name string) string {
+// readDomainPackage concatenates every non-test Go file of internal/models as
+// source text.
+func readDomainPackage(t *testing.T) string {
 	t.Helper()
-	b, err := os.ReadFile(filepath.Join("..", "models", name))
+	dir := filepath.Join("..", "models")
+	entries, err := os.ReadDir(dir)
 	if err != nil {
-		t.Fatalf("read internal/models/%s: %v", name, err)
+		t.Fatalf("read internal/models: %v", err)
 	}
-	return string(b)
+	var b strings.Builder
+	var read int
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		content, err := os.ReadFile(filepath.Join(dir, name))
+		if err != nil {
+			t.Fatalf("read internal/models/%s: %v", name, err)
+		}
+		b.Write(content)
+		b.WriteString("\n")
+		read++
+	}
+	if read == 0 {
+		t.Fatal("read no source from internal/models; this guard is checking nothing")
+	}
+	return b.String()
 }
 
 // domainConstLiterals extracts every string literal assigned to a constant of

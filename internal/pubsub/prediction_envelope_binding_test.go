@@ -208,3 +208,98 @@ func TestCaptureCostsNothingWhenNobodyIsObserving(t *testing.T) {
 		t.Fatalf("attempt counter = %d with a sink wired, want 1", got)
 	}
 }
+
+// TestEveryTerminalAutoFactCarriesTheAttemptCounter regresses a silent gap in
+// attempt linkage.
+//
+// Three terminal reasons — NOT_ACTIVE, ROUND_SUPPRESSED and ALREADY_PLACED —
+// are filed by observeAutoSkipState, which took no counters and set none. Those
+// attempts therefore produced an AUTO_DUE fact carrying autoAttemptId and a
+// terminal fact carrying none, so a reader assembling an attempt by that
+// counter found its beginning and no ending.
+//
+// The gap was silent because the envelope's own AttemptID is a second,
+// differently-shaped join path that still worked, and because the existing
+// terminal-path test asserts the envelope id and the AUTO_DUE counter — never
+// the terminal fact's counter. This asserts exactly that, for every terminal
+// reason, including the three that do not go through observeAutoSkip.
+func TestEveryTerminalAutoFactCarriesTheAttemptCounter(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		setup func(t *testing.T, p *WebSocketPool, ep *models.EventPrediction)
+		want  string
+	}{
+		{
+			name: "the round is no longer active",
+			setup: func(_ *testing.T, _ *WebSocketPool, ep *models.EventPrediction) {
+				ep.Status = models.PredictionLocked
+			},
+			want: "NOT_ACTIVE",
+		},
+		{
+			name: "this round is suppressed",
+			setup: func(t *testing.T, p *WebSocketPool, _ *models.EventPrediction) {
+				if err := p.SetAutoBetSkip("term-1", true); err != nil {
+					t.Fatal(err)
+				}
+			},
+			want: "ROUND_SUPPRESSED",
+		},
+		{
+			name: "a bet was already placed",
+			setup: func(_ *testing.T, _ *WebSocketPool, ep *models.EventPrediction) {
+				ep.BetPlaced = true
+			},
+			want: "ALREADY_PLACED",
+		},
+		{
+			name: "the strategy's filter rejects it",
+			setup: func(_ *testing.T, _ *WebSocketPool, ep *models.EventPrediction) {
+				ep.Bet.Settings.FilterCondition = &models.FilterCondition{
+					By: models.OutcomeTotalUsers, Where: models.ConditionGT, Value: 1e9,
+				}
+			},
+			want: "FILTER_REJECTED",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p, sink := observedPool(t, &fakePlacer{})
+			s := newTestStreamer(100000)
+			ep := admitRound(p, s, "term-1")
+			ep.Bet.Settings = autoBetSettings(5)
+			p.SetRiskSettings(config.PredictionRiskSettings{HealthGateEnabled: false})
+			tc.setup(t, p, ep)
+
+			p.placeAutoBet("term-1")
+
+			var due, terminal int64
+			var sawTerminal bool
+			for _, o := range sink.all() {
+				if o.Kind != ObsKindAutoDecision {
+					continue
+				}
+				switch o.Payload.Phase {
+				case "AUTO_DUE":
+					due = o.Payload.Counters[obsCounterAutoAttemptID]
+				case "AUTO_SKIPPED":
+					if o.Payload.ReasonCode != tc.want {
+						continue
+					}
+					sawTerminal = true
+					terminal = o.Payload.Counters[obsCounterAutoAttemptID]
+				}
+			}
+			if !sawTerminal {
+				t.Fatalf("no %s terminal fact; got %v", tc.want, sink.phases())
+			}
+			if due == 0 {
+				t.Fatal("the AUTO_DUE fact carries no attempt discriminator")
+			}
+			if terminal != due {
+				t.Fatalf("the %s terminal fact carries attempt %d, but the attempt opened as %d: "+
+					"an attempt with a beginning and no findable ending cannot be assembled by "+
+					"the counter the other facts are joined on", tc.want, terminal, due)
+			}
+		})
+	}
+}

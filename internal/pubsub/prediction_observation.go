@@ -808,13 +808,18 @@ func (p *WebSocketPool) observeAutoSkip(eventID, channelID, login, incarnation, 
 
 // observeAutoSkipState is observeAutoSkip for the branch that also knows the
 // round's lifecycle state.
-func (p *WebSocketPool) observeAutoSkipState(eventID, channelID, login, incarnation, reason, roundState string, env *ObservationDecision) {
+// It carries the attempt counters for the same reason observeAutoSkip does: a
+// terminal fact without the attempt discriminator leaves the attempt with a due
+// fact and no visible ending, and a reader joining by that counter would silently
+// find nothing for NOT_ACTIVE, ROUND_SUPPRESSED or ALREADY_PLACED.
+func (p *WebSocketPool) observeAutoSkipState(eventID, channelID, login, incarnation, reason, roundState string, counters map[string]int64, env *ObservationDecision) {
 	p.observeRoundFactOf(eventID, channelID, login, incarnation, ObsKindAutoDecision, ObservationPayload{
 		Phase:            "AUTO_SKIPPED",
 		Decision:         "SKIP",
 		ReasonCode:       reason,
 		RoundState:       roundState,
 		Manual:           boolPtr(false),
+		Counters:         counters,
 		DecisionEnvelope: env,
 	})
 }

@@ -1593,7 +1593,7 @@ func (p *WebSocketPool) placeAutoBetScheduled(eventID, scheduled string) {
 		case placed:
 			reason = "ALREADY_PLACED"
 		}
-		p.observeAutoSkipState(eventID, obsChannel, obsLogin, rc.incarnation, reason, state, env)
+		p.observeAutoSkipState(eventID, obsChannel, obsLogin, rc.incarnation, reason, state, attemptCounters(nil), env)
 		return
 	}
 	balance := event.Streamer.GetChannelPoints()
