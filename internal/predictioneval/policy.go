@@ -38,7 +38,10 @@ import "math"
 
 // Strategy, condition and outcome-key spellings of the pinned policy. They are
 // re-declared rather than imported for the reasons in records.go, and pinned
-// against internal/models by TestPolicyVocabularyMatchesTheDomain.
+// against internal/models by the parity suite, which feeds
+// string(models.StrategyMostVoted) and friends straight into these constants
+// and requires byte-equal agreement — so a misspelling here surfaces as a
+// parity failure rather than as a silently unmatched switch case.
 const (
 	StrategyMostVoted  = "MOST_VOTED"
 	StrategyHighOdds   = "HIGH_ODDS"
@@ -72,19 +75,6 @@ const (
 	GatePercent          = "max_stake_percent"
 	GateReserveViolation = "reserve_violation"
 )
-
-// SupportedStrategies is every strategy the pinned policy dispatches on. A
-// strategy outside it is not "unsupported input" — the pinned policy has no
-// default branch, so it deterministically chooses nothing, and this model
-// reproduces that rather than refusing the case.
-func SupportedStrategies() []string {
-	return []string{
-		StrategyMostVoted, StrategyHighOdds, StrategyPercentage, StrategySmartMoney,
-		StrategySmart,
-		StrategyNumber1, StrategyNumber2, StrategyNumber3, StrategyNumber4,
-		StrategyNumber5, StrategyNumber6, StrategyNumber7, StrategyNumber8,
-	}
-}
 
 // LegacyFailure names a way the PINNED POLICY ITSELF fails on an input, as
 // opposed to a way this model cannot read one.
@@ -152,8 +142,21 @@ func outcomeValue(outs []policyOutcome, index int, key string) (float64, LegacyF
 		return 0, LegacyFailureNegativeChoiceIndex
 	}
 	o := outs[index]
-	if !o.present {
-		return 0, LegacyFailureAbsentOutcome
+	switch key {
+	case OutcomePercentageUsers, OutcomeOddsPercentage, OutcomeOdds,
+		OutcomeTopPoints, OutcomeTotalUsers, OutcomeTotalPoints:
+		// The absence check belongs INSIDE the named cases. The pinned policy
+		// binds the outcome pointer before the switch but only dereferences it
+		// in these branches, so an absent outcome under an unrecognised key
+		// returns 0 there rather than panicking. Checking before the switch
+		// would report a legacy failure the real policy does not have — a
+		// divergence that is currently unreachable through Evaluate, and would
+		// stop being unreachable the moment a guard upstream moved.
+		if !o.present {
+			return 0, LegacyFailureAbsentOutcome
+		}
+	default:
+		return 0, LegacyFailureNone
 	}
 	switch key {
 	case OutcomePercentageUsers:
@@ -166,10 +169,8 @@ func outcomeValue(outs []policyOutcome, index int, key string) (float64, LegacyF
 		return float64(o.topPoints), LegacyFailureNone
 	case OutcomeTotalUsers:
 		return float64(o.totalUsers), LegacyFailureNone
-	case OutcomeTotalPoints:
-		return float64(o.totalPoints), LegacyFailureNone
 	default:
-		return 0, LegacyFailureNone
+		return float64(o.totalPoints), LegacyFailureNone
 	}
 }
 
@@ -281,6 +282,17 @@ func baseStake(balance, percentage, maxPoints int) (stake int, representable boo
 		amount = maxPoints
 	}
 	return amount, true
+}
+
+// cappedByMaxPoints reports whether the MaxPoints cap actually bound the stake:
+// the pinned policy applies it with a STRICT >, so an uncapped amount equal to
+// MaxPoints is unconstrained.
+func cappedByMaxPoints(balance, percentage, maxPoints int) bool {
+	product := float64(balance) * (float64(percentage) / 100)
+	if math.IsNaN(product) || product < float64(math.MinInt) || product >= -float64(math.MinInt) {
+		return false
+	}
+	return int(product) > maxPoints
 }
 
 // stealthApplies mirrors the pinned policy's stealth condition: stealth mode is

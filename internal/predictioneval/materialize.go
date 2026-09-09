@@ -111,6 +111,19 @@ type Exclusion struct {
 type AttemptKnowledge struct {
 	Key AttemptKey `json:"key"`
 
+	// Source is the session provenance this attempt was read under, and
+	// Anomalies are the qualifications that apply to the whole reading.
+	//
+	// They are carried ON THE ATTEMPT rather than left on the enclosing
+	// PairedKnowledge because the per-case [Scorecard] is the artifact that
+	// gets stored and read later, and a scorecard that cannot name the session
+	// it came from is indistinguishable from one produced against a truncated,
+	// unwitnessed or foreign-revision dataset. That was a real defect: the
+	// qualifications were computed correctly and then stranded one level above
+	// the result that needed them.
+	Source    SourceProvenance `json:"source"`
+	Anomalies []string         `json:"anomalies,omitempty"`
+
 	// RoundIncarnationID is the LOCAL admission of the round this attempt
 	// resolved — not the Twitch event id, which a later admission can reuse.
 	RoundIncarnationID string `json:"roundIncarnationId"`
@@ -188,6 +201,27 @@ func MaterializePairedKnowledge(ds SourceDataset) (PairedKnowledge, error) {
 		return out, nil
 	}
 
+	// The producer revision BINDS, it does not merely annotate.
+	//
+	// A revision this model does not know may have changed what a field means —
+	// recorded a post-gate stake on an exit that previously had none, or
+	// redefined the stake gate's return. Replaying it under obs-v2 invariants
+	// would produce confident AGREE/DISAGREE verdicts against a contract nobody
+	// re-read, which is worse than producing none. So it yields no cases.
+	//
+	// The pre-envelope contract is NOT in that category: it is known, and it is
+	// known to carry no envelope, so it stays readable and says exactly that.
+	switch {
+	case ds.Source.ProducerRevision == SupportedProducerRevision:
+	case isLegacyProducer(ds.Source.ProducerRevision):
+	default:
+		out.Excluded = append(out.Excluded, Exclusion{
+			Reason: ExclusionUnsupportedProducerRevision,
+			Detail: ds.Source.ProducerRevision,
+		})
+		return out, nil
+	}
+
 	groups := map[AttemptKey][]SourceRecord{}
 	var order []AttemptKey
 
@@ -243,9 +277,18 @@ func MaterializePairedKnowledge(ds SourceDataset) (PairedKnowledge, error) {
 		}
 		id, ok := attemptIDOf(r)
 		if !ok {
+			// Under the pre-envelope contract NO auto fact carried the
+			// discriminator, because the producer minted none. Reporting that
+			// as NO_ATTEMPT_ID would tell an operator no attempt occurred,
+			// when in fact a full decision occurred under a contract that did
+			// not record its inputs — the opposite meaning.
+			reason := ExclusionNoAttemptID
+			if isLegacyProducer(ds.Source.ProducerRevision) && r.Kind == KindAutoDecision {
+				reason = ExclusionLegacyProducerNoEnvelope
+			}
 			out.Excluded = append(out.Excluded, Exclusion{
 				ObservationID: r.ObservationID,
-				Reason:        ExclusionNoAttemptID,
+				Reason:        reason,
 				Detail:        r.Payload.Phase + "/" + r.Payload.ReasonCode,
 			})
 			continue
@@ -266,7 +309,7 @@ func MaterializePairedKnowledge(ds SourceDataset) (PairedKnowledge, error) {
 	sort.Slice(order, func(i, j int) bool { return attemptKeyLess(order[i], order[j]) })
 
 	for _, key := range order {
-		attempt, excl := materializeAttempt(key, groups[key], ds.Source)
+		attempt, excl := materializeAttempt(key, groups[key], ds.Source, out.Anomalies)
 		out.Excluded = append(out.Excluded, excl...)
 		if attempt != nil {
 			out.Attempts = append(out.Attempts, *attempt)
@@ -286,7 +329,7 @@ const (
 )
 
 // materializeAttempt bounds one attempt's prefix and digests it.
-func materializeAttempt(key AttemptKey, recs []SourceRecord, src SourceProvenance) (*AttemptKnowledge, []Exclusion) {
+func materializeAttempt(key AttemptKey, recs []SourceRecord, src SourceProvenance, anomalies []string) (*AttemptKnowledge, []Exclusion) {
 	var excl []Exclusion
 
 	terminal := -1
@@ -346,13 +389,15 @@ func materializeAttempt(key AttemptKey, recs []SourceRecord, src SourceProvenanc
 
 	out := &AttemptKnowledge{
 		Key:                  key,
+		Source:               src,
+		Anomalies:            append([]string(nil), anomalies...),
 		RoundIncarnationID:   incarnation,
 		EventID:              slice[terminal].EventID,
 		RoundCaptureOrigin:   slice[terminal].RoundCaptureOrigin,
 		RoundCaptureGapCause: slice[terminal].RoundCaptureGapCause,
-		CommonInputSlice:     append([]SourceRecord(nil), slice...),
+		CommonInputSlice:     deepCopyRecords(slice),
 		TerminalIndex:        terminal,
-		PostDecision:         append([]SourceRecord(nil), post...),
+		PostDecision:         deepCopyRecords(post),
 	}
 	for _, r := range slice {
 		if r.Kind == KindAutoDecision && r.Payload.Phase == PhaseAutoDue {
@@ -456,4 +501,110 @@ func appendOnce(list []string, v string) []string {
 		}
 	}
 	return append(list, v)
+}
+
+// deepCopyRecords copies the records AND the reference types inside their
+// payloads.
+//
+// A plain slice copy is not enough: SourcePayload carries a Counters map and a
+// DecisionEnvelope pointer, so a shallow copy leaves the materialized slice
+// aliasing the caller's dataset. Nothing in the four seams mutates, and the
+// reader builds a fresh value per load, so no live failure exists — but the
+// common-input digest deliberately does not hash payload contents, delegating
+// that to the store's row witness, which is checked BEFORE materialization. An
+// alias would therefore let a post-materialize edit change what a replay reads
+// while its digest stayed byte-identical, and that is exactly the property this
+// package sells.
+func deepCopyRecords(in []SourceRecord) []SourceRecord {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]SourceRecord, len(in))
+	for i, r := range in {
+		r.Payload = deepCopyPayload(r.Payload)
+		out[i] = r
+	}
+	return out
+}
+
+func deepCopyPayload(p SourcePayload) SourcePayload {
+	if p.Manual != nil {
+		v := *p.Manual
+		p.Manual = &v
+	}
+	if p.OutcomeSlot != nil {
+		v := *p.OutcomeSlot
+		p.OutcomeSlot = &v
+	}
+	if p.Counters != nil {
+		counters := make(map[string]int64, len(p.Counters))
+		for k, v := range p.Counters {
+			counters[k] = v
+		}
+		p.Counters = counters
+	}
+	p.DecisionEnvelope = deepCopyEnvelope(p.DecisionEnvelope)
+	p.AdmissionSettings = deepCopySettings(p.AdmissionSettings)
+	return p
+}
+
+func deepCopyEnvelope(e *SourceDecisionEnvelope) *SourceDecisionEnvelope {
+	if e == nil {
+		return nil
+	}
+	c := *e
+	c.Settings = deepCopySettings(e.Settings)
+	c.Balance = copyInt64(e.Balance)
+	c.BetTotalUsers = copyInt64(e.BetTotalUsers)
+	c.BetTotalPoints = copyInt64(e.BetTotalPoints)
+	c.ChoiceIndex = copyIntPtr(e.ChoiceIndex)
+	c.ChoiceAmount = copyInt64(e.ChoiceAmount)
+	c.SkipResult = copyBoolPtr(e.SkipResult)
+	c.SkipCompared = copyFloatPtr(e.SkipCompared)
+	c.RiskMaxStakePercent = copyIntPtr(e.RiskMaxStakePercent)
+	c.RiskReservePoints = copyIntPtr(e.RiskReservePoints)
+	c.StakeAllowed = copyInt64(e.StakeAllowed)
+	c.StakeLimit = copyInt64(e.StakeLimit)
+	c.ClampApplied = copyBoolPtr(e.ClampApplied)
+	c.FinalAmount = copyInt64(e.FinalAmount)
+	if e.Outcomes != nil {
+		c.Outcomes = append([]SourceModelOutcome(nil), e.Outcomes...)
+	}
+	return &c
+}
+
+func deepCopySettings(s *SourceBetSettings) *SourceBetSettings {
+	if s == nil {
+		return nil
+	}
+	c := *s
+	if s.FilterCondition != nil {
+		fc := *s.FilterCondition
+		c.FilterCondition = &fc
+	}
+	return &c
+}
+
+func copyIntPtr(v *int) *int {
+	if v == nil {
+		return nil
+	}
+	out := *v
+	return &out
+}
+
+func copyBoolPtr(v *bool) *bool {
+	if v == nil {
+		return nil
+	}
+	out := *v
+	return &out
+}
+
+func copyFloatPtr(v *float64) *float64 {
+	if v == nil {
+		return nil
+	}
+	out := *v
+	return &out
 }

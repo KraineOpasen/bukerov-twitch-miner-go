@@ -2919,22 +2919,46 @@ and agreement about them proves nothing about that hidden state.
 **Refusals.** The reader binds to `payload_version` 1 and producer revision
 `obs-v2|policy-378d05d6ccc7d2a914730a1e1d023ff754bcf873`; the replay model and
 its results carry their own version and the pinned policy revision, which are
-never restamped with the SHA of whatever build is replaying. `obs-v1` facts stay
-readable and acquire nothing: a missing envelope is a contract fact, and no
-default, current setting or neighbouring fact is used to manufacture one. Session
-integrity, truncation and witness verification are consumed from
+never restamped with the SHA of whatever build is replaying.
+
+The revision BINDS rather than merely annotating. A session stamped with a
+revision this model does not know yields no cases at all: an unknown contract
+may have changed what a field means, and a confident verdict against a contract
+nobody re-read is worse than no verdict. `obs-v1` is the one known exception —
+it stays readable and acquires nothing, because a missing envelope is a contract
+fact there, and no default, current setting or neighbouring fact is used to
+manufacture one. A pre-envelope auto fact carries no attempt discriminator
+either (the counter and the envelope shipped in the same commit), so it is
+refused by name as a legacy-contract fact rather than as a fact whose attempt
+never began.
+
+Session integrity, truncation and witness verification are consumed from
 `ReadObservationSession` rather than re-implemented — the reader-facing
-projection COALESCEs NULL parent ids and re-marshals the payload, so it could not
-reproduce the digest's inputs even from copied code. A session the store calls
-`INTEGRITY_ERROR` yields no cases; an unfinalized, truncated or foreign-revision
-session yields cases carrying that qualification. Neither a `COMPLETE` session
-nor a verified digest is ever treated as proof that an individual decision case
-is complete: the envelope's own stage states are checked against the producer's
-structural invariants, and a snapshot that breaks one is refused rather than read
-under assumptions that do not hold for it. A missing or unusable input makes its
-stage `UNSUPPORTED` or `INDETERMINATE` — never `0`, `false`, `SMART` or "skip" —
-and a stake the pinned policy's `int` arithmetic could not represent or would
-wrap is reported explicitly instead of being silently truncated.
+projection COALESCEs NULL parent ids and re-marshals the payload, so it could
+not reproduce the digest's inputs even from copied code. A session the store
+calls `INTEGRITY_ERROR` yields no cases, and so does one written under an
+unsupported revision; an unfinalized or truncated session yields cases carrying
+that qualification, and the qualification travels ON the case — a scorecard
+names the session, the witness counts and the loss counters it was read under,
+so a result from a truncated, unwitnessed session is never mistaken for one from
+a fully verified run.
+
+Neither a `COMPLETE` session nor a verified digest is ever treated as proof that
+an individual decision case is complete: the envelope's own stage states are
+checked against the producer's structural invariants, and a snapshot that breaks
+one is refused rather than read under assumptions that do not hold for it. A
+missing or unusable input makes its stage `UNSUPPORTED` or `INDETERMINATE` —
+never `0`, `false`, `SMART` or "skip" — and a stake the pinned policy's `int`
+arithmetic could not represent or would wrap is reported explicitly instead of
+being silently truncated.
+
+How a round SETTLED is not attributable to an attempt at this producer revision.
+The discriminator that links an attempt's facts is absent from the
+`user_terminal` fact carrying the win/loss verdict and the payout, and a round
+can carry more than one attempt — so joining on the round would credit one
+attempt with another's payout. Resolution, payout and returned stake are
+therefore reported `UNKNOWN` rather than guessed. Making them attributable is a
+producer change, not a reader change.
 
 `WOULD_ATTEMPT_PLACEMENT` is a statement about the policy reaching the placement
 call, not a claim that a bet was placed or accepted. Settlement facts reach

@@ -29,6 +29,7 @@ package pubsub_test
 
 import (
 	"reflect"
+	"sync"
 	"testing"
 
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/config"
@@ -42,12 +43,27 @@ import (
 // It is the producer's own sink interface, so the pool hands it exactly what it
 // hands the miner's adapter in production. It performs no I/O and never blocks,
 // which is the sink contract.
+// The mutex is not needed by the paths this harness drives — DriveAutoBet is a
+// direct synchronous call and AdmitRound schedules no timer — but the sink
+// interface is a producer seam, and the production scheduling path emits from a
+// timer goroutine. Guarding it costs nothing and keeps the footgun from being
+// armed by a later change that routes this through the real event path.
 type replayCapturingSink struct {
+	mu    sync.Mutex
 	facts []pubsub.PredictionObservation
 }
 
 func (s *replayCapturingSink) RecordPredictionObservation(o pubsub.PredictionObservation) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.facts = append(s.facts, o)
+}
+
+// snapshot returns a copy of what was captured, taken under the lock.
+func (s *replayCapturingSink) snapshot() []pubsub.PredictionObservation {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]pubsub.PredictionObservation(nil), s.facts...)
 }
 func (s *replayCapturingSink) BeginPredictionProducerEpisode() func()    { return func() {} }
 func (s *replayCapturingSink) PredictionCaptureState(_, _ string) string { return "" }
@@ -95,11 +111,12 @@ func driveAndReplay(
 	h.DriveAutoBet("p2-1")
 	settle(nil)
 
-	if len(sink.facts) == 0 {
+	captured := sink.snapshot()
+	if len(captured) == 0 {
 		t.Fatal("the real decision emitted no facts at all; the producer seam is broken")
 	}
 
-	ds := datasetFromCapturedFacts(t, sink.facts)
+	ds := datasetFromCapturedFacts(t, captured)
 	pk, err := predictioneval.MaterializePairedKnowledge(ds)
 	if err != nil {
 		t.Fatalf("materialize: %v", err)

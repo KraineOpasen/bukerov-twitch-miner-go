@@ -21,13 +21,21 @@ package predictioneval_test
 //	Rule C — the transitive stdlib closure contains no capability package.
 //
 // HONEST RESIDUE, stated rather than hidden: crypto/sha256 transitively
-// reaches os, syscall, time and reflect through the FIPS-140 integrity check
-// and the entropy source. Those are unavoidable beneath ANY cryptographic hash
-// in the standard library, they are not reachable from any code path this
-// package executes, and no amount of fence design removes them. Rule C
-// therefore denies the packages that indicate real capability and would NOT be
-// dragged in by hashing — which is exactly the set that matters. The residue is
-// asserted explicitly below so it can never grow silently.
+// reaches os, syscall, time, io/fs and internal/poll through the FIPS-140
+// integrity check and the entropy source. Those are unavoidable beneath ANY
+// cryptographic hash in the standard library, they are not reachable from any
+// code path this package executes, and no amount of fence design removes them.
+//
+// That list used to say "and reflect", which was WRONG, and wrong in the one
+// direction that matters: reflect was not unavoidable at all. It came from
+// encoding/binary, which this package used for eight bytes of length prefix and
+// no longer does. An earlier version of this file also asserted the residue in
+// a way that could only detect SHRINKAGE — the "exact" set was built by
+// filtering the closure through the documented list, so a package nobody had
+// listed could never appear in it. Both are fixed below: the residue is
+// computed by intersecting the closure with a WATCHLIST that is deliberately
+// wider than the documented set, so a newly reachable sensitive package fails
+// this test instead of passing it unnoticed.
 //
 // Test files are excluded on purpose: the tests import internal/models to
 // compare against the real policy, which is the whole point of the parity
@@ -53,13 +61,12 @@ const modulePath = "github.com/KraineOpasen/bukerov-twitch-miner-go"
 // about what "pure" means for this package, so it is deliberately a diff a
 // reviewer cannot miss.
 var allowedDirectImports = map[string]string{
-	"crypto/sha256":   "the common-input digest; collision resistance is the point",
-	"encoding/binary": "length prefixes in the digest",
-	"errors":          "typed sentinel errors",
-	"hash":            "the hash.Hash interface used by the digest helpers",
-	"math":            "Abs/Round/IsNaN, mirroring the pinned policy's own arithmetic",
-	"sort":            "deterministic attempt ordering, independent of map iteration",
-	"strconv":         "rendering comparison values without fmt",
+	"crypto/sha256": "the common-input digest; collision resistance is the point",
+	"errors":        "typed sentinel errors",
+	"hash":          "the hash.Hash interface used by the digest helpers",
+	"math":          "Abs/Round/IsNaN, mirroring the pinned policy's own arithmetic",
+	"sort":          "deterministic attempt ordering, independent of map iteration",
+	"strconv":       "rendering comparison values without fmt",
 }
 
 // deniedTransitiveImports are capability packages. None of them is reachable
@@ -83,10 +90,39 @@ var deniedTransitiveImports = []string{
 	"modernc.org/sqlite",
 }
 
-// knownStdlibResidue is what crypto/sha256 legitimately drags in. Asserting the
-// set EXACTLY means a future stdlib change that widened it would fail here
-// instead of quietly enlarging the core's reach.
-var knownStdlibResidue = []string{"os", "reflect", "syscall", "time"}
+// knownStdlibResidue is what crypto/sha256 legitimately drags in, sorted.
+//
+// Every entry here is a package this core can reach but never calls, and each
+// one is beneath the FIPS-140 integrity check or the entropy source. Verified
+// per-root rather than assumed: crypto/sha256 reaches all five, and none of the
+// other six allowed imports reaches any of them.
+var knownStdlibResidue = []string{"internal/poll", "io/fs", "os", "syscall", "time"}
+
+// sensitiveWatchlist is deliberately WIDER than knownStdlibResidue. It names
+// the packages whose appearance in the closure would mean the core had gained a
+// capability, whether or not anyone predicted it.
+//
+// The residue check intersects the closure with THIS list and requires the
+// result to equal knownStdlibResidue exactly. That is what makes the check
+// bidirectional: a package that shows up here and is not documented fails the
+// test, which is precisely what the previous filter-through-the-documented-list
+// formulation could not do.
+var sensitiveWatchlist = []string{
+	"context",
+	"database/sql", "database/sql/driver",
+	"internal/poll",
+	"io/fs", "io/ioutil",
+	"log", "log/slog",
+	"math/rand", "math/rand/v2",
+	"net", "net/http", "net/url",
+	"os", "os/exec", "os/signal", "os/user",
+	"plugin",
+	"reflect",
+	"runtime/debug", "runtime/pprof",
+	"syscall",
+	"testing",
+	"time",
+}
 
 func TestProductionCoreDependencyFence(t *testing.T) {
 	direct := directImportsOfProductionFiles(t, "../predictioneval")
@@ -122,23 +158,28 @@ func TestProductionCoreDependencyFence(t *testing.T) {
 		}
 	}
 
-	// ---- The residue, asserted exactly. --------------------------------
+	// ---- The residue, asserted exactly and in BOTH directions. ---------
+	// Built from the WATCHLIST, not from the documented set, so a sensitive
+	// package nobody predicted still lands here.
 	var residue []string
-	for _, p := range knownStdlibResidue {
+	for _, p := range sensitiveWatchlist {
 		if closure[p] {
 			residue = append(residue, p)
 		}
 	}
 	sort.Strings(residue)
-	if strings.Join(residue, ",") != strings.Join(knownStdlibResidue, ",") {
-		t.Errorf("the documented stdlib residue changed: reachable = %v, documented = %v.\n"+
-			"This is not necessarily a defect, but the fence's honesty depends on the "+
-			"documented set matching reality, so update the comment and this list together.",
-			residue, knownStdlibResidue)
+	want := append([]string(nil), knownStdlibResidue...)
+	sort.Strings(want)
+	if strings.Join(residue, ",") != strings.Join(want, ",") {
+		t.Errorf("the reachable sensitive set changed.\n reachable  = %v\n documented = %v\n"+
+			"The fence's honesty rests on these matching. If something was ADDED, the core "+
+			"just gained reach it has to justify; if something was REMOVED, tighten the "+
+			"documented set rather than leaving it overstated.",
+			residue, want)
 	}
 
 	t.Logf("core direct imports (%d): %v", len(direct), direct)
-	t.Logf("transitive stdlib closure: %d packages; documented residue %v is reachable only "+
+	t.Logf("transitive stdlib closure: %d packages; reachable sensitive residue %v, all of it "+
 		"beneath crypto/sha256", len(closure), residue)
 }
 
@@ -166,6 +207,38 @@ func TestTheFenceWouldActuallyCatchAForbiddenImport(t *testing.T) {
 	if !closure["context"] {
 		t.Fatal("the transitive walk did not reach context from database/sql, so Rule C is not " +
 			"actually inspecting the import graph")
+	}
+}
+
+// TestTheDocumentedResidueIsActuallyAttributableToTheHash checks the CLAIM the
+// residue paragraph makes, not just the set it names.
+//
+// The paragraph's whole argument is "these are unavoidable beneath any stdlib
+// cryptographic hash". That is a statement about WHERE they come from, and it
+// was previously wrong about reflect — which came from encoding/binary, was
+// entirely avoidable, and is now gone. So the attribution is verified per-root:
+// crypto/sha256 must reach every documented residue entry, and none of the
+// other allowed imports may reach any of them.
+func TestTheDocumentedResidueIsActuallyAttributableToTheHash(t *testing.T) {
+	hashClosure := transitiveStdlibClosure(t, []string{"crypto/sha256"})
+	for _, p := range knownStdlibResidue {
+		if !hashClosure[p] {
+			t.Errorf("%q is documented as residue of crypto/sha256, but the hash does not reach it; "+
+				"something else in the core is pulling it in and the justification does not apply", p)
+		}
+	}
+	for imp := range allowedDirectImports {
+		if imp == "crypto/sha256" {
+			continue
+		}
+		closure := transitiveStdlibClosure(t, []string{imp})
+		for _, p := range knownStdlibResidue {
+			if closure[p] {
+				t.Errorf("%q reaches %q, so that residue entry is NOT attributable to the hash alone. "+
+					"Either drop %q from the core (reflect was dropped for exactly this reason) or "+
+					"correct the residue paragraph.", imp, p, imp)
+			}
+		}
 	}
 }
 

@@ -212,6 +212,12 @@ type DecisionCase struct {
 	Key   AttemptKey      `json:"key"`
 	Model ModelProvenance `json:"model"`
 
+	// Source is the session the case was read under, and Anomalies are the
+	// qualifications on that reading. They travel with the case so the
+	// scorecard can name its own evidence instead of implying a clean one.
+	Source    SourceProvenance `json:"source"`
+	Anomalies []string         `json:"anomalies,omitempty"`
+
 	RoundIncarnationID   string `json:"roundIncarnationId"`
 	EventID              string `json:"eventId"`
 	RoundCaptureOrigin   string `json:"roundCaptureOrigin"`
@@ -237,6 +243,8 @@ func ProjectDecisionCase(a AttemptKnowledge) (DecisionCase, error) {
 	out := DecisionCase{
 		Key:                  a.Key,
 		Model:                CurrentModelProvenance(),
+		Source:               a.Source,
+		Anomalies:            append([]string(nil), a.Anomalies...),
 		RoundIncarnationID:   a.RoundIncarnationID,
 		EventID:              a.EventID,
 		RoundCaptureOrigin:   a.RoundCaptureOrigin,

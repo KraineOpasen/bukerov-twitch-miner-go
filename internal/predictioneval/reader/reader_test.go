@@ -1298,11 +1298,17 @@ func TestALegacyProducerSessionStaysReadableAndYieldsNoDecisionCase(t *testing.T
 		Payload: predictioneval.SourcePayload{
 			// A terminal auto fact in every respect EXCEPT that it carries no
 			// envelope, which is exactly what the previous contract wrote.
+			// NO autoAttemptId. The discriminator and the envelope were added
+			// in the SAME commit, so a genuine pre-envelope fact carries
+			// neither. An earlier version of this fixture injected the counter,
+			// which made the test pass on a fact shape obs-v1 never wrote — and
+			// therefore made it no oracle at all for the case it names. The
+			// counters below are the ones that contract actually emitted.
 			Phase:      predictioneval.PhaseAutoDecided,
 			RoundState: "ACTIVE",
 			Decision:   "PLACE",
 			ReasonCode: "OK",
-			Counters:   map[string]int64{predictioneval.CounterAutoAttemptID: int64(fixtureAttemptID)},
+			Counters:   map[string]int64{"stake": 50, "balance": 1000},
 		},
 	}
 
@@ -1342,9 +1348,18 @@ func TestALegacyProducerSessionStaysReadableAndYieldsNoDecisionCase(t *testing.T
 			"differently by a reader",
 			got, predictioneval.ExclusionLegacyProducerNoEnvelope)
 	}
-	if pk.Excluded[0].Key == nil || pk.Excluded[0].Key.AttemptID != fixtureAttemptID {
-		t.Errorf("the exclusion names attempt %v, want the attempt id %d the fact carried",
-			pk.Excluded[0].Key, fixtureAttemptID)
+	// The exclusion names the FACT, not an attempt: the pre-envelope producer
+	// minted no discriminator, so there is no attempt identity to name. An
+	// exclusion claiming one would be inventing the very linkage obs-v2 exists
+	// to provide.
+	if pk.Excluded[0].Key != nil {
+		t.Errorf("the exclusion names attempt %+v, but the pre-envelope contract minted no "+
+			"attempt id at all — the identity is not there to be named",
+			*pk.Excluded[0].Key)
+	}
+	if pk.Excluded[0].ObservationID != legacyFact.ObservationID {
+		t.Errorf("the exclusion names observation %q, want %q: an operator has to be able to find "+
+			"the fact that was refused", pk.Excluded[0].ObservationID, legacyFact.ObservationID)
 	}
 
 	foundForeign := false

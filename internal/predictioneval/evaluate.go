@@ -114,7 +114,9 @@ type BaseStakeStage struct {
 	State string `json:"state"`
 	// Amount is the percentage-of-balance stake after the MaxPoints cap.
 	Amount int `json:"amount"`
-	// Capped reports that MaxPoints bound the amount.
+	// Capped reports that MaxPoints actually BOUND the amount — that the
+	// uncapped percentage exceeded it. A stake that merely equals MaxPoints was
+	// not constrained by it.
 	Capped bool `json:"capped"`
 }
 
@@ -293,7 +295,11 @@ func Evaluate(in DecisionInputs, obs ObservedRealization) Evaluation {
 		ev.BaseStake = BaseStakeStage{
 			State:  StageStateExecuted,
 			Amount: base,
-			Capped: base == settings.MaxPoints,
+			// "Bound by MaxPoints", not "equal to MaxPoints". The pinned policy
+			// caps on a strict >, so a percentage that lands exactly on the cap
+			// was never constrained by it — and a consumer told otherwise would
+			// go and adjust the wrong setting.
+			Capped: cappedByMaxPoints(in.Balance, settings.Percentage, settings.MaxPoints),
 		}
 
 		// ---- Stealth: independent first, conditioned only at the end. --

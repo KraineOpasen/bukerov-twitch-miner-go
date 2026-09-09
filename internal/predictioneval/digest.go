@@ -2,7 +2,6 @@ package predictioneval
 
 import (
 	"crypto/sha256"
-	"encoding/binary"
 	"hash"
 	"strconv"
 )
@@ -26,9 +25,18 @@ import (
 // be forged by a field containing it, a length prefix cannot.
 
 // digestPart feeds one field in length-prefixed.
+//
+// The eight-byte big-endian length is written by hand rather than with
+// encoding/binary. That package is the ONLY thing that put reflect into this
+// package's import graph, and the dependency fence's honesty depends on the
+// graph containing nothing it cannot justify — eight shifts are a smaller
+// price than a residue entry that needs explaining.
 func digestPart(h hash.Hash, part string) {
-	var lenBuf [8]byte
-	binary.BigEndian.PutUint64(lenBuf[:], uint64(len(part)))
+	n := uint64(len(part))
+	lenBuf := [8]byte{
+		byte(n >> 56), byte(n >> 48), byte(n >> 40), byte(n >> 32),
+		byte(n >> 24), byte(n >> 16), byte(n >> 8), byte(n),
+	}
 	_, _ = h.Write(lenBuf[:])
 	_, _ = h.Write([]byte(part))
 }
@@ -42,7 +50,7 @@ func digestBool(h hash.Hash, v bool) { digestPart(h, strconv.FormatBool(v)) }
 // Only facts UP TO AND INCLUDING the attempt's terminal fact are passed here.
 // Nothing later can reach this function, which is what makes the digest stable
 // against a growing store — and what
-// TestAppendingLaterFactsChangesNoEarlierCase falsifies if it ever stops being
+// TestAppendingLaterFactsCannotChangeAnEarlierAttemptsInputsOrDigest falsifies if it ever stops being
 // true.
 func commonInputDigest(attemptID uint64, slice []SourceRecord) string {
 	h := sha256.New()

@@ -36,7 +36,7 @@ const (
 	// even though the two must agree. Importing the constant would make this
 	// reader follow a producer bump silently and start replaying facts written
 	// under a contract nobody checked. The literal turns that into a loud test
-	// failure instead — see TestPinnedProducerRevisionMatchesTheStore — which
+	// failure instead — see the reader package's pinned-contract-identity test — which
 	// is a decision for a human, not a default.
 	SupportedProducerRevision = "obs-v2|policy-378d05d6ccc7d2a914730a1e1d023ff754bcf873"
 

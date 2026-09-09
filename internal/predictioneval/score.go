@@ -135,10 +135,16 @@ type SettlementAssessment struct {
 
 // Scorecard is the deterministic, versioned result for one decision case.
 type Scorecard struct {
-	Model             ModelProvenance  `json:"model"`
-	Source            SourceProvenance `json:"source"`
-	Key               AttemptKey       `json:"key"`
-	CommonInputDigest string           `json:"commonInputDigest"`
+	Model  ModelProvenance  `json:"model"`
+	Source SourceProvenance `json:"source"`
+	// Anomalies are the qualifications on the SESSION this case was read from
+	// — truncated, unfinalized, unwitnessed, lossy, foreign revision. They ride
+	// on the scorecard because the scorecard is what gets stored: without them
+	// a result from a seven-facts-dropped, zero-witness session is byte-identical
+	// to one from a fully verified AS_FINALIZED session.
+	Anomalies         []string   `json:"anomalies,omitempty"`
+	Key               AttemptKey `json:"key"`
+	CommonInputDigest string     `json:"commonInputDigest"`
 
 	RoundIncarnationID string `json:"roundIncarnationId"`
 	EventID            string `json:"eventId"`
@@ -176,6 +182,8 @@ type Scorecard struct {
 func Score(c DecisionCase, ev Evaluation, s SettlementFacts) Scorecard {
 	sc := Scorecard{
 		Model:              CurrentModelProvenance(),
+		Source:             c.Source,
+		Anomalies:          append([]string(nil), c.Anomalies...),
 		Key:                c.Key,
 		CommonInputDigest:  c.CommonInputDigest,
 		RoundIncarnationID: c.RoundIncarnationID,
