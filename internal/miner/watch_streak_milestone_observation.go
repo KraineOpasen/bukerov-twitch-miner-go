@@ -100,10 +100,15 @@ const (
 // the pure stall the old comment described, and under the cycle allowance
 // (three dispatches, fewer than the ladder's gqlMaxRetries+1) the ladder never
 // reaches its final attempt through this stage either: a pre-response stall
-// ends as the stage's own DEADLINE_EXCEEDED (the 30s client timeout plus one
-// backoff put the second dispatch past the 40s budget before a third permit
-// could be charged), while a FAST-failing transient - an immediate 5xx or a
-// refused connection, not a stall - is what ends as ALLOWANCE_EXHAUSTED. What
+// on a target that starts with at least two permits ends as the stage's own
+// DEADLINE_EXCEEDED (the 30s client timeout plus one backoff put the second
+// dispatch past the 40s budget before a third permit could be charged); a
+// stall on a target that starts with the cycle's LAST permit ends as
+// ALLOWANCE_EXHAUSTED after its first 30s timeout, with budget to spare and
+// the owner alive (the retry loop finds no permit for attempt 2 and stops;
+// pinned by TestAStallOnTheLastPermitEndsAsAllowanceExhausted in
+// internal/twitch), as does a FAST-failing transient - an immediate 5xx or a
+// refused connection, not a stall - whatever the permit count. What
 // DOES reach TRANSPORT_TIMEOUT through this stage is a body stall: a 2xx
 // status received and then a body that never completes, which Client.Timeout
 // ends as a non-transient read error on the FIRST dispatch (pinned by
@@ -685,11 +690,13 @@ func logWatchStreakMilestoneObservation(obs twitch.WatchStreakMilestoneObservati
 
 	// DEBUG for EVERY outcome, including OBSERVED.
 	//
-	// This record is emitted once per online streamer per bonus cycle, forever.
-	// internal/logger's console handler filters on level alone — it has no
-	// message allowlist — and ConsoleLevel defaults to INFO, so an INFO record
-	// here would print N long lines per minute to stdout/docker logs for as
-	// long as the miner runs, drowning a console that is deliberately kept
+	// This record is emitted for every started target on every bonus cycle,
+	// forever: up to three per cycle under the shared allowance, one per cycle
+	// in the unaccepted-hash steady state. internal/logger's console handler
+	// filters on level alone — it has no message allowlist — and ConsoleLevel
+	// defaults to INFO, so an INFO record here would print up to three long
+	// lines per minute to stdout/docker logs for as long as the miner runs,
+	// drowning a console that is deliberately kept
 	// sparse. In the outcome this feature currently expects most
 	// (UNSUPPORTED_QUERY, until the RewardList hash's live acceptance is
 	// evidenced) every observed field is unset, so those lines would carry no
@@ -808,13 +815,53 @@ func milestoneLogString(f twitch.MilestoneStringField) string {
 // sentinel ever is; every other value renders exactly as before. The check
 // runs on the sanitized, untruncated value, so a genuinely truncated long value
 // keeps its plain marker and only a wire value that SPELLS the marker is quoted.
+//
+// Quoting is applied to the ENCODED form's bound, not to an already-bounded
+// value: strconv.Quote doubles every backslash and quotation mark, so quoting
+// a 128-byte value could otherwise print up to 258 bytes and let the peer
+// inflate the record past milestoneLogStringCap. quoteBoundedForLog keeps the
+// quoted encoding within the cap, so a colliding value is bounded exactly as
+// tightly as a plain one (cap plus the truncation marker).
 func renderWireString(v string) string {
 	s := sanitizeForLog(v)
-	rendered := boundForLog(s)
 	if strings.HasPrefix(s, "<") || s == unknownLink || s == noProvenBroadcast || strings.HasSuffix(s, truncatedMarker) {
-		return strconv.Quote(rendered)
+		return quoteBoundedForLog(s)
 	}
-	return rendered
+	return boundForLog(s)
+}
+
+// quoteBoundedForLog renders an already-sanitized value as a Go-quoted string
+// whose quoted encoding is at most milestoneLogStringCap bytes. A value whose
+// whole encoding fits is quoted as is. A longer one is cut on a whole rune —
+// never inside an escape sequence — so that the quoted part stays a
+// well-formed literal, and the cut is marked with truncatedMarker AFTER the
+// closing quotation mark, where it reads as this record's marker rather than
+// as part of the wire value. The result is therefore never longer than
+// boundForLog's own bound of milestoneLogStringCap plus the marker.
+func quoteBoundedForLog(v string) string {
+	if q := strconv.Quote(v); len(q) <= milestoneLogStringCap {
+		return q
+	}
+	var b strings.Builder
+	b.Grow(milestoneLogStringCap + len(truncatedMarker))
+	b.WriteByte('"')
+	for i := 0; i < len(v); {
+		_, width := utf8.DecodeRuneInString(v[i:])
+		// strconv.Quote encodes rune by rune, so quoting one rune on its own
+		// yields exactly the bytes it would contribute to the whole literal:
+		// itself, or an escape sequence. The wrapping quotation marks are
+		// stripped.
+		enc := strconv.Quote(v[i : i+width])
+		enc = enc[1 : len(enc)-1]
+		if b.Len()+len(enc)+1 > milestoneLogStringCap {
+			break
+		}
+		b.WriteString(enc)
+		i += width
+	}
+	b.WriteByte('"')
+	b.WriteString(truncatedMarker)
+	return b.String()
 }
 
 // milestoneLogInt renders an integer field for a log record. A field that was

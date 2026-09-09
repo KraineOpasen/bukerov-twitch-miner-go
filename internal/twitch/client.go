@@ -71,7 +71,7 @@ var (
 	errAmbiguousDiagnosticJSON = errors.New("twitch: ambiguous diagnostic JSON response (duplicate object members)")
 
 	// errOversizedDiagnosticJSON marks a DIAGNOSTIC response carrying more JSON
-	// values than any credible answer to a diagnostic operation. Unexported for
+	// values than this read will decode. Unexported for
 	// the same reason as errAmbiguousDiagnosticJSON: only the observation
 	// raises and classifies it.
 	errOversizedDiagnosticJSON = errors.New("twitch: oversized diagnostic JSON response (too many values)")
@@ -393,7 +393,7 @@ func isAuthError(statusCode int, result map[string]interface{}) bool {
 // and gqlSingleRoundTrip): draws every explicit dispatch from a per-cycle
 // DiagnosticAllowance, so candidates and retries stop when it is spent; never
 // follows a redirect; caps the body at maxDiagnosticResponseBytes; stops the
-// candidate loop and drops the body on any non-2xx; refuses oversized or
+// candidate loop and drops the body on any status but 200; refuses oversized or
 // ambiguous JSON; recognises PersistedQueryNotFound structurally; settles
 // authorization on the HTTP status alone; never replays on an auth rejection;
 // and can return errDiagnosticAllowanceExhausted, errAmbiguousDiagnosticJSON
@@ -546,7 +546,7 @@ func (c *TwitchClient) gqlSingleRoundTrip(ctx context.Context, body []byte, oper
 	}
 
 	// A diagnostic read settles authorization on the STATUS alone. A 401 was
-	// answered above; a 2xx body that merely says "Unauthorized" is a string
+	// answered above; a 200 body that merely says "Unauthorized" is a string
 	// the peer chose, not a token rejection, and letting it pick the recorded
 	// class is exactly the peer-controlled misclassification this read
 	// refuses everywhere else. isAuthError's body rule stays for business
@@ -575,8 +575,8 @@ func (c *TwitchClient) postGQLRequest(ctx context.Context, operation constants.G
 // as a result, so a caller that treats "this decoded into the shape I
 // expected" as proof of success would accept a 400, a 404 or a redirect page
 // as data. For a
-// DIAGNOSTIC caller doGQLRequestWithClientIDFallback drops any non-2xx body
-// instead and the round trip surfaces an error; the status is exposed so that
+// DIAGNOSTIC caller doGQLRequestWithClientIDFallback drops the body of any
+// status but 200 instead and the round trip surfaces an error; the status is exposed so that
 // caller can name the failure by status rather than by shape.
 func (c *TwitchClient) postGQLRequestWithStatus(ctx context.Context, operation constants.GQLOperation) (map[string]interface{}, int, error) {
 	if isBonusMutationOperation(operation) {
@@ -1449,8 +1449,17 @@ func (c *TwitchClient) doGQLRequestWithClientIDFallback(ctx context.Context, bod
 			return respBody, statusCode, err
 		}
 
-		// A DIAGNOSTIC read stops here on any non-2xx, before the body is
-		// treated as evidence of anything.
+		// A DIAGNOSTIC read stops here on any status but 200, before the body
+		// is treated as evidence of anything. Exactly 200, not the 2xx range:
+		// HTTP 200 is the only status the checked-in GQL contract names as an
+		// answer (SPECIFICATIONS.md, and the bonus-mutation path one function
+		// up refuses everything else), so a 202 or a 206 is a pending or partial
+		// answer the contract never describes. With a range check a 206 carrying
+		// a valid data object was recorded OBSERVED, and a 202 carrying a
+		// structured APQ rejection drove the candidate loop below and ended as
+		// UNSUPPORTED_QUERY after three authenticated dispatches (reproduced by
+		// TestOnlyHTTP200IsDiagnosticEvidence). Business reads keep decoding
+		// whatever a 2xx carries; only the diagnostic gate is exact.
 		//
 		// The structured APQ detector this path uses
 		// (diagnosticPersistedQueryNotFound, below) reads the body and does
@@ -1477,12 +1486,12 @@ func (c *TwitchClient) doGQLRequestWithClientIDFallback(ctx context.Context, bod
 		// Nothing downstream loses evidence: 401 and 403 are settled on the
 		// status alone, the resulting "empty response body" transport error
 		// carries no text worth keeping, and ObserveWatchStreakMilestone
-		// refines it back to HTTP_STATUS. A non-2xx is not a working client ID,
+		// refines it back to HTTP_STATUS. A refused status is not a working client ID,
 		// so nothing is cached for it either. Transient statuses never arrive
 		// here - doGQLRequestWithRetry has already exhausted them into an error
 		// above.
 		if diagnostic {
-			if statusCode < 200 || statusCode > 299 {
+			if statusCode != http.StatusOK {
 				return nil, statusCode, nil
 			}
 
@@ -1660,7 +1669,7 @@ func (c *TwitchClient) doGQLRequestWithRetry(ctx context.Context, body []byte, o
 				return nil, 0, cerr
 			}
 			if dr.allowance != nil && !dr.allowance.charge() {
-				return nil, 0, errDiagnosticAllowanceExhausted
+				return nil, 0, fmt.Errorf("%w: operation %s (attempt %d)", errDiagnosticAllowanceExhausted, operationLabel, attempt+1)
 			}
 			dr.dispatches++
 
@@ -1670,11 +1679,12 @@ func (c *TwitchClient) doGQLRequestWithRetry(ctx context.Context, body []byte, o
 			// see. noRedirectClient is request-local and made at dispatch
 			// time, as doGQLMutationOnce already does, so the shared client's
 			// policy - and every business read's - is untouched. The 3xx then
-			// comes back as an ordinary non-2xx and is refused on its status.
+			// comes back as an ordinary refused status and is refused on it.
 			respBody, statusCode, retryAfter, err = doGQLOnceWithClient(c.noRedirectClient(), req)
 		}
 		if err == nil {
-			// A diagnostic read repeats for every target on every cycle, so its
+			// A diagnostic read repeats for every started target on every
+			// cycle (up to three under the shared allowance), so its
 			// per-attempt trace is pure volume in the retained log; the caller
 			// records the outcome as its own structured fact instead. A
 			// business read keeps the trace.
@@ -1709,7 +1719,7 @@ func (c *TwitchClient) doGQLRequestWithRetry(ctx context.Context, body []byte, o
 				return nil, statusCode, cerr
 			}
 			if dr.allowance != nil && dr.allowance.Remaining() == 0 {
-				return nil, statusCode, errDiagnosticAllowanceExhausted
+				return nil, statusCode, fmt.Errorf("%w: operation %s (attempt %d)", errDiagnosticAllowanceExhausted, operationLabel, attempt+1)
 			}
 		}
 
@@ -1779,8 +1789,10 @@ func waitForRetry(ctx context.Context, wait time.Duration) error {
 }
 
 // maxDiagnosticResponseBytes is the largest response body a DIAGNOSTIC read will
-// accept. Chosen orders of magnitude above a real RewardList response so it
-// cannot refuse one, and far below anything that would matter to the process.
+// accept. Sized by margin, not by observation: no live RewardList response
+// has been captured (acceptance is PENDING), so the limit is only EXPECTED to
+// sit orders of magnitude above one (see doGQLOnceWithClient), and it is far
+// below anything that would matter to the process.
 //
 // It is a limit, not a truncation point: a body past it is refused whole. The
 // read pulls one byte more than the limit precisely so overflow is DETECTABLE,

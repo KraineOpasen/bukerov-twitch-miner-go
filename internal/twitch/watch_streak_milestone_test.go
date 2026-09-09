@@ -547,8 +547,8 @@ func TestObservationFailsClosedOnAMalformedErrorsNode(t *testing.T) {
 // merely LOOKS like a GraphQL response.
 //
 // The shared transport special-cases only 401 and 403; for a diagnostic read
-// every other non-2xx has its body dropped one layer down and surfaces as an
-// error refined to HTTP_STATUS. Without that, a 400 or 404 whose payload
+// every other status but 200 has its body dropped one layer down and surfaces
+// as an error refined to HTTP_STATUS. Without that, a 400 or 404 whose payload
 // carries an object-valued data key would satisfy the data-presence check and
 // be recorded as an observation, so a hostile endpoint or proxy could
 // manufacture diagnostic evidence out of a request the server refused.
@@ -570,6 +570,74 @@ func TestObservationRequiresAnHTTPSuccessStatus(t *testing.T) {
 			assertEmptySnapshot(t, obs.Snapshot)
 		})
 	}
+}
+
+// TestOnlyHTTP200IsDiagnosticEvidence closes the gap between "any 2xx" and the
+// checked-in GQL contract, which names HTTP 200 as the only status Twitch
+// answers a GraphQL request with (the bonus-mutation path already refuses
+// everything else). With a 2xx RANGE gate, a 206 carrying a valid data object
+// was recorded as OBSERVED - partial content promoted to evidence - and a 202
+// carrying a structured APQ rejection drove the client-ID candidate loop and
+// ended as UNSUPPORTED_QUERY after three authenticated dispatches. Both gates,
+// the transport's and the reader's, now require exactly 200; a business read
+// is unchanged and still decodes what a 206 carries.
+func TestOnlyHTTP200IsDiagnosticEvidence(t *testing.T) {
+	const observed = `{"data":{"channel":{"id":"12345","self":{"watchStreakMilestone":{"watchStreakMilestone":{"value":"9"}}}}}}`
+	const apq = `{"errors":[{"message":"PersistedQueryNotFound","extensions":{"code":"PERSISTED_QUERY_NOT_FOUND"}}]}`
+	for _, tc := range []struct {
+		name           string
+		status         int
+		body           string
+		wantOutcome    WatchStreakMilestoneOutcome
+		wantClass      MilestoneFailureClass
+		wantDispatches int
+	}{
+		{"206 with a data object is not evidence", http.StatusPartialContent, observed, MilestoneUnavailable, MilestoneFailureHTTPStatus, 1},
+		{"202 with an APQ rejection does not rotate client IDs", http.StatusAccepted, apq, MilestoneUnavailable, MilestoneFailureHTTPStatus, 1},
+		{"201 with a data object is not evidence", http.StatusCreated, observed, MilestoneUnavailable, MilestoneFailureHTTPStatus, 1},
+		{"204 with a data object is not evidence", http.StatusNoContent, observed, MilestoneUnavailable, MilestoneFailureHTTPStatus, 1},
+		// Controls: 200 keeps its meaning on both shapes.
+		{"200 with a data object is observed", http.StatusOK, observed, MilestoneObserved, MilestoneFailureNone, 1},
+		{"200 with an APQ rejection walks the client IDs", http.StatusOK, apq, MilestoneUnsupported, MilestoneFailureQueryNotFound, 3},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var requests int
+			clientIDs := map[string]struct{}{}
+			c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+				requests++
+				clientIDs[r.Header.Get("Client-Id")] = struct{}{}
+				w.WriteHeader(tc.status)
+				_, _ = io.WriteString(w, tc.body)
+			})
+
+			obs := c.ObserveWatchStreakMilestone(context.Background(), "12345", "somestreamer", nil)
+
+			if obs.Outcome != tc.wantOutcome || obs.FailureClass != tc.wantClass {
+				t.Errorf("HTTP %d: outcome/class = %s/%s, want %s/%s", tc.status, obs.Outcome, obs.FailureClass, tc.wantOutcome, tc.wantClass)
+			}
+			if requests != tc.wantDispatches || obs.Dispatches != tc.wantDispatches {
+				t.Errorf("HTTP %d: %d requests seen, %d dispatches recorded, want %d of each (client IDs used: %d)",
+					tc.status, requests, obs.Dispatches, tc.wantDispatches, len(clientIDs))
+			}
+			if tc.wantOutcome != MilestoneObserved {
+				assertEmptySnapshot(t, obs.Snapshot)
+			}
+		})
+	}
+
+	// Control: the business transport is untouched. It special-cases only
+	// 401 and 403 and decodes what any other status carries, so a 206 with a
+	// decodable body still answers a business read exactly as before.
+	t.Run("a business read still decodes a 206", func(t *testing.T) {
+		c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusPartialContent)
+			_, _ = io.WriteString(w, `{"data":{"user":{"id":"777"}}}`)
+		})
+		id, err := c.GetChannelID("somebody")
+		if err != nil || id != "777" {
+			t.Fatalf("business read at HTTP 206 = (%q, %v), want (\"777\", nil): the exact-200 gate is diagnostic-only", id, err)
+		}
+	})
 }
 
 // TestDiagnosticRetryTraceCarriesNoRawErrorText holds the diagnostic read to its
@@ -3126,6 +3194,11 @@ func TestMalformedJSONKeepsItsOwnFailureClass(t *testing.T) {
 			if obs.Outcome == MilestoneObserved {
 				t.Fatalf("malformed input recorded as an observation")
 			}
+			// "Its own class" has a name: the decoder's refusal is recorded under
+			// the generic TRANSPORT class, which the spec states and this pins.
+			if obs.Outcome != MilestoneUnavailable || obs.FailureClass != MilestoneFailureTransport {
+				t.Fatalf("malformed input recorded as %s/%s, want %s/%s", obs.Outcome, obs.FailureClass, MilestoneUnavailable, MilestoneFailureTransport)
+			}
 			assertEmptySnapshot(t, obs.Snapshot)
 		})
 	}
@@ -3142,6 +3215,60 @@ func TestMalformedJSONKeepsItsOwnFailureClass(t *testing.T) {
 			t.Fatalf("failure class = %q, want %s", obs.FailureClass, MilestoneFailureAmbiguousJSON)
 		}
 	})
+}
+
+// TestAStallOnTheLastPermitEndsAsAllowanceExhausted pins the permit-count half
+// of the stall classification the cycle-budget comment and SPECIFICATIONS.md
+// state: a pre-response stall on a target that starts with the cycle's LAST
+// permit ends as ALLOWANCE_EXHAUSTED after its first client timeout - not as
+// the stage's deadline, which still has slack, and not as TRANSPORT_TIMEOUT -
+// because the retry loop finds no permit for a second attempt and stops. The
+// owner is alive throughout, so the class is the allowance's, not a
+// cancellation's.
+func TestAStallOnTheLastPermitEndsAsAllowanceExhausted(t *testing.T) {
+	var (
+		mu       sync.Mutex
+		attempts int
+	)
+	stopHandlers := make(chan struct{})
+	c := newTestClient(t, func(_ http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		attempts++
+		mu.Unlock()
+		select {
+		case <-r.Context().Done():
+		case <-stopHandlers:
+		}
+	})
+	t.Cleanup(func() { close(stopHandlers) })
+	c.client.Timeout = 40 * time.Millisecond
+
+	// Far longer than one timeout plus the whole retry ladder would be at this
+	// scale, so the owner cannot be what ends the read.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	start := time.Now()
+	obs := c.ObserveWatchStreakMilestone(ctx, "12345", "somestreamer", NewDiagnosticAllowance(1))
+	elapsed := time.Since(start)
+
+	mu.Lock()
+	got := attempts
+	mu.Unlock()
+
+	if got != 1 || obs.Dispatches != 1 {
+		t.Fatalf("attempts = %d, dispatches = %d, want 1 and 1: the last permit admits exactly one dispatch", got, obs.Dispatches)
+	}
+	if obs.Outcome != MilestoneUnavailable || obs.FailureClass != MilestoneFailureAllowanceExhausted {
+		t.Fatalf("outcome/class = %s/%s, want %s/%s: a stall on the last permit is the allowance's stop, "+
+			"not the deadline's and not the transport's", obs.Outcome, obs.FailureClass, MilestoneUnavailable, MilestoneFailureAllowanceExhausted)
+	}
+	if ctx.Err() != nil {
+		t.Fatalf("the owner context ended (%v); the class above was not the allowance's", ctx.Err())
+	}
+	if elapsed >= 2*time.Second {
+		t.Fatalf("the read took %v: it waited on a retry it could never afford", elapsed)
+	}
 }
 
 // TestAClientTimeoutIsRetriedRatherThanReturned pins the retry contract that

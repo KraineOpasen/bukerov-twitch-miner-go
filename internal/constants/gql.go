@@ -209,14 +209,25 @@ var (
 	// Live acceptance is PENDING separately authorized runtime evidence; until
 	// then a PersistedQueryNotFound outcome is the expected, honestly reported
 	// result and no replacement hash may be invented. On a confirmed rotation
-	// the stale-hash handling in client.go applies exactly as it does to every
-	// other operation here.
+	// the stale-hash handling in client.go does NOT apply to this operation
+	// as it does to the business operations here: RewardList is dispatched
+	// only as a DIAGNOSTIC read (internal/twitch/watch_streak_milestone.go),
+	// which walks the same client-ID candidates but promotes no working ID,
+	// pins no per-operation candidate, records nothing in ConnHealth, and
+	// reports an exhausted walk as its own DEBUG summary and an
+	// UNSUPPORTED_QUERY outcome rather than the operator-facing ERROR and WARN
+	// a business operation raises (doGQLRequestWithClientIDFallback and
+	// logStaleHashExhausted in client.go).
 	//
-	// Both variables are required and are supplied per call (there is no
-	// preset: WithVariables replaces the whole map, so presetting one here
-	// would be silently dropped by the call site that supplies the other):
+	// Both variables are supplied on every call, because that is what the
+	// donor capture sends. Whether Twitch would accept the query with either
+	// omitted is not attested by that capture (no live response has been
+	// observed), so this code never omits one. They are supplied per call
+	// rather than preset here because WithVariables replaces the whole map:
+	// presetting one would be silently dropped by the call site that
+	// supplies the other.
 	//   channelID                        - the channel to read
-	//   shouldIncludeAllSuspendedStreaks - false (observed default)
+	//   shouldIncludeAllSuspendedStreaks - false (the donor's captured value)
 	RewardList = NewGQLOperation(
 		"RewardList",
 		"0b1471876d7647993731b9e3c6a13bf304c67fb31d07f06a945d42286ee377c4",

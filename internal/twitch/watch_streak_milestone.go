@@ -270,16 +270,19 @@ const (
 	// MilestoneUnavailable: the request failed at the transport/auth layer, the
 	// cycle's diagnostic dispatch allowance ran out AFTER at least one dispatch
 	// had been made for this target (ALLOWANCE_EXHAUSTED), or the response was
-	// refused before parsing (a non-2xx status, a malformed errors node,
+	// refused before parsing (a status other than 200, a malformed errors node,
 	// ambiguous or oversized JSON, no data object), so what was learned is
 	// incomplete. FailureClass names which.
 	MilestoneUnavailable WatchStreakMilestoneOutcome = "UNAVAILABLE"
-	// MilestoneCancelled: the owning context was cancelled; the request was
-	// released rather than completed.
+	// MilestoneCancelled: the owning context was cancelled before or while a
+	// request was in flight; the request, if one left, was released rather
+	// than completed. Dispatches says whether one left.
 	MilestoneCancelled WatchStreakMilestoneOutcome = "CANCELLED"
 	// MilestoneSkipped: no request was made at all (no channel identity, the
 	// context was already done before the attempt, or the cycle's dispatch
-	// allowance was already empty on entry).
+	// allowance was already empty on entry). A context that ends after those
+	// entry checks but before the first dispatch reads CANCELLED with
+	// Dispatches 0, not SKIPPED.
 	MilestoneSkipped WatchStreakMilestoneOutcome = "SKIPPED"
 )
 
@@ -311,8 +314,8 @@ const (
 	MilestoneFailureContextDone      MilestoneFailureClass = "CONTEXT_ALREADY_DONE"
 	// MilestoneFailureNoDataNode: the response carried no top-level GraphQL
 	// errors AND no data object. A GraphQL data response always has one, so
-	// this is an edge/proxy body served at a 2xx status (a gateway page with a
-	// JSON payload); a non-2xx never reaches this check, because the diagnostic
+	// this is an edge/proxy body served at HTTP 200 (a gateway page with a
+	// JSON payload); no other status reaches this check, because the diagnostic
 	// transport branch drops its body and it is refused as HTTP_STATUS.
 	// Reporting it as OBSERVED would record "Twitch answered and there is no
 	// milestone" when the request was in fact rejected.
@@ -324,8 +327,10 @@ const (
 	// string, a number or null - so without this the rejection would be walked
 	// past and its accompanying data recorded as an observed milestone.
 	MilestoneFailureMalformedErrors MilestoneFailureClass = "MALFORMED_ERRORS_NODE"
-	// MilestoneFailureHTTPStatus: the response did not carry a 2xx status. For
-	// a diagnostic read every non-2xx body that reaches
+	// MilestoneFailureHTTPStatus: the response did not carry HTTP 200, the only
+	// status the checked-in GQL contract names as an answer (a 202 or 206 is a
+	// pending or partial answer it never describes, and is refused like a 404).
+	// For a diagnostic read the body of every other status that reaches
 	// doGQLRequestWithClientIDFallback is DROPPED there; 401 and 403 are then
 	// settled by status in gqlSingleRoundTrip, and every other NON-TRANSIENT
 	// status surfaces as an error which this reader refines to the status
@@ -518,7 +523,8 @@ func (c *TwitchClient) ObserveWatchStreakMilestone(ctx context.Context, channelI
 		// own timeout, an exhausted hash, a token rejection, ambiguous JSON -
 		// and must survive untouched. What is left is the catch-all, which
 		// answers "transport" for failures that were in truth an HTTP refusal:
-		// a 4xx whose body did not parse reached the record as TRANSPORT even
+		// a 4xx whose body did not parse (or, since the diagnostic transport
+		// drops it, any status but 200) reached the record as TRANSPORT even
 		// though the status alone had already settled it.
 		//
 		// Transient statuses keep TRANSPORT deliberately. After the retry
@@ -530,7 +536,12 @@ func (c *TwitchClient) ObserveWatchStreakMilestone(ctx context.Context, channelI
 		// a future path that surfaces a 429 or a 5xx here with the generic
 		// class is not refined into HTTP_STATUS, because "the schedule ran and
 		// gave up" is the more useful fact than the last status seen.
-		if statusCode != 0 && (statusCode < 200 || statusCode > 299) &&
+		//
+		// Exactly 200 is the accepted status, as at the transport gate: a 201,
+		// 202 or 206 whose dropped body surfaced as the generic class is an HTTP
+		// refusal too, and is refined like a 404. A 200 is never refined, so an
+		// empty or undecodable 200 body keeps the decoder's own TRANSPORT class.
+		if statusCode != 0 && statusCode != http.StatusOK &&
 			!gql.IsTransientStatus(statusCode) {
 			switch obs.FailureClass {
 			case MilestoneFailureTransport:
@@ -558,7 +569,7 @@ func (c *TwitchClient) ObserveWatchStreakMilestone(ctx context.Context, channelI
 				// {"error":"Unauthorized"} and HTTP 400 with
 				// {"errors":[{"message":"Unauthorized"}]} both recorded
 				// UNAUTHORIZED, so the peer chose the class the status had
-				// already settled. The same rule now holds at a 2xx too:
+				// already settled. The same rule now holds at a 200 too:
 				// gqlSingleRoundTrip settles authorization on the status alone
 				// for a diagnostic read, so a 200 whose body merely says
 				// "Unauthorized" reaches the top-level-error refusal below and
@@ -566,14 +577,14 @@ func (c *TwitchClient) ObserveWatchStreakMilestone(ctx context.Context, channelI
 				//
 				// Stated honestly, because a test cannot currently tell the two
 				// guards apart: this branch is UNREACHABLE through the transport
-				// today. doGQLRequestWithClientIDFallback drops the body on a
-				// diagnostic non-2xx, so isAuthError never sees one and the
+				// today. doGQLRequestWithClientIDFallback drops the body on any
+				// diagnostic status but 200, so isAuthError never sees one and the
 				// class arrives as TRANSPORT, handled by the case above.
 				// Measured by reverting each guard alone: either one fixes the
 				// case, and only removing BOTH reproduces it.
 				//
-				// It is kept anyway, and not as decoration. The rule "at a
-				// non-2xx the STATUS names the failure" belongs at the layer
+				// It is kept anyway, and not as decoration. The rule "at any
+				// status but 200 the STATUS names the failure" belongs at the layer
 				// that records the failure, not as a side effect of a
 				// resource-bound decision made two calls away; if a later change
 				// ever needs that body back, this is what stops the class bug
@@ -593,15 +604,17 @@ func (c *TwitchClient) ObserveWatchStreakMilestone(ctx context.Context, channelI
 	// Success is judged on the STATUS, not on the shape of what came back. A
 	// refused request is not evidence. Stated honestly: for a diagnostic read
 	// this branch is UNREACHABLE through the transport today, because
-	// doGQLRequestWithClientIDFallback drops the body of every non-2xx it does
-	// not special-case and the round trip then surfaces an error, which the
-	// err != nil path above refines to HTTP_STATUS. It is kept for the same
-	// reason as the UNAUTHORIZED case: the rule "at a non-2xx the status names
-	// the failure" belongs at the layer that records the failure, so that if
-	// a later change ever hands that body back, a 400, a 404 or a redirect
-	// page carrying a data object still cannot pass the data-presence check
-	// below and be recorded as an observed milestone.
-	if statusCode < 200 || statusCode > 299 {
+	// doGQLRequestWithClientIDFallback drops the body of every status but 200
+	// it does not special-case and the round trip then surfaces an error, which
+	// the err != nil path above refines to HTTP_STATUS. It is kept for the same
+	// reason as the UNAUTHORIZED case: the rule "at any status but 200 the
+	// status names the failure" belongs at the layer that records the failure,
+	// so that if a later change ever hands that body back, a 400, a 404, a 206
+	// or a redirect page carrying a data object still cannot pass the
+	// data-presence check below and be recorded as an observed milestone.
+	// Exactly 200, as at the transport: the checked-in GQL contract names no
+	// other status as an answer.
+	if statusCode != http.StatusOK {
 		obs.Outcome, obs.FailureClass = MilestoneUnavailable, MilestoneFailureHTTPStatus
 		return obs
 	}
@@ -704,8 +717,8 @@ func classifyMilestoneRequestError(ctx context.Context, err error) (WatchStreakM
 		return MilestoneUnavailable, MilestoneFailureAmbiguousJSON
 	case errors.Is(err, errOversizedDiagnosticJSON):
 		// Same policy as the parser-side collection limit, enforced one layer
-		// earlier and reported under the same class: this response is too large
-		// to be a credible answer, and refusing it before the decode is what
+		// earlier and reported under the same class: this response is larger than
+		// this read will decode, and refusing it before the decode is what
 		// makes the refusal cheap.
 		return MilestoneUnavailable, MilestoneFailureOversizedCollection
 	default:
@@ -761,7 +774,8 @@ func parseWatchStreakMilestone(resp map[string]interface{}) WatchStreakMilestone
 // same bound: a dense array of tiny elements turns a megabyte of wire into
 // hundreds of thousands of Go structs. Measured on a 1,048,575-byte body of
 // "0," elements: 524,244 entries retained and ~145 MB allocated, on the bonus
-// poll goroutine, once per online target.
+// poll goroutine, once per started target (at most three per cycle under the
+// allowance).
 //
 // The structs bought nothing. The record prints exact COUNTS and a sample of
 // at most a few identifiers, so every element past the sample exists only to be
@@ -825,6 +839,8 @@ func parseMilestoneMissedStreams(parent map[string]interface{}) MilestoneMissedS
 	if !ok {
 		return MilestoneMissedStreams{Presence: MilestoneFieldMalformed}
 	}
+	// A typed-nil slice, which only a Go caller can build (json.Unmarshal
+	// never produces one), is NULL as the wire null is.
 	if list == nil {
 		return MilestoneMissedStreams{Presence: MilestoneFieldNull}
 	}
@@ -880,6 +896,8 @@ func parseMilestoneBroadcastIdentifiers(entry map[string]interface{}) MilestoneB
 	if !ok {
 		return MilestoneBroadcastIdentifiers{Presence: MilestoneFieldMalformed}
 	}
+	// A typed-nil slice, which only a Go caller can build (json.Unmarshal
+	// never produces one), is NULL as the wire null is.
 	if list == nil {
 		return MilestoneBroadcastIdentifiers{Presence: MilestoneFieldNull}
 	}
@@ -930,7 +948,8 @@ func parseMilestoneBroadcastIdentifiers(entry map[string]interface{}) MilestoneB
 // milestoneObject classifies and returns a nested object node. A nil parent
 // yields MISSING (an absent parent cannot make its child present), a JSON null
 // yields NULL, a non-object yields MALFORMED, and only a real object yields
-// VALID.
+// VALID. A typed-nil map, which only a Go caller can build (json.Unmarshal
+// never produces one), is NULL too.
 func milestoneObject(parent map[string]interface{}, key string) (map[string]interface{}, MilestoneFieldPresence) {
 	raw, present := parent[key]
 	switch {

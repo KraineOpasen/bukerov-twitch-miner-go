@@ -289,6 +289,34 @@ func hasAttr(line, key string) bool {
 	return strings.Contains(line, " "+key+"=")
 }
 
+// textLogAttrRaw returns one slog text-handler attribute exactly as written on
+// the line — a quoted Go literal when the handler had to quote it — so a test
+// can strconv.Unquote the handler's layer and measure what the record itself
+// emitted. attrValue's unquoting stops at the first embedded quotation mark,
+// which a value the record quoted itself always carries.
+func textLogAttrRaw(line, key string) string {
+	idx := strings.Index(line, " "+key+"=")
+	if idx < 0 {
+		return ""
+	}
+	rest := line[idx+len(key)+2:]
+	if !strings.HasPrefix(rest, `"`) {
+		if end := strings.Index(rest, " "); end >= 0 {
+			return rest[:end]
+		}
+		return rest
+	}
+	for i := 1; i < len(rest); i++ {
+		switch rest[i] {
+		case '\\':
+			i++
+		case '"':
+			return rest[:i+1]
+		}
+	}
+	return rest
+}
+
 // attrValue extracts a slog text-handler attribute value from one line.
 func attrValue(line, key string) string {
 	idx := strings.Index(line, " "+key+"=")
@@ -909,6 +937,67 @@ func TestTruncateForLogBoundsTwitchStrings(t *testing.T) {
 			t.Error("the record does not mark the values it cut")
 		}
 	})
+}
+
+// TestAQuotedWireValueStaysWithinTheLogBound proves the quoting that keeps a
+// wire value from spelling a record sentinel cannot itself breach the record's
+// size bound: strconv.Quote doubles backslashes and quotation marks, so a
+// 128-byte value of them would render at 257 bytes if the bound were applied
+// before quoting. The quoted ENCODING is what is bounded, the cut never splits
+// an escape sequence or a rune, and a value whose encoding fits is unchanged.
+func TestAQuotedWireValueStaysWithinTheLogBound(t *testing.T) {
+	const bound = milestoneLogStringCap + len("...(truncated)")
+	for _, tc := range []struct {
+		name  string
+		value string
+	}{
+		{"backslashes at the cap", "<" + strings.Repeat(`\`, milestoneLogStringCap-1)},
+		{"quotation marks past the cap", "<" + strings.Repeat(`"`, milestoneLogStringCap*2)},
+		{"multi-byte runes past the cap", "<" + strings.Repeat("\u00e9", milestoneLogStringCap)},
+		{"mixed escapes", "<" + strings.Repeat(`a\"`, milestoneLogStringCap)},
+		{"a long value spelling the marker", strings.Repeat("x", milestoneLogStringCap*3) + "...(truncated)"},
+		{"one byte past the fit", "<" + strings.Repeat("a", milestoneLogStringCap-1)},
+		{"exactly fits when quoted", "<" + strings.Repeat("a", milestoneLogStringCap-3)},
+		{"a plain sentinel", "UNKNOWN"},
+		{"a short collision", "<MISSING>"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := renderWireString(tc.value)
+			if len(got) > bound {
+				t.Fatalf("rendered %d bytes, over the %d-byte bound: %q", len(got), bound, got)
+			}
+			if !strings.HasPrefix(got, `"`) {
+				t.Fatalf("a colliding value is not rendered quoted: %q", got)
+			}
+			quoted := got
+			truncated := strings.HasSuffix(got, "...(truncated)")
+			if truncated {
+				quoted = strings.TrimSuffix(got, "...(truncated)")
+			}
+			if len(quoted) > milestoneLogStringCap {
+				t.Errorf("the quoted encoding is %d bytes, over the %d-byte cap", len(quoted), milestoneLogStringCap)
+			}
+			decoded, err := strconv.Unquote(quoted)
+			if err != nil {
+				t.Fatalf("the quoted part is not a well-formed literal (%v): %q", err, quoted)
+			}
+			if !strings.HasPrefix(tc.value, decoded) {
+				t.Errorf("the quoted part does not decode to a prefix of the value: %q", decoded)
+			}
+			if !utf8.ValidString(decoded) {
+				t.Errorf("the cut split a rune: %q", decoded)
+			}
+			if truncated == (decoded == tc.value) {
+				t.Errorf("truncated=%v but decoded equals value=%v: %q", truncated, decoded == tc.value, got)
+			}
+			if !truncated && len(strconv.Quote(tc.value)) > milestoneLogStringCap {
+				t.Errorf("an over-cap encoding was not cut: %q", got)
+			}
+			if truncated && len(strconv.Quote(tc.value)) <= milestoneLogStringCap {
+				t.Errorf("an encoding that fit the cap was cut: %q", got)
+			}
+		})
+	}
 }
 
 // TestObservationUnsupportedQueryStaysObservationalOnly proves a stale
@@ -1841,6 +1930,43 @@ func TestForgedSentinelsCannotSpellTheRecordVocabulary(t *testing.T) {
 		}
 	})
 
+	t.Run("a colliding value cannot inflate the record past the bound", func(t *testing.T) {
+		logs := captureLogs(t)
+		logins := milestoneLogins(t, 1)
+		// A 128-byte state of "<" and backslashes: within the value cap, so it
+		// is not truncated, and colliding, so it is quoted — which doubles
+		// every backslash. Bounding before quoting would print 257 bytes.
+		// JSON-escaped, so the body decodes to single backslashes.
+		inflating := "<" + strings.Repeat(`\\`, milestoneLogStringCap-1)
+		forged := `{"data":{"channel":{"id":"12345","self":{"watchStreakMilestone":{` +
+			`"watchStreakThreshold":3,"watchStreakCopoBonus":450,"state":"` + inflating + `",` +
+			`"watchStreakMilestone":{"id":"m-1","value":"4"}}}}}}`
+		rt := &milestoneRoundTripper{rewardListBody: forged}
+		m, _ := newMilestoneMiner(t, rt, logins, logins)
+		logs.Reset()
+		m.observeWatchStreakMilestones(context.Background(), milestoneCycleNow(0))
+		obs := recordLines(logs.String(), milestoneObservationRecord)
+		if len(obs) != 1 {
+			t.Fatalf("observation records = %d, want 1; logs:\n%s", len(obs), logs.String())
+		}
+		line := obs[0]
+		if attrValue(line, "outcome") != "OBSERVED" {
+			t.Fatalf("the forged body was not OBSERVED: %s", line)
+		}
+		// The text handler re-quotes the value; decode its layer to measure
+		// what this record emitted.
+		emitted, err := strconv.Unquote(textLogAttrRaw(line, "state"))
+		if err != nil {
+			t.Fatalf("state attribute is not a quoted text-handler value (%v): %s", err, line)
+		}
+		if len(emitted) > milestoneLogStringCap+len("...(truncated)") {
+			t.Errorf("state rendered at %d bytes, over the %d-byte bound: quoting expanded past the cap", len(emitted), milestoneLogStringCap+len("...(truncated)"))
+		}
+		if !strings.HasPrefix(emitted, `"<`) || !strings.HasSuffix(emitted, "...(truncated)") {
+			t.Errorf("state is not rendered as a quoted, marked cut: %q", emitted)
+		}
+	})
+
 	t.Run("correlation record", func(t *testing.T) {
 		logbuf := captureLogs(t)
 		m, s, _ := newMilestoneCorrelationMiner(t, &milestoneRoundTripper{})
@@ -2491,11 +2617,23 @@ func TestAStalledTwitchIsRecordedAsOurDeadlineNotTheTransportsTimeout(t *testing
 	}
 }
 
+// TestObservationStageIsBoundedByACycleBudget proves the BUDGET stops a slow
+// roster, and that the budget - not the dispatch allowance - is what stopped
+// it. An earlier version compared the requests issued against the roster size;
+// with the three-permit allowance a four-target roster can never issue four
+// requests whatever the deadline does, so that assertion had become
+// unreachable and the test passed with the budget switched off entirely
+// (reproduced by pushing the stage deadline an hour out: three targets ran on
+// the allowance and the test stayed green). The bound asserted here is the one
+// only the budget can produce: with a 120ms uncancellable cost per target and
+// a 50ms budget, exactly ONE target starts, and the budget record names TIME
+// under the stage budget as the reason.
 func TestObservationStageIsBoundedByACycleBudget(t *testing.T) {
 	previousBudget := milestoneObservationCycleBudget
 	milestoneObservationCycleBudget = 50 * time.Millisecond
 	t.Cleanup(func() { milestoneObservationCycleBudget = previousBudget })
 
+	logs := captureLogs(t)
 	const targets = 4
 	logins := milestoneLogins(t, targets)
 	rt := &milestoneRoundTripper{}
@@ -2503,6 +2641,7 @@ func TestObservationStageIsBoundedByACycleBudget(t *testing.T) {
 	// cancellable, so the budget can only be honoured between targets.
 	rt.onRewardList = func(int) { time.Sleep(120 * time.Millisecond) }
 	m, _ := newMilestoneMiner(t, rt, logins, logins)
+	logs.Reset()
 
 	m.observeWatchStreakMilestones(context.Background(), milestoneCycleNow(0))
 
@@ -2514,10 +2653,23 @@ func TestObservationStageIsBoundedByACycleBudget(t *testing.T) {
 	if issued == 0 {
 		t.Fatalf("no RewardList request was issued at all; the fixture proves nothing")
 	}
-	if issued >= targets {
-		t.Fatalf("the stage issued %d of %d RewardList requests: it walked the whole roster "+
-			"with the cycle budget already spent, so the bonus poll loop stays blocked "+
-			"for as long as Twitch is slow", issued, targets)
+	if issued >= milestoneCycleDispatchAllowance {
+		t.Fatalf("the stage issued %d RewardList requests, the whole dispatch allowance: the "+
+			"allowance stopped it, not the 50ms cycle budget, which had expired after the first "+
+			"120ms target", issued)
+	}
+	if issued != 1 {
+		t.Fatalf("the stage issued %d RewardList requests, want exactly 1: the budget was spent "+
+			"by the first target's uncancellable cost and every later target must be refused "+
+			"before its dispatch", issued)
+	}
+	lines := recordLines(logs.String(), milestoneBudgetRecord)
+	if len(lines) != 1 {
+		t.Fatalf("budget records = %d, want exactly 1; logs:\n%s", len(lines), logs.String())
+	}
+	if cutoff, source := attrValue(lines[0], "cutoff"), attrValue(lines[0], "deadlineSource"); cutoff != "TIME" || source != "STAGE_BUDGET" {
+		t.Fatalf("budget record reads cutoff=%s deadlineSource=%s, want TIME under STAGE_BUDGET: the "+
+			"stage was not stopped by its own budget", cutoff, source)
 	}
 }
 
@@ -2551,6 +2703,13 @@ func TestObservationBudgetExhaustionIsRecorded(t *testing.T) {
 	unexamined := attrValue(lines[0], "unexaminedTargets")
 	if unexamined == "" || unexamined == "0" {
 		t.Errorf("unexaminedTargets = %q, want a positive count naming what was skipped", unexamined)
+	}
+	// The record must name the budget as the reason. A COUNT cutoff from the
+	// dispatch allowance produces the same record shape on this roster, which
+	// is how an earlier version of this test stayed green with the budget
+	// switched off.
+	if cutoff, source := attrValue(lines[0], "cutoff"), attrValue(lines[0], "deadlineSource"); cutoff != "TIME" || source != "STAGE_BUDGET" {
+		t.Errorf("budget record reads cutoff=%s deadlineSource=%s, want TIME under STAGE_BUDGET", cutoff, source)
 	}
 	// An owner shutdown is NOT a budget exhaustion and must stay silent here.
 	logs.Reset()
