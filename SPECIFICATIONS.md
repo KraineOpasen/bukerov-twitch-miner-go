@@ -2857,6 +2857,96 @@ id needed to link a choice to its placement call. Outcome titles and colours are
 not projected, and beyond the `TopPoints` figure described above no predictor
 data is retained.
 
+#### Offline decision replay
+
+`internal/predictioneval` reads the envelope back and re-derives the decision it
+describes. It is an offline reader: it never places a bet, never changes a
+stake, never proposes or selects a strategy, and has no runtime, scheduler or
+HTTP surface. Its only product is a versioned, machine-readable comparison
+between what a decision was recorded to have *read* and what it was recorded to
+have *produced*.
+
+The pipeline is four pure value-in/value-out functions —
+`MaterializePairedKnowledge` → `ProjectDecisionCase` → `Evaluate` → `Score`.
+Acquiring data is the separate job of `internal/predictioneval/reader`, the only
+part that touches SQLite. The four core stages reach no database, network,
+Twitch, PubSub, live setting, environment variable, wall clock or global RNG,
+and a dependency-fence test enforces that over the package's whole transitive
+import graph rather than by convention.
+
+**Causal separation.** The producer persists an attempt's inputs and its results
+in one terminal envelope, so the reader performs the split the writer could not.
+`MaterializePairedKnowledge` groups facts by the minted `autoAttemptId` — together
+with the pool instance and collector session, because the attempt counter
+restarts with the process — and bounds each attempt's *common-input slice*: the
+causally-closed prefix up to and including its terminal fact. Both placement
+facts carry the same attempt id and fall **after** that boundary, so they reach
+`Score` alone and can never feed the decision that produced them. The slice is
+digested before any model projection, so appending later facts to the store
+cannot change an earlier case or its digest. `Evaluate` receives only
+`DecisionInputs`; a recorded choice, a later outcome, a post-placement state and
+a settlement are not merely unused there, they are unrepresentable in its
+signature.
+
+**Faithful baseline, not a substitute strategy.** The model reconstructs the
+policy each decision was actually configured with — every strategy the pinned
+policy dispatches on, its strict-`>` tie handling that keeps the lowest index,
+`SMART`'s strict-`<` gap comparison, the `NUMBER_*` fallback to slot 0, the
+`decision_*` → `total_*` key remapping, the int truncation in the stake, and the
+caller's `Calculate → Skip → health → stake → clamp → minimum → filter` ordering,
+in which the filter is *computed* early and *acted on* last. Derived odds and
+percentages are read from the envelope as the model held them, never recomputed
+from newer wire totals. `EvaluateStake`'s returned allowance and the amount the
+caller actually adopted stay distinct facts, and a reserve violation produces no
+post-gate stake because the pinned caller returns from inside the gate block.
+Where an unrecognised strategy, filter key or comparison operator was stored as
+`UNKNOWN`, the replay is still exact: the pinned switches have no `default`, so
+every value outside a closed set takes the same branch.
+
+**What cannot be proven is not claimed.** Stealth mode consumes a random draw
+that was never recorded. The model establishes the choice, the base stake and
+whether stealth applies *without* any observed value, and only then uses the
+recorded pre-risk stake to pin down which of the four legal integer reductions
+occurred. That stage is reported as `CONDITIONED_ON_OBSERVED_REALIZATION`,
+everything derived from it is counted apart from independent evidence, and the
+comparison of the reconstructed stake against the stake it was conditioned on is
+labelled circular rather than counted as a passed oracle. A realization that is
+missing or unreachable by any legal reduction stays `UNPROVEN`; it never becomes
+the base stake. Eligibility and health verdicts are echoed as witnessed external
+inputs — the replay cannot see the transport health or round state behind them,
+and agreement about them proves nothing about that hidden state.
+
+**Refusals.** The reader binds to `payload_version` 1 and producer revision
+`obs-v2|policy-378d05d6ccc7d2a914730a1e1d023ff754bcf873`; the replay model and
+its results carry their own version and the pinned policy revision, which are
+never restamped with the SHA of whatever build is replaying. `obs-v1` facts stay
+readable and acquire nothing: a missing envelope is a contract fact, and no
+default, current setting or neighbouring fact is used to manufacture one. Session
+integrity, truncation and witness verification are consumed from
+`ReadObservationSession` rather than re-implemented — the reader-facing
+projection COALESCEs NULL parent ids and re-marshals the payload, so it could not
+reproduce the digest's inputs even from copied code. A session the store calls
+`INTEGRITY_ERROR` yields no cases; an unfinalized, truncated or foreign-revision
+session yields cases carrying that qualification. Neither a `COMPLETE` session
+nor a verified digest is ever treated as proof that an individual decision case
+is complete: the envelope's own stage states are checked against the producer's
+structural invariants, and a snapshot that breaks one is refused rather than read
+under assumptions that do not hold for it. A missing or unusable input makes its
+stage `UNSUPPORTED` or `INDETERMINATE` — never `0`, `false`, `SMART` or "skip" —
+and a stake the pinned policy's `int` arithmetic could not represent or would
+wrap is reported explicitly instead of being silently truncated.
+
+`WOULD_ATTEMPT_PLACEMENT` is a statement about the policy reaching the placement
+call, not a claim that a bet was placed or accepted. Settlement facts reach
+`Score` only after `Evaluate` has run, and describe the *replayed* decision only
+when the replay independently reproduced the recorded one; otherwise they are
+`UNKNOWN`. Profitability, ROI and bankroll effects are not computed at all.
+
+The module is proven against controlled datasets written through the real store
+and read back through the real reader, and against real decisions driven through
+the real pool. It has **not** been validated against a production observation
+dataset; collection and empirical replay are separate work.
+
 ### Event Types for Series
 
 Reasons tagged on balance-timeline samples (`points.event_type`, display form
