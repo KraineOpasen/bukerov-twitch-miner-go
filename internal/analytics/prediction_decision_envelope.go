@@ -56,9 +56,13 @@ var (
 	}
 
 	// observationBetStrategies mirrors the models strategy vocabulary. It is
-	// duplicated rather than imported because this package must not depend on
-	// the domain package, and a strategy outside the list is recorded as
-	// UNKNOWN rather than as a strategy this build cannot replay.
+	// spelled out rather than imported so the STORED vocabulary is frozen
+	// independently of whatever the domain happens to declare today — a value
+	// outside it is recorded as UNKNOWN rather than as a strategy this build
+	// cannot replay. (The package does import internal/models elsewhere; the
+	// duplication is a deliberate contract boundary, not a dependency
+	// constraint.) TestTheEnvelopeVocabulariesCoverEveryDomainConstant is what
+	// keeps the two from drifting apart silently.
 	observationBetStrategies = []string{
 		"MOST_VOTED", "HIGH_ODDS", "PERCENTAGE", "SMART_MONEY", "SMART",
 		"NUMBER_1", "NUMBER_2", "NUMBER_3", "NUMBER_4",
@@ -166,10 +170,14 @@ type ObservationModelOutcome struct {
 
 	TotalUsers  int64 `json:"totalUsers"`
 	TotalPoints int64 `json:"totalPoints"`
-	// TopPoints is the aggregate the model had already computed: the maximum
-	// over the round's top predictors. It is a number and carries no predictor
-	// identity, and recording it does not authorize reading or retaining
-	// anything else about a predictor.
+	// TopPoints is the value the model had already computed: the LARGEST
+	// single stake among the round's top predictors. It is one viewer's wager
+	// amount, NOT a pool aggregate — say so plainly, because calling it an
+	// aggregate would understate what is stored. It is kept because the
+	// strategy selects on it and stealth mode reduces below it, so a decision
+	// that read it cannot be replayed without it. It carries no identity, and
+	// it authorizes reading or retaining nothing else about a predictor: the
+	// wire projection still keeps only a COUNT of them.
 	TopPoints int64 `json:"topPoints"`
 
 	PercentageUsers float64 `json:"percentageUsers"`

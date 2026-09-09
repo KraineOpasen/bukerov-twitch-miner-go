@@ -2,6 +2,7 @@ package miner
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"reflect"
 	"strings"
@@ -48,10 +49,14 @@ func TestObservationAdapterIsFieldComplete(t *testing.T) {
 			ErrorClass:  "NONE",
 			Manual:      boolValue(true),
 			OutcomeSlot: intValue(1),
+			// Slots are 1 and 2 rather than 0 and 1: slot 0 is a legitimate
+			// value, but a zero leaves that element unexercised by the
+			// completeness guard below, which is exactly the blind spot this
+			// fixture exists to close. The adapter copies the slot verbatim.
 			Outcomes: []pubsub.ObservationOutcome{
-				{Slot: 0, Color: "BLUE", ColorState: "PRESENT", TotalPoints: 300,
+				{Slot: 1, Color: "BLUE", ColorState: "PRESENT", TotalPoints: 300,
 					TotalUsers: 3, TopPredictorsExamined: 2, TopPredictors: "PRESENT"},
-				{Slot: 1, Color: "PINK", ColorState: "PRESENT", TotalPoints: 200,
+				{Slot: 2, Color: "PINK", ColorState: "PRESENT", TotalPoints: 200,
 					TotalUsers: 2, TopPredictorsExamined: 1, TopPredictors: "PRESENT"},
 			},
 			Counters: map[string]int64{"stake": 250},
@@ -125,9 +130,9 @@ func TestObservationAdapterIsFieldComplete(t *testing.T) {
 			Manual:      boolValue(true),
 			OutcomeSlot: intValue(1),
 			Outcomes: []analytics.ObservationOutcome{
-				{Slot: 0, Color: "BLUE", ColorState: "PRESENT", TotalPoints: 300,
+				{Slot: 1, Color: "BLUE", ColorState: "PRESENT", TotalPoints: 300,
 					TotalUsers: 3, TopPredictorsExamined: 2, TopPredictors: "PRESENT"},
-				{Slot: 1, Color: "PINK", ColorState: "PRESENT", TotalPoints: 200,
+				{Slot: 2, Color: "PINK", ColorState: "PRESENT", TotalPoints: 200,
 					TotalUsers: 2, TopPredictorsExamined: 1, TopPredictors: "PRESENT"},
 			},
 			Counters: map[string]int64{"stake": 250},
@@ -203,12 +208,34 @@ func assertNoZeroFields(t *testing.T, v reflect.Value, path string) {
 	for i := 0; i < v.NumField(); i++ {
 		f := v.Field(i)
 		name := path + "." + typ.Field(i).Name
-		if f.Kind() == reflect.Struct {
-			assertNoZeroFields(t, f, name)
-			continue
-		}
 		if f.IsZero() {
 			t.Fatalf("%s is still the zero value; the adapter fixture must exercise every field", name)
+		}
+		assertNoZeroValue(t, f, name)
+	}
+}
+
+// assertNoZeroValue walks INTO a non-zero field.
+//
+// Recursing on struct alone was not enough. The payload's decision envelope is
+// a POINTER and its outcome vector is a SLICE, so a non-nil pointer and a
+// non-empty slice both satisfied IsZero and were never opened — which meant a
+// field added to any of the nested envelope types could go unset in the fixture
+// and, being unset on both sides, still compare equal. The adapter could drop
+// it and this test would pass. Opening pointers and slice elements is what
+// makes "every field" mean every field.
+func assertNoZeroValue(t *testing.T, v reflect.Value, path string) {
+	t.Helper()
+	switch v.Kind() {
+	case reflect.Struct:
+		assertNoZeroFields(t, v, path)
+	case reflect.Pointer:
+		if !v.IsNil() {
+			assertNoZeroValue(t, v.Elem(), path+"->")
+		}
+	case reflect.Slice:
+		for i := 0; i < v.Len(); i++ {
+			assertNoZeroValue(t, v.Index(i), fmt.Sprintf("%s[%d]", path, i))
 		}
 	}
 }

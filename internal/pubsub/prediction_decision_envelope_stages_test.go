@@ -893,11 +893,11 @@ func TestEveryBetSettingsFieldReachesTheEnvelope(t *testing.T) {
 				"the one the round was filtered by", f.name, f.got, f.want)
 		}
 	}
-	// The copy must not alias the round's own condition: a later settings edit
-	// would otherwise reach back and change a fact already recorded.
-	if env.Settings.FilterCondition.Value != 12.5 {
-		t.Fatal("the recorded filter value drifted")
-	}
+	// The aliasing property this used to gesture at — that a later settings
+	// edit cannot reach back and rewrite a recorded fact — is not testable by
+	// re-reading a value nothing has mutated, so it is not asserted here. It is
+	// proved by mutating the round's real condition after the decision in
+	// TestCapturedInputsDoNotFollowALaterMutation.
 }
 
 // derefInt64 / derefBool render an optional envelope field in a failure

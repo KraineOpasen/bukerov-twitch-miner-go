@@ -82,9 +82,10 @@ const maxEnvelopeOutcomes = maxObservedOutcomes
 // field omitted "because the strategy in force did not read it" would make the
 // envelope's completeness depend on the very value being replayed.
 //
-// This package does not import internal/models — a transport must not depend
-// on the domain package's layout — so the projection is plain types and the
-// caller in pool.go performs the one conversion.
+// The projection is plain types rather than the domain types themselves, so a
+// stored fact cannot alias a live model value and the store's closed
+// vocabulary cannot drift into the domain's. The conversion is captureBetSettings
+// below.
 type ObservationBetSettings struct {
 	Strategy      string
 	Percentage    int
@@ -114,10 +115,12 @@ type ObservationFilterCondition struct {
 // describes what Calculate consulted, including the derived values the model
 // had accumulated over every earlier frame.
 //
-// TopPoints is the aggregate the model already computed (the maximum over the
-// round's top predictors). It is a number, and carries no predictor identity;
-// recording it does not authorize reading or retaining anything else about a
-// predictor.
+// TopPoints is the value the model had already computed: the LARGEST single
+// stake among the round's top predictors. It is one viewer's wager amount, not
+// a pool aggregate — the strategy selects on it and stealth mode reduces below
+// it, so a replay cannot reproduce either without it. It carries no identity,
+// and recording it authorizes reading or retaining nothing else about a
+// predictor: the wire projection still keeps only a COUNT of them.
 type ObservationModelOutcome struct {
 	Slot int
 	// Present distinguishes an outcome the model actually held from a hole in

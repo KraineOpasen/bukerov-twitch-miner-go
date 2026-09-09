@@ -2573,8 +2573,20 @@ func classifyObservationSession(s ObservationSessionRecord, facts observationSes
 	// the revision is bumped, destroying the trail's whole value across an
 	// upgrade. The reading stands; the caller is told which contract's
 	// invariants apply.
+	//
+	// The note is APPENDED, never substituted. Before the first revision bump
+	// this branch could not fire for a locally-produced session, so replacing
+	// Detail was harmless; the moment the revision moves it fires for every
+	// session already in the database — and an INCOMPLETE session would have
+	// lost the sentence saying it lost facts, which is the one thing a reader
+	// most needs to be told.
 	if s.ProducerRevision != ObservationProducerRevision {
-		out.Detail = "session was produced under a different observation contract: read its facts under that contract's invariants"
+		const foreign = "session was produced under a different observation contract: read its facts under that contract's invariants"
+		if out.Detail == "" {
+			out.Detail = foreign
+		} else {
+			out.Detail += "; " + foreign
+		}
 	}
 	return out
 }

@@ -22,10 +22,21 @@ package pubsub_test
 // Be clear about what that costs. This repository's CI runs `go test -race`,
 // so CI does NOT execute the fully integrated four-leg end-to-end proof. Under
 // -race the legs are still covered, each in a build that can measure it:
-// the producer by the in-package envelope tests, the miner adapter
-// exhaustively by TestObservationAdapterIsFieldComplete's reflection over
-// every field, and the collector/store/reader by the analytics package's own
-// tests. The integrated run is verified WITHOUT -race, which is a deliberate
-// manual step. Treat a green -race CI as evidence of the legs, never of the
-// integrated chain.
+// the producer by the in-package envelope tests, the miner adapter by
+// TestObservationAdapterIsFieldComplete (whose completeness guard now walks
+// INTO the envelope pointer and its outcome slice — before that it stopped at
+// the pointer, so a dropped nested field went unnoticed), and the
+// collector/store/reader by the analytics package's own tests. The integrated
+// run is verified WITHOUT -race, which is a deliberate manual step. Treat a
+// green -race CI as evidence of the legs, never of the integrated chain.
+//
+// This is NOT the same trade-off the analytics package makes for its latency
+// pilot, and must not be described as one: that pilot keeps its test RUNNING
+// under -race and relaxes only a wall-clock assertion, so its correctness
+// checks still execute. This skips outright, because under -race there is no
+// committed row left to assert anything about — the strictly weaker
+// arrangement. That is why the two properties which would otherwise lose all
+// -race coverage — the round-identity binding and the deep-copy immunity of
+// captured inputs — have their own tests in prediction_envelope_binding_test.go
+// that DO run under the race detector.
 const raceDetectorEnabled = true

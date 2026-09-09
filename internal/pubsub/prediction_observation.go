@@ -791,8 +791,12 @@ func (p *WebSocketPool) observeUserFrameOfRound(msg *PubSubMessage, streamer str
 // attempt that declined. The envelope is the attempt's ONE terminal record:
 // every stage it never reached says so explicitly, so a skip is never read as
 // a decision computed from zeroes.
-func (p *WebSocketPool) observeAutoSkip(eventID, channelID, login, reason string, counters map[string]int64, env *ObservationDecision) {
-	p.observeRoundFact(eventID, channelID, login, ObsKindAutoDecision, ObservationPayload{
+// incarnation is the admission this attempt is ABOUT, carried from the
+// roundControl the attempt already resolved. It is never re-looked-up: a
+// concurrent cleanup and re-admission of the same Twitch event would otherwise
+// file this decision against a round it was never about.
+func (p *WebSocketPool) observeAutoSkip(eventID, channelID, login, incarnation, reason string, counters map[string]int64, env *ObservationDecision) {
+	p.observeRoundFactOf(eventID, channelID, login, incarnation, ObsKindAutoDecision, ObservationPayload{
 		Phase:            "AUTO_SKIPPED",
 		Decision:         "SKIP",
 		ReasonCode:       reason,
@@ -804,8 +808,8 @@ func (p *WebSocketPool) observeAutoSkip(eventID, channelID, login, reason string
 
 // observeAutoSkipState is observeAutoSkip for the branch that also knows the
 // round's lifecycle state.
-func (p *WebSocketPool) observeAutoSkipState(eventID, channelID, login, reason, roundState string, env *ObservationDecision) {
-	p.observeRoundFact(eventID, channelID, login, ObsKindAutoDecision, ObservationPayload{
+func (p *WebSocketPool) observeAutoSkipState(eventID, channelID, login, incarnation, reason, roundState string, env *ObservationDecision) {
+	p.observeRoundFactOf(eventID, channelID, login, incarnation, ObsKindAutoDecision, ObservationPayload{
 		Phase:            "AUTO_SKIPPED",
 		Decision:         "SKIP",
 		ReasonCode:       reason,
@@ -824,7 +828,7 @@ func (p *WebSocketPool) observeAutoSkipState(eventID, channelID, login, reason, 
 // manualActionId for an operator action, autoAttemptId for an automatic
 // decision attempt. Both paths supply one, which is why there is no
 // counter-less variant.
-func (p *WebSocketPool) observePlacementCallOf(eventID, channelID, login, phase string, ok bool, errorClass string, slot, amount int, extra map[string]int64) {
+func (p *WebSocketPool) observePlacementCallOf(eventID, channelID, login, incarnation, phase string, ok bool, errorClass string, slot, amount int, extra map[string]int64) {
 	reason := "OK"
 	if !ok && phase == "CALL_RETURNED" {
 		reason = "REJECTED"
@@ -833,7 +837,7 @@ func (p *WebSocketPool) observePlacementCallOf(eventID, channelID, login, phase 
 	for k, v := range extra {
 		counters[k] = v
 	}
-	p.observeRoundFact(eventID, channelID, login, ObsKindPlacement, ObservationPayload{
+	p.observeRoundFactOf(eventID, channelID, login, incarnation, ObsKindPlacement, ObservationPayload{
 		Phase:       phase,
 		ReasonCode:  reason,
 		ErrorClass:  errorClass,
@@ -967,7 +971,7 @@ func (a manualAction) skip(eventID, channelID, login, reason, roundState string)
 }
 
 func (a manualAction) placementCall(eventID, channelID, login, phase string, ok bool, errorClass string, slot, amount int) {
-	a.pool.observePlacementCallOf(eventID, channelID, login, phase, ok, errorClass, slot, amount, a.counters(nil))
+	a.pool.observePlacementCallOf(eventID, channelID, login, a.pool.roundIncarnation(eventID), phase, ok, errorClass, slot, amount, a.counters(nil))
 }
 
 // observeRoundCleanup records a tracked round's state being dropped.

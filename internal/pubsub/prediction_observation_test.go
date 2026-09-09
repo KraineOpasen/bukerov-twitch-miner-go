@@ -148,7 +148,7 @@ func TestObservationSinkAbsentIsANoOp(t *testing.T) {
 	}
 	// Every producer entry point must tolerate the absent sink.
 	p.observeRoundFact("e1", "chan-1", "streamer", ObsKindAutoDecision, ObservationPayload{Phase: "AUTO_DUE"})
-	p.observeAutoSkip("e1", "chan-1", "streamer", "OK", nil, nil)
+	p.observeAutoSkip("e1", "chan-1", "streamer", "", "OK", nil, nil)
 	p.observeManualPhase("e1", "chan-1", "streamer", "MANUAL_DIRECT_ROOT", "OK", nil)
 	p.observeRoundCleanup("e1", "chan-1", "streamer", "round:x:1", "CLEANUP_APPLIED", "OK")
 	p.observeUnclassifiedFrame(&PubSubMessage{Topic: NewTopic(TopicPredictionsChannel, "chan-1")}, s, "event", ObsNotObserved)
