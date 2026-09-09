@@ -1436,3 +1436,106 @@ func TestAStageStateOutsideTheStoresClosedVocabularyIsRefusedRatherThanGuessed(t
 		})
 	}
 }
+
+// TestEveryReferenceFieldOfAnEnvelopeIsActuallyDeepCopied is the structural
+// guard behind the aliasing property.
+//
+// TestMaterializedInputsDoNotAliasTheCallersDataset establishes the property
+// for the fields that exist today, and the reflection mirror test establishes
+// that no store field is DROPPED — but neither notices a newly added pointer
+// field that is copied by the shallow struct assignment and therefore still
+// aliases the caller's dataset. That failure is silent and specific: the digest
+// does not hash payload contents, so a caller mutating its own dataset could
+// change what a replay reads while the digest stayed identical.
+//
+// This walks the envelope by reflection, so a field added tomorrow is covered
+// without anyone remembering to extend a list.
+func TestEveryReferenceFieldOfAnEnvelopeIsActuallyDeepCopied(t *testing.T) {
+	// An envelope with every pointer and slice field non-nil, so each one has
+	// something to alias.
+	populated := populatedEnvelope()
+
+	rv := reflect.ValueOf(*populated)
+	rt := rv.Type()
+	checked := 0
+	for i := 0; i < rt.NumField(); i++ {
+		f := rv.Field(i)
+		switch f.Kind() {
+		case reflect.Ptr, reflect.Slice, reflect.Map:
+			if f.IsNil() {
+				t.Fatalf("field %s is nil in the fixture, so it cannot be checked for "+
+					"aliasing. populatedEnvelope must set every reference field.", rt.Field(i).Name)
+			}
+			checked++
+		}
+	}
+	if checked < 12 {
+		t.Fatalf("only %d reference fields found; this check is not inspecting the envelope",
+			checked)
+	}
+
+	clone := deepCopyEnvelope(populated)
+	cv := reflect.ValueOf(*clone)
+	for i := 0; i < rt.NumField(); i++ {
+		name := rt.Field(i).Name
+		orig, copied := rv.Field(i), cv.Field(i)
+		switch orig.Kind() {
+		case reflect.Ptr, reflect.Slice, reflect.Map:
+			if orig.Pointer() == copied.Pointer() {
+				t.Errorf("field %s of the copied envelope still points at the caller's memory. "+
+					"deepCopyEnvelope copies each reference field explicitly, so a field added "+
+					"without a line there is carried by the shallow struct assignment and "+
+					"aliases the dataset — a caller mutating its own data would change what a "+
+					"replay reads, while the common-input digest stayed identical because it "+
+					"does not hash payload contents.", name)
+			}
+		}
+	}
+
+	// The copy must also be EQUAL: independence is worthless if it lost data.
+	if !reflect.DeepEqual(*populated, *clone) {
+		t.Errorf("the deep copy is not equal to its source:\n orig = %+v\n copy = %+v",
+			*populated, *clone)
+	}
+
+	// And nil still means nil.
+	if deepCopyEnvelope(nil) != nil {
+		t.Error("deepCopyEnvelope(nil) returned a non-nil envelope")
+	}
+}
+
+// populatedEnvelope is an envelope with every reference field set.
+func populatedEnvelope() *SourceDecisionEnvelope {
+	balance, users, points := int64(1000), int64(20), int64(500)
+	amount, allowed, limit, final := int64(50), int64(60), int64(70), int64(50)
+	idx, pct, reserve := 0, 10, 5
+	skip, clamp := false, false
+	compared := 1.5
+	return &SourceDecisionEnvelope{
+		AttemptID:     1,
+		SettingsStage: StageExecuted,
+		Settings: &SourceBetSettings{
+			Strategy:        StrategySmart,
+			FilterCondition: &SourceFilterCondition{By: "TOTAL_USERS", Where: "GT", Value: 1},
+		},
+		CalculateStage: StageExecuted,
+		Balance:        &balance,
+		Outcomes:       []SourceModelOutcome{{Slot: 0, Present: true, ID: "o1"}},
+		BetTotalUsers:  &users,
+		BetTotalPoints: &points,
+		ChoiceIndex:    &idx,
+		ChoiceAmount:   &amount,
+		SkipStage:      StageExecuted,
+		SkipResult:     &skip,
+		SkipCompared:   &compared,
+		HealthStage:    HealthAllowed,
+		StakeStage:     StageExecuted,
+
+		RiskMaxStakePercent: &pct,
+		RiskReservePoints:   &reserve,
+		StakeAllowed:        &allowed,
+		StakeLimit:          &limit,
+		ClampApplied:        &clamp,
+		FinalAmount:         &final,
+	}
+}

@@ -386,8 +386,24 @@ func materializeAttempt(key AttemptKey, recs []SourceRecord, src SourceProvenanc
 
 	// Every fact of one attempt describes one admission of one round. Facts
 	// that disagree mean the grouping crossed a boundary it should not have.
+	//
+	// BOTH halves are checked. Checking only the input prefix left the half
+	// that feeds the settlement unguarded: a placement fact carrying this
+	// attempt's counter but a different incarnation landed in PostDecision,
+	// reached ProjectSettlementFacts, and could supply the stake and slot for
+	// a settlement about a DIFFERENT admission of the round. The producer
+	// cannot write that shape, which is exactly why a reader that meets it
+	// should refuse rather than read it.
 	incarnation := slice[terminal].RoundIncarnationID
 	for _, r := range slice {
+		if r.RoundIncarnationID != incarnation {
+			return nil, append(excl, Exclusion{
+				Key:    &key,
+				Reason: ExclusionInconsistentRoundIncarnation,
+			})
+		}
+	}
+	for _, r := range post {
 		if r.RoundIncarnationID != incarnation {
 			return nil, append(excl, Exclusion{
 				Key:    &key,

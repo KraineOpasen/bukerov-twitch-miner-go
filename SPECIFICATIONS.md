@@ -3012,6 +3012,19 @@ slot are low-cardinality enough that a different attempt on the same round can
 carry the same pair by coincidence — matching arguments are evidence, not
 identity.
 
+No comparison may be UNAVAILABLE either. A comparison that could not be made is
+evidence that is *missing*, and it is not a disagreement — so counting only
+disagreements let a case with an unrecorded field carry an accepted placement to
+an affirmative settlement. An affirmative assessment asserts that the recorded
+settlement describes the replayed decision, and that claim cannot rest on a
+field nobody could check.
+
+Every fact of an attempt must describe ONE admission of the round, on both
+sides of the causal cut. Checking only the input prefix left the half that feeds
+the settlement unguarded: a placement fact carrying this attempt's counter but a
+different `round_incarnation_id` reached the settlement projection and could
+supply the stake and slot for a different admission.
+
 The recorded terminal fact must also NAME its action. The producer writes
 `PLACE` beside `AUTO_DECIDED` and `SKIP` beside `AUTO_SKIPPED` on every terminal
 auto fact it emits, so a blank decision is a record it cannot have written: the

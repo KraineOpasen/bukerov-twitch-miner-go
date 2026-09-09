@@ -551,6 +551,20 @@ func assessSettlement(sc Scorecard, ev Evaluation, conditioned bool, s Settlemen
 		out.Assessment = SettlementUnknown
 	case ev.Action != ActionWouldAttemptPlacement:
 		out.Assessment = SettlementNotApplicable
+	case sc.UnavailablePairs > 0:
+		// An UNAVAILABLE comparison is not a disagreement, so the disagreement
+		// guard above lets it through. That is the wrong reading: a comparison
+		// that could not be made is EVIDENCE THAT IS MISSING, and an
+		// affirmative settlement asserts that the recorded settlement
+		// describes the replayed decision — a claim that cannot rest on a
+		// field nobody could check.
+		//
+		// The narrow case that prompted this was a blank terminal decision,
+		// now compared unconditionally; the guard is kept general because the
+		// hole is general. A caller assembling its own case can leave any
+		// recorded field unset, and only counting disagreements would call
+		// that agreement.
+		out.Assessment = SettlementUnknown
 	case s.PlacementCoherence != PlacementShapeCoherent:
 		// No single coherent call is recorded, so nothing here describes the
 		// one this replay derived. ABSENT and INCOHERENT are different facts

@@ -416,9 +416,17 @@ func TestTheCommonInputDigestCoversTheWholeEncoding(t *testing.T) {
 	}
 	got := pk.Attempts[0].CommonInputDigest
 
-	const want = "" // filled in below by the self-describing failure
-	if want != "" && got != want {
-		t.Fatalf("common-input digest = %q, want %q", got, want)
+	// The golden, pinned. It was previously left empty behind an `if want !=
+	// ""` guard, which made this assertion UNREACHABLE while the comment above
+	// claimed it covered every field at once — the sensitivity cases below
+	// were doing all the work, and a field-ORDER change moves none of them.
+	const want = "b80d21dc33fb537d778b8b45571102486b6567c36b8d3acb5381e221cf677d13"
+	if got != want {
+		t.Fatalf("common-input digest = %q, want %q.\n"+
+			"Every field this digest hashes, and the order it hashes them in, is pinned by "+
+			"this constant. If the encoding changed deliberately, bump CommonInputDigestVersion "+
+			"in the same commit — a digest that changes silently makes two builds' scorecards "+
+			"incomparable while both claim the same version.", got, want)
 	}
 	if len(got) != 64 {
 		t.Fatalf("digest %q is not a sha256 hex string", got)
@@ -1056,5 +1064,141 @@ func TestATerminalFactThatNamesNoActionIsRefused(t *testing.T) {
 	if sc.Settlement.Assessment != predictioneval.SettlementUnknown {
 		t.Fatalf("settlement = %q, want UNKNOWN: the record never said what it did",
 			sc.Settlement.Assessment)
+	}
+}
+
+// TestAnUnavailableComparisonNeverBecomesAnAffirmativeSettlement closes a hole
+// where missing evidence read as agreement.
+//
+// assessSettlement blocked only DISAGREEMENTS, and an UNAVAILABLE comparison is
+// not one. So a case whose recorded choice amount was never recorded — or any
+// other field a caller left unset — produced no disagreement, and an accepted
+// placement carried it all the way to APPLIES_TO_REPLAY. An affirmative
+// settlement asserts that the recorded settlement describes the replayed
+// decision, and that claim cannot rest on a field nobody could check.
+func TestAnUnavailableComparisonNeverBecomesAnAffirmativeSettlement(t *testing.T) {
+	c, ev := ncAgreeingCase()
+	if ev.Action != predictioneval.ActionWouldAttemptPlacement {
+		t.Fatalf("fixture action = %q, want WOULD_ATTEMPT_PLACEMENT", ev.Action)
+	}
+	slot := ev.Choice.Index
+	stake := int64(ev.Clamp.FinalAmount)
+	facts := func(c predictioneval.DecisionCase) predictioneval.SettlementFacts {
+		return ncBoundFacts(c, predictioneval.SettlementFacts{
+			PlacementCallStarted: true, PlacementCallReturned: true, PlacementAccepted: true,
+			PlacementStake: &stake, PlacementSlot: &slot,
+		})
+	}
+
+	// The control: everything recorded, everything agrees, settlement applies.
+	base := predictioneval.Score(c, ev, facts(c))
+	if base.UnavailablePairs != 0 {
+		t.Fatalf("the control case already has %d unavailable comparison(s): %+v",
+			base.UnavailablePairs, base.Comparisons)
+	}
+	if base.Settlement.Assessment != predictioneval.SettlementAppliesToReplay {
+		t.Fatalf("the control settlement = %q, want APPLIES_TO_REPLAY. The mutations below "+
+			"prove nothing if the control does not reach it", base.Settlement.Assessment)
+	}
+
+	for _, tc := range []struct {
+		name  string
+		field string
+		blank func(*predictioneval.RecordedResults)
+	}{
+		{"the recorded stake the strategy proposed", "choiceAmount",
+			func(r *predictioneval.RecordedResults) { r.ChoiceAmountRecorded = false }},
+		{"the recorded filter result", "skipResult",
+			func(r *predictioneval.RecordedResults) { r.SkipResultRecorded = false }},
+		{"the recorded gate allowance", "stakeAllowed",
+			func(r *predictioneval.RecordedResults) { r.StakeAllowedRecorded = false }},
+		{"the recorded final stake", "finalAmount",
+			func(r *predictioneval.RecordedResults) { r.FinalAmountRecorded = false }},
+		{"the recorded filter comparison", "skipCompared",
+			func(r *predictioneval.RecordedResults) { r.SkipCompared = nil }},
+	} {
+		t.Run(tc.name+" is missing", func(t *testing.T) {
+			mut := c
+			mut.Recorded = c.Recorded
+			tc.blank(&mut.Recorded)
+
+			sc := predictioneval.Score(mut, ev, facts(mut))
+
+			cmp := findComparison(t, sc, tc.field)
+			if cmp.Verdict != predictioneval.VerdictUnavailable {
+				t.Fatalf("%s verdict = %q, want UNAVAILABLE; this case is not exercising "+
+					"missing evidence at all", tc.field, cmp.Verdict)
+			}
+			if sc.IndependentDisagree != 0 || sc.ConditionedDisagree != 0 {
+				t.Fatalf("blanking %s produced a disagreement, so the disagreement guard "+
+					"would have caught it and this test proves nothing about UNAVAILABLE",
+					tc.field)
+			}
+			if sc.Settlement.Assessment != predictioneval.SettlementUnknown {
+				t.Fatalf("settlement = %q with %s unavailable, want UNKNOWN. Missing evidence "+
+					"is not agreement", sc.Settlement.Assessment, tc.field)
+			}
+		})
+	}
+}
+
+// TestAPostDecisionFactFromAnotherAdmissionIsRefused closes the half of the
+// round-incarnation check that fed the settlement.
+//
+// The agreement check walked the input prefix only. A placement fact carrying
+// this attempt's counter but a DIFFERENT RoundIncarnationID therefore landed in
+// PostDecision, reached ProjectSettlementFacts, and could supply the stake and
+// slot for a settlement about another admission of the same round.
+func TestAPostDecisionFactFromAnotherAdmissionIsRefused(t *testing.T) {
+	const attempt = 7
+	terminal := peRecord(2, predictioneval.KindAutoDecision, predictioneval.PhaseAutoDecided, attempt)
+	terminal.Payload.ReasonCode = "OK"
+	terminal.Payload.Decision = "PLACE"
+	terminal.Payload.DecisionEnvelope = peMinimalEnvelope(attempt)
+
+	started := pePlacement(3, attempt, predictioneval.PhaseCallStarted, 50, 0, "OK", "NONE")
+	returned := pePlacement(4, attempt, predictioneval.PhaseCallReturned, 50, 0, "OK", "NONE")
+	// The call belongs to a different admission of the round.
+	returned.RoundIncarnationID = "round-2"
+
+	pk, err := predictioneval.MaterializePairedKnowledge(predictioneval.SourceDataset{
+		Source: peProvenance(),
+		Records: []predictioneval.SourceRecord{
+			peRecord(1, predictioneval.KindAutoDecision, predictioneval.PhaseAutoDue, attempt),
+			terminal, started, returned,
+		},
+	})
+	if err != nil {
+		t.Fatalf("materialize: %v", err)
+	}
+	if len(pk.Attempts) != 0 {
+		t.Fatalf("an attempt materialized with a post-decision fact from another admission "+
+			"(%d attempts). Its placement facts would have supplied the stake and slot for a "+
+			"settlement about a different round admission", len(pk.Attempts))
+	}
+	found := false
+	for _, e := range pk.Excluded {
+		if e.Reason == predictioneval.ExclusionInconsistentRoundIncarnation {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("no %q exclusion: %+v",
+			predictioneval.ExclusionInconsistentRoundIncarnation, pk.Excluded)
+	}
+
+	// The same shape with a consistent incarnation still materializes, so the
+	// check did not simply refuse every attempt carrying placement facts.
+	returned.RoundIncarnationID = started.RoundIncarnationID
+	ok, err := predictioneval.MaterializePairedKnowledge(predictioneval.SourceDataset{
+		Source: peProvenance(),
+		Records: []predictioneval.SourceRecord{
+			peRecord(1, predictioneval.KindAutoDecision, predictioneval.PhaseAutoDue, attempt),
+			terminal, started, returned,
+		},
+	})
+	if err != nil || len(ok.Attempts) != 1 {
+		t.Fatalf("a consistent attempt failed to materialize: %v (%d attempts, excluded %+v)",
+			err, len(ok.Attempts), ok.Excluded)
 	}
 }

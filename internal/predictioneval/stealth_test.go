@@ -266,6 +266,18 @@ func TestScoreCountsAConditionedStealthComparisonApartFromIndependentEvidence(t 
 			HealthStage:    predictioneval.HealthAllowed,
 		},
 	}
+	// The filter's compared value. The producer sets SkipStage, SkipResult and
+	// SkipCompared together in one statement, so a record whose skip stage
+	// EXECUTED always carries it; omitting it here described a record the
+	// producer does not write, and left an UNAVAILABLE comparison in a fixture
+	// meant to agree throughout. Taken from the evaluation because this
+	// fixture's job is the evidence BASES, not the filter oracle — which
+	// TestTheFilterIsActedOnAfterTheMinimumStakeExit and the goldens cover.
+	if ev.Filter.State == predictioneval.StageStateExecuted {
+		compared := ev.Filter.Compared
+		c.Recorded.SkipCompared = &compared
+	}
+
 	// The terminal ACTION, which is now compared unconditionally. Derived from
 	// the replayed action rather than hardcoded, so this fixture keeps saying
 	// "the record agrees" if the case ever stops being a placement.
