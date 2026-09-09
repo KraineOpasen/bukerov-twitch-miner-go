@@ -89,11 +89,12 @@ func (p *budgetProbe) ObservationSessionSizeBySession(ctx context.Context, sessi
 	return p.size, nil
 }
 
-func (p *budgetProbe) ObservationsBySession(ctx context.Context, sessionID string, limit int) ([]analytics.ObservationRecord, error) {
+func (p *budgetProbe) ObservationsBySessionWithinBudget(ctx context.Context, sessionID string,
+	limit int, maxRowBytes, maxTotalBytes int64) ([]analytics.ObservationRecord, bool, error) {
 	p.loads++
 	p.t.Errorf("the rows were loaded even though the session measured over the budget; " +
 		"the refusal has to happen BEFORE this call, because this call is the cost")
-	return p.real.ObservationsBySession(ctx, sessionID, limit)
+	return p.real.ObservationsBySessionWithinBudget(ctx, sessionID, limit, maxRowBytes, maxTotalBytes)
 }
 
 // TestASessionOverTheByteBudgetIsRefusedBeforeItIsLoaded closes a bound that
@@ -121,7 +122,7 @@ func TestASessionOverTheByteBudgetIsRefusedBeforeItIsLoaded(t *testing.T) {
 
 	over := &budgetProbe{
 		real: repo, t: t,
-		size: analytics.ObservationSessionSize{Rows: 3, PayloadBytes: reader.MaxSessionPayloadBytes + 1},
+		size: analytics.ObservationSessionSize{Rows: 3, TotalBytes: reader.MaxSessionPayloadBytes + 1},
 	}
 	ds, err := reader.LoadSession(ctx, over, epoch, reader.DefaultMaxRecords)
 	if !errors.Is(err, reader.ErrPayloadBudgetExceeded) {
@@ -138,7 +139,7 @@ func TestASessionOverTheByteBudgetIsRefusedBeforeItIsLoaded(t *testing.T) {
 	// simply refuse everything.
 	atBudget := &passThrough{
 		real: repo,
-		size: analytics.ObservationSessionSize{Rows: 3, PayloadBytes: reader.MaxSessionPayloadBytes},
+		size: analytics.ObservationSessionSize{Rows: 3, TotalBytes: reader.MaxSessionPayloadBytes},
 	}
 	if _, err := reader.LoadSession(ctx, atBudget, epoch, reader.DefaultMaxRecords); err != nil {
 		t.Fatalf("a session exactly at the budget was refused: %v", err)
@@ -168,8 +169,9 @@ func (p *passThrough) ObservationSessionSizeBySession(ctx context.Context, sessi
 	return p.size, nil
 }
 
-func (p *passThrough) ObservationsBySession(ctx context.Context, sessionID string, limit int) ([]analytics.ObservationRecord, error) {
-	return p.real.ObservationsBySession(ctx, sessionID, limit)
+func (p *passThrough) ObservationsBySessionWithinBudget(ctx context.Context, sessionID string,
+	limit int, maxRowBytes, maxTotalBytes int64) ([]analytics.ObservationRecord, bool, error) {
+	return p.real.ObservationsBySessionWithinBudget(ctx, sessionID, limit, maxRowBytes, maxTotalBytes)
 }
 
 // TestTheMeasuredSizeIsBytesAndNotCharacters pins the CAST in the measurement.
@@ -220,13 +222,157 @@ func TestTheMeasuredSizeIsBytesAndNotCharacters(t *testing.T) {
 	a := measure("measured-bytes-ascii", ascii)
 	c := measure("measured-bytes-cyrillic", cyrillic)
 
-	if got := c.PayloadBytes - a.PayloadBytes; got != extra {
+	if got := c.TotalBytes - a.TotalBytes; got != extra {
 		t.Fatalf("two payloads of equal RUNE length measured %d and %d bytes, a difference of "+
 			"%d; want exactly %d, the multi-byte overhead. A difference of 0 means LENGTH is "+
 			"counting characters and the byte budget under-counts the memory it exists to bound",
-			a.PayloadBytes, c.PayloadBytes, got, extra)
+			a.TotalBytes, c.TotalBytes, got, extra)
 	}
 	t.Logf("equal-rune payloads measured %d and %d bytes; the %d-byte difference is the "+
 		"multi-byte overhead a character count would have hidden",
-		a.PayloadBytes, c.PayloadBytes, extra)
+		a.TotalBytes, c.TotalBytes, extra)
+}
+
+// TestTheBudgetCountsEveryColumnTheReadMaterializes closes a bound that
+// measured one column and read seventeen.
+//
+// The budget originally summed payload_json alone. The row also carries a
+// dozen TEXT columns and the schema constrains the length of NONE of them, so
+// a store that kept the payload small while putting a very large value in
+// pool_instance_id or source_fingerprint measured as tiny and was still
+// scanned into Go strings in full — the bound reporting a number unrelated to
+// the memory it was supposed to bound.
+func TestTheBudgetCountsEveryColumnTheReadMaterializes(t *testing.T) {
+	ctx := context.Background()
+	repo := observationStore(t)
+
+	fat := ""
+	for i := 0; i < 4096; i++ {
+		fat += "x"
+	}
+
+	measure := func(label string, mut func(*analytics.PredictionObservation)) analytics.ObservationSessionSize {
+		t.Helper()
+		f := baseFact(analytics.KindChannelEvent)
+		f.Payload = analytics.ObservationPayload{Phase: "ROUND_UPDATED", RoundState: "ACTIVE"}
+		mut(&f)
+		_, sessionID := seedSession(t, repo, label, []analytics.PredictionObservation{f})
+		size, err := repo.ObservationSessionSizeBySession(ctx, sessionID)
+		if err != nil {
+			t.Fatalf("measure %s: %v", label, err)
+		}
+		return size
+	}
+
+	plain := measure("width-plain", func(*analytics.PredictionObservation) {})
+
+	for _, tc := range []struct {
+		name string
+		mut  func(*analytics.PredictionObservation)
+	}{
+		{"pool_instance_id", func(f *analytics.PredictionObservation) { f.PoolInstanceID = fat }},
+		{"source_fingerprint", func(f *analytics.PredictionObservation) { f.SourceFingerprint = fat }},
+		{"event_id", func(f *analytics.PredictionObservation) { f.EventID = fat }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := measure("width-"+tc.name, tc.mut)
+			grew := got.TotalBytes - plain.TotalBytes
+			// The inflated value REPLACES a shorter one, so the growth is the
+			// new length minus the old — a few bytes under len(fat), never
+			// equal to it. The discriminating fact is not the exact number but
+			// its magnitude: a column the budget does not count moves the
+			// measurement by exactly 0.
+			if grew < int64(len(fat))/2 {
+				t.Fatalf("inflating %s by %d bytes moved the measured width by only %d. "+
+					"A column the read materializes but the budget does not count is a column "+
+					"an oversized value can hide in", tc.name, len(fat), grew)
+			}
+			if grew > int64(len(fat)) {
+				t.Fatalf("inflating %s by %d bytes moved the measured width by %d, which is "+
+					"more than the value added; the width expression is counting something twice",
+					tc.name, len(fat), grew)
+			}
+			if got.WidestRowBytes < int64(len(fat)) {
+				t.Fatalf("the widest-row measure was %d for a row carrying a %d-byte value",
+					got.WidestRowBytes, len(fat))
+			}
+		})
+	}
+}
+
+// TestTheBoundTravelsWithTheReadNotWithAnEarlierMeasurement closes a
+// time-of-check/time-of-use gap.
+//
+// The budget was checked by one query and the rows read by another. Between
+// them another connection can enlarge a value: the ROW COUNT is unchanged so a
+// count re-check still passes, and the enlarged value is materialized having
+// never been covered by any bound. The bounds are therefore restated inside
+// the reading statement, where they cannot be stale by the time rows are
+// produced.
+//
+// The check here is on the reading call itself rather than on LoadSession,
+// because that is the call whose guard must hold on its own.
+func TestTheBoundTravelsWithTheReadNotWithAnEarlierMeasurement(t *testing.T) {
+	ctx := context.Background()
+	repo := observationStore(t)
+
+	facts := make([]analytics.PredictionObservation, 0, 3)
+	for i := 0; i < 3; i++ {
+		f := baseFact(analytics.KindChannelEvent)
+		f.Payload = analytics.ObservationPayload{Phase: "ROUND_UPDATED", RoundState: "ACTIVE"}
+		facts = append(facts, f)
+	}
+	epoch, sessionID := seedSession(t, repo, "bound-travels", facts)
+
+	size, err := repo.ObservationSessionSizeBySession(ctx, sessionID)
+	if err != nil {
+		t.Fatalf("measure: %v", err)
+	}
+	if size.Rows != 3 || size.TotalBytes <= 0 || size.WidestRowBytes <= 0 {
+		t.Fatalf("unexpected measurement %+v", size)
+	}
+
+	// Generous bounds: the rows come back.
+	rows, within, err := repo.ObservationsBySessionWithinBudget(ctx, sessionID, 10,
+		reader.MaxRecordBytes, reader.MaxSessionPayloadBytes)
+	if err != nil {
+		t.Fatalf("bounded read: %v", err)
+	}
+	if !within || len(rows) != 3 {
+		t.Fatalf("within=%v rows=%d, want a full read inside a generous budget", within, len(rows))
+	}
+
+	// An aggregate bound one byte under the real width: the read itself
+	// refuses, with no help from the earlier measurement.
+	rows, within, err = repo.ObservationsBySessionWithinBudget(ctx, sessionID, 10,
+		reader.MaxRecordBytes, size.TotalBytes-1)
+	if err != nil {
+		t.Fatalf("bounded read: %v", err)
+	}
+	if within || len(rows) != 0 {
+		t.Fatalf("within=%v rows=%d; the aggregate bound was not enforced by the reading "+
+			"statement, so an enlargement after the measurement would be materialized",
+			within, len(rows))
+	}
+
+	// A per-row bound one byte under the widest row. The aggregate alone
+	// cannot stand in for this: a read aborted on exceeding a running total
+	// has already materialized the row that exceeded it.
+	rows, within, err = repo.ObservationsBySessionWithinBudget(ctx, sessionID, 10,
+		size.WidestRowBytes-1, reader.MaxSessionPayloadBytes)
+	if err != nil {
+		t.Fatalf("bounded read: %v", err)
+	}
+	if within || len(rows) != 0 {
+		t.Fatalf("within=%v rows=%d; the per-row bound was not enforced", within, len(rows))
+	}
+
+	// And the whole path still works end to end.
+	ds, err := reader.LoadSession(ctx, repo, epoch, reader.DefaultMaxRecords)
+	if err != nil {
+		t.Fatalf("LoadSession: %v", err)
+	}
+	if len(ds.Records) != 3 {
+		t.Fatalf("read %d facts, want 3", len(ds.Records))
+	}
 }

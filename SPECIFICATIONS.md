@@ -2964,15 +2964,28 @@ a fully verified run.
 before the data they bound is materialized. The row count is capped
 (`DefaultMaxRecords` 20000, ceiling `MaxLoadLimit` 2^20 — a bound large enough
 to overflow the `limit+1` probe is not a bound and is refused), and the
-AGGREGATE size of the session's `payload_json` is measured and capped
-(`MaxSessionPayloadBytes`, 128 MiB) by a `COUNT`/`SUM(LENGTH(CAST(... AS
-BLOB)))` aggregate the database evaluates without handing any payload across
-the driver boundary. The byte bound is not redundant with the row bound:
+AGGREGATE width of the session is capped (`MaxSessionPayloadBytes`, 128 MiB)
+alongside the width of any single row (`MaxRecordBytes`, 1 MiB), by
+`COUNT`/`SUM`/`MAX` aggregates the database evaluates without handing any value
+across the driver boundary. The byte bound is not redundant with the row bound:
 `MaxObservationPayloadBytes` is enforced by the WRITER, so it bounds a store
 the writer filled and bounds nothing in a tampered or foreign database file —
-and even where it holds, 20000 facts at 64 KiB is 1.25 GiB. A session over
-either bound is refused, never truncated, because a prefix is indistinguishable
-from a complete dataset to every stage downstream. A session the store already
+and even where it holds, 20000 facts at 64 KiB is 1.25 GiB. A session over any
+bound is refused, never truncated, because a prefix is indistinguishable from a
+complete dataset to every stage downstream.
+
+Two details of that bound are load-bearing. The measured width is every
+VARIABLE-WIDTH column the read materializes, not `payload_json` alone: the row
+carries a dozen further TEXT columns whose length the schema does not
+constrain, so measuring one of them would report a small number for a row that
+is read in full. A structural test compares the width expression against the
+`SELECT` list itself and fails when either grows a column the other lacks. And
+the bounds are restated INSIDE the reading statement rather than inherited from
+the earlier measurement, because two statements are two snapshots: a value
+enlarged in between would leave the row count unchanged, pass a count re-check,
+and be materialized having never been bounded. The per-row cap exists for what
+an aggregate cannot cover — a read aborted on exceeding a running total has
+already materialized the row that exceeded it. A session the store already
 classified `INTEGRITY_ERROR` is refused before the rows are read at all: it was
 going to yield no cases, so there is nothing to gain by paying for its content.
 

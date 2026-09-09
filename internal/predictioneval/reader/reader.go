@@ -46,8 +46,9 @@ const DefaultMaxRecords = 20000
 // every value, not just the exact maximum.
 const MaxLoadLimit = 1 << 20
 
-// MaxSessionPayloadBytes bounds the AGGREGATE payload bytes one load will
-// accept, measured before a single payload is materialized.
+// MaxSessionPayloadBytes bounds the AGGREGATE width of one load, and
+// MaxRecordBytes bounds any single row within it. Both are enforced before a
+// value is materialized.
 //
 // The row count is not a memory bound on its own. analytics enforces
 // MaxObservationPayloadBytes (64 KiB) in the WRITER, which is the right place
@@ -57,11 +58,25 @@ const MaxLoadLimit = 1 << 20
 // 20000 x 64 KiB = 1.25 GiB, and without it a single row is unbounded, so the
 // row count permits an allocation neither this package nor its caller chose.
 //
+// The two bounds are not redundant. The aggregate bounds what the caller ends
+// up holding; the per-row bound covers what an aggregate cannot, because a
+// read aborted on exceeding a running total has already materialized the row
+// that exceeded it. And neither covers only payload_json: the row carries a
+// dozen other TEXT columns whose length the schema does not constrain, so a
+// store keeping the payload small while inflating pool_instance_id or
+// source_fingerprint would measure as tiny and still be read in full. The
+// width both bounds are computed from is every variable-width column the read
+// materializes.
+//
 // 128 MiB is far above any real collector session (a 20000-fact session of
 // typical envelopes is a few tens of megabytes) and far below what a refusal
-// is supposed to prevent. A session over it is refused, not truncated: a
-// prefix would look exactly like a complete dataset downstream.
-const MaxSessionPayloadBytes = 128 << 20
+// is supposed to prevent; 1 MiB per row is far above the writer's own 64 KiB
+// payload ceiling plus its identifiers. A session over either is refused, not
+// truncated: a prefix would look exactly like a complete dataset downstream.
+const (
+	MaxSessionPayloadBytes = 128 << 20
+	MaxRecordBytes         = 1 << 20
+)
 
 var (
 	// ErrSessionNotFound reports an epoch with no session row.
@@ -87,6 +102,8 @@ var (
 	// MaxSessionPayloadBytes. It is raised from a measurement, so the refusal
 	// costs the size of the answer rather than the size of the data.
 	ErrPayloadBudgetExceeded = errors.New("predictioneval/reader: session payloads exceed the maximum this reader will load")
+	// ErrRecordTooLarge reports a single row wider than MaxRecordBytes.
+	ErrRecordTooLarge = errors.New("predictioneval/reader: a stored fact exceeds the maximum width this reader will load")
 )
 
 // ObservationSource is the read surface this package needs. It is an interface
@@ -96,11 +113,18 @@ var (
 // *analytics.SQLiteRepository satisfies it.
 type ObservationSource interface {
 	ReadObservationSession(ctx context.Context, epoch int64) (analytics.ObservationSessionReading, bool, error)
-	ObservationsBySession(ctx context.Context, sessionID string, limit int) ([]analytics.ObservationRecord, error)
 	// ObservationSessionSizeBySession measures what a load would cost without
 	// paying it. It is part of the read surface rather than an optimization:
-	// the byte bound below cannot be enforced after the rows are in memory.
+	// a byte bound cannot be enforced after the rows are in memory.
 	ObservationSessionSizeBySession(ctx context.Context, sessionID string) (analytics.ObservationSessionSize, error)
+	// ObservationsBySessionWithinBudget reads the rows only if they fit, with
+	// the bounds evaluated in the SAME statement as the read. The measurement
+	// above cannot carry that job alone: between a separate measuring query
+	// and a separate reading one, another connection can enlarge a value, the
+	// row count is unchanged so a count re-check still passes, and the
+	// enlarged value is materialized having never been covered by any bound.
+	ObservationsBySessionWithinBudget(ctx context.Context, sessionID string, limit int,
+		maxRowBytes, maxTotalBytes int64) ([]analytics.ObservationRecord, bool, error)
 }
 
 // LoadSession reads one collector session as a bounded, coherent dataset.
@@ -157,8 +181,13 @@ func LoadSession(ctx context.Context, src ObservationSource, epoch int64, limit 
 	if size.Rows > int64(limit) {
 		return predictioneval.SourceDataset{}, ErrLimitExceeded
 	}
-	if size.PayloadBytes > MaxSessionPayloadBytes {
+	// Refuse from the measurement where it is decisive, so the caller gets the
+	// specific reason rather than a bare "the store changed".
+	if size.TotalBytes > MaxSessionPayloadBytes {
 		return predictioneval.SourceDataset{}, ErrPayloadBudgetExceeded
+	}
+	if size.WidestRowBytes > MaxRecordBytes {
+		return predictioneval.SourceDataset{}, ErrRecordTooLarge
 	}
 
 	// Ask for one more than the bound, so a session AT the bound is
@@ -166,12 +195,21 @@ func LoadSession(ctx context.Context, src ObservationSource, epoch int64, limit 
 	// facts of a longer session would hand the replay a prefix that looks
 	// complete.
 	//
-	// The count is re-checked on the returned rows rather than trusted from
-	// the measurement: the two statements are separate reads, and a session
-	// that grew between them must still be refused rather than truncated.
-	rows, err := src.ObservationsBySession(ctx, before.Session.CollectorSessionID, limit+1)
+	// The bounds are passed DOWN rather than trusted from the measurement
+	// above. The measurement and the read are separate statements, so a value
+	// enlarged between them would pass a count re-check unchanged and be
+	// materialized having never been bounded at all. Re-stating the limits
+	// here puts them in the same statement as the rows.
+	rows, within, err := src.ObservationsBySessionWithinBudget(
+		ctx, before.Session.CollectorSessionID, limit+1, MaxRecordBytes, MaxSessionPayloadBytes)
 	if err != nil {
 		return predictioneval.SourceDataset{}, err
+	}
+	if !within && size.Rows > 0 {
+		// The measurement saw facts and the bounded read produced none, so the
+		// session grew past a bound in between. That is the store changing
+		// underneath the load, which is what this error means.
+		return predictioneval.SourceDataset{}, ErrSnapshotIncoherent
 	}
 	if len(rows) > limit {
 		return predictioneval.SourceDataset{}, ErrLimitExceeded
