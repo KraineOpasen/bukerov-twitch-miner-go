@@ -64,6 +64,18 @@ var (
 	// internal/constants/gql.go (see the per-operation client-ID fallback below).
 	ErrPersistedQueryNotFound = errors.New("twitch: persisted query not found (stale query hash or client metadata)")
 
+	// errAmbiguousDiagnosticJSON marks a DIAGNOSTIC response whose raw JSON
+	// carries duplicate object members, so decoding it would silently pick one
+	// of two conflicting readings. Unexported: only the observation raises and
+	// classifies it, and no business path changes behaviour on it.
+	errAmbiguousDiagnosticJSON = errors.New("twitch: ambiguous diagnostic JSON response (duplicate object members)")
+
+	// errOversizedDiagnosticJSON marks a DIAGNOSTIC response carrying more JSON
+	// values than this read will decode. Unexported for
+	// the same reason as errAmbiguousDiagnosticJSON: only the observation
+	// raises and classifies it.
+	errOversizedDiagnosticJSON = errors.New("twitch: oversized diagnostic JSON response (too many values)")
+
 	// ErrClaimNotAccepted is returned only when Twitch authoritatively rejected a
 	// bonus claim in the mutation's business-result node. Missing/null/malformed
 	// responses use ErrBonusClaimIndeterminate and are quarantined, never retried.
@@ -339,6 +351,141 @@ func isAuthError(statusCode int, result map[string]interface{}) bool {
 	return false
 }
 
+// diagnosticRequestKey marks a request context as carrying a DIAGNOSTIC-ONLY
+// read.
+//
+// This is the transport owner's distinction between a BUSINESS read — one the
+// miner acts on, whose success or failure is real evidence about the Twitch
+// link — and a diagnostic observation, which must be able to fail without
+// telling the rest of the process anything about connectivity.
+//
+// It exists because the connectivity accounting below is shared, and it feeds
+// the auto-bet gate: functionalFailures reaches TwitchClient.ConnHealth ->
+// internal/miner.classifyAPI -> health.SignalGQLAPI = DEGRADED ->
+// minerBetHealthGate blocks every automated prediction bet. A diagnostic read
+// of an operation whose live acceptance is not established (see
+// constants.RewardList) would otherwise pin that gate closed forever on an
+// outcome that says nothing about whether Twitch is reachable.
+//
+// The suppression is SYMMETRIC: a diagnostic request contributes neither
+// failure nor success to the accounting, and never escalates to the operator
+// reauth path. It must not be able to mask a real outage any more than it can
+// invent one.
+//
+// Scope, stated precisely rather than generously: no WARN or ERROR is raised
+// for the request's own OUTCOME (stale hash, retries, exhaustion — all DEBUG),
+// and the retry trace carries no raw transport error text, only its bounded
+// status.
+//
+// The shared CLIENT-ID POOL is isolated too, and completely: a diagnostic read
+// caches NOTHING. It does not promote the process-wide defaultClientID, it does
+// not pin a per-operation candidate, and it never raises the WARN that
+// announces the shipped persisted-query hashes are stale. rememberWorkingClientID
+// promotes on any fallback answer that is not PersistedQueryNotFound — a 401
+// included — so without the split a diagnostic that FAILED would steer the
+// client ID a later business call goes out under, and would tell the operator to
+// update internal/constants/gql.go when nothing had resolved. A BUSINESS
+// rotation still promotes and still warns, unchanged.
+//
+// What a diagnostic read SHARES with a business read is the candidate order,
+// the transient-retry schedule and gqlMaxRetries. It additionally (see
+// doGQLRequestWithClientIDFallback, doGQLRequestWithRetry, doGQLOnceWithClient
+// and gqlSingleRoundTrip): draws every explicit dispatch from a per-cycle
+// DiagnosticAllowance, so candidates and retries stop when it is spent; never
+// follows a redirect; caps the body at maxDiagnosticResponseBytes; stops the
+// candidate loop and drops the body on any status but 200; refuses oversized or
+// ambiguous JSON; recognises PersistedQueryNotFound structurally; settles
+// authorization on the HTTP status alone; never replays on an auth rejection;
+// and can return errDiagnosticAllowanceExhausted, errAmbiguousDiagnosticJSON
+// or errOversizedDiagnosticJSON, none of which a business read ever sees.
+type diagnosticRequestKey struct{}
+
+// DiagnosticAllowance caps the explicit authenticated diagnostic HTTP dispatches
+// one logical cycle may make. The caller that owns the cycle creates it, hands
+// it to every ObserveWatchStreakMilestone of that cycle, and lets it go when
+// the cycle ends: it is per-cycle state, not a limiter on the client, and it is
+// deliberately NOT safe for concurrent use, because a diagnostic stage has
+// exactly one goroutine.
+//
+// The unit is one explicit http.Client.Do call made by this package - a first
+// attempt, a retry or a client-ID fallback alike. It is an application attempt
+// cap, not a wire-delivery bound: net/http may transparently replay a request
+// on a dead keep-alive connection, and nothing here claims to count what
+// Twitch counts.
+type DiagnosticAllowance struct {
+	remaining int
+	spent     int
+}
+
+// NewDiagnosticAllowance returns an allowance of `permits` explicit dispatches.
+func NewDiagnosticAllowance(permits int) *DiagnosticAllowance {
+	if permits < 0 {
+		permits = 0
+	}
+	return &DiagnosticAllowance{remaining: permits}
+}
+
+// Remaining reports how many dispatches may still be made. It consumes nothing,
+// which is what lets a caller decide whether to START another target, fallback
+// or retry without spending the permit that decision needs.
+func (a *DiagnosticAllowance) Remaining() int { return a.remaining }
+
+// Spent reports how many dispatches were charged.
+func (a *DiagnosticAllowance) Spent() int { return a.spent }
+
+// charge takes one permit immediately before a dispatch. It never refunds:
+// a dispatch that errors, times out or is cancelled has still been made.
+func (a *DiagnosticAllowance) charge() bool {
+	if a.remaining == 0 {
+		return false
+	}
+	a.remaining--
+	a.spent++
+	return true
+}
+
+// errDiagnosticAllowanceExhausted is the stopping reason a diagnostic read
+// returns when its cycle's dispatch allowance ran out before the read could
+// finish. It is a LOCAL decision, never a transport fact: it is not transient,
+// it must not be retried, and a candidate traversal it cut short is incomplete
+// evidence rather than proof that every client ID rejected the query.
+var errDiagnosticAllowanceExhausted = errors.New("twitch: diagnostic dispatch allowance exhausted")
+
+// diagnosticRequest is the value a diagnostic-only context carries. It is a
+// pointer so the transport can count the dispatches it actually makes and the
+// caller can read that count after the request returns; the count is per
+// ObserveWatchStreakMilestone call, because that is where the value is created.
+type diagnosticRequest struct {
+	// allowance is the cycle's shared permit pool. nil means uncapped, which is
+	// what non-cycle callers and tests use; the miner always passes one.
+	allowance *DiagnosticAllowance
+	// dispatches counts the explicit http.Client.Do calls this request made.
+	dispatches int
+}
+
+// withDiagnosticRequest marks ctx as a diagnostic-only read that draws on
+// allowance (nil = uncapped). Cancellation and deadlines propagate unchanged.
+// The stored value is ALWAYS non-nil: the mark is the pointer's presence, not
+// the allowance's.
+func withDiagnosticRequest(ctx context.Context, allowance *DiagnosticAllowance) context.Context {
+	return context.WithValue(ctx, diagnosticRequestKey{}, &diagnosticRequest{allowance: allowance})
+}
+
+// diagnosticRequestOf returns the diagnostic value ctx carries, or nil for an
+// unmarked (business) context. Like every other context consumer in this
+// package it requires a non-nil ctx.
+func diagnosticRequestOf(ctx context.Context) *diagnosticRequest {
+	dr, _ := ctx.Value(diagnosticRequestKey{}).(*diagnosticRequest)
+	return dr
+}
+
+// isDiagnosticRequest reports whether ctx was marked diagnostic-only. A nil or
+// unmarked context is a business request, so the accounting default is
+// unchanged for every pre-existing caller.
+func isDiagnosticRequest(ctx context.Context) bool {
+	return diagnosticRequestOf(ctx) != nil
+}
+
 // PostGQL runs one GQL operation under the client's own lifetime. A caller that
 // owns a cancellation scope (today: the watch generation, through the ctx-taking
 // entry points below) reaches postGQLRequest directly with its context; this
@@ -359,62 +506,105 @@ func isBonusMutationOperation(operation constants.GQLOperation) bool {
 
 // gqlSingleRoundTrip performs one complete single-operation GQL cycle (client
 // ID fallback + transient retry + parse) signed with the given token, and
-// reports whether the outcome was an authoritative auth rejection. The
-// marshaled body is reused verbatim across recovery replays, so a replayed
-// request is byte-identical to the original.
-func (c *TwitchClient) gqlSingleRoundTrip(ctx context.Context, body []byte, operationName, token string) (result map[string]interface{}, authRejected bool, err error) {
+// reports the HTTP status of the response it judged (0 when none was
+// received) and whether the outcome was an authoritative auth rejection. The
+// status is what postGQLRequestWithStatus exposes, so a diagnostic caller can
+// name a refusal by status rather than by body shape. The marshaled body is
+// reused verbatim across recovery replays, so a replayed request is
+// byte-identical to the original.
+func (c *TwitchClient) gqlSingleRoundTrip(ctx context.Context, body []byte, operationName, token string) (result map[string]interface{}, statusCode int, authRejected bool, err error) {
 	respBody, statusCode, err := c.doGQLRequestWithClientIDFallback(ctx, body, operationName, token)
 	if err != nil {
 		// Includes ErrPersistedQueryNotFound when every candidate client ID
 		// returned PersistedQueryNotFound. Returning it here (instead of an empty
 		// map) is what stops callers from misreading a stale hash as "streamer
 		// does not exist" or wiping their last-known state.
-		return nil, false, err
+		return nil, statusCode, false, err
 	}
 
 	// HTTP 401 is the authoritative token rejection regardless of body shape.
 	if statusCode == http.StatusUnauthorized {
-		return nil, true, nil
+		return nil, statusCode, true, nil
 	}
 	// HTTP 403 is a permission/scope/business rejection: NOT an auth
 	// rejection (no refresh, no device flow) and NOT data either — its error
 	// body must never reach per-operation parsers as if it were a result, nor
 	// refresh the connection-health timestamp.
 	if statusCode == http.StatusForbidden {
-		c.connAcct.markFunctionalFailure(time.Now())
-		return nil, false, fmt.Errorf("twitch GQL %s: permission denied (status 403)", operationName)
+		if !isDiagnosticRequest(ctx) {
+			c.connAcct.markFunctionalFailure(time.Now())
+		}
+		return nil, statusCode, false, fmt.Errorf("twitch GQL %s: permission denied (status 403)", operationName)
 	}
 
 	if len(bytes.TrimSpace(respBody)) == 0 {
-		return nil, false, fmt.Errorf("twitch GQL %s: empty response body", operationName)
+		return nil, statusCode, false, fmt.Errorf("twitch GQL %s: empty response body", operationName)
 	}
 
 	if err := json.Unmarshal(respBody, &result); err != nil {
-		return nil, false, fmt.Errorf("failed to unmarshal %s response: %w", operationName, err)
+		return nil, statusCode, false, fmt.Errorf("failed to unmarshal %s response: %w", operationName, err)
 	}
 
-	return result, isAuthError(statusCode, result), nil
+	// A diagnostic read settles authorization on the STATUS alone. A 401 was
+	// answered above; a 200 body that merely says "Unauthorized" is a string
+	// the peer chose, not a token rejection, and letting it pick the recorded
+	// class is exactly the peer-controlled misclassification this read
+	// refuses everywhere else. isAuthError's body rule stays for business
+	// reads, whose responses are not attacker-shaped text and whose token
+	// rejections must still drive credential recovery.
+	if isDiagnosticRequest(ctx) {
+		return result, statusCode, false, nil
+	}
+	return result, statusCode, isAuthError(statusCode, result), nil
 }
 
+// postGQLRequest is the ordinary read entry point. It keeps its historical
+// signature so every existing caller is untouched; callers that must judge the
+// HTTP status themselves use postGQLRequestWithStatus.
 func (c *TwitchClient) postGQLRequest(ctx context.Context, operation constants.GQLOperation) (map[string]interface{}, error) {
+	result, _, err := c.postGQLRequestWithStatus(ctx, operation)
+	return result, err
+}
+
+// postGQLRequestWithStatus is postGQLRequest plus the HTTP status of the
+// response it parsed.
+//
+// The shared transport special-cases 401 and 403 here and the transient
+// statuses (429/5xx) one layer down, in doGQLRequestWithRetry. For a BUSINESS
+// caller every other non-2xx body that happens to be JSON is returned verbatim
+// as a result, so a caller that treats "this decoded into the shape I
+// expected" as proof of success would accept a 400, a 404 or a redirect page
+// as data. For a
+// DIAGNOSTIC caller doGQLRequestWithClientIDFallback drops the body of any
+// status but 200 instead and the round trip surfaces an error; the status is exposed so that
+// caller can name the failure by status rather than by shape.
+func (c *TwitchClient) postGQLRequestWithStatus(ctx context.Context, operation constants.GQLOperation) (map[string]interface{}, int, error) {
 	if isBonusMutationOperation(operation) {
-		return nil, ErrDirectBonusMutation
+		return nil, 0, ErrDirectBonusMutation
 	}
 	body, err := json.Marshal(operation)
 	if err != nil {
-		return nil, fmt.Errorf("failed to marshal operation: %w", err)
+		return nil, 0, fmt.Errorf("failed to marshal operation: %w", err)
 	}
 
 	// Capture the credential snapshot the request is signed with; its
 	// Generation is what a recovery is keyed on, so a rejection of an
 	// already-rotated token never triggers a second refresh.
 	snap := c.auth.Snapshot()
-	result, authRejected, err := c.gqlSingleRoundTrip(ctx, body, operation.OperationName, snap.AccessToken)
+	result, statusCode, authRejected, err := c.gqlSingleRoundTrip(ctx, body, operation.OperationName, snap.AccessToken)
 	if err != nil {
-		return nil, err
+		return nil, statusCode, err
 	}
 
 	if authRejected {
+		// A diagnostic read owns no credential recovery: it neither drives a
+		// token refresh nor escalates to the operator reauth path. It reports
+		// ErrUnauthorized and stops. Business operations own auth recovery,
+		// and an observation must not be the thing that declares the session
+		// dead.
+		if isDiagnosticRequest(ctx) {
+			return nil, statusCode, fmt.Errorf("%w: operation %s", ErrUnauthorized, operation.OperationName)
+		}
 		// Serialized recovery + exactly ONE replay of the identical body. A
 		// replay that is rejected again surfaces ErrUnauthorized with no
 		// further recovery and no third request.
@@ -427,15 +617,15 @@ func (c *TwitchClient) postGQLRequest(ctx context.Context, operation constants.G
 			if !isTransientRecoveryFailure(rerr) {
 				c.handleUnauthorized()
 			}
-			return nil, fmt.Errorf("%w: operation %s", ErrUnauthorized, operation.OperationName)
+			return nil, statusCode, fmt.Errorf("%w: operation %s", ErrUnauthorized, operation.OperationName)
 		}
-		result, authRejected, err = c.gqlSingleRoundTrip(ctx, body, operation.OperationName, newSnap.AccessToken)
+		result, statusCode, authRejected, err = c.gqlSingleRoundTrip(ctx, body, operation.OperationName, newSnap.AccessToken)
 		if err != nil {
-			return nil, err
+			return nil, statusCode, err
 		}
 		if authRejected {
 			c.handleUnauthorized()
-			return nil, fmt.Errorf("%w: operation %s", ErrUnauthorized, operation.OperationName)
+			return nil, statusCode, fmt.Errorf("%w: operation %s", ErrUnauthorized, operation.OperationName)
 		}
 	}
 
@@ -447,12 +637,19 @@ func (c *TwitchClient) postGQLRequest(ctx context.Context, operation constants.G
 	// Checked explicitly here rather than via isAuthError, which only covers
 	// token rejection. The result is returned unchanged so per-operation
 	// parsing behaves exactly as before.
+	if isDiagnosticRequest(ctx) {
+		// Symmetric suppression: a diagnostic read neither refreshes the
+		// health timestamp nor records a functional failure. Letting it
+		// refresh lastSuccess would let a diagnostic that Twitch happens to
+		// answer mask a real business-path outage.
+		return result, statusCode, nil
+	}
 	if !gql.HasTopLevelErrors(result) {
 		c.markSuccess()
 	} else {
 		c.connAcct.markFunctionalFailure(time.Now())
 	}
-	return result, nil
+	return result, statusCode, nil
 }
 
 // postBonusMutation is the only transport allowed to send
@@ -606,6 +803,291 @@ func strictPersistedQueryNotFound(respBody []byte) bool {
 	return true
 }
 
+// maxDiagnosticJSONValues bounds how many JSON values one DIAGNOSTIC response
+// may contain, counted over the RAW body before anything decodes it.
+//
+// The byte limit and the collection limit each bound something real, and
+// neither bounds this. maxDiagnosticResponseBytes bounds the wire. The
+// milestone collection limit bounds what the PARSER retains. Between them sits
+// encoding/json, which materialises the entire document into interface values
+// before either the parser or its guard is reached: measured, a 1,048,575-byte
+// body of "0," elements still cost ~97 MB and ~300 ms to refuse, because the
+// refusal ran after the decode that made it expensive.
+//
+// A megabyte of wire is only a megabyte of memory when the values inside it are
+// large. This is the bound for the opposite case.
+//
+// "Value" counts scalars, object keys AND opening containers, because the
+// containers are exactly what gets allocated. A first version of this scan
+// counted only scalars and was therefore blind to the cheapest amplification
+// available: a body that is nothing but delimiters.
+//
+// Sized by MARGIN, not by observation. No live RewardList response has been
+// captured (acceptance is PENDING) and the donor's model covers only the
+// watchStreakMilestone subtree, so the value count of a real document is
+// unverified; the limit is expected to sit far above it, and that expectation
+// is an assumption this comment does not upgrade to a fact.
+//
+// The number is above the milestone collection limit (8192 values against
+// 4096 elements), but that is NOT an ordering of evidence: a body refused here
+// and a body refused by milestoneCollectionsWithinLimit record the same
+// OVERSIZED_COLLECTION class (see classifyMilestoneRequestError), with no
+// snapshot either way. For entries of the documented shape,
+// {"broadcastIdentifiers":[{"id":...}]} - about six values each - THIS scan is
+// the operative cardinality bound: it refuses at roughly 1,360 such entries,
+// long before 4096 elements. The collection bound is reached first only by
+// degenerate elements (empty objects, scalars, nulls). This scan runs first
+// because it is cheaper - it refuses before anything is decoded - not because
+// its evidence is more precise.
+const maxDiagnosticJSONValues = 8192
+
+// diagnosticJSONValueVerdict is what diagnosticJSONValueCount answers. The
+// over-limit case is split in two because the SIZE question and the SHAPE
+// question have different owners, and collapsing them cost the bound its teeth
+// once already: reporting "within limit" for an over-limit malformed body let
+// the next pass walk the whole document.
+type diagnosticJSONValueVerdict int
+
+const (
+	// diagnosticJSONWithinLimit: few enough values to decode.
+	diagnosticJSONWithinLimit diagnosticJSONValueVerdict = iota
+	// diagnosticJSONOverLimit: too many values, in a body that is otherwise
+	// well formed. "Too large" is the honest class.
+	diagnosticJSONOverLimit
+	// diagnosticJSONOverLimitMalformed: too many values AND not well formed.
+	// There is no honest size verdict to give - the decoder owns the shape one
+	// - but the resource bound still applies, so no caller may run another
+	// allocating pass over this body.
+	diagnosticJSONOverLimitMalformed
+)
+
+// diagnosticJSONValueCount classifies body by how many JSON values it carries.
+//
+// It streams tokens and stops at the limit, so it holds only the decoder's
+// nesting stack and never the document: the check cannot become the
+// amplification it exists to prevent.
+//
+// Malformed JSON is NOT this function's business to CLASSIFY. Saying "too
+// large" about a body that is merely broken would be a fabricated reason - and,
+// worse, one a peer could choose, by moving its syntax error to either side of
+// the limit boundary. But declining to name the class is not the same as
+// declining to bound the resource, and an earlier version conflated the two:
+// it answered a plain "within limit" for an over-limit malformed body, and the
+// duplicate-member scan that runs next then boxed the entire payload. Measured:
+// a 1,048,560-byte dense array with one trailing invalid byte allocated 55.2 MB
+// - the exact cost this scan exists to avoid, reachable by appending a byte.
+func diagnosticJSONValueCount(body []byte) diagnosticJSONValueVerdict {
+	decoder := json.NewDecoder(bytes.NewReader(body))
+
+	// UseNumber is what keeps this bound from being switchable off. Without it
+	// Token converts every number to a float64, so a single unrepresentable one
+	// - 1e10000 - fails the scan; and because a scan failure means "malformed,
+	// not my problem", the bound then applied to NOTHING after that point. A
+	// 240 KB body, well inside the byte cap, was reported within limit and cost
+	// 22 MB to refuse. json.Number keeps the token a string, so counting
+	// survives values the decoder could never represent, and the size question
+	// stays separate from the representability one.
+	decoder.UseNumber()
+
+	values := 0
+	for {
+		token, err := decoder.Token()
+		if err != nil {
+			// Ran out of readable tokens before the limit: too small to matter,
+			// whatever its shape. The decoder reports the shape.
+			return diagnosticJSONWithinLimit
+		}
+		// An OPENING delimiter is a value: it is the map or slice
+		// encoding/json will allocate. Counting only scalars leaves the
+		// cheapest amplification of all uncounted, because a container-heavy
+		// body - [{},{},{},...] - is nothing BUT delimiters. Measured before
+		// this line existed: 349,496 empty objects inside a just-under-1 MiB
+		// body scanned as zero values and still cost ~88 MB to decode.
+		//
+		// Closing delimiters are skipped so a container is counted once, not
+		// twice.
+		if delimiter, isDelimiter := token.(json.Delim); isDelimiter {
+			if delimiter != '{' && delimiter != '[' {
+				continue
+			}
+		}
+		values++
+		if values > maxDiagnosticJSONValues {
+			// Over the limit on the tokens seen so far - but "too large" is
+			// only the honest answer for a body that is otherwise WELL FORMED.
+			// A malformed one has no size verdict to give, only a shape one,
+			// and the decoder that follows owns that; answering "too large"
+			// here would let a peer choose between the two classes by moving
+			// its syntax error to either side of this boundary.
+			//
+			// json.Valid is the right way to settle that and the reason this
+			// is not simply "keep scanning": finishing the token loop boxes
+			// every value it reads, which measured 54 MB on a 1 MiB body -
+			// reintroducing the cost this scan exists to avoid. json.Valid
+			// walks the bytes without materialising anything.
+			if json.Valid(body) {
+				return diagnosticJSONOverLimit
+			}
+			return diagnosticJSONOverLimitMalformed
+		}
+	}
+}
+
+// diagnosticJSONHasDuplicateMembers reports whether body carries duplicate
+// object members, and ONLY that.
+//
+// jsonObjectKeysAreUnique cannot answer this question, because it folds scanner
+// errors into its "not unique" answer: it returns false for a truncated body,
+// for trailing bytes after the document, and for anything else the decoder
+// dislikes. That is the right shape for its own callers, which want a single
+// "is this body trustworthy" verdict. It is the wrong shape here, where the
+// answer becomes a named failure class: malformed input reported as
+// AMBIGUOUS_JSON would tell an operator that Twitch sent duplicate members
+// when it sent no such thing, and would let a peer choose the recorded class
+// with syntax alone.
+//
+// Malformed input is therefore left to the decoder that follows, which reports
+// it honestly.
+func diagnosticJSONHasDuplicateMembers(body []byte) bool {
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	duplicate, err := scanJSONValueForDuplicateKeys(decoder)
+	if err != nil {
+		return false
+	}
+	if !duplicate {
+		return false
+	}
+
+	// A duplicate found does not yet mean a duplicate REPORTED. The scan stops
+	// at the first repeated key, so it has seen only a prefix - and a body
+	// whose remainder the decoder cannot read is a shape problem, whatever its
+	// prefix contained. Reporting "duplicate members" for it would let a peer
+	// choose between this class and the transport class by moving the bad part
+	// to either side of the repeated key.
+	//
+	// The test is DECODABILITY, not syntax, and the difference is reachable:
+	// json.Valid accepts 1e10000 as a well-formed number while the decode that
+	// follows fails on it, because interface{} decoding puts numbers in a
+	// float64. Syntax is the wrong question here - the operative one is
+	// whether the document decodes at all. Whether it then has the object
+	// shape the rest of this read wants is a further question the following
+	// decode answers on its own (a top-level array decodes here and fails
+	// there; Twitch never answers a single operation with one).
+	//
+	// Affordable precisely here: the value bound above has already passed, so
+	// this document is at most maxDiagnosticJSONValues values. The value scan
+	// itself cannot do this, because it runs before any bound is established
+	// and so can only afford json.Valid.
+	var decoded interface{}
+	return json.Unmarshal(body, &decoded) == nil
+}
+
+// diagnosticPersistedQueryNotFound reports whether body is a STRUCTURED
+// PersistedQueryNotFound rejection.
+//
+// gql.IsPersistedQueryNotFound answers with bytes.Contains over the whole body.
+// For a business read that is defensible: the operations are ours and their
+// responses are not attacker-shaped text. For a diagnostic read it is not, and
+// the consequence is not a misclassification but a destroyed observation - any
+// valid response with the marker in an unrelated string is resent under every
+// candidate client ID and then reported as UNSUPPORTED_QUERY, discarding the
+// real milestone data it carried.
+//
+// So the marker must be where a rejection actually puts it: a top-level errors
+// array, every element an object carrying the APQ marker, with no non-null data
+// member beside it (an empty data object is PRESENT, and refuses the reading;
+// an explicit null is absent, as everywhere else in this read). Both attested
+// spellings count - "message" and the extensions code
+// - because a genuine PersistedQueryNotFound is the EXPECTED steady state for
+// this operation, and failing to recognise one would replace an honest
+// UNSUPPORTED_QUERY with GRAPHQL_TOP_LEVEL_ERRORS after a single dispatch: the
+// unrecognised body still carries a non-empty errors array, which the reader
+// refuses before it ever looks for a data node, so the stale shipped hash
+// would hide among ordinary service errors.
+//
+// Deliberately not strictPersistedQueryNotFound: that one authorizes a mutation
+// REPLAY and demands the extensions code specifically, so it would answer false
+// for the message-only spelling this read must still recognise.
+func diagnosticPersistedQueryNotFound(body []byte) bool {
+	var result map[string]interface{}
+	if err := json.Unmarshal(body, &result); err != nil {
+		return false
+	}
+	if data, present := result["data"]; present && data != nil {
+		return false
+	}
+	// A top-level "error" is an explicit rejection in its own right, and it
+	// sits BESIDE the errors array rather than inside it - so an APQ-shaped
+	// array can be presented alongside one and would otherwise be believed,
+	// concealing the real rejection.
+	//
+	// An explicit null is ABSENT, not a rejection, which is the rule this read
+	// applies to every other presence question and the rule SPECIFICATIONS.md
+	// states for it. Matching strictPersistedQueryNotFound's blunter "any
+	// present key" test here was wrong in the one direction that costs
+	// evidence: {"error":null,"errors":[{"message":"PersistedQueryNotFound"}]}
+	// was refused as APQ and recorded GRAPHQL_TOP_LEVEL_ERRORS, so a null the
+	// peer costs nothing to add would hide the stale shipped hash this
+	// operation exists to detect. That mutation-replay detector can afford to
+	// be blunter; this one cannot.
+	if raw, present := result["error"]; present && raw != nil {
+		return false
+	}
+
+	list, ok := result["errors"].([]interface{})
+	if !ok || len(list) == 0 {
+		return false
+	}
+	for _, raw := range list {
+		object, ok := raw.(map[string]interface{})
+		if !ok {
+			return false
+		}
+
+		// The two spellings are ALTERNATIVE evidence, not independent ones.
+		// Where both are present the code decides, because it is the machine-
+		// readable field and the message is prose beside it: an error reading
+		// {"message":"PersistedQueryNotFound","extensions":{"code":"UNAUTHORIZED"}}
+		// is an authorization rejection wearing an APQ message, and taking the
+		// message on its own would replay the authenticated request under every
+		// client ID and record the real rejection as UNSUPPORTED_QUERY.
+		// Presence and SHAPE are separate questions. A single type assertion
+		// answers both at once and therefore answers neither: it reports false
+		// for an absent extensions member and for a present one that is a
+		// string, so malformed rejection metadata reads as no metadata and
+		// falls through to the message.
+		//
+		// An explicit null is treated as absent rather than malformed, because
+		// it says "no extensions object" and refusing it would risk missing a
+		// genuine PersistedQueryNotFound - the one direction where being wrong
+		// hides a stale shipped hash instead of merely refusing a response.
+		if rawExtensions, present := object["extensions"]; present && rawExtensions != nil {
+			extensions, isObject := rawExtensions.(map[string]interface{})
+			if !isObject {
+				return false
+			}
+			// The same null-is-absent rule applies to the code itself: an
+			// explicit "code": null says "no code", not "a contradicting code",
+			// so it falls through to the message exactly as a null extensions
+			// object does. Refusing it cost the same evidence in the same
+			// direction: a genuine rejection wearing a null code was recorded
+			// GRAPHQL_TOP_LEVEL_ERRORS after one dispatch.
+			if code, carried := extensions["code"]; carried && code != nil {
+				if code != "PERSISTED_QUERY_NOT_FOUND" {
+					return false
+				}
+				continue
+			}
+		}
+
+		// No code to consult: the message is the only evidence there is.
+		if message, _ := object["message"].(string); message != "PersistedQueryNotFound" {
+			return false
+		}
+	}
+	return true
+}
+
 // jsonObjectKeysAreUnique validates the raw JSON token stream before decoding
 // into maps. encoding/json otherwise applies last-value-wins to duplicate
 // members, which is unsafe proof for a side-effect retry: a conflicting
@@ -671,6 +1153,20 @@ func scanJSONValueForDuplicateKeys(decoder *json.Decoder) (bool, error) {
 	return false, nil
 }
 
+// noRedirectClient returns a request-local copy of the shared HTTP client that
+// refuses to follow redirects. The copy shares the transport, the timeout and
+// the cookie jar (nil on the shared client: no cookie state exists to share);
+// only the copy's redirect policy changes, so the shared client - and every
+// caller that follows redirects - is untouched. Both the side-effect
+// mutations and the diagnostic read dispatch through it.
+func (c *TwitchClient) noRedirectClient() *http.Client {
+	client := *c.client
+	client.CheckRedirect = func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
+	return &client
+}
+
 func (c *TwitchClient) doGQLMutationOnce(body []byte, operationName, clientID, token string) ([]byte, int, bool, error) {
 	req, err := http.NewRequest(http.MethodPost, c.gqlURL, bytes.NewReader(body))
 	if err != nil {
@@ -678,11 +1174,7 @@ func (c *TwitchClient) doGQLMutationOnce(body []byte, operationName, clientID, t
 	}
 	c.setGQLHeaders(req, clientID, token)
 
-	client := *c.client
-	client.CheckRedirect = func(*http.Request, []*http.Request) error {
-		return http.ErrUseLastResponse
-	}
-	respBody, statusCode, _, err := doGQLOnceWithClient(&client, req)
+	respBody, statusCode, _, err := doGQLOnceWithClient(c.noRedirectClient(), req)
 	if err != nil {
 		return respBody, statusCode, true, err
 	}
@@ -905,14 +1397,23 @@ func (c *TwitchClient) rememberWorkingClientID(operation, clientID string, viaFa
 // client-ID/query-hash case.
 //
 // Candidate order is per-operation (candidateClientIDs): the operation's cached
-// known-good ID first, then the promoted default, then the rest. On success the
-// working ID is cached for the operation (rememberWorkingClientID). When every
+// known-good ID first, then the promoted default, then the rest. On success a
+// BUSINESS read caches the working ID for the operation
+// (rememberWorkingClientID); a DIAGNOSTIC read caches nothing at all, so it
+// starts from the current process-wide default - the shipped one until a
+// BUSINESS rotation promotes another - followed by the remaining shipped
+// candidates, and it never moves that default itself. When every
 // candidate returns PersistedQueryNotFound the request has genuinely failed
-// because the hash itself is stale — one ERROR is logged and
+// because the hash itself is stale — one ERROR is logged for a business read (a
+// diagnostic read logs the same summary at DEBUG, see logStaleHashExhausted) and
 // ErrPersistedQueryNotFound is returned so the caller keeps its last-known state
 // instead of parsing an error body as "no data".
 func (c *TwitchClient) doGQLRequestWithClientIDFallback(ctx context.Context, body []byte, operationLabel, token string) ([]byte, int, error) {
-	c.connAcct.markAttempt(time.Now())
+	dr := diagnosticRequestOf(ctx)
+	diagnostic := dr != nil
+	if !diagnostic {
+		c.connAcct.markAttempt(time.Now())
+	}
 	candidates := c.candidateClientIDs(operationLabel)
 
 	var (
@@ -922,30 +1423,214 @@ func (c *TwitchClient) doGQLRequestWithClientIDFallback(ctx context.Context, bod
 	)
 
 	for i, clientID := range candidates {
+		// A diagnostic read asks - WITHOUT spending anything - whether the
+		// cycle can still afford another candidate before it starts one. When
+		// it cannot, the traversal ends here as INCOMPLETE. That is not the
+		// same fact as the exhausted-hash return after the loop: that one says
+		// every candidate answered PersistedQueryNotFound, and a traversal cut
+		// short by the allowance has not established it. UNSUPPORTED_QUERY
+		// stays reachable only through the full walk.
+		//
+		// The owner is consulted FIRST, as on the retry path: a cancellation
+		// or deadline that lands between one candidate's answer and the next
+		// must read CANCELLED, never as an allowance stop.
+		if diagnostic {
+			if cerr := ctx.Err(); cerr != nil {
+				return nil, 0, cerr
+			}
+			if dr.allowance != nil && dr.allowance.Remaining() == 0 {
+				return nil, 0, fmt.Errorf("%w: after %d of %d client IDs",
+					errDiagnosticAllowanceExhausted, i, len(candidates))
+			}
+		}
+
 		respBody, statusCode, err = c.doGQLRequestWithRetry(ctx, body, operationLabel, clientID, token)
 		if err != nil {
 			return respBody, statusCode, err
 		}
 
-		if !gql.IsPersistedQueryNotFound(respBody) {
-			c.rememberWorkingClientID(operationLabel, clientID, i > 0)
+		// A DIAGNOSTIC read stops here on any status but 200, before the body
+		// is treated as evidence of anything. Exactly 200, not the 2xx range:
+		// HTTP 200 is the only status the checked-in GQL contract names as an
+		// answer (SPECIFICATIONS.md, and the bonus-mutation path one function
+		// up refuses everything else), so a 202 or a 206 is a pending or partial
+		// answer the contract never describes. With a range check a 206 carrying
+		// a valid data object was recorded OBSERVED, and a 202 carrying a
+		// structured APQ rejection drove the candidate loop below and ended as
+		// UNSUPPORTED_QUERY after three authenticated dispatches (reproduced by
+		// TestOnlyHTTP200IsDiagnosticEvidence). Business reads keep decoding
+		// whatever a 2xx carries; only the diagnostic gate is exact.
+		//
+		// The structured APQ detector this path uses
+		// (diagnosticPersistedQueryNotFound, below) reads the body and does
+		// not consult the status, so a rejected response whose body is SHAPED
+		// like a structured rejection would otherwise drive the candidate
+		// loop: the authenticated request would be re-sent under every client
+		// ID this project ships, and an endpoint answering each with the same
+		// shape would end the read as UNSUPPORTED_QUERY - amplifying the
+		// request threefold and naming the wrong cause. The status is the
+		// authority on whether a body is worth reading at all.
+		//
+		// The BODY is dropped, not just the iteration stopped. An earlier
+		// version handed it back "unchanged, so gqlSingleRoundTrip keeps
+		// deciding 401 and 403" - but neither of those branches reads the body,
+		// so nothing needed it, and returning it walked the response straight
+		// past the pre-decode value bound (the diagnosticJSONValueCount switch
+		// below) into json.Unmarshal. Measured on one 1,048,567-byte dense array: 44.9 MB
+		// at HTTP 404 against 3.2 MB for the identical body at HTTP 200 - a
+		// 14x amplification on the bonus poll goroutine, selected purely by the
+		// peer's status code, in the one place this feature's stated order
+		// (bound the resource, establish the shape, then interpret) had no
+		// bound at all.
+		//
+		// Nothing downstream loses evidence: 401 and 403 are settled on the
+		// status alone, the resulting "empty response body" transport error
+		// carries no text worth keeping, and ObserveWatchStreakMilestone
+		// refines it back to HTTP_STATUS. A refused status is not a working client ID,
+		// so nothing is cached for it either. Transient statuses never arrive
+		// here - doGQLRequestWithRetry has already exhausted them into an error
+		// above.
+		if diagnostic {
+			if statusCode != http.StatusOK {
+				return nil, statusCode, nil
+			}
+
+			// Duplicate JSON members are ambiguous evidence. encoding/json
+			// keeps the LAST value, so a response that carries an explicit
+			// rejection followed by a benign duplicate - say an "errors" array
+			// of real errors followed by an empty one - decodes with the
+			// rejection erased and would be recorded as a clean observation.
+			// The mutation path already refuses raw bodies like this
+			// (jsonObjectKeysAreUnique); an observation whose whole purpose is
+			// honest evidence has the same need, and the fail-closed checks
+			// downstream cannot help, because they only ever see the lossy
+			// decoded map.
+			//
+			// This runs BEFORE the structured APQ detector, not after, and the
+			// order is the whole point: that detector decodes the body, and
+			// encoding/json keeps the LAST duplicate member, so a benign errors
+			// array followed by an APQ-shaped one would present as an
+			// authoritative rejection, drive the candidate loop under every
+			// client ID and end as UNSUPPORTED_QUERY - while the reverse member
+			// order would erase a real rejection into NO_DATA_NODE - never
+			// reaching this refusal at all. The peer would pick the recorded
+			// class by member ORDER. An ambiguous body is not evidence of
+			// anything, the marker included.
+			// Size first: this scan is what keeps the two below - and the
+			// decode after them - from being handed a document that makes them
+			// expensive. jsonObjectKeysAreUnique builds a key set per object,
+			// so it is one of the things being protected, not a peer.
+			switch diagnosticJSONValueCount(respBody) {
+			case diagnosticJSONOverLimit:
+				return nil, statusCode, fmt.Errorf(
+					"%w: operation %s", errOversizedDiagnosticJSON, operationLabel)
+
+			case diagnosticJSONOverLimitMalformed:
+				// Over the limit, and broken. It keeps its malformed class -
+				// the decoder below names that, and a peer must not be able to
+				// pick between the two classes with a syntax error - but the
+				// duplicate scan is SKIPPED, because that scan boxes every
+				// value it reads and this body is precisely the one too large
+				// to hand it. Nothing is lost by skipping it: a body that does
+				// not decode cannot be recorded as an observation either way.
+				// The two json.Unmarshal calls that still follow - the
+				// structured APQ detector's and gqlSingleRoundTrip's - are
+				// safe because encoding/json validates the whole input before
+				// allocating anything, so a malformed body fails without
+				// materialising; TestAMalformedOversizedBodyIsStillBounded
+				// pins that cost, so a decoder that does not share the
+				// property cannot be substituted silently.
+
+			default:
+				if diagnosticJSONHasDuplicateMembers(respBody) {
+					return nil, statusCode, fmt.Errorf(
+						"%w: operation %s", errAmbiguousDiagnosticJSON, operationLabel)
+				}
+			}
+		}
+
+		// The two paths ask the same question of different evidence: a business
+		// read trusts the marker anywhere in its own operation's response, a
+		// diagnostic read requires it where a rejection actually puts it. See
+		// diagnosticPersistedQueryNotFound.
+		queryNotFound := gql.IsPersistedQueryNotFound(respBody)
+		if diagnostic {
+			queryNotFound = diagnosticPersistedQueryNotFound(respBody)
+		}
+
+		if !queryNotFound {
+			// A diagnostic read pins NOTHING - not the process-wide default,
+			// and not the per-operation candidate either.
+			//
+			// It used to pin the per-operation candidate, guarded by a predicate
+			// that tried to decide HERE whether the reader would accept the
+			// response. Every version of that predicate was an incomplete
+			// restatement of the reader's rules, and three consecutive review
+			// rounds each found a body it admitted and the reader then rejected:
+			// an explicit service rejection, a non-object data node, and an
+			// oversized collection. Because candidateClientIDs puts the cached
+			// ID FIRST and any non-APQ response ends this loop, each of those
+			// pinned a candidate permanently and the shipped default was never
+			// retried.
+			//
+			// Predicting one layer's verdict in another is the defect, not any
+			// one of those shapes, so the prediction is gone rather than
+			// extended a fourth time. What it bought was at most one saved
+			// request per target per cycle, and only in a state - the shipped
+			// default failing while a fallback serves - that RewardList has
+			// never been observed in, its acceptance being PENDING. In the
+			// state it IS expected to be in, every candidate answers
+			// PersistedQueryNotFound and nothing was ever cached anyway.
+			//
+			// This also makes the code match what this feature claims: it owns
+			// no cache. A BUSINESS read is untouched and still caches and
+			// promotes exactly as before.
+			if !diagnostic {
+				c.rememberWorkingClientID(operationLabel, clientID, i > 0)
+			}
 			return respBody, statusCode, nil
 		}
 
-		slog.Warn("GQL request returned PersistedQueryNotFound; trying next client ID",
-			"operation", operationLabel,
-			"clientID", clientID,
-			"remainingCandidates", len(candidates)-i-1,
-		)
+		// A diagnostic read of an operation whose live acceptance is not
+		// established fails this way BY DESIGN, for every candidate, on every
+		// cycle. At WARN/ERROR it would be an unactionable operator alert; even
+		// at DEBUG, one line per candidate per target per cycle is volume the
+		// retained log does not need, and the exhausted summary below already
+		// reports how many candidates were tried. A business read keeps the
+		// full per-candidate WARN, where the specific client ID is actionable.
+		if !diagnostic {
+			slog.Warn("GQL request returned PersistedQueryNotFound; trying next client ID",
+				"operation", operationLabel,
+				"clientID", clientID,
+				"remainingCandidates", len(candidates)-i-1,
+			)
+		}
 	}
 
+	logStaleHashExhausted(diagnostic, operationLabel, len(candidates))
+
+	if !diagnostic {
+		c.connAcct.markFunctionalFailure(time.Now())
+	}
+	return respBody, statusCode, fmt.Errorf("%w: operation %s (tried %d client IDs)", ErrPersistedQueryNotFound, operationLabel, len(candidates))
+}
+
+// logStaleHashExhausted reports that every candidate client ID returned
+// PersistedQueryNotFound. For a business read this is the operator's signal to
+// refresh the hash in internal/constants/gql.go; for a diagnostic read it is an
+// expected outcome the caller records itself.
+func logStaleHashExhausted(diagnostic bool, operationLabel string, clientIDsTried int) {
+	if diagnostic {
+		slog.Debug("Diagnostic GQL request returned PersistedQueryNotFound on all known client IDs",
+			"operation", operationLabel,
+			"clientIDsTried", clientIDsTried,
+		)
+		return
+	}
 	slog.Error("GQL request returned PersistedQueryNotFound on all known client IDs; persisted-query hashes are stale and need updating in internal/constants/gql.go",
 		"operation", operationLabel,
-		"clientIDsTried", len(candidates),
+		"clientIDsTried", clientIDsTried,
 	)
-
-	c.connAcct.markFunctionalFailure(time.Now())
-	return respBody, statusCode, fmt.Errorf("%w: operation %s (tried %d client IDs)", ErrPersistedQueryNotFound, operationLabel, len(candidates))
 }
 
 // doGQLRequestWithRetry sends the given already-marshaled GQL request body
@@ -957,6 +1642,8 @@ func (c *TwitchClient) doGQLRequestWithClientIDFallback(ctx context.Context, bod
 // same failure. A successful response never incurs a wait.
 func (c *TwitchClient) doGQLRequestWithRetry(ctx context.Context, body []byte, operationLabel, clientID, token string) ([]byte, int, error) {
 	var lastErr error
+	dr := diagnosticRequestOf(ctx)
+	diagnostic := dr != nil
 
 	for attempt := 0; attempt <= gqlMaxRetries; attempt++ {
 		req, err := http.NewRequestWithContext(ctx, "POST", c.gqlURL, bytes.NewReader(body))
@@ -965,9 +1652,45 @@ func (c *TwitchClient) doGQLRequestWithRetry(ctx context.Context, body []byte, o
 		}
 		c.setGQLHeaders(req, clientID, token)
 
-		respBody, statusCode, retryAfter, err := c.doGQLOnce(req)
+		var (
+			respBody   []byte
+			statusCode int
+			retryAfter time.Duration
+		)
+		if !diagnostic {
+			respBody, statusCode, retryAfter, err = c.doGQLOnce(req)
+		} else {
+			// The permit is charged IMMEDIATELY before the dispatch and in the
+			// same breath as the dispatch count, so spent == dispatches by
+			// construction; a charge refused here means no request is made.
+			// A dead owner is checked first so a permit is not spent on a
+			// Do that would refuse on its own context without dialling.
+			if cerr := ctx.Err(); cerr != nil {
+				return nil, 0, cerr
+			}
+			if dr.allowance != nil && !dr.allowance.charge() {
+				return nil, 0, fmt.Errorf("%w: operation %s (attempt %d)", errDiagnosticAllowanceExhausted, operationLabel, attempt+1)
+			}
+			dr.dispatches++
+
+			// A diagnostic read never follows a redirect. The shared client
+			// follows up to ten, each one another authenticated request that
+			// no permit above would have counted and that the byte cap cannot
+			// see. noRedirectClient is request-local and made at dispatch
+			// time, as doGQLMutationOnce already does, so the shared client's
+			// policy - and every business read's - is untouched. The 3xx then
+			// comes back as an ordinary refused status and is refused on it.
+			respBody, statusCode, retryAfter, err = doGQLOnceWithClient(c.noRedirectClient(), req)
+		}
 		if err == nil {
-			slog.Debug("GQL response", "operation", operationLabel, "status", statusCode)
+			// A diagnostic read repeats for every started target on every
+			// cycle (up to three under the shared allowance), so its
+			// per-attempt trace is pure volume in the retained log; the caller
+			// records the outcome as its own structured fact instead. A
+			// business read keeps the trace.
+			if !diagnostic {
+				slog.Debug("GQL response", "operation", operationLabel, "status", statusCode)
+			}
 			return respBody, statusCode, nil
 		}
 
@@ -982,16 +1705,47 @@ func (c *TwitchClient) doGQLRequestWithRetry(ctx context.Context, body []byte, o
 			break
 		}
 
+		if diagnostic {
+			// Order matters and is the whole point of these two lines. The
+			// owner's own cancellation is checked FIRST: an owner deadline or
+			// SIGTERM that lands on the last permitted dispatch must be
+			// recorded as CANCELLED, not as an allowance stop, and no switch
+			// order downstream can recover that once the wrong sentinel has
+			// been returned. Only then is the allowance asked - WITHOUT
+			// spending - whether a retry is affordable at all; when it is not,
+			// waiting out the backoff would be a wait for a request that can
+			// never be sent.
+			if cerr := ctx.Err(); cerr != nil {
+				return nil, statusCode, cerr
+			}
+			if dr.allowance != nil && dr.allowance.Remaining() == 0 {
+				return nil, statusCode, fmt.Errorf("%w: operation %s (attempt %d)", errDiagnosticAllowanceExhausted, operationLabel, attempt+1)
+			}
+		}
+
 		wait, via := gql.RetryWait(attempt, retryAfter)
-		slog.Warn("GQL request failed, retrying",
+		retryLog := slog.Warn
+		retryAttrs := []any{
 			"operation", operationLabel,
-			"attempt", attempt+1,
-			"maxAttempts", gqlMaxRetries+1,
+			"attempt", attempt + 1,
+			"maxAttempts", gqlMaxRetries + 1,
 			"waitSeconds", wait.Seconds(),
 			"nextRetryVia", via,
 			"status", statusCode,
-			"error", lastErr,
-		)
+		}
+		if diagnostic {
+			// Lowering the level is not enough on its own: FileLevel defaults
+			// to DEBUG, so this record still reaches the retained log. The
+			// transport error is an arbitrary, unbounded string that a hostile
+			// redirect or proxy can shape - exactly what a diagnostic read
+			// promises never to write. The bounded status is what makes a retry
+			// diagnosable; the raw text adds nothing a class does not.
+			retryLog = slog.Debug
+		} else {
+			retryAttrs = append(retryAttrs, "error", lastErr)
+		}
+		retryLog("GQL request failed, retrying", retryAttrs...)
+
 		// The backoff belongs to the request, so it belongs to whoever owns the
 		// request. gql.RetryWait still computes the same jittered delay; only
 		// the waiting is interruptible now, so a cancelled owner stops instead
@@ -1001,12 +1755,19 @@ func (c *TwitchClient) doGQLRequestWithRetry(ctx context.Context, body []byte, o
 		}
 	}
 
-	c.gqlFailures.mark(time.Now())
-	slog.Error("GQL request exhausted all retries, skipping this cycle",
-		"operation", operationLabel,
-		"attempts", gqlMaxRetries+1,
-		"error", lastErr,
-	)
+	if !diagnostic {
+		c.gqlFailures.mark(time.Now())
+		slog.Error("GQL request exhausted all retries, skipping this cycle",
+			"operation", operationLabel,
+			"attempts", gqlMaxRetries+1,
+			"error", lastErr,
+		)
+	} else {
+		slog.Debug("Diagnostic GQL request exhausted all retries",
+			"operation", operationLabel,
+			"attempts", gqlMaxRetries+1,
+		)
+	}
 
 	return nil, 0, fmt.Errorf("gql request failed after %d attempts: %w", gqlMaxRetries+1, lastErr)
 }
@@ -1027,6 +1788,21 @@ func waitForRetry(ctx context.Context, wait time.Duration) error {
 	}
 }
 
+// maxDiagnosticResponseBytes is the largest response body a DIAGNOSTIC read will
+// accept. Sized by margin, not by observation: no live RewardList response
+// has been captured (acceptance is PENDING), so the limit is only EXPECTED to
+// sit orders of magnitude above one (see doGQLOnceWithClient), and it is far
+// below anything that would matter to the process.
+//
+// It is a limit, not a truncation point: a body past it is refused whole. The
+// read pulls one byte more than the limit precisely so overflow is DETECTABLE,
+// because io.LimitReader reports a truncated stream and a complete one the same
+// way - both end in a clean EOF. Truncating instead would let a hostile endpoint
+// send a complete document ending exactly at the limit followed by arbitrary
+// bytes: the prefix would decode and be recorded as a whole observation of a
+// response that was never read whole.
+const maxDiagnosticResponseBytes = 1 << 20 // 1 MiB
+
 // doGQLOnce performs a single HTTP round trip. It returns the response body on
 // success, or an error with the observed status code (0 for network-level
 // errors, where no HTTP response was received at all) plus any Retry-After delay
@@ -1042,13 +1818,48 @@ func doGQLOnceWithClient(client *http.Client, req *http.Request) ([]byte, int, t
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	respBody, err := io.ReadAll(resp.Body)
+	// A diagnostic read caps what it will pull into memory. The status is only
+	// known after the response arrives, so a hostile endpoint or proxy could
+	// otherwise answer a rejected diagnostic with an unbounded body and have it
+	// read in full — on the bonus poll goroutine — before anything classifies
+	// it. Business reads stay unbounded as they were; this is a property of the
+	// diagnostic caller, not a change to the shared contract.
+	//
+	// The limit is sized by margin, not by observation: no live RewardList
+	// response has been captured (acceptance is PENDING), so its real size is
+	// unverified and the limit is only EXPECTED to sit far above it. A body
+	// that exceeds it is refused whole and reported as a transport failure,
+	// which is the honest outcome for a response this read declines to trust;
+	// if a legitimate response ever exceeded it, that channel would be refused
+	// on every cycle and the record could not tell it from a hostile one.
+	//
+	// Reading limit+1 is what makes the overflow visible - see
+	// maxDiagnosticResponseBytes. This is the same shape fetchSpadeAsset uses.
+	diagnostic := isDiagnosticRequest(req.Context())
+	body := io.Reader(resp.Body)
+	if diagnostic {
+		body = io.LimitReader(resp.Body, maxDiagnosticResponseBytes+1)
+	}
+
+	respBody, err := io.ReadAll(body)
 	if err != nil {
 		return nil, resp.StatusCode, 0, fmt.Errorf("failed to read response: %w", err)
 	}
+	// A transient status keeps its Retry-After even when the body is refused
+	// below, so a capped 429 is retried on the peer's schedule rather than on
+	// the computed backoff. Parsed once, before the size check, so the two
+	// returns that carry it cannot drift apart.
+	transient := gql.IsTransientStatus(resp.StatusCode)
+	retryAfter := time.Duration(0)
+	if transient {
+		retryAfter = gql.ParseRetryAfter(resp.Header.Get("Retry-After"), time.Now())
+	}
+	if diagnostic && len(respBody) > maxDiagnosticResponseBytes {
+		return nil, resp.StatusCode, retryAfter, fmt.Errorf(
+			"response body exceeded the %d-byte diagnostic limit", maxDiagnosticResponseBytes)
+	}
 
-	if gql.IsTransientStatus(resp.StatusCode) {
-		retryAfter := gql.ParseRetryAfter(resp.Header.Get("Retry-After"), time.Now())
+	if transient {
 		return nil, resp.StatusCode, retryAfter, fmt.Errorf("transient GQL error: status %d", resp.StatusCode)
 	}
 

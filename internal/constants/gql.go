@@ -190,4 +190,46 @@ var (
 		"DirectoryGameRedirect",
 		"1f0300090caceec51f33c5e20647aceff9017f740f223c3c532ba6fa59f6b6cc",
 	)
+
+	// RewardList reads the viewer's per-channel reward context. This project
+	// uses it for ONE purpose only: a read-only, diagnostic observation of the
+	// Watch Streak milestone node Twitch exposes under
+	// data.channel.self.watchStreakMilestone (see
+	// internal/twitch/watch_streak_milestone.go). It grants nothing, claims
+	// nothing and controls no pursuit, selection or reward decision.
+	//
+	// Provenance: the operation name, persisted-query version (1), SHA-256 hash
+	// and the two variables below are PROTOCOL evidence captured clean-room
+	// from mpforce1/Twitch-Channel-Points-Miner
+	// (ref f1dda17ad61562ca2e93d975ee0a24e8b2f7ea0c, tree
+	// 650ddd7ed974f78fab1956e41c0849ea177545b2, GPL-3.0). No donor code text
+	// was copied; only the wire facts a persisted query is made of.
+	//
+	// The hash being recorded here is NOT proof that Twitch still accepts it.
+	// Live acceptance is PENDING separately authorized runtime evidence; until
+	// then a PersistedQueryNotFound outcome is the expected, honestly reported
+	// result and no replacement hash may be invented. On a confirmed rotation
+	// the stale-hash handling in client.go does NOT apply to this operation
+	// as it does to the business operations here: RewardList is dispatched
+	// only as a DIAGNOSTIC read (internal/twitch/watch_streak_milestone.go),
+	// which walks the same client-ID candidates but promotes no working ID,
+	// pins no per-operation candidate, records nothing in ConnHealth, and
+	// reports an exhausted walk as its own DEBUG summary and an
+	// UNSUPPORTED_QUERY outcome rather than the operator-facing ERROR and WARN
+	// a business operation raises (doGQLRequestWithClientIDFallback and
+	// logStaleHashExhausted in client.go).
+	//
+	// Both variables are supplied on every call, because that is what the
+	// donor capture sends. Whether Twitch would accept the query with either
+	// omitted is not attested by that capture (no live response has been
+	// observed), so this code never omits one. They are supplied per call
+	// rather than preset here because WithVariables replaces the whole map:
+	// presetting one would be silently dropped by the call site that
+	// supplies the other.
+	//   channelID                        - the channel to read
+	//   shouldIncludeAllSuspendedStreaks - false (the donor's captured value)
+	RewardList = NewGQLOperation(
+		"RewardList",
+		"0b1471876d7647993731b9e3c6a13bf304c67fb31d07f06a945d42286ee377c4",
+	)
 )
