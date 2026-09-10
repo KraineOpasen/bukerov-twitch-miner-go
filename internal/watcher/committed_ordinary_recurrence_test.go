@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"runtime"
 	"sort"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -1495,6 +1497,13 @@ func (c *generationEndsBeforeCommit) Err() error {
 // generation that ends before the allocation is final grants no residence and
 // consumes no turn.
 //
+// It pins that a gate EXISTS and sits downstream of candidate preparation. It
+// deliberately does not pin WHERE downstream, because its fabricated context
+// cancels on an observation count and would be satisfied by a gate anywhere
+// after that point — including one hoisted above arbitration, which is the P2
+// defect itself. That placement is pinned separately, by
+// TestCommittedOrdinaryResidenceSurvivesAStopThatLandsInsideArbitration.
+//
 // Committing either one would credit service on behalf of a generation that no
 // longer exists: the next generation would protect seats this one never served,
 // and would rank channels as though they had been watched when no beacon was
@@ -1583,5 +1592,88 @@ func TestCommittedOrdinaryResidenceProtectsASeatCommittedBeforeItsBroadcastWasKn
 	requireCohort(t, w, "after the broadcast became known", 2, "streamera", "streamerb")
 	if !w.residentOrdinaryIndex(indexOfLogin(t, w, "streamera"), time.Now()) {
 		t.Fatalf("learning a broadcast identity ended a term that never lapsed")
+	}
+}
+
+// waitUntilTickBlocksOnObservationMu blocks until the goroutine running the tick
+// is parked acquiring observationMu.
+//
+// It waits for that STATE, never for a duration: there is no sleep, and a tick
+// that never reaches the mutex fails the test instead of passing on a timer. The
+// deadline is a failure bound, not a wait.
+func waitUntilTickBlocksOnObservationMu(t *testing.T) {
+	t.Helper()
+
+	buf := make([]byte, 1<<20)
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		dump := string(buf[:runtime.Stack(buf, true)])
+		blocked := strings.Contains(dump, "sync.(*Mutex).Lock") ||
+			strings.Contains(dump, "sync.(*Mutex).lockSlow") ||
+			strings.Contains(dump, "sync.runtime_SemacquireMutex")
+		inSection := strings.Contains(dump, "provenProvisionalCandidates") ||
+			strings.Contains(dump, "reconcileProvisionalSlots")
+		if blocked && inSection {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the tick never parked on observationMu inside arbitration or final reconciliation; "+
+				"this fixture cannot exercise the window the guard exists for. Goroutines:\n%s", dump)
+		}
+		runtime.Gosched()
+	}
+}
+
+// TestCommittedOrdinaryResidenceSurvivesAStopThatLandsInsideArbitration pins
+// WHERE the cancellation gate has to sit, which is the whole substance of the
+// rule: the allocation becomes final inside arbitration and final-proof
+// reconciliation, both of which take observationMu, and Stop takes that same
+// mutex before it cancels. A generation can therefore die while the tick is
+// parked in that section — after every earlier gate has already observed a live
+// context.
+//
+// This drives that exact interleaving rather than a fabricated observation
+// count, so a gate hoisted ABOVE arbitration — which reinstates the defect,
+// because the tick passes it while the generation is still alive — fails here
+// even though it satisfies a count-based oracle.
+func TestCommittedOrdinaryResidenceSurvivesAStopThatLandsInsideArbitration(t *testing.T) {
+	f := newResidenceFixture(t, 4)
+	w := f.w
+	f.seedWeights(t, time.Now(), map[string]float64{"streamerb": 0.5, "streamerc": 30, "streamerd": 90})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	// Hold the mutex the way a concurrent observation does, so the tick parks in
+	// the section where the allocation is settled.
+	w.observationMu.Lock()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		w.processWatching(ctx)
+	}()
+
+	waitUntilTickBlocksOnObservationMu(t)
+
+	// The generation ends here: every gate before this section has already seen a
+	// live context, exactly as it would under a real Stop.
+	cancel()
+	w.observationMu.Unlock()
+	<-done
+
+	if got := cohortLogins(w); len(got) != 0 {
+		t.Fatalf("a generation that died while the tick was settling the allocation granted residence to %v: "+
+			"the cancellation gate must sit AFTER final proof reconciliation, not before arbitration", got)
+	}
+	if !w.rotation.cohortSince.IsZero() {
+		t.Fatalf("a generation that died inside arbitration stamped a residence anchor: %v", w.rotation.cohortSince)
+	}
+	if len(w.rotation.lastWatched) != 0 {
+		t.Fatalf("a generation that died inside arbitration consumed a turn for %d channel(s); it sent no beacon",
+			len(w.rotation.lastWatched))
+	}
+	if snap := w.BrokerSnapshot(); !snap.EvaluatedAt.IsZero() || len(snap.Slots) != 0 {
+		t.Fatalf("a generation that died inside arbitration published a broker snapshot: %+v", snap)
 	}
 }

@@ -1659,8 +1659,13 @@ func (w *MinuteWatcher) selectRotating(onlineIndexes []int, now time.Time) []int
 // still the most owed. There is no goroutine, timer, store, ledger, cache or
 // setting behind it — the loop derives elapsed residence from
 // rotationState.cohortSince on the broker tick it already runs, and that anchor
-// moves only when the committed membership, an occupant's broadcast identity, or
-// the residual ordinary capacity really changes (see commitOrdinaryResidence).
+// moves only when the committed MEMBERSHIP or the residual ordinary capacity
+// really changes (see commitOrdinaryResidence). A broadcast identity change is
+// deliberately NOT in that list: one anchor is common to the whole cohort, so
+// restamping it on one member's new broadcast would renew a partner whose
+// service never stopped. Identity acts the other way instead — it expires that
+// one member's protection early, in residentOrdinaryAt — so it can shorten a
+// term and never extend one.
 //
 // Every stronger cause bypasses it structurally rather than by exception,
 // because residentOrdinaryAt is consulted ONLY on ordinary branches — the
