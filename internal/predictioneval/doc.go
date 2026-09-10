@@ -15,8 +15,29 @@
 // It is also NOT a universal-SMART substitute and NOT a plugin framework for
 // alternative strategies. It reconstructs the CURRENT-CONFIGURED baseline —
 // the strategy each individual decision was actually running under — and
-// nothing else. A donor strategy, a counterfactual sweep or a portfolio
-// comparison is a different concern and is deliberately absent.
+// nothing else. A counterfactual sweep or a portfolio comparison is a different
+// concern and is deliberately absent.
+//
+// # The second model in this package
+//
+// One donor mechanism now lives beside the baseline: [EvaluateOrderedRules],
+// with [ProjectOrderedRulesStream] in front of it. It is a SEPARATE model with
+// its own versions, its own digests and its own evidence label, and the two do
+// not meet — the ordered-rules core reads no persisted fact, feeds nothing back
+// into the four seams, and cannot change a baseline result. Where the baseline
+// asks "did the configured policy re-derive what was recorded?", it asks a
+// different question entirely: "over data a caller supplied explicitly, what
+// would this other mechanism have done?"
+//
+// The distinction that keeps them apart is the DATA. The baseline reads facts
+// this miner persisted and verified. The ordered-rules core reads values a
+// caller passed in, which a pure function cannot authenticate — so every result
+// it produces is labelled [OrderedRulesEvidenceLabel] and means only that: the
+// mechanism, over the declared common-admitted data. It is not a replay of the
+// donor's full runtime policy, whose balance acquisition, cadence, lock/end
+// branching, placement success and retry behaviour are established by nothing
+// this package can read and are therefore not modelled. See ordered_rules.go
+// and testdata/ordered_rules/PROVENANCE.md.
 //
 // # The four seams
 //

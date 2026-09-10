@@ -1,0 +1,192 @@
+package predictioneval_test
+
+// REPRODUCIBILITY, THE WORK BUDGET, AND THE UNCHANGED BASELINE.
+//
+// The last three obligations. The first two are about this model; the third is
+// about everything around it — the current-configured replay that was already
+// here, which this addition must leave exactly as it found it.
+
+import (
+	"encoding/json"
+	"testing"
+
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/predictioneval"
+)
+
+// TestOrderedRulesIsByteIdenticalAcrossRuns pins determinism.
+//
+// The same declared inputs, config, trace and versions must produce the same
+// canonical result every time — independent of map iteration order, of the
+// clock this package cannot read, and of how many times it has run. The
+// serialized form is compared, not just the fields, because a map anywhere in
+// the result types would show up here and nowhere else.
+func TestOrderedRulesIsByteIdenticalAcrossRuns(t *testing.T) {
+	cs := []predictioneval.OrderedRulesCandidate{
+		orTwoOutcomePool("c1", 10),
+		orTwoOutcomePool("c2", 20),
+		orTwoOutcomePool("c3", 30),
+	}
+	cfg := orConfig([]predictioneval.OrderedRule{
+		orRule(predictioneval.ComparatorLe, 50, 50, 500, 10),
+		orRule(predictioneval.ComparatorGe, 55, 25, 0, 5),
+	}, 35, 45, 250, 7.5)
+
+	var first []byte
+	for run := 0; run < 8; run++ {
+		stream := orProject(t, cs, []predictioneval.OrderedRulesIntervention{
+			orIntervention("call-1", 40, predictioneval.InterventionAutoCallStarted,
+				predictioneval.RelevanceProven, "boundary"),
+		})
+		ev := predictioneval.EvaluateOrderedRules(stream, cfg, orDraws(orWordRefuse, orWordRefuse, orWordAdmit))
+		got, err := json.Marshal(ev)
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		if run == 0 {
+			first = got
+			continue
+		}
+		if string(got) != string(first) {
+			t.Fatalf("run %d differs from run 0:\n first = %s\n  this = %s", run, first, got)
+		}
+	}
+	if len(first) == 0 {
+		t.Fatal("nothing was serialized; this check would pass vacuously")
+	}
+}
+
+// TestOrderedRulesConfigAndStreamAreNotMutatedByEvaluation pins that evaluating
+// is a read.
+//
+// A model that normalized the caller's config in place would work perfectly on
+// the first call and halve every rate on the second — the classic
+// normalize-twice bug, arriving one call late.
+func TestOrderedRulesConfigAndStreamAreNotMutatedByEvaluation(t *testing.T) {
+	cs := []predictioneval.OrderedRulesCandidate{orTwoOutcomePool("c1", 10)}
+	cfg := orConfig([]predictioneval.OrderedRule{
+		orRule(predictioneval.ComparatorLe, 50, 50, 0, 10),
+	}, 95, 100, 0, 10)
+
+	before, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	stream := orProject(t, cs, nil)
+	streamBefore, err := json.Marshal(stream)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	first := predictioneval.EvaluateOrderedRules(stream, cfg, orDraws(orWordAdmit))
+	second := predictioneval.EvaluateOrderedRules(stream, cfg, orDraws(orWordAdmit))
+
+	after, _ := json.Marshal(cfg)
+	streamAfter, _ := json.Marshal(stream)
+	switch {
+	case string(before) != string(after):
+		t.Fatalf("the config was mutated in place:\n before = %s\n  after = %s", before, after)
+	case string(streamBefore) != string(streamAfter):
+		t.Fatal("the stream was mutated in place")
+	case first.Status != second.Status || first.Stake != second.Stake:
+		t.Fatalf("the second evaluation of the same inputs differs: %+v then %+v",
+			first.Stake, second.Stake)
+	}
+}
+
+// TestOrderedRulesWorkBudgetRefusesRatherThanTruncates pins the live work
+// counter.
+//
+// The other bounds together permit more predicate slots than the budget allows,
+// so the budget has to be counted as it is spent. When it runs out the answer
+// is a refusal — not a shortened traversal reported as a complete one.
+func TestOrderedRulesWorkBudgetRefusesRatherThanTruncates(t *testing.T) {
+	// The widest input the other bounds allow: every candidate, every outcome,
+	// every rule, with no rule ever matching so nothing stops early.
+	cs := make([]predictioneval.OrderedRulesCandidate, predictioneval.MaxOrderedRulesCandidates)
+	outs := make([]predictioneval.OrderedRulesOutcome, predictioneval.MaxOrderedRulesOutcomes)
+	for i := range outs {
+		outs[i] = orOutcome("o"+itoaTest(i), int64(i+1))
+	}
+	for i := range cs {
+		cs[i] = orCandidate("c"+itoaTest(i), int64(i+1), orKnownBalance(1000), outs...)
+	}
+	rules := make([]predictioneval.OrderedRule, predictioneval.MaxOrderedRulesRules)
+	for i := range rules {
+		// A threshold of zero under Le matches only a share of exactly zero,
+		// which this pool never produces.
+		rules[i] = orRule(predictioneval.ComparatorLe, 0, 100, 0, 10)
+	}
+
+	ev := predictioneval.EvaluateOrderedRules(orProject(t, cs, nil),
+		orConfig(rules, 95, 100, 0, 10), orDraws())
+	if ev.Status != predictioneval.StatusRefused || ev.Reason != predictioneval.ReasonWorkBudgetExceeded {
+		t.Fatalf("status %q reason %q, want REFUSED / WORK_BUDGET_EXCEEDED", ev.Status, ev.Reason)
+	}
+	if ev.Selected != nil {
+		t.Fatal("a refused traversal decides nothing")
+	}
+
+	// Non-vacuity: a materially smaller input of the same shape completes.
+	small := cs[:2]
+	ok := predictioneval.EvaluateOrderedRules(orProject(t, small, nil),
+		orConfig(rules, 95, 100, 0, 10), orDraws())
+	if ok.Status != predictioneval.StatusNoAttemptInSuppliedPrefix {
+		t.Fatalf("the control run must complete: status %q reason %q", ok.Status, ok.Reason)
+	}
+}
+
+// TestOrderedRulesAdditionLeavesCurrentConfiguredBaselineByteIdentical is the
+// preservation proof.
+//
+// The ordered-rules core sits in the same package as the current-configured
+// replay, and the one thing it must not do is disturb it. The literal below is
+// the serialized [predictioneval.Evaluation] of a fixed decision, and it is
+// pinned so that any change to the baseline's arithmetic, stage vocabulary,
+// limitation text, provenance or JSON shape fails HERE — beside the addition
+// that would have caused it — rather than somewhere downstream.
+//
+// The four seams' own suites still hold their own behaviour; this one exists to
+// make "the baseline is unchanged" a mechanical claim rather than a review note.
+func TestOrderedRulesAdditionLeavesCurrentConfiguredBaselineByteIdentical(t *testing.T) {
+	in := predictioneval.DecisionInputs{
+		CommonInputDigest: "pinned-baseline-digest",
+		ReachedDecision:   true,
+		Settings: &predictioneval.BetSettingsInput{
+			Strategy:      "SMART",
+			Percentage:    5,
+			PercentageGap: 20,
+			MaxPoints:     50000,
+			MinimumPoints: 0,
+			StealthMode:   false,
+			Delay:         6,
+			DelayMode:     "FROM_END",
+		},
+		Balance:        1000,
+		BalancePresent: true,
+		Outcomes: []predictioneval.OutcomeInput{
+			{Slot: 0, Present: true, ID: "outcome-a", TotalUsers: 10, TotalPoints: 400,
+				TopPoints: 100, PercentageUsers: 50, Odds: 2.5, OddsPercentage: 40},
+			{Slot: 1, Present: true, ID: "outcome-b", TotalUsers: 10, TotalPoints: 600,
+				TopPoints: 200, PercentageUsers: 50, Odds: 1.6666666666666667, OddsPercentage: 60},
+		},
+		OutcomesPresent: true,
+		RiskPresent:     false,
+		HealthState:     "NO_GATE",
+		MinimumStake:    predictioneval.PinnedMinimumStake,
+	}
+
+	got, err := json.Marshal(predictioneval.Evaluate(in, predictioneval.ObservedRealization{}))
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if string(got) != baselineEvaluationGolden {
+		t.Fatalf("the current-configured baseline changed.\n got  = %s\n want = %s\n\n"+
+			"This test exists so that an addition beside the baseline cannot alter it silently. If the "+
+			"change was intended, it belongs in its own commit with its own justification — not folded "+
+			"into the ordered-rules core.", got, baselineEvaluationGolden)
+	}
+}
+
+// baselineEvaluationGolden is the serialized baseline evaluation captured at
+// this branch's base commit, before any ordered-rules file existed.
+const baselineEvaluationGolden = `{"model":{"modelVersion":"predictioneval/v1","policyRevision":"policy-378d05d6ccc7d2a914730a1e1d023ff754bcf873","supportedProducerRevision":"obs-v2|policy-378d05d6ccc7d2a914730a1e1d023ff754bcf873","platformIntBits":64},"commonInputDigest":"pinned-baseline-digest","choice":{"state":"EXECUTED","index":0,"selected":true,"outcomeId":"outcome-a"},"baseStake":{"state":"EXECUTED","amount":50,"capped":false},"stealth":{"state":"EXECUTED","outcome":"NOT_APPLICABLE","applies":false,"realized":50,"reductionDerived":false,"realizationSound":true},"filter":{"state":"EXECUTED","skip":false,"compared":0,"applied":false},"health":{"state":"WITNESSED","verdict":"NO_GATE"},"stakeGate":{"state":"UNSUPPORTED","proposed":0,"allowed":0,"reason":"","limit":0},"clamp":{"state":"NOT_REACHED","applied":false,"finalAmount":0,"hasFinal":false},"minimum":{"state":"NOT_REACHED","threshold":10,"below":false},"policyAmount":50,"policyAmountKnown":true,"action":"UNSUPPORTED","limitations":["HEALTH_VERDICT_IS_WITNESSED_NOT_RECONSTRUCTED"]}`

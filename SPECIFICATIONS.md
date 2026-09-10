@@ -3195,6 +3195,110 @@ and read back through the real reader, and against real decisions driven through
 the real pool. It has **not** been validated against a production observation
 dataset; collection and empirical replay are separate work.
 
+#### Ordered-rules reference core (supplied data)
+
+`internal/predictioneval` carries a SECOND, separate pure model beside the
+baseline replay: a re-derivation of a donor project's ordered odds-rules
+mechanism — ordered detailed rules with a per-rule participation rate, a
+per-outcome default, and a percentage stake. Two exported functions,
+`ProjectOrderedRulesStream` and `EvaluateOrderedRules`, are the whole surface.
+There is no collector, no schema change, no reader, no HTTP or settings
+contract, no runtime caller and no new dependency; the package's existing
+dependency fence and its allowlist are unchanged.
+
+The two models do not meet. The ordered-rules core reads no persisted fact,
+feeds nothing back into the four seams and cannot change a baseline result. It
+carries its own versions — `predictioneval-orderedrules/v1`, the stream contract
+`pe-ors/v1`, the raw-config basis `pe-orc-raw/v1` and the entropy semantics
+`rand-0.8.5-bernoulli/v1` — none of which is `predictioneval/v1` or `pe-cid/v1`,
+because attaching a claim about verified database rows to numbers passed in as
+arguments is exactly the confusion these versions exist to prevent.
+
+**Supplied is not proven.** Every value reaches the model because a caller
+passed it in, and a pure function cannot authenticate a number it is handed. So
+presence is a first-class part of the input types rather than a nil pointer
+someone can read as a zero, provenance travels with each field, and every result
+carries the label `CORE_MECHANISM_COMMON_ADMITTED_DATA` — the mechanism,
+evaluated over the declared common-admitted data, and nothing more. The
+admission manifest is DATA, not a callback: admission is fixed before evaluation
+and cannot be chosen for producing a better answer.
+
+**The mechanism.** The outcome vector is the OUTER loop and the rule list the
+inner one. A pool share is `1/(total/points)` — two divisions, never collapsed
+into `points/total`, because in binary64 they differ: for the pool `[9,1]` the
+donor's value is one ulp below the double a raw threshold of 90 normalizes to,
+so a `Ge 90` rule separates the two formulations. Comparators are inclusive; a
+matched comparator whose participation draw FAILS falls through to later
+overlapping rules rather than ending the scan; and when no rule admits, the
+CURRENT outcome's default is checked — inclusive on both bounds, never reordered
+when the minimum exceeds the maximum — before the next outcome's rules. Raw
+percentages in 0..100 are divided by one hundred exactly once, privately: the
+exported contract accepts the raw form only, so an already-normalized config
+cannot be normalized again. Stakes are sized as the donor sizes them — multiply
+in float64, truncate to `u32`, then cap, with a cap of zero meaning NO cap — and
+a computed stake of zero stays an attempt rather than becoming a skip.
+
+**Entropy is supplied, never generated.** The donor drew from a thread-local
+generator whose realization was never recorded, so the historical entropy is
+UNAVAILABLE and is not reconstructed. What is reproduced exactly is the
+CONSUMPTION rule pinned from `rand` 0.8.5: a participation rate of exactly one
+succeeds consuming NO word, a rate of exactly zero consumes one word and then
+fails, and anything between compares `raw < uint64(rate * 2^64)` strictly. A
+comparator that did not match never reaches the draw, and a default admission
+adds none. Words are consumed in order across the whole run and never restart.
+An exhausted trace is an explicit unknown — never a default draw, never a skip.
+The baseline's `ObservedRealization` is structurally excluded: it is a recorded
+draw from a different mechanism, conditioned on a decision that already happened.
+
+**The factual boundary.** A stream is bounded by the first relevant placement
+call in the declared episode, automatic or manual. Manual calls carry no attempt
+discriminator and may carry a different or empty round incarnation, so they are
+supplied as first-class interventions rather than discovered by attempt
+grouping — grouping is what would miss them. A call that FAILED is still a
+boundary, and the intervention type has no field for a result at all. Where an
+association cannot be established, the earlier, conservative boundary is taken
+and labelled rather than skipped. Coverage must be declared: an unstated
+coverage is refused, because it makes "no intervention was supplied"
+indistinguishable from "the intervention was never collected". A declared gap is
+evaluable and its qualification travels into every result.
+
+**Stops, and what they are not.** The traversal ends at the earliest of: the
+first admission with a computable stake; the first admission whose stake is not
+computable; the boundary; a required input it reached and could not read; or a
+resource bound. After an admission it stops rather than continuing — there is no
+counterfactual placement success, retry, pool mutation or balance update, none
+of which is established by anything this repository persists. A stop with an
+unknown stake is neither a zero nor an abstention: the model knows WHICH outcome
+it would have bet and does not know HOW MUCH, and those are reported as separate
+fields. A missing balance is never converted to zero and never borrowed from
+another candidate. `NO_ATTEMPT_IN_SUPPLIED_PREFIX` is a statement about the
+supplied prefix alone — not a full-round skip and not a financial zero.
+
+**Bounds and bindings.** Offline resource limits — 128 candidates, 64 outcomes,
+128 rules, 4 KiB per identifier, 2^20 draw words and 2^20 predicate slots — are
+refusal boundaries, never truncation boundaries: an oversized input is rejected
+whole, because a silently shortened candidate list changes which opportunities
+exist. Four domain-separated digests bind a result to its inputs: the whole
+stream, the raw config, the whole supplied entropy, and — separately — only the
+prefix actually consumed. That last one deliberately excludes metadata about the
+full supplied set, so that appending facts beyond the boundary provably cannot
+move it. Like the baseline's, these are unkeyed hashes over supplied data: they
+prevent recombination and authenticate nothing.
+
+**What this is not.** It is NOT a faithful replay of the donor's full runtime
+policy, and no result may be described as one. The donor branches on lock/end
+timestamps, refreshes its balance against a live API before each attempt,
+re-enters on every round update until a placement succeeds and may retry after a
+failure; none of that is established by anything persisted here, so none is
+modelled. It says nothing about profitability or about whether either mechanism
+is better. Automatic extraction of a full donor-candidate stream from the
+existing rows is NOT possible — the wire projection already lost distinctions a
+reader cannot restore, such as an outcome holding zero points against one whose
+points were never recorded — and remains separate work. The donor is Apache-2.0
+and this repository GPL-3.0, a permitted direction of inclusion; no donor source
+bytes were copied, and the pins, blob hashes and licence disposition are recorded
+in `internal/predictioneval/testdata/ordered_rules/PROVENANCE.md`.
+
 ### Event Types for Series
 
 Reasons tagged on balance-timeline samples (`points.event_type`, display form
