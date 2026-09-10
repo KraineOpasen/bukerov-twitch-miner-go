@@ -2359,6 +2359,25 @@ func (r *SQLiteRepository) ReadObservationSession(ctx context.Context, epoch int
 // holding the connection for an unbounded hash sweep.
 const observationWitnessBudget = 4096
 
+// observationWitnessSelectColumns is the column list verifyObservationWitnesses
+// materializes, one row at a time, to recompute a stored digest.
+//
+// It is a named constant so the replay reader's per-row byte bound can be
+// checked against it structurally. That bound is computed from
+// observationRowWidthBytes, which measures the columns of the FACT read; this
+// list must stay a subset of those columns, or a row could carry bytes the
+// witness sweep materializes and no bound measures.
+const observationWitnessSelectColumns = `
+	observation_id, collector_sequence, pool_instance_id, round_incarnation_id,
+	round_capture_origin, round_capture_gap_cause,
+	routed_streamer_id, routed_channel_id,
+	round_owner_streamer_id, round_owner_channel_id,
+	retention_group_owner_streamer_id, retention_group_owner_channel_id,
+	event_id, kind, source_topic_type, source_message_type, source_fingerprint,
+	producer_at_ms, producer_time_source, received_at_ms,
+	connection_index, connection_generation, connection_sequence,
+	payload_json, observation_sha256`
+
 // verifyObservationWitnesses recomputes the stored digest of a bounded prefix
 // of one session's surviving facts and reports how many matched.
 //
@@ -2375,15 +2394,7 @@ func verifyObservationWitnesses(ctx context.Context, tx *sql.Tx, epoch int64, se
 		return 0, 0, 0, e
 	}
 	rows, e := tx.QueryContext(ctx, `
-		SELECT observation_id, collector_sequence, pool_instance_id, round_incarnation_id,
-		       round_capture_origin, round_capture_gap_cause,
-		       routed_streamer_id, routed_channel_id,
-		       round_owner_streamer_id, round_owner_channel_id,
-		       retention_group_owner_streamer_id, retention_group_owner_channel_id,
-		       event_id, kind, source_topic_type, source_message_type, source_fingerprint,
-		       producer_at_ms, producer_time_source, received_at_ms,
-		       connection_index, connection_generation, connection_sequence,
-		       payload_json, observation_sha256
+		SELECT `+observationWitnessSelectColumns+`
 		  FROM prediction_observations
 		 WHERE collector_epoch = ? AND collector_session_id = ?
 		 ORDER BY collector_sequence ASC

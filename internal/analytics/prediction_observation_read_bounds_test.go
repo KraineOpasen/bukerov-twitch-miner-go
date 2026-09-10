@@ -28,24 +28,39 @@ func TestTheWidthExpressionCoversEveryColumnTheReadSelects(t *testing.T) {
 		selects string
 		width   string
 		minCols int
+		// subsetOnly relaxes the reverse direction for a read whose columns
+		// are a proper subset of the ones the width expression measures.
+		subsetOnly bool
 	}{
-		{"observation rows", observationSelectColumns, observationRowWidthBytes, 25},
+		{what: "observation rows", selects: observationSelectColumns,
+			width: observationRowWidthBytes, minCols: 25},
 		// The session row needs the same treatment, and did not get it first
 		// time: its width expression measured three columns while
 		// ReadObservationSession scanned twelve. That row is read BEFORE any
 		// observation-row bound applies, so it was the earliest unbounded
 		// allocation in the load.
-		{"the session row", observationSessionSelectColumns, observationSessionRowWidthBytes, 12},
+		{what: "the session row", selects: observationSessionSelectColumns,
+			width: observationSessionRowWidthBytes, minCols: 12},
+		// And the witness sweep, which is the read that hid behind both. It
+		// runs INSIDE ReadObservationSession and materializes a row at a time
+		// to recompute its digest, so the replay reader bounds it with the
+		// fact-read's width expression before it learns the session id. That
+		// only holds while this list stays a SUBSET of the columns that
+		// expression measures — hence one direction here, not two: the width
+		// expression legitimately measures four columns this sweep does not
+		// select.
+		{what: "the witness sweep", selects: observationWitnessSelectColumns,
+			width: observationRowWidthBytes, minCols: 25, subsetOnly: true},
 	} {
 		t.Run(pair.what, func(t *testing.T) {
-			assertWidthCoversSelect(t, pair.selects, pair.width, pair.minCols)
+			assertWidthCoversSelect(t, pair.selects, pair.width, pair.minCols, pair.subsetOnly)
 		})
 	}
 }
 
 // assertWidthCoversSelect compares a SELECT list against the width expression
 // meant to measure it, in both directions.
-func assertWidthCoversSelect(t *testing.T, selectList, widthExpr string, minCols int) {
+func assertWidthCoversSelect(t *testing.T, selectList, widthExpr string, minCols int, subsetOnly bool) {
 	t.Helper()
 	// The column names the read selects, taken from the SELECT list itself
 	// rather than restated: a restated list is one more thing that can drift.
@@ -87,6 +102,12 @@ func assertWidthCoversSelect(t *testing.T, selectList, widthExpr string, minCols
 
 	// And the reverse: the width expression must not measure a column the read
 	// does not select, or the budget refuses loads on bytes nobody pays for.
+	// A subset read is exempt from this half by construction — it is bounded
+	// BY a wider read's expression, so measuring more than it selects is the
+	// conservative direction and the only one available.
+	if subsetOnly {
+		return
+	}
 	var phantom []string
 	for _, tok := range ident.FindAllString(widthExpr, -1) {
 		switch strings.ToLower(tok) {

@@ -2960,9 +2960,9 @@ names the session, the witness counts and the loss counters it was read under,
 so a result from a truncated, unwitnessed session is never mistaken for one from
 a fully verified run.
 
-**Bounded acquisition.** A load is bounded at three levels — the session row,
-the row count and the bytes — and every bound is enforced before the data it
-bounds is materialized.
+**Bounded acquisition.** A load is bounded at four levels — the session row,
+the facts an epoch holds, the row count and the bytes — and every bound is
+enforced before the data it bounds is materialized.
 
 The SESSION ROW is measured first, because it is read first, and — like the
 fact row — **every** column it selects is measured.
@@ -2974,8 +2974,35 @@ against the integer literal 0 with `>=` passes whatever it contains — measured
 a 250 KB string inserts into such a column and reports `typeof() = "text"`.
 Bounding the facts while scanning this row unguarded would leave the earliest
 allocation of the whole load the only unbounded one (`MaxSessionMetaBytes`,
-64 KiB). One structural test covers both `SELECT`/width pairs, so neither can
+64 KiB). One structural test covers every `SELECT`/width pair, so none can
 drift from the columns it is meant to measure.
+
+The EPOCH bound covers the read that hid behind the other three.
+`ReadObservationSession` is not only a session-row read: inside the same
+transaction it recomputes the stored witness of a bounded prefix of the
+session's facts, and doing so scans `payload_json` and a dozen identifier
+columns of each row into memory one row at a time. Every other bound here is
+keyed on the SESSION ID, which the load learns *from that call* — so they all
+applied strictly after those rows had been materialized. Measured on a
+`payload_json` tampered to 4 MiB, four times `MaxRecordBytes`: the sweep
+scanned and hashed it in full, and the load then returned no facts and no
+error, having already paid for it. So the widest fact row is measured first,
+keyed on the `collector_epoch` — the only key available at that point, and a
+SUPERSET of the `(epoch, session id)` rows the sweep can touch. The measurement
+window is `limit+1` rows, and an epoch whose count reaches the window is
+REFUSED rather than read on: a truncated window describes a prefix, so trusting
+its widest-row figure would bound the load by rows nobody measured. The bounded
+window and that refusal are one mechanism — unbounded work without the window,
+an unsound bound without the refusal.
+
+Two of these four bounds are separate STATEMENTS from the read they guard,
+which the bound on the facts themselves deliberately is not, and the difference
+is stated rather than glossed. The fact read carries its guard in the same
+statement because it belongs to this module; the session-row and epoch bounds
+guard `ReadObservationSession`, production code the replay does not modify. They
+are therefore decisive against a static tampered or foreign file — the input
+they exist for — and advisory against a writer enlarging a value concurrently,
+which the coherence re-read detects afterwards rather than prevents.
 
 The byte aggregates run over a BOUNDED candidate set of `limit+1` rows, not the
 whole session. Measuring every row first would let a store holding millions of

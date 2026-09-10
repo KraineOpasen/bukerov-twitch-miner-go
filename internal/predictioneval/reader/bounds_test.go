@@ -96,6 +96,11 @@ func (p *budgetProbe) ObservationSessionMetaWidthBytes(ctx context.Context, epoc
 	return p.real.ObservationSessionMetaWidthBytes(ctx, epoch)
 }
 
+func (p *budgetProbe) ObservationEpochRowBounds(ctx context.Context, epoch int64,
+	candidateRows int) (analytics.ObservationEpochSize, error) {
+	return p.real.ObservationEpochRowBounds(ctx, epoch, candidateRows)
+}
+
 func (p *budgetProbe) ObservationsBySessionWithinBudget(ctx context.Context, sessionID string,
 	limit int, maxRowBytes, maxTotalBytes int64) ([]analytics.ObservationRecord, bool, error) {
 	p.loads++
@@ -179,6 +184,11 @@ func (p *passThrough) ObservationSessionSizeBySession(ctx context.Context, sessi
 
 func (p *passThrough) ObservationSessionMetaWidthBytes(ctx context.Context, epoch int64) (int64, error) {
 	return p.real.ObservationSessionMetaWidthBytes(ctx, epoch)
+}
+
+func (p *passThrough) ObservationEpochRowBounds(ctx context.Context, epoch int64,
+	candidateRows int) (analytics.ObservationEpochSize, error) {
+	return p.real.ObservationEpochRowBounds(ctx, epoch, candidateRows)
 }
 
 func (p *passThrough) ObservationsBySessionWithinBudget(ctx context.Context, sessionID string,
@@ -668,5 +678,171 @@ func TestOversizedSessionMetadataIsCountedInEveryColumn(t *testing.T) {
 					len(ds.Records), err)
 			}
 		})
+	}
+}
+
+// sweepProbe defers to the real store but fails the test if
+// ReadObservationSession is reached.
+//
+// That call is the cost being bounded, not a neutral step before it: inside
+// its transaction it recomputes the stored witness of a bounded prefix of the
+// session's facts, which scans payload_json and a dozen identifier columns of
+// each row into memory. Asserting only on the error LoadSession returns would
+// pass just as happily with the refusal in the wrong place, because the
+// refusal that matters is the one that happens before this call.
+type sweepProbe struct {
+	real  reader.ObservationSource
+	t     *testing.T
+	reads int
+}
+
+func (p *sweepProbe) ReadObservationSession(ctx context.Context, epoch int64) (analytics.ObservationSessionReading, bool, error) {
+	p.reads++
+	p.t.Errorf("the session was read even though the epoch holds a row wider than " +
+		"MaxRecordBytes; this call verifies stored witnesses over the session's facts and " +
+		"materializes each row to do it, so the refusal has to happen BEFORE it")
+	return p.real.ReadObservationSession(ctx, epoch)
+}
+
+func (p *sweepProbe) ObservationSessionSizeBySession(ctx context.Context, sessionID string,
+	candidateRows int) (analytics.ObservationSessionSize, error) {
+	return p.real.ObservationSessionSizeBySession(ctx, sessionID, candidateRows)
+}
+
+func (p *sweepProbe) ObservationSessionMetaWidthBytes(ctx context.Context, epoch int64) (int64, error) {
+	return p.real.ObservationSessionMetaWidthBytes(ctx, epoch)
+}
+
+func (p *sweepProbe) ObservationEpochRowBounds(ctx context.Context, epoch int64,
+	candidateRows int) (analytics.ObservationEpochSize, error) {
+	return p.real.ObservationEpochRowBounds(ctx, epoch, candidateRows)
+}
+
+func (p *sweepProbe) ObservationsBySessionWithinBudget(ctx context.Context, sessionID string,
+	limit int, maxRowBytes, maxTotalBytes int64) ([]analytics.ObservationRecord, bool, error) {
+	return p.real.ObservationsBySessionWithinBudget(ctx, sessionID, limit, maxRowBytes, maxTotalBytes)
+}
+
+// TestAnOversizedFactIsRefusedBeforeTheWitnessSweepReadsIt closes the last
+// unbounded allocation in the load, and the one that hid behind the others.
+//
+// Every bound this file already pins is keyed on the SESSION id, and
+// LoadSession learns the session id from ReadObservationSession. So they all
+// applied strictly after that call — and that call is not only a session-row
+// read. Inside the same transaction it recomputes the stored witness of a
+// bounded prefix of the session's facts, scanning payload_json and a dozen
+// other columns of each row into memory one row at a time.
+//
+// Measured before the fix, on a payload tampered to 4 MiB, four times
+// MaxRecordBytes:
+//
+//	ReadObservationSession: reading="INTEGRITY_ERROR" verified=1
+//	LoadSession:            records=0 err=<nil>
+//
+// The load reported nothing wrong and returned no facts, having already
+// scanned and hashed the whole 4 MiB. Only a bound that runs BEFORE the
+// session id is known can close that, which is why the measurement is keyed on
+// the epoch instead.
+//
+// The row is tampered rather than written, because the repository's own writer
+// enforces MaxObservationPayloadBytes and cannot produce it. A tampered or
+// foreign database file can, and is the input the bound exists for.
+func TestAnOversizedFactIsRefusedBeforeTheWitnessSweepReadsIt(t *testing.T) {
+	ctx := context.Background()
+	repo := observationStore(t)
+
+	f := baseFact(analytics.KindChannelEvent)
+	f.Payload = analytics.ObservationPayload{Phase: "ROUND_UPDATED", RoundState: "ACTIVE"}
+	epoch, sessionID := seedSession(t, repo, "witness-sweep", []analytics.PredictionObservation{f})
+
+	// The clean session loads, so the refusal below is not refusing everything.
+	if _, err := reader.LoadSession(ctx, repo, epoch, reader.DefaultMaxRecords); err != nil {
+		t.Fatalf("the clean session failed to load: %v", err)
+	}
+
+	db, err := database.Open(observationTestDir)
+	if err != nil {
+		t.Fatalf("open database: %v", err)
+	}
+	fat := `{"phase":"ROUND_UPDATED","pad":"` + strings.Repeat("A", 4<<20) + `"}`
+	if int64(len(fat)) <= reader.MaxRecordBytes {
+		t.Fatalf("the tampered payload is %d bytes, which is within MaxRecordBytes (%d); "+
+			"this test would then prove nothing", len(fat), reader.MaxRecordBytes)
+	}
+	if _, err := db.ExecContext(ctx,
+		`UPDATE prediction_observations SET payload_json = ? WHERE collector_session_id = ?`,
+		fat, sessionID); err != nil {
+		t.Fatalf("tamper: %v", err)
+	}
+
+	// The measurement sees it, keyed on the epoch alone.
+	size, err := repo.ObservationEpochRowBounds(ctx, epoch, reader.DefaultMaxRecords)
+	if err != nil {
+		t.Fatalf("measure epoch rows: %v", err)
+	}
+	if size.WidestRowBytes <= reader.MaxRecordBytes {
+		t.Fatalf("the epoch measured a widest row of %d bytes while holding a %d-byte payload",
+			size.WidestRowBytes, len(fat))
+	}
+
+	probe := &sweepProbe{real: repo, t: t}
+	ds, err := reader.LoadSession(ctx, probe, epoch, reader.DefaultMaxRecords)
+	if !errors.Is(err, reader.ErrRecordTooLarge) {
+		t.Fatalf("LoadSession returned %d facts and err %v, want ErrRecordTooLarge",
+			len(ds.Records), err)
+	}
+	if len(ds.Records) != 0 {
+		t.Fatalf("the refused load still handed back %d facts", len(ds.Records))
+	}
+	if probe.reads != 0 {
+		t.Fatalf("ReadObservationSession ran %d times before the refusal", probe.reads)
+	}
+}
+
+// TestAnEpochThatFillsTheMeasurementWindowIsRefusedRatherThanTrusted pins what
+// makes the bounded window sound.
+//
+// The epoch measurement scans at most limit+1 rows, so its answer describes the
+// EPOCH only when the window did not truncate. If it did, the widest-row figure
+// covers a prefix, and reading on would mean applying a per-row bound derived
+// from rows nobody measured — the exact shape of "bounded because we stopped
+// looking". So a count that reaches the window is a refusal, not a fallback.
+//
+// The two properties only hold together: unbounded work if the window is
+// removed, an unsound bound if the refusal is.
+func TestAnEpochThatFillsTheMeasurementWindowIsRefusedRatherThanTrusted(t *testing.T) {
+	ctx := context.Background()
+	repo := observationStore(t)
+
+	const facts = 6
+	seeded := make([]analytics.PredictionObservation, 0, facts)
+	for i := 0; i < facts; i++ {
+		f := baseFact(analytics.KindChannelEvent)
+		f.Payload = analytics.ObservationPayload{Phase: "ROUND_UPDATED", RoundState: "ACTIVE"}
+		seeded = append(seeded, f)
+	}
+	epoch, _ := seedSession(t, repo, "window-truncation", seeded)
+
+	// At the bound the window holds all six and one to spare, so the load runs.
+	if _, err := reader.LoadSession(ctx, repo, epoch, facts); err != nil {
+		t.Fatalf("a session exactly at the bound failed to load: %v", err)
+	}
+
+	// One under it, the window truncates and the load is refused rather than
+	// proceeding on a measurement of a prefix.
+	probe := &sweepProbe{real: repo, t: t}
+	ds, err := reader.LoadSession(ctx, probe, epoch, facts-1)
+	if !errors.Is(err, reader.ErrLimitExceeded) {
+		t.Fatalf("LoadSession returned %d facts and err %v, want ErrLimitExceeded",
+			len(ds.Records), err)
+	}
+	if probe.reads != 0 {
+		t.Fatalf("ReadObservationSession ran %d times before the refusal", probe.reads)
+	}
+
+	// And the measurement itself refuses a window that is no window.
+	if _, err := repo.ObservationEpochRowBounds(ctx, epoch, 0); err == nil {
+		t.Fatal("a candidate bound of zero was accepted; a measurement with no bound is " +
+			"the unbounded scan the window exists to prevent")
 	}
 }

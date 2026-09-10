@@ -78,12 +78,19 @@ const (
 	MaxRecordBytes         = 1 << 20
 	// MaxSessionMetaBytes bounds the SESSION ROW itself.
 	//
-	// prediction_observation_sessions is not STRICT either, and neither
-	// collector_session_id nor producer_revision carries a length constraint.
-	// That row is read FIRST, so bounding the facts while scanning their
-	// session metadata unguarded would leave the earliest allocation of the
-	// whole load the only unbounded one. 64 KiB is orders of magnitude above a
-	// session id plus a revision string.
+	// prediction_observation_sessions is not STRICT either, so no column of
+	// that row is bounded by its declared type and none carries a length
+	// constraint. That row is read FIRST, so bounding the facts while scanning
+	// their session metadata unguarded would leave the earliest allocation of
+	// the whole load the only unbounded one. 64 KiB is orders of magnitude
+	// above a session id plus a revision string and the counters beside them.
+	//
+	// MaxRecordBytes above bounds a fact row, and it is applied TWICE for two
+	// different reads: once keyed on the epoch, before ReadObservationSession
+	// recomputes stored witnesses over a prefix of the session's facts, and
+	// once inside the statement that reads the facts themselves. The first is
+	// not redundant — the witness sweep runs before this function holds a
+	// session id, so nothing keyed on the session could reach it.
 	MaxSessionMetaBytes = 64 << 10
 )
 
@@ -134,6 +141,13 @@ type ObservationSource interface {
 	// read, because that read is the first allocation of the load and the
 	// sessions table constrains no column's length either.
 	ObservationSessionMetaWidthBytes(ctx context.Context, epoch int64) (int64, error)
+	// ObservationEpochRowBounds measures the FACT rows an epoch holds, also
+	// before ReadObservationSession runs. That call verifies stored witnesses
+	// over a prefix of the session's facts, scanning each row's payload and
+	// identifiers into memory — so without this, the load materialized rows of
+	// unbounded width before it held a session id to bound them by.
+	ObservationEpochRowBounds(ctx context.Context, epoch int64,
+		candidateRows int) (analytics.ObservationEpochSize, error)
 	// ObservationsBySessionWithinBudget reads the rows only if they fit, with
 	// the bounds evaluated in the SAME statement as the read. The measurement
 	// above cannot carry that job alone: between a separate measuring query
@@ -163,15 +177,53 @@ func LoadSession(ctx context.Context, src ObservationSource, epoch int64, limit 
 	}
 
 	// Measure the session row BEFORE reading it. ReadObservationSession scans
-	// collector_session_id and producer_revision into Go strings, and it runs
-	// before any observation-row bound applies — so without this, the earliest
+	// every column of that row into Go values, and it runs before any bound
+	// keyed on the session id can apply — so without this, the earliest
 	// allocation of the whole load is the one nothing bounds.
+	//
+	// This bound and the epoch bound below are separate STATEMENTS from the
+	// read they guard, which the bound on the facts themselves is deliberately
+	// not. The difference is not an oversight and is worth stating: the fact
+	// read belongs to this change and could carry its guard in the same
+	// statement, while ReadObservationSession is production code this change
+	// does not modify. So these two are decisive against a static tampered or
+	// foreign file — the input they exist for — and advisory against a writer
+	// enlarging a value concurrently, which the coherence re-read below
+	// detects afterwards rather than prevents.
 	metaWidth, err := src.ObservationSessionMetaWidthBytes(ctx, epoch)
 	if err != nil {
 		return predictioneval.SourceDataset{}, err
 	}
 	if metaWidth > MaxSessionMetaBytes {
 		return predictioneval.SourceDataset{}, ErrSessionMetaTooLarge
+	}
+
+	// And measure the FACT rows the epoch holds, also before
+	// ReadObservationSession runs. That call is not only a session-row read:
+	// inside its transaction it recomputes the stored witness of a bounded
+	// prefix of the session's facts, which scans each row's payload_json and
+	// identifiers into memory. Those reads happen before this function holds a
+	// session id, so every bound below applied strictly after the store had
+	// already materialized them — a payload tampered to 4 MiB, four times
+	// MaxRecordBytes, was scanned and hashed in full and the load then returned
+	// no facts and no error.
+	//
+	// The window is limit+1 so an epoch AT the bound stays distinguishable from
+	// one over it, exactly as for the session probe below.
+	epochSize, err := src.ObservationEpochRowBounds(ctx, epoch, limit+1)
+	if err != nil {
+		return predictioneval.SourceDataset{}, err
+	}
+	// An epoch whose count reaches the window was TRUNCATED by it, so the
+	// measurement describes a prefix and the width bound below would be a claim
+	// about rows nobody measured. Refusing is not a fallback here, it is what
+	// makes the bounded window sound: past this point the window provably
+	// covered every row of the epoch.
+	if epochSize.Rows > int64(limit) {
+		return predictioneval.SourceDataset{}, ErrLimitExceeded
+	}
+	if epochSize.WidestRowBytes > MaxRecordBytes {
+		return predictioneval.SourceDataset{}, ErrRecordTooLarge
 	}
 
 	before, found, err := src.ReadObservationSession(ctx, epoch)
