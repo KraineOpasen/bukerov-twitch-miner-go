@@ -56,7 +56,7 @@ func TestWatchSlotDropAssignmentGate_BareAdvertisedIDCannotBoostOrDisplace(t *te
 		t.Errorf("advertised-only campaign emitted false drop reason %q", reasonCode)
 	}
 
-	selected := w.applyPriorityBoost(fairPair, online)
+	selected := w.applyPriorityBoost(fairPair, online, time.Now())
 	if selected != fairPair {
 		t.Errorf("advertised-only campaign changed fair pair: got %v, want %v", selected, fairPair)
 	}
@@ -208,7 +208,7 @@ func TestWatchSlotDropAssignmentGate_ClassificationControls(t *testing.T) {
 				t.Errorf("reasonCode=%q, want %q", reasonCode, tc.wantReason)
 			}
 
-			selected := w.applyPriorityBoost(fairPair, online)
+			selected := w.applyPriorityBoost(fairPair, online, time.Now())
 			selectedC := selected[0] == 2 || selected[1] == 2
 			if selectedC != tc.wantDrop {
 				t.Errorf("selected pair=%v, target selected=%v, want %v", selected, selectedC, tc.wantDrop)

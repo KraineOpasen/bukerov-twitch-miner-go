@@ -309,12 +309,44 @@ type rotationState struct {
 	activePair [2]int // streamer indexes currently occupying the watch slots
 	hasPair    bool   // whether activePair has been initialized yet
 
-	// lastSwitch is when activePair last actually changed. It is also the
-	// residence anchor fairRotationResidence is measured from, and the value
-	// published as DebugState.PairSince.
+	// lastSwitch is when activePair last actually changed, and the value
+	// published as DebugState.PairSince. It is NOT the residence anchor:
+	// residence belongs to the committed ordinary cohort below, which is the
+	// set that actually holds slots. lastSwitch keeps only its documented
+	// meaning so PairSince still projects base-pair membership changes, and
+	// nothing reads it for tenure.
 	lastSwitch time.Time
 
-	lastWatched map[int]time.Time // last tick each streamer index was actually watched (fairness tie-break + boost victim selection)
+	// committedCohort is the single process-local residence owner: the ordinary
+	// watch-slot service that was actually GRANTED, keyed by login (index-free,
+	// like lastConfiguredWatched, so a streamer-list reorder needs no remap) and
+	// valued by the broadcast identity that member was holding when the term
+	// below was stamped.
+	//
+	// cohortSince is its ONE common anchor and cohortCapacity the residual
+	// ordinary capacity C the cohort was committed against. A real change of
+	// MEMBERSHIP or capacity starts a fresh common anchor; a permutation, a
+	// cosmetic reason/campaign relabel, a refresh, a rejected proposal, a change
+	// among unselected candidates, or a stronger occupant handing off to another
+	// stronger occupant does not. An empty cohort invalidates residence
+	// outright — nothing is promised at zero capacity.
+	//
+	// A broadcast REPLACEMENT is deliberately not in the restamp list. One
+	// anchor is common to the whole cohort, so restamping on one member's new
+	// broadcast would also renew the term of a partner whose service never
+	// stopped — a channel that starts a new broadcast every few minutes could
+	// then hold both seats indefinitely and starve the rest of the ranking.
+	// The recorded identity is used the other way instead: it EXPIRES that one
+	// member's protection early (see residentOrdinaryAt) and cannot extend
+	// anyone's.
+	//
+	// It is process-local by design: a restart keeps the persisted fairness
+	// history and deliberately keeps no tenure.
+	committedCohort map[string]string
+	cohortSince     time.Time
+	cohortCapacity  int
+
+	lastWatched map[int]time.Time // last tick each streamer index actually held a committed slot (fairness tie-break + boost/displacement victim selection)
 
 	// A near-streak swap-out may be deferred once for the current pair
 	// approach. deferUntil is the explicit, bounded deadline; deferUsed stays
@@ -351,6 +383,232 @@ func (r *rotationState) clearBoostLatch() {
 	r.boostLatched = false
 	r.boostTarget = -1
 	r.boostVictim = -1
+}
+
+// residentOrdinaryAt reports whether login still holds a committed ordinary
+// seat that is inside its minimum residence at now.
+//
+// This is the ONE residence authority. It answers a single question — "is this
+// channel's already-granted ordinary service still protected from an ORDINARY
+// re-selection?" — and it is consulted only on branches that are themselves
+// ordinary: the persisted-deficit base-pair ranking, the DROPS/STREAK boost's
+// victim choice, and the cross-source displacement's victim choice. It is never
+// consulted on an admission decision, so it can never delay, weaken or veto a
+// stronger cause: a stronger admission or preemption, an offline/ineligible/
+// avoided/removed channel, an invalid session or proof, and the established
+// recovery paths all reach their effect through code this predicate does not
+// gate.
+//
+// Expiry only RE-OPENS ordinary ranking. Nothing switches because the deadline
+// passed; the ranking simply becomes free to choose again, and it keeps the same
+// cohort whenever that cohort is still the most owed.
+func (w *MinuteWatcher) residentOrdinaryAt(login, broadcast string, now time.Time) bool {
+	// An invalidated cohort has no anchor, and a login that holds no committed
+	// ordinary seat is not in the map at all — a nil map answers that correctly.
+	if w.rotation.cohortSince.IsZero() {
+		return false
+	}
+	granted, held := w.rotation.committedCohort[login]
+	if !held {
+		return false
+	}
+	// The term was granted on a specific broadcast. Replacing it ends the
+	// committed service the term was protecting, so this member drops out of
+	// residence right away and goes back to competing on persisted deficit like
+	// any other candidate. It expires protection and never grants it: the common
+	// anchor is untouched, so a member that keeps starting new broadcasts can
+	// neither renew itself nor extend a partner's term. An identity that is
+	// merely unknown on either side is not a replacement.
+	if granted != "" && broadcast != "" && granted != broadcast {
+		return false
+	}
+	return now.Sub(w.rotation.cohortSince) < fairRotationResidence
+}
+
+// residentOrdinaryIndex is residentOrdinaryAt for a configured streamer index.
+func (w *MinuteWatcher) residentOrdinaryIndex(idx int, now time.Time) bool {
+	if idx < 0 || idx >= len(w.streamers) {
+		return false
+	}
+	st := w.streamers[idx]
+	return w.residentOrdinaryAt(st.GetUsername(), st.Stream.GetBroadcastID(), now)
+}
+
+// ordinarySeat reports whether a committed slot was obtained by the ORDINARY
+// selection role — persisted-deficit fair rotation, or the direct-mode priority
+// pick — rather than by a stronger admission.
+//
+// The partition is derived from how the seat was actually obtained, never from
+// its reason label, which is what keeps residual capacity C honest: C is
+// MaxSimultaneousStreams minus the seats a stronger admission really took, NOT
+// two minus every high-labelled candidate. A candidate that was not admitted
+// reserves nothing, so channels carrying equal drop semantics keep competing for
+// an ordinary seat by persisted deficit exactly as before.
+//
+//   - An external (discovery) proposal, including a proven provisional one, is
+//     never an ordinary seat: it is not part of the configured fairness cohort.
+//   - A configured channel the DROPS/STREAK overlay seated OFF the base pair is a
+//     stronger admission — it is precisely the member the overlay swapped in.
+//   - A configured channel persisted fairness itself put in the base pair is
+//     ordinary even when it carries a drop and even when it is the boost target,
+//     because fairness, not the overlay, is why it holds the seat.
+//   - A configured occupant that survived a cross-source displacement stays
+//     ordinary; the displaced one is not committed at all.
+func (w *MinuteWatcher) ordinarySeat(s slotOccupant) bool {
+	if s.idx < 0 {
+		return false
+	}
+	if w.selectionMode == ModeRotation {
+		return w.rotation.hasPair && (s.idx == w.rotation.activePair[0] || s.idx == w.rotation.activePair[1])
+	}
+	// Direct mode has no overlay to be seated by, so a committed configured seat
+	// came from the priority pick. The idle mode reaches this only if a configured
+	// slot exists without a selection pass having run, which the loop does not
+	// produce; classifying it as ordinary keeps that impossible case from silently
+	// reporting zero residual capacity and wiping a live cohort.
+	return true
+}
+
+// commitOrdinaryResidence reconciles the residence anchor against the slots that
+// were actually committed this tick. Committed grants — not proposals — own the
+// cohort, its anchor and its capacity, so a proposal the broker rejected, a
+// provisional lease that failed its final proof, or a fallback that restored the
+// original occupant all leave the anchor to the cohort that was really accepted.
+//
+// Runs on the loop goroutine, once per tick, on the final allocation, including
+// the empty one: losing every ordinary seat is itself the C0 transition.
+func (w *MinuteWatcher) commitOrdinaryResidence(slots []slotOccupant, now time.Time) {
+	cohort := make(map[string]string, constants.MaxSimultaneousStreams)
+	stronger := 0
+	for _, s := range slots {
+		if w.ordinarySeat(s) {
+			cohort[s.streamer.GetUsername()] = s.streamer.Stream.GetBroadcastID()
+			continue
+		}
+		stronger++
+	}
+	capacity := constants.MaxSimultaneousStreams - stronger
+
+	if len(cohort) == 0 {
+		// C0: no ordinary service is held, so there is no tenure to protect and
+		// no waiting time that counts as service. A later return of capacity
+		// initializes a fresh anchor from its own commit.
+		w.rotation.committedCohort = nil
+		w.rotation.cohortSince = time.Time{}
+		w.rotation.cohortCapacity = 0
+		return
+	}
+
+	if w.rotation.cohortSince.IsZero() ||
+		capacity != w.rotation.cohortCapacity ||
+		!sameOrdinaryMembers(cohort, w.rotation.committedCohort) {
+		// A real membership or capacity change ends the term the cohort was
+		// serving, so a fresh common anchor is stamped on the identities the new
+		// term is granted on.
+		w.rotation.cohortSince = now
+		w.rotation.committedCohort = cohort
+		w.rotation.cohortCapacity = capacity
+		return
+	}
+
+	// Same members, same capacity: the term continues, so both the anchor and the
+	// identities it was stamped on stand. Refreshing the recorded identities here
+	// would erase the evidence residentOrdinaryAt needs to expire a member whose
+	// broadcast was replaced. Only a seat committed before its broadcast was known
+	// is filled in — that identifies the session the term already covers rather
+	// than replacing it, so a later real replacement is still measured against a
+	// known identity.
+	for login, broadcast := range cohort {
+		if broadcast != "" && w.rotation.committedCohort[login] == "" {
+			w.rotation.committedCohort[login] = broadcast
+		}
+	}
+	w.rotation.cohortCapacity = capacity
+}
+
+// sameOrdinaryMembers compares two committed cohorts as UNORDERED sets of
+// logins. Seat ordering and candidate permutation are therefore not changes,
+// while a member swap, an arrival and a departure are.
+//
+// Broadcast identity is deliberately NOT part of this comparison. It decides one
+// member's own residence, not the cohort's term: see residentOrdinaryAt and the
+// committedCohort field comment for why a single common anchor must never be
+// restamped by one member's new broadcast.
+func sameOrdinaryMembers(a, b map[string]string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for login := range a {
+		if _, held := b[login]; !held {
+			return false
+		}
+	}
+	return true
+}
+
+// commitFinalAllocation settles ordinary residence and rotation recency against
+// the allocation this tick actually committed, and reports whether the tick may
+// continue.
+//
+// The generation check and the two mutations happen TOGETHER, under w.mu,
+// because Stop cancels under that same lock (see Stop). Reading ctx.Err() beside
+// them instead of under the lock only narrows the window rather than closing it:
+// reconciliation waits on observationMu, which Stop releases BEFORE it cancels,
+// so a cancellation can land between an unguarded check and the commits. It
+// would then credit committed service to a generation that no longer exists —
+// the send loop refuses to start a beacon a moment later — and the NEXT
+// generation would protect seats this one never served and rank channels as
+// watched. Under the lock there is no such window: either this tick observes the
+// cancelled generation and commits nothing, or it commits while the generation
+// is still live and Stop's cancellation is ordered after it.
+//
+// Holding w.mu here cannot delay Stop beyond the commit itself: both callees are
+// in-memory updates to loop-owned state, with no I/O, no other lock ordered
+// after this one, and no wait.
+func (w *MinuteWatcher) commitFinalAllocation(ctx context.Context, slots []slotOccupant, now time.Time) bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if ctx.Err() != nil {
+		return false
+	}
+	w.commitOrdinaryResidence(slots, now)
+	w.noteCommittedRecency(slots, now)
+	return true
+}
+
+// noteCommittedRecency records rotation recency for the configured channels that
+// actually RECEIVED a slot this tick.
+//
+// Recency is service evidence, so only a committed grant may advance it. A
+// Phase-A proposal the broker went on to reject, or a provisional overlay whose
+// final proof was refused, consumes no turn — otherwise a channel that was
+// merely offered a seat would be ranked as though it had been watched, and the
+// next evaluation would rotate away from a channel that never received service.
+func (w *MinuteWatcher) noteCommittedRecency(slots []slotOccupant, now time.Time) {
+	for _, s := range slots {
+		if s.idx < 0 {
+			continue
+		}
+		if w.rotation.lastWatched == nil {
+			w.rotation.lastWatched = make(map[int]time.Time)
+		}
+		w.rotation.lastWatched[s.idx] = now
+	}
+}
+
+// forgetGenerationTenure drops the residence and turn evidence one watch
+// generation accumulated: the committed ordinary cohort, its common anchor, the
+// capacity it was committed against, and rotation recency.
+//
+// It deliberately leaves the base pair alone — that is a proposal the next
+// evaluation re-derives from the ranking, not tenure — and it touches no
+// persisted state at all: accumulated watch time is the store's, and a new
+// generation must keep reading the same fairness history it always did.
+func (r *rotationState) forgetGenerationTenure() {
+	r.committedCohort = nil
+	r.cohortSince = time.Time{}
+	r.cohortCapacity = 0
+	r.lastWatched = nil
 }
 
 func (r *rotationState) clearActiveDeferral() {
@@ -562,6 +820,26 @@ func (w *MinuteWatcher) Start(ctx context.Context) error {
 			return ErrGenerationLive
 		}
 	}
+	// A fresh generation inherits no LOCAL tenure from the one it replaces.
+	// Persisted fairness history survives — it lives in WatchTimeStore — but
+	// residence and rotation recency are evidence about service a PARTICULAR
+	// generation delivered, and the new one has delivered none.
+	//
+	// This is also what makes the committed allocation safe against a
+	// cancellation the watcher cannot serialize. Stop cancels under w.mu, so
+	// commitFinalAllocation is atomic against it; but a caller cancelling the
+	// PARENT context passed to Start — the signal path in cmd/miner — cancels the
+	// derived generation through the context package, taking no lock of ours, so
+	// a tick can still commit an instant after its generation ended. Rather than
+	// racing to prevent that, this makes it inconsequential: whatever a dying
+	// generation managed to write, the next one starts from nothing.
+	//
+	// Touching loop-owned state from the caller's goroutine is safe at exactly
+	// this point: it is reached only when no loop is running — either none ever
+	// started, or its loopDone is already closed, which happens-after every write
+	// that loop made.
+	w.rotation.forgetGenerationTenure()
+
 	w.ctx, w.cancel = context.WithCancel(ctx)
 	loopCtx := w.ctx
 	done := make(chan struct{})
@@ -796,6 +1074,22 @@ func (w *MinuteWatcher) applyStreamerList(newList []*models.Streamer) {
 		delete(w.slotResidence, login)
 	}
 	w.pruneRefreshOutcomes(newIndexByLogin)
+	// Drop every ordinary-residence entry whose login is no longer on the roster.
+	//
+	// It iterates the COHORT rather than the departed streamers on purpose. The
+	// departed-streamer loop above can only find a key by asking the OLD list for
+	// a name, and a pointer-preserving rename (RenameIfCurrent) has already
+	// changed that name on the old list too — so a pre-rename key would be
+	// unreachable from there and would survive, letting a same-process re-add of
+	// that login inherit tenure it never earned. Asking the roster instead needs
+	// no old key and is correct however the login left. A channel that is gone
+	// under its old identity holds no ordinary service, so it stops being
+	// protected here and the next commit anchors whatever actually replaced it.
+	for login := range w.rotation.committedCohort {
+		if _, kept := newIndexByLogin[login]; !kept {
+			delete(w.rotation.committedCohort, login)
+		}
+	}
 	// A pointer-preserving rename may already have changed GetUsername on both
 	// oldList and newList, so there is no reliable old key to remap here. Clearing
 	// is safe: every contested production selection refreshes this evidence from
@@ -900,6 +1194,10 @@ func (w *MinuteWatcher) processWatching(ctx context.Context) {
 
 	w.selectionReasons = make(map[int]string)
 	w.selectionMode = ModeIdle
+	// ONE instant for the whole evaluation. Phase A selection, Phase B
+	// arbitration and the commit all measure ordinary residence against this
+	// same now, so a deadline cannot fall between two of them and let a channel
+	// be resident for one decision and expired for the next.
 	now := time.Now()
 
 	onlineStreamers := w.getOnlineStreamers(avoid)
@@ -929,7 +1227,7 @@ func (w *MinuteWatcher) processWatching(ctx context.Context) {
 	// discovery) on top and enforce the global MaxSimultaneousStreams cap.
 	var configuredWatch []int
 	if len(onlineStreamers) > 0 {
-		configuredWatch = w.selectStreamersToWatch(onlineStreamers)
+		configuredWatch = w.selectStreamersToWatch(onlineStreamers, now)
 	}
 	extra := w.gatherCandidates(ctx, sources, avoid)
 	if ctx.Err() != nil {
@@ -949,6 +1247,17 @@ func (w *MinuteWatcher) processWatching(ctx context.Context) {
 	}
 	slots, waiting, provisionalContenders := w.arbitrateWithProvisionalContenders(configuredWatch, extra, now)
 	slots, waiting = w.reconcileProvisionalSlots(slots, waiting, now, provisionalContenders)
+
+	// The allocation is final from here: this is the first point at which the
+	// committed grants — as opposed to anyone's proposal — are known. Ordinary
+	// residence and rotation recency are both settled against them, so a
+	// rejected proposal or a rolled-back provisional overlay costs its channel
+	// neither tenure nor a turn. A generation that ended while this tick was
+	// arbitrating commits nothing and ends the tick, like the sibling guards
+	// around it.
+	if !w.commitFinalAllocation(ctx, slots, now) {
+		return
+	}
 
 	// The per-streamer debug state reflects the FINAL configured-watched set
 	// (a pick displaced by a higher-priority discovery drop is reported as not
@@ -1294,7 +1603,7 @@ var watcherEligibility = eligibility.Evaluator{}
 // across all online streamers over time (selectRotating), with DROPS/STREAK
 // only influencing how often a channel gets an extra turn - never granting
 // it a permanent exclusive slot.
-func (w *MinuteWatcher) selectStreamersToWatch(onlineIndexes []int) []int {
+func (w *MinuteWatcher) selectStreamersToWatch(onlineIndexes []int, now time.Time) []int {
 	candidates := w.filterAvoided(onlineIndexes)
 	if len(candidates) <= constants.MaxSimultaneousStreams {
 		// Not enough online streamers to need rotation; drop any stale pair
@@ -1306,7 +1615,7 @@ func (w *MinuteWatcher) selectStreamersToWatch(onlineIndexes []int) []int {
 		return w.selectByPriority(candidates)
 	}
 	w.selectionMode = ModeRotation
-	return w.selectRotating(candidates)
+	return w.selectRotating(candidates, now)
 }
 
 // filterAvoided drops streamers marked PreferenceAvoid from the candidate
@@ -1358,8 +1667,9 @@ func (w *MinuteWatcher) isPreferred(idx int) bool {
 // Whoever is watched accumulates minutes and becomes less owed, so every valid
 // contender progresses without a separate timer or queue.
 //
-// A complete pair whose members are both still valid candidates keeps its seats
-// for fairRotationResidence before an ordinary challenger may take one.
+// A channel whose ordinary seat was actually GRANTED keeps its place in the pair
+// for fairRotationResidence before an ordinary challenger may take it; the seats
+// the committed cohort does not hold are re-ranked on every evaluation.
 //
 // On top of that fair pair, one strictly stronger DROPS/STREAK candidate may
 // take one seat. Hard restricted/streak/drop classes come first; active-drop
@@ -1375,48 +1685,55 @@ func (w *MinuteWatcher) isPreferred(idx int) bool {
 // one explicit deferUntil deadline for the current approach. Re-evaluation
 // cannot extend that deadline, and offline or no-longer-protected members leave
 // immediately.
-func (w *MinuteWatcher) selectRotating(onlineIndexes []int) []int {
-	now := time.Now()
+func (w *MinuteWatcher) selectRotating(onlineIndexes []int, now time.Time) []int {
 	w.reconcileLeastWatchedPair(onlineIndexes, now)
 
-	pair := w.applyPriorityBoost(w.rotation.activePair, onlineIndexes)
+	pair := w.applyPriorityBoost(w.rotation.activePair, onlineIndexes, now)
 
 	for _, idx := range pair {
 		w.noteSelectionIfEmpty(idx, "watched: holds a fair slot based on persisted accumulated watch time at this broker evaluation")
 	}
 
-	if w.rotation.lastWatched == nil {
-		w.rotation.lastWatched = make(map[int]time.Time)
-	}
-	w.rotation.lastWatched[pair[0]] = now
-	w.rotation.lastWatched[pair[1]] = now
-
+	// Recency is deliberately NOT stamped here. This pair is a PROPOSAL: the
+	// cross-source broker still runs after it and may reject either member.
+	// noteCommittedRecency stamps the channels that actually received a slot,
+	// which is what rotation.lastWatched has always been documented to mean.
 	return []int{pair[0], pair[1]}
 }
 
-// fairRotationResidence is the minimum time a COMPLETE, still-valid ordinary
-// fair-rotation pair keeps its two base seats before an ordinary
-// persisted-deficit challenger may take one.
+// fairRotationResidence is the minimum time the COMMITTED ordinary cohort — the
+// ordinary watch-slot service that was actually granted — keeps its seats before
+// an ordinary persisted-deficit challenger may take one.
+//
+// It protects the service that exists rather than the pair that was proposed.
+// Phase A's pair is only a proposal: applyPriorityBoost and the cross-source
+// broker both run after it and can take one of its two seats, so a guard on the
+// pair would be measuring the tenure of something that is not, at that moment,
+// what the miner is watching.
 //
 // It is a MINIMUM RESIDENCE, not a switching cadence: nothing schedules or
 // forces a switch when it elapses. Reaching it only re-opens ordinary
-// reconciliation, which then keeps the same pair whenever the incumbents are
-// still the two most owed. There is no goroutine, timer, store, ledger, cache
-// or setting behind it — the loop derives elapsed residence from
-// rotationState.lastSwitch on the broker tick it already runs. That anchor is
-// stamped only on initialization or an unordered membership change, so seat
-// ordering, candidate permutation and re-evaluating the same pair never
-// refresh it, and hasPair == false leaves it inert.
+// reconciliation, which then keeps the same cohort whenever its members are
+// still the most owed. There is no goroutine, timer, store, ledger, cache or
+// setting behind it — the loop derives elapsed residence from
+// rotationState.cohortSince on the broker tick it already runs, and that anchor
+// moves only when the committed MEMBERSHIP or the residual ordinary capacity
+// really changes (see commitOrdinaryResidence). A broadcast identity change is
+// deliberately NOT in that list: one anchor is common to the whole cohort, so
+// restamping it on one member's new broadcast would renew a partner whose
+// service never stopped. Identity acts the other way instead — it expires that
+// one member's protection early, in residentOrdinaryAt — so it can shorten a
+// term and never extend one.
 //
 // Every stronger cause bypasses it structurally rather than by exception,
-// because the guard lives inside the `hasPair && containsPair(...)` branch and
-// only runs when the incoming pair actually differs: an incumbent that is
-// removed, offline, ineligible, avoided or otherwise no longer a candidate is
-// not in onlineIndexes (so containsPair is false and the pair is recomputed at
-// once, which is also why an incomplete pair is never protected and an empty
-// seat refills immediately); DROPS/STREAK and stronger-priority arbitration
-// happen in applyPriorityBoost, which runs AFTER this decision unguarded; and
-// Phase-B / unified-broker arbitration happens after Phase A entirely.
+// because residentOrdinaryAt is consulted ONLY on ordinary branches — the
+// persisted-deficit ranking, the boost's victim choice and the displacement's
+// victim choice — and always below hard reason class and campaign semantics. An
+// incumbent that is removed, offline, ineligible, avoided or otherwise no longer
+// a candidate is not in onlineIndexes, so it is not pinned and is replaced at
+// once; an empty seat is filled from the same fresh ranking on the same
+// evaluation; DROPS/STREAK admission in applyPriorityBoost and Phase-B/unified
+// broker admission both still decide who is ADMITTED without consulting it.
 //
 // It does apply to the ordinary ranking's own inputs — persisted deficit, the
 // preferenceWeightBiasMinutes handicap and the recency/login tie-break — since
@@ -1428,10 +1745,14 @@ const fairRotationResidence = 15 * time.Minute
 
 // streakDeferDelay bounds the one explicit deferral used when an immediate
 // fairness replacement would interrupt a streamer actively pursuing its watch
-// streak. It is completion protection, not a scheduler cadence. It is reached
-// only once fairRotationResidence has expired: while the pair is still resident
-// there is no replacement to defer, so the one-shot deferral is neither armed
-// nor consumed.
+// streak. It is completion protection, not a scheduler cadence.
+//
+// It is reached only when an ordinary replacement is actually pending. While the
+// committed ordinary cohort still holds every base seat there is none, so the
+// one-shot deferral is neither armed nor consumed. A cohort that holds only SOME
+// of the seats is different: the seats it does not hold are re-ranked on this
+// very evaluation, so a replacement there is real and may be deferred once —
+// which is exactly what this protection is for.
 const streakDeferDelay = 2 * time.Minute
 
 // preferenceWeightBiasMinutes is the fixed handicap (in accumulated watch
@@ -1442,11 +1763,14 @@ const streakDeferDelay = 2 * time.Minute
 const preferenceWeightBiasMinutes = 5.0
 
 // reconcileLeastWatchedPair evaluates the persisted fairness ranking on every
-// broker tick. A complete, still-valid pair is only replaced by an ordinary
-// challenger once it has been resident for fairRotationResidence, and after
-// that the one bounded streak-completion deferral may still hold it briefly.
-// Neither guard applies when a pair member is no longer a valid candidate:
-// that pair is recomputed immediately.
+// broker tick, then pins back into the pair every member of the committed
+// ordinary cohort that is still inside its minimum residence. A channel whose
+// ordinary seat was actually granted is therefore replaced by an ordinary
+// challenger only once that residence has elapsed, and after that the one
+// bounded streak-completion deferral may still hold the replacement briefly.
+// Neither guard applies to a member that is no longer a valid candidate: it is
+// absent from the ranking and replaced at once, and the seats the cohort does
+// not hold are re-ranked on every evaluation.
 func (w *MinuteWatcher) reconcileLeastWatchedPair(onlineIndexes []int, now time.Time) {
 	weights := w.watchWeights(onlineIndexes, now)
 
@@ -1474,27 +1798,26 @@ func (w *MinuteWatcher) reconcileLeastWatchedPair(onlineIndexes []int, now time.
 		}
 		return compareNormalizedLogins(w.streamers[a].GetUsername(), w.streamers[b].GetUsername()) < 0
 	})
-	newPair := [2]int{candidates[0], candidates[1]}
+	// Minimum residence of the COMMITTED ordinary cohort: a channel whose
+	// ordinary seat was actually granted and is still inside its residence keeps
+	// its place in the base pair, and only the remaining seats are re-ranked. It
+	// protects the service that exists rather than a pre-overlay pair that may
+	// never have held both its seats, and it can never idle capacity, because
+	// every seat the residents do not occupy is filled from this same fresh
+	// ranking on this same evaluation.
+	fairPair := [2]int{candidates[0], candidates[1]}
+	newPair := w.pinResidentOrdinary(candidates, now)
+	for _, idx := range newPair {
+		if idx != fairPair[0] && idx != fairPair[1] {
+			w.noteSelection(idx, "watched: keeps its fair slot for the minimum residence of the committed ordinary cohort")
+		}
+	}
 
 	// Deferral is legal only while the current pair remains fully online. An
 	// offline/ineligible member must never linger in activePair.
 	if w.rotation.hasPair && containsPair(onlineIndexes, w.rotation.activePair) {
 		if samePair(newPair, w.rotation.activePair) {
 			w.rotation.clearActiveDeferral()
-			w.captureDeficitMinutes(onlineIndexes, weights)
-			return
-		}
-
-		// Minimum residence of the ordinary configured pair: both incumbents
-		// are still valid candidates and only the ordinary ranking wants a
-		// different pair, which is the one case fairRotationResidence covers.
-		// Deferral state is deliberately left untouched — there is no
-		// replacement to defer yet, so the one-shot approach must not be
-		// consumed here.
-		if now.Sub(w.rotation.lastSwitch) < fairRotationResidence {
-			for _, idx := range w.rotation.activePair {
-				w.noteSelection(idx, "watched: keeps its fair slot for the minimum residence of the current rotation pair")
-			}
 			w.captureDeficitMinutes(onlineIndexes, weights)
 			return
 		}
@@ -1643,6 +1966,43 @@ func samePair(a, b [2]int) bool {
 	return a == b || (a[0] == b[1] && a[1] == b[0])
 }
 
+// pinResidentOrdinary builds the base pair from the persisted-deficit ranking
+// while keeping every still-valid member of the committed ordinary cohort that
+// is inside its minimum residence.
+//
+// ranked is the ordinary ranking, most-owed first, and contains only current
+// valid candidates — so a resident that went offline, was removed, became
+// ineligible or was set to "avoid" is simply absent and is replaced at once.
+// Residents are taken in ranking order, then the remaining seats are filled from
+// the same ranking, so unused capacity is never held back for a channel that no
+// longer holds it. selectRotating only runs above the slot cap, so there are
+// always at least two candidates to fill both seats.
+func (w *MinuteWatcher) pinResidentOrdinary(ranked []int, now time.Time) [2]int {
+	pair := [2]int{-1, -1}
+	filled := 0
+	for _, idx := range ranked {
+		if filled == len(pair) {
+			break
+		}
+		if !w.residentOrdinaryIndex(idx, now) {
+			continue
+		}
+		pair[filled] = idx
+		filled++
+	}
+	for _, idx := range ranked {
+		if filled == len(pair) {
+			break
+		}
+		if idx == pair[0] || idx == pair[1] {
+			continue
+		}
+		pair[filled] = idx
+		filled++
+	}
+	return pair
+}
+
 // applyPriorityBoost lets one DROPS/STREAK-eligible online streamer take over a
 // base-pair seat for the current tick, without affecting the base ranking
 // computed by reconcileLeastWatchedPair.
@@ -1673,19 +2033,25 @@ func samePair(a, b [2]int) bool {
 //     fair-rotation ranking naturally keeps it OUT of the base pair — no
 //     double-dipping — which de-starves the rest;
 //   - the only channel not watched while the latch holds is the current victim,
-//     deliberately the LESS-owed of the two base-pair members, and its identity
-//     moves as the base pair recomputes, so no single channel is locked out.
+//     chosen below the hard/semantic ordering by residence first and then by
+//     persisted deficit — so it is the seat whose service is not protected and,
+//     between two the residence cannot separate, the LESS-owed one. Its identity
+//     moves as the base pair and the cohort recompute, so no channel is locked out.
 //
-// fairRotationResidence bounds how fast that last point can act: while the base
-// pair is still resident it does not recompute, so a latch held across a whole
-// residence keeps displacing the same victim for up to that long. The exposure
-// is bounded by the residence itself and by the Stream-owned pursuit cap, and
-// it is the deliberate cost of the minimum residence — an ordinary challenger
-// waiting is exactly what the rule buys.
+// fairRotationResidence bounds how fast that last point can act, and is also
+// what keeps it from thrashing. The victim is chosen below the hard/semantic
+// ordering by residence first: the channel whose ordinary seat was actually
+// granted is not the one given up while the other base member can take the
+// displacement instead. So a latch held across a whole residence keeps
+// displacing the SAME victim for up to that long — an ordinary challenger
+// waiting is exactly what the rule buys — instead of alternating the two base
+// members on every tick and leaving neither of them a continuous minute. The
+// exposure is bounded by the residence itself and by the Stream-owned pursuit
+// cap.
 //
 // The bounded cost is throughput while a real streak pursuit holds one seat:
 // the remaining channels temporarily share the other rotating slot.
-func (w *MinuteWatcher) applyPriorityBoost(pair [2]int, onlineIndexes []int) [2]int {
+func (w *MinuteWatcher) applyPriorityBoost(pair [2]int, onlineIndexes []int, now time.Time) [2]int {
 	best := w.selectBoostTarget(pair, onlineIndexes)
 
 	keepHeld := false
@@ -1721,7 +2087,7 @@ func (w *MinuteWatcher) applyPriorityBoost(pair [2]int, onlineIndexes []int) [2]
 		(!w.nearStreakCompletion(w.rotation.boostVictim) || w.strictlyHigherBoost(best, w.rotation.boostVictim)) {
 		victim = w.rotation.boostVictim
 	} else {
-		victim = w.selectBoostVictim(pair, best)
+		victim = w.selectBoostVictim(pair, best, now)
 	}
 	if victim == -1 {
 		w.rotation.clearBoostLatch()
@@ -1835,29 +2201,42 @@ func (w *MinuteWatcher) strongestBoostEligible(pair [2]int) int {
 // strictly stronger contender such as a channel-restricted drop. Otherwise
 // evict the weakest hard/semantic member, then the less-owed member, recency,
 // and login.
-func (w *MinuteWatcher) selectBoostVictim(pair [2]int, target int) int {
+func (w *MinuteWatcher) selectBoostVictim(pair [2]int, target int, now time.Time) int {
 	victim := -1
 	for _, slot := range pair {
 		if w.nearStreakCompletion(slot) && !w.strictlyHigherBoost(target, slot) {
 			continue
 		}
-		if victim == -1 || w.betterBoostVictim(slot, victim) {
+		if victim == -1 || w.betterBoostVictim(slot, victim, now) {
 			victim = slot
 		}
 	}
 	return victim
 }
 
-func (w *MinuteWatcher) betterBoostVictim(candidate, current int) bool {
+func (w *MinuteWatcher) betterBoostVictim(candidate, current int, now time.Time) bool {
 	if cmp := w.compareStrictBoost(candidate, current); cmp != 0 {
 		return cmp < 0
 	}
-	if w.streamers[candidate].DropsCondition() && w.streamers[current].DropsCondition() {
-		cw := w.effectiveDeficitMinutes(candidate)
-		bw := w.effectiveDeficitMinutes(current)
-		if cw != bw {
-			return cw > bw
-		}
+	// A committed ordinary seat inside its minimum residence is not the one to
+	// give up while the other base member can take the displacement instead.
+	// This sits BELOW the hard/semantic ordering above — so a strictly stronger
+	// contender still evicts whoever it must — and ABOVE persisted deficit and
+	// recency below, which are the ordinary ranking residence exists to hold off.
+	if cr, br := w.residentOrdinaryIndex(candidate, now), w.residentOrdinaryIndex(current, now); cr != br {
+		return !cr
+	}
+	// Persisted deficit decides between seats residence cannot separate — both
+	// resident, or neither — by evicting the LESS owed. Without it the choice
+	// falls through to recency and then to a fixed login order, and two seats
+	// that are re-anchored together on every evaluation (a stronger occupant
+	// arriving and leaving repeatedly restamps the common anchor) would keep
+	// picking the same victim forever, pinning the other channel against the
+	// very fairness ranking this whole path exists to serve.
+	cw := w.effectiveDeficitMinutes(candidate)
+	bw := w.effectiveDeficitMinutes(current)
+	if cw != bw {
+		return cw > bw
 	}
 	cl := w.rotation.lastWatched[candidate]
 	bl := w.rotation.lastWatched[current]

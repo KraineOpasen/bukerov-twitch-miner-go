@@ -279,9 +279,10 @@ func TestStreakDeferralHasOneNonExtendingDeadline(t *testing.T) {
 	// residence has expired (before that there is no replacement to defer, and
 	// the one-shot approach must not be consumed). Model that later evaluation.
 	openFairRotationResidence(w)
-	// The residence anchor IS DebugState.PairSince, so record the value now in
-	// effect: the assertions below are that neither the deferral nor an ordinary
-	// re-evaluation advances it.
+	// lastSwitch is the base-pair membership timestamp DebugState.PairSince
+	// publishes (the residence anchor itself is the committed cohort's
+	// cohortSince). Record the value now in effect: the assertions below are that
+	// neither the deferral nor an ordinary re-evaluation advances it.
 	residentSince := w.rotation.lastSwitch
 	before := time.Now()
 	runSelectionTick(w, online)

@@ -123,7 +123,7 @@ func TestMaxSlotsUnderMixedCandidates(t *testing.T) {
 	if len(online) != 3 {
 		t.Fatalf("all three should be eligible candidates, got %d", len(online))
 	}
-	watched := w.selectStreamersToWatch(online)
+	watched := w.selectStreamersToWatch(online, time.Now())
 	if len(watched) > 2 {
 		t.Fatalf("watch selection must never exceed two slots, got %d", len(watched))
 	}
