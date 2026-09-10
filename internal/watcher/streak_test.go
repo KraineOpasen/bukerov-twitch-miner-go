@@ -33,7 +33,7 @@ func TestBoostFinishesStreakInProgressInsteadOfThrashing(t *testing.T) {
 		3: time.Now().Add(-time.Hour),
 	}
 
-	boosted := w.applyPriorityBoost([2]int{0, 1}, online)
+	boosted := w.applyPriorityBoost([2]int{0, 1}, online, time.Now())
 	if boosted[0] != 2 && boosted[1] != 2 {
 		t.Fatalf("expected the in-progress-streak streamer 2 to keep the boost seat, got %v", boosted)
 	}
@@ -58,7 +58,7 @@ func TestBoostRestrictedDropStillOutranksStreak(t *testing.T) {
 		3: time.Now(),
 	}
 
-	boosted := w.applyPriorityBoost([2]int{0, 1}, online)
+	boosted := w.applyPriorityBoost([2]int{0, 1}, online, time.Now())
 	if boosted[0] != 3 && boosted[1] != 3 {
 		t.Fatalf("expected channel-restricted-drop streamer 3 to win the boost seat over the mid-streak streamer 2, got %v", boosted)
 	}

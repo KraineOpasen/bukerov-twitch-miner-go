@@ -28,8 +28,29 @@ import (
 // every immediate-preemption path reaches the replacement without consulting
 // the anchor at all.
 func openFairRotationResidence(w *MinuteWatcher) {
-	w.rotation.lastSwitch = time.Now().Add(-fairRotationResidence)
+	past := time.Now().Add(-fairRotationResidence)
+	w.rotation.cohortSince = past
+	w.rotation.lastSwitch = past
 }
+
+// reconcileAndCommitAt runs ONE ordinary base-pair evaluation at an explicit
+// instant and commits the grant it produced, through the same production entry
+// points processWatching uses on its final allocation.
+//
+// Residence belongs to committed ordinary service, so a residence test has to
+// commit: an evaluation that only proposes leaves the cohort — and therefore the
+// anchor these tests measure — untouched, which is a scheduler this package does
+// not have. Driving an explicit instant keeps every deadline assertion exact
+// without a sleep.
+func reconcileAndCommitAt(w *MinuteWatcher, online []int, now time.Time) {
+	w.selectionMode = ModeRotation
+	w.reconcileLeastWatchedPair(online, now)
+	w.commitSelectedOrdinary(w.rotation.activePair[:], now)
+}
+
+// residenceAnchor is the committed ordinary cohort's single common anchor — the
+// value the minimum residence is actually measured from.
+func residenceAnchor(w *MinuteWatcher) time.Time { return w.rotation.cohortSince }
 
 // writerEpoch is a seqlock-style generation counter for a test writer call:
 // even means no call is in flight, odd means one is. Entering increments to a
@@ -216,9 +237,9 @@ func TestFairRotationResidenceBlocksOrdinaryDeficitReplacement(t *testing.T) {
 	w, _, online, store := newResidenceWatcher(t, 4)
 	t0 := time.Now()
 
-	w.reconcileLeastWatchedPair(online, t0)
+	reconcileAndCommitAt(w, online, t0)
 	requireResidencePair(t, w, "initial", "streamera", "streamerb")
-	anchor := w.rotation.lastSwitch
+	anchor := residenceAnchor(w)
 	if !anchor.Equal(t0) {
 		t.Fatalf("initial residence anchor = %v, want %v", anchor, t0)
 	}
@@ -228,7 +249,7 @@ func TestFairRotationResidenceBlocksOrdinaryDeficitReplacement(t *testing.T) {
 
 	justBefore := t0.Add(fairRotationResidence - time.Second)
 	w.selectionReasons = make(map[int]string)
-	w.reconcileLeastWatchedPair(online, justBefore)
+	reconcileAndCommitAt(w, online, justBefore)
 	requireResidencePair(t, w, "at 14:59", "streamera", "streamerb")
 	// The hold is visible in diagnostics, and it is the residence that held it.
 	for _, idx := range w.rotation.activePair {
@@ -236,8 +257,8 @@ func TestFairRotationResidenceBlocksOrdinaryDeficitReplacement(t *testing.T) {
 			t.Fatalf("resident seat %d reports %q, want the minimum-residence reason", idx, reason)
 		}
 	}
-	if !w.rotation.lastSwitch.Equal(anchor) {
-		t.Fatalf("a blocked evaluation moved the residence anchor: %v -> %v", anchor, w.rotation.lastSwitch)
+	if !residenceAnchor(w).Equal(anchor) {
+		t.Fatalf("a blocked evaluation moved the residence anchor: %v -> %v", anchor, residenceAnchor(w))
 	}
 	// Blocking must not consume the one-shot streak deferral approach either.
 	if !w.rotation.deferUntil.IsZero() || w.rotation.deferUsed {
@@ -245,17 +266,17 @@ func TestFairRotationResidenceBlocksOrdinaryDeficitReplacement(t *testing.T) {
 	}
 
 	open := t0.Add(fairRotationResidence)
-	w.reconcileLeastWatchedPair(online, open)
+	reconcileAndCommitAt(w, online, open)
 	requireResidencePair(t, w, "at exactly 15:00", "streamerc", "streamerd")
-	if !w.rotation.lastSwitch.Equal(open) {
-		t.Fatalf("a real pair change did not stamp a fresh anchor: got %v, want %v", w.rotation.lastSwitch, open)
+	if !residenceAnchor(w).Equal(open) {
+		t.Fatalf("a real cohort change did not stamp a fresh anchor: got %v, want %v", residenceAnchor(w), open)
 	}
 
 	// A real membership change starts a fresh residence, measured from the change.
 	seedMinutes(t, store, t0, map[string]float64{"streamerc": 500, "streamerd": 500})
-	w.reconcileLeastWatchedPair(online, open.Add(fairRotationResidence-time.Second))
+	reconcileAndCommitAt(w, online, open.Add(fairRotationResidence-time.Second))
 	requireResidencePair(t, w, "14:59 into the new residence", "streamerc", "streamerd")
-	w.reconcileLeastWatchedPair(online, open.Add(fairRotationResidence))
+	reconcileAndCommitAt(w, online, open.Add(fairRotationResidence))
 	requireResidencePair(t, w, "15:00 into the new residence", "streamera", "streamerb")
 }
 
@@ -268,9 +289,9 @@ func TestFairRotationResidenceExpiryDoesNotForceASwitch(t *testing.T) {
 	t0 := time.Now()
 	seedMinutes(t, store, t0, map[string]float64{"streamerc": 500, "streamerd": 500})
 
-	w.reconcileLeastWatchedPair(online, t0)
+	reconcileAndCommitAt(w, online, t0)
 	requireResidencePair(t, w, "initial", "streamera", "streamerb")
-	anchor := w.rotation.lastSwitch
+	anchor := residenceAnchor(w)
 
 	for _, elapsed := range []time.Duration{
 		fairRotationResidence,
@@ -278,11 +299,11 @@ func TestFairRotationResidenceExpiryDoesNotForceASwitch(t *testing.T) {
 		2 * fairRotationResidence,
 		10 * fairRotationResidence,
 	} {
-		w.reconcileLeastWatchedPair(online, t0.Add(elapsed))
+		reconcileAndCommitAt(w, online, t0.Add(elapsed))
 		requireResidencePair(t, w, "elapsed "+elapsed.String(), "streamera", "streamerb")
-		if !w.rotation.lastSwitch.Equal(anchor) {
-			t.Fatalf("elapsed %v: re-evaluating the same pair re-stamped the residence anchor: %v -> %v",
-				elapsed, anchor, w.rotation.lastSwitch)
+		if !residenceAnchor(w).Equal(anchor) {
+			t.Fatalf("elapsed %v: re-evaluating the same cohort re-stamped the residence anchor: %v -> %v",
+				elapsed, anchor, residenceAnchor(w))
 		}
 	}
 }
@@ -295,9 +316,9 @@ func TestFairRotationResidenceIgnoresOrderingAndPermutation(t *testing.T) {
 	t0 := time.Now()
 	seedMinutes(t, store, t0, map[string]float64{"streamerc": 50, "streamerd": 50})
 
-	w.reconcileLeastWatchedPair(online, t0)
+	reconcileAndCommitAt(w, online, t0)
 	requireResidencePair(t, w, "initial", "streamera", "streamerb")
-	anchor := w.rotation.lastSwitch
+	anchor := residenceAnchor(w)
 	seat0 := w.streamers[w.rotation.activePair[0]].GetUsername()
 
 	// Flip which incumbent ranks first: the SAME pair, computed in the opposite
@@ -305,10 +326,10 @@ func TestFairRotationResidenceIgnoresOrderingAndPermutation(t *testing.T) {
 	seedMinutes(t, store, t0, map[string]float64{"streamera": 1})
 	permutations := [][]int{{0, 1, 2, 3}, {3, 2, 1, 0}, {2, 0, 3, 1}, {1, 3, 0, 2}}
 	for i, candidates := range permutations {
-		w.reconcileLeastWatchedPair(candidates, t0.Add(time.Duration(i+1)*time.Minute))
+		reconcileAndCommitAt(w, candidates, t0.Add(time.Duration(i+1)*time.Minute))
 		requireResidencePair(t, w, "permutation", "streamera", "streamerb")
-		if !w.rotation.lastSwitch.Equal(anchor) {
-			t.Fatalf("permutation %d refreshed the residence anchor: %v -> %v", i, anchor, w.rotation.lastSwitch)
+		if !residenceAnchor(w).Equal(anchor) {
+			t.Fatalf("permutation %d refreshed the residence anchor: %v -> %v", i, anchor, residenceAnchor(w))
 		}
 	}
 	// The fixture really did flip the computed ranking, so the incoming pair was
@@ -324,40 +345,59 @@ func TestFairRotationResidenceIgnoresOrderingAndPermutation(t *testing.T) {
 
 	// The anchor really is still the ORIGINAL one, measured from t0.
 	seedMinutes(t, store, t0, map[string]float64{"streamera": 200, "streamerb": 200})
-	w.reconcileLeastWatchedPair(online, t0.Add(fairRotationResidence-time.Second))
+	reconcileAndCommitAt(w, online, t0.Add(fairRotationResidence-time.Second))
 	requireResidencePair(t, w, "14:59 measured from the original anchor", "streamera", "streamerb")
-	w.reconcileLeastWatchedPair(online, t0.Add(fairRotationResidence))
+	reconcileAndCommitAt(w, online, t0.Add(fairRotationResidence))
 	requireResidencePair(t, w, "15:00 measured from the original anchor", "streamerc", "streamerd")
 }
 
-// TestFairRotationResidenceAnchorIsInertWithoutACompletePair covers 2->0: when
-// the candidate set falls back to the slot cap the pair is dropped, and the
-// stale anchor must not protect anything when rotation resumes.
-func TestFairRotationResidenceAnchorIsInertWithoutACompletePair(t *testing.T) {
+// TestCommittedOrdinaryResidenceSurvivesDroppingToTheSlotCap covers the direct
+// demand 2->3 path: when the candidate set falls back TO the slot cap, the same
+// two channels keep both slots, so the ordinary cohort has not changed and its
+// anchor was established at demand 2 — not when a third candidate later made
+// rotation begin.
+//
+// The stored base pair is still dropped on the way through (nothing rotates at
+// or below the cap), which is exactly why the anchor cannot live on it: the pair
+// is a proposal, and this cohort never stopped being served. A mutant that keys
+// residence off the direct path's hasPair = false fails here.
+func TestCommittedOrdinaryResidenceSurvivesDroppingToTheSlotCap(t *testing.T) {
 	w, _, online, store := newResidenceWatcher(t, 4)
 
 	runSelectionTick(w, online)
 	if got := sortedPair(w.GetDebugState().ActivePair); got[0] != "streamera" || got[1] != "streamerb" {
 		t.Fatalf("initial fair pair = %v, want [streamera streamerb]", got)
 	}
-	stale := w.rotation.lastSwitch
+	established := residenceAnchor(w)
+	if established.IsZero() {
+		t.Fatal("the initial selection did not commit an ordinary cohort")
+	}
 
-	runSelectionTick(w, online[:2]) // 2 candidates: rotation ends, pair dropped
+	runSelectionTick(w, online[:2]) // 2 candidates: rotation ends, the pair is dropped
 	if w.rotation.hasPair {
 		t.Fatalf("falling back to the slot cap must drop the rotation pair: %v", residencePair(w))
 	}
+	if got := residenceAnchor(w); !got.Equal(established) {
+		t.Fatalf("the same two channels kept both slots, yet the anchor moved: %v -> %v", established, got)
+	}
 
-	// Rotation resumes far inside the OLD residence window (wall clock has barely
-	// moved), with persisted deficit now favoring the other two channels.
+	// Rotation resumes inside that window with persisted deficit now favoring the
+	// other two channels: ordinary ranking alone must not take the seats.
 	seedMinutes(t, store, time.Now(), map[string]float64{"streamera": 100, "streamerb": 100})
-	if elapsed := time.Since(stale); elapsed >= fairRotationResidence {
-		t.Fatalf("fixture is not inside the old residence window (elapsed %v)", elapsed)
+	if elapsed := time.Since(established); elapsed >= fairRotationResidence {
+		t.Fatalf("fixture is not inside the residence window (elapsed %v)", elapsed)
 	}
 	runSelectionTick(w, online)
-	requireResidencePair(t, w, "after rotation resumed", "streamerc", "streamerd")
-	if !w.rotation.lastSwitch.After(stale) {
-		t.Fatalf("refill did not stamp a fresh residence anchor: stale=%v got=%v", stale, w.rotation.lastSwitch)
+	requireResidencePair(t, w, "after rotation resumed", "streamera", "streamerb")
+	if got := residenceAnchor(w); !got.Equal(established) {
+		t.Fatalf("rotation resuming re-stamped an anchor that was established at demand 2: %v -> %v", established, got)
 	}
+
+	// Once that residence expires the ranking is free again, and the two owed
+	// channels take over: residence is a floor, not a lock.
+	openFairRotationResidence(w)
+	runSelectionTick(w, online)
+	requireResidencePair(t, w, "after the residence expired", "streamerc", "streamerd")
 }
 
 // TestFairRotationResidenceDoesNotProtectAnIncompletePair covers 2->1 and
@@ -369,25 +409,29 @@ func TestFairRotationResidenceDoesNotProtectAnIncompletePair(t *testing.T) {
 	// Keep a and b the most owed, so nothing ORDINARY would ever move the pair.
 	seedMinutes(t, store, t0, map[string]float64{"streamerc": 500, "streamerd": 500})
 
-	w.reconcileLeastWatchedPair(online, t0)
+	reconcileAndCommitAt(w, online, t0)
 	requireResidencePair(t, w, "initial", "streamera", "streamerb")
 
 	// One incumbent stops being a candidate a minute in: that seat is empty and
 	// must refill immediately, deep inside the residence window.
 	refill := t0.Add(time.Minute)
-	w.reconcileLeastWatchedPair([]int{0, 2, 3}, refill)
+	reconcileAndCommitAt(w, []int{0, 2, 3}, refill)
 	requireResidencePair(t, w, "empty-seat refill", "streamera", "streamerc")
-	if !w.rotation.lastSwitch.Equal(refill) {
-		t.Fatalf("refill did not stamp a fresh residence anchor: got %v, want %v", w.rotation.lastSwitch, refill)
+	if !residenceAnchor(w).Equal(refill) {
+		t.Fatalf("refill did not stamp a fresh residence anchor: got %v, want %v", residenceAnchor(w), refill)
 	}
 
 	// 2->1->2: the refilled pair is protected from its OWN anchor, not the
 	// original one (which is already older than the minimum residence here).
 	seedMinutes(t, store, t0, map[string]float64{"streamera": 1000})
-	w.reconcileLeastWatchedPair(online, refill.Add(fairRotationResidence-time.Second))
+	reconcileAndCommitAt(w, online, refill.Add(fairRotationResidence-time.Second))
 	requireResidencePair(t, w, "14:59 into the refilled pair's residence", "streamera", "streamerc")
-	w.reconcileLeastWatchedPair(online, refill.Add(fairRotationResidence))
-	requireResidencePair(t, w, "15:00 into the refilled pair's residence", "streamerb", "streamerc")
+	// At 15:00 the ranking is open again and the two most owed take the seats.
+	// c and d carry equal persisted minutes, and the tie goes to d: c has already
+	// held a committed seat during this window and d has not, so the recency
+	// tie-break sends the turn to the channel that was never served.
+	reconcileAndCommitAt(w, online, refill.Add(fairRotationResidence))
+	requireResidencePair(t, w, "15:00 into the refilled pair's residence", "streamerb", "streamerd")
 }
 
 // TestFairRotationResidenceNeverDelaysAnInvalidIncumbent proves every
@@ -442,7 +486,10 @@ func TestFairRotationResidenceNeverDelaysAnInvalidIncumbent(t *testing.T) {
 
 			runSelectionTick(w, w.getOnlineStreamers(nil))
 			requireResidencePair(t, w, "precondition", "streamera", "streamerb")
-			anchor := w.rotation.lastSwitch
+			anchor := residenceAnchor(w)
+			if anchor.IsZero() {
+				t.Fatal("precondition: the selection did not commit an ordinary cohort to be resident")
+			}
 
 			tt.invalidate(t, w)
 			if elapsed := time.Since(anchor); elapsed >= fairRotationResidence {
@@ -527,7 +574,16 @@ func TestFairRotationResidenceNeverDelaysABoost(t *testing.T) {
 			// the base-pair residence decision.
 			requireResidencePair(t, w, "base pair after the boost", "streamera", "streamerb")
 			if !w.rotation.lastSwitch.Equal(anchor) {
-				t.Fatalf("a boost moved the base-pair residence anchor: %v -> %v", anchor, w.rotation.lastSwitch)
+				t.Fatalf("a boost moved the base-pair anchor: %v -> %v", anchor, w.rotation.lastSwitch)
+			}
+			// The boost took one of the two ordinary seats, so residual ordinary
+			// capacity really did fall to one — and residence, which belongs to the
+			// committed cohort rather than to the pair, re-anchors on that change.
+			if w.rotation.cohortCapacity != 1 {
+				t.Fatalf("a boost took a seat yet residual ordinary capacity = %d, want 1", w.rotation.cohortCapacity)
+			}
+			if len(w.rotation.committedCohort) != 1 {
+				t.Fatalf("the committed ordinary cohort should be the single surviving seat, got %v", w.rotation.committedCohort)
 			}
 		})
 	}
@@ -542,7 +598,7 @@ func TestFairRotationResidenceIsEvaluatedBeforeTheStreakDeferral(t *testing.T) {
 	w, streamers, online, store := newResidenceWatcher(t, 4)
 	t0 := time.Now()
 
-	w.reconcileLeastWatchedPair(online, t0)
+	reconcileAndCommitAt(w, online, t0)
 	requireResidencePair(t, w, "initial", "streamera", "streamerb")
 
 	// The incumbent is pursuing a watch streak, and persisted deficit now wants
@@ -554,7 +610,7 @@ func TestFairRotationResidenceIsEvaluatedBeforeTheStreakDeferral(t *testing.T) {
 	}
 	seedMinutes(t, store, t0, map[string]float64{"streamera": 100, "streamerb": 100})
 
-	w.reconcileLeastWatchedPair(online, t0.Add(fairRotationResidence-time.Second))
+	reconcileAndCommitAt(w, online, t0.Add(fairRotationResidence-time.Second))
 	requireResidencePair(t, w, "at 14:59", "streamera", "streamerb")
 	if !w.rotation.deferUntil.IsZero() || w.rotation.deferUsed {
 		t.Fatalf("the one-shot streak deferral was consulted while the pair was still resident: until=%v used=%v",
@@ -562,7 +618,7 @@ func TestFairRotationResidenceIsEvaluatedBeforeTheStreakDeferral(t *testing.T) {
 	}
 
 	open := t0.Add(fairRotationResidence)
-	w.reconcileLeastWatchedPair(online, open)
+	reconcileAndCommitAt(w, online, open)
 	requireResidencePair(t, w, "at exactly 15:00", "streamera", "streamerb")
 	if !w.rotation.deferUsed {
 		t.Fatal("the bounded streak deferral was not available once residence expired")
@@ -575,11 +631,11 @@ func TestFairRotationResidenceIsEvaluatedBeforeTheStreakDeferral(t *testing.T) {
 	}
 	// The deferral holds the pair without re-stamping residence, and once it
 	// expires ordinary fairness reconciles.
-	if !w.rotation.lastSwitch.Equal(t0) {
-		t.Fatalf("the deferral re-stamped the residence anchor: %v", w.rotation.lastSwitch)
+	if !residenceAnchor(w).Equal(t0) {
+		t.Fatalf("the deferral re-stamped the residence anchor: %v", residenceAnchor(w))
 	}
 	after := open.Add(streakDeferDelay)
-	w.reconcileLeastWatchedPair(online, after)
+	reconcileAndCommitAt(w, online, after)
 	requireResidencePair(t, w, "after the bounded deferral expired", "streamerc", "streamerd")
 }
 
@@ -631,7 +687,15 @@ func TestFairRotationResidenceKeepsBrokerArbitration(t *testing.T) {
 	// base pair, never the final broker snapshot.
 	requireResidencePair(t, w, "base pair after broker arbitration", resident...)
 	if !w.rotation.lastSwitch.Equal(anchor) {
-		t.Fatalf("broker arbitration moved the base-pair residence anchor: %v -> %v", anchor, w.rotation.lastSwitch)
+		t.Fatalf("broker arbitration moved the base-pair anchor: %v -> %v", anchor, w.rotation.lastSwitch)
+	}
+	// Phase B took one of the two ordinary seats, so residence — which belongs to
+	// the committed cohort, not to the untouched pair — now covers a single seat.
+	if w.rotation.cohortCapacity != 1 {
+		t.Fatalf("Phase B took a seat yet residual ordinary capacity = %d, want 1", w.rotation.cohortCapacity)
+	}
+	if len(w.rotation.committedCohort) != 1 {
+		t.Fatalf("the committed ordinary cohort should be the single surviving seat, got %v", w.rotation.committedCohort)
 	}
 }
 
@@ -648,7 +712,7 @@ func TestPersistedDeficitFairnessResumesAfterResidence(t *testing.T) {
 	for round := 0; round < candidates*3; round++ {
 		at := t0.Add(time.Duration(round) * fairRotationResidence)
 		weights := w.watchWeights(online, at)
-		w.reconcileLeastWatchedPair(online, at)
+		reconcileAndCommitAt(w, online, at)
 
 		// The pair really is the two least-watched: no off-pair candidate may
 		// have strictly less accumulated time than a seated one.
@@ -681,7 +745,7 @@ func TestPersistedDeficitFairnessResumesAfterResidence(t *testing.T) {
 		}
 	}
 	// The cap is a real allocation count, not the width of the activePair array.
-	if got := w.selectRotating(online); len(got) != constants.MaxSimultaneousStreams {
+	if got := w.selectRotating(online, time.Now()); len(got) != constants.MaxSimultaneousStreams {
 		t.Fatalf("selection allocated %d slots, want exactly %d", len(got), constants.MaxSimultaneousStreams)
 	}
 }
@@ -874,19 +938,51 @@ func TestFairRotationResidenceIsNotAConfigurableSetting(t *testing.T) {
 		}
 	}
 
-	// The anchor has exactly one owner, and diagnostics read that owner rather
-	// than a second copy.
+	// The residence anchor has exactly ONE owner: rotationState.cohortSince, the
+	// anchor of the committed ordinary cohort. lastSwitch is no longer an anchor
+	// at all — it keeps only its documented meaning, "when activePair last
+	// actually changed", which is what diagnostics publish as PairSince.
 	w, _, online, _ := newResidenceWatcher(t, 4)
 	runSelectionTick(w, online)
 	if st := w.GetDebugState(); !st.PairSince.Equal(w.rotation.lastSwitch) {
-		t.Fatalf("residence is owned by something other than rotationState.lastSwitch: PairSince=%v anchor=%v",
+		t.Fatalf("PairSince stopped projecting base-pair membership: PairSince=%v lastSwitch=%v",
 			st.PairSince, w.rotation.lastSwitch)
 	}
+	if w.rotation.cohortSince.IsZero() {
+		t.Fatal("the committed ordinary cohort has no anchor after a selection that granted both seats")
+	}
+
+	// Exactly one field may answer "how long has this ordinary service been
+	// protected". The ban is by ROLE, so it names the owner explicitly instead of
+	// matching on a word an added field could simply avoid.
+	const anchorOwner = "cohortsince"
+	anchors := 0
 	rotation := reflect.TypeOf(rotationState{})
 	for i := 0; i < rotation.NumField(); i++ {
 		name := strings.ToLower(rotation.Field(i).Name)
-		if name != "lastswitch" && (strings.Contains(name, "residence") || strings.Contains(name, "resident")) {
+		if name == anchorOwner {
+			anchors++
+			continue
+		}
+		if name == "lastswitch" {
+			continue // the base-pair membership timestamp, not a tenure anchor
+		}
+		if strings.Contains(name, "residence") || strings.Contains(name, "resident") ||
+			strings.Contains(name, "anchor") || strings.Contains(name, "since") ||
+			strings.Contains(name, "tenure") {
 			t.Fatalf("a second residence owner appeared in rotationState: field %q", rotation.Field(i).Name)
+		}
+	}
+	if anchors != 1 {
+		t.Fatalf("rotationState declares %d residence anchors named %q, want exactly 1", anchors, anchorOwner)
+	}
+
+	// And no residence anchor may live outside rotationState on the watcher.
+	watcher := reflect.TypeOf(MinuteWatcher{})
+	for i := 0; i < watcher.NumField(); i++ {
+		name := strings.ToLower(watcher.Field(i).Name)
+		if strings.Contains(name, "residence") && name != "slotresidence" {
+			t.Fatalf("a residence owner appeared outside rotationState: MinuteWatcher.%s", watcher.Field(i).Name)
 		}
 	}
 }

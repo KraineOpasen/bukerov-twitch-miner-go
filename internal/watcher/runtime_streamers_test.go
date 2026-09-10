@@ -47,7 +47,7 @@ func TestUpdateStreamersAddsCandidateOnNextTick(t *testing.T) {
 	if len(online) != 2 {
 		t.Fatalf("added streamer is not an online candidate: got %d candidates, want 2", len(online))
 	}
-	watched := w.selectStreamersToWatch(online)
+	watched := w.selectStreamersToWatch(online, time.Now())
 	found := false
 	for _, idx := range watched {
 		if w.streamers[idx] == added {
@@ -70,7 +70,7 @@ func TestUpdateStreamersRemovalFreesSlotOnNextTick(t *testing.T) {
 		s.OnlineAt = time.Now().Add(-time.Minute)
 	}
 
-	watched := w.selectStreamersToWatch(online)
+	watched := w.selectStreamersToWatch(online, time.Now())
 	if len(watched) != 2 {
 		t.Fatalf("precondition: both online streamers should hold slots, got %d", len(watched))
 	}
@@ -83,7 +83,7 @@ func TestUpdateStreamersRemovalFreesSlotOnNextTick(t *testing.T) {
 		t.Fatalf("removal not applied: list=%d", len(w.streamers))
 	}
 	online2 := w.getOnlineStreamers(nil)
-	watched2 := w.selectStreamersToWatch(online2)
+	watched2 := w.selectStreamersToWatch(online2, time.Now())
 	for _, idx := range watched2 {
 		if w.streamers[idx] == removed {
 			t.Fatal("removed streamer still selected for a watch slot after the tick boundary")

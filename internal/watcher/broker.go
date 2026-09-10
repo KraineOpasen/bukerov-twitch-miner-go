@@ -428,7 +428,7 @@ func (w *MinuteWatcher) arbitrateWithProvisionalContenders(
 		victim := -1
 		parityBefore := w.displaceParity
 		if incoming.provisionalDrop == nil || incoming.provisionalProven {
-			victim = w.pickDisplaceable(slots, incoming)
+			victim = w.pickDisplaceable(slots, incoming, now)
 		}
 		if victim < 0 {
 			if incoming.provisionalDrop != nil && !incoming.provisionalProven {
@@ -524,7 +524,7 @@ func (w *MinuteWatcher) campaignPolicyForCandidate(candidate Candidate) (Candida
 // guarantees your streamers keep their slots ahead of a random directory
 // channel, at the cost of not bumping a points/rotation pick for a game-wide
 // drop the discovery channel happens to carry.
-func (w *MinuteWatcher) pickDisplaceable(slots []slotOccupant, incoming slotOccupant) int {
+func (w *MinuteWatcher) pickDisplaceable(slots []slotOccupant, incoming slotOccupant, now time.Time) int {
 	if incoming.origin != OriginConfigured && w.preferConfigured.Load() {
 		return -1
 	}
@@ -536,7 +536,7 @@ func (w *MinuteWatcher) pickDisplaceable(slots []slotOccupant, incoming slotOccu
 		if !w.slotStrictlyOutranks(incoming, s) {
 			continue
 		}
-		if victim < 0 || w.betterDisplaceVictim(s, slots[victim]) {
+		if victim < 0 || w.betterDisplaceVictim(s, slots[victim], now) {
 			victim = i
 		}
 	}
@@ -637,36 +637,63 @@ func (w *MinuteWatcher) coldStartTie(slots []slotOccupant, victim int) bool {
 //
 //  1. lowest rank — evict the least-valuable pick (unchanged cross-rank rule);
 //  2. among equal drop ranks, weakest Campaign Policy bounded semantic utility;
-//  3. among equal bounded utilities, greater persisted watch minutes — so the
-//     most-owed configured occupant keeps the fair seat;
-//  4. among equal ranks/utilities with real rotation recency, most-recently-watched — so
-//     the least-recently-watched keeps its slot, mirroring applyPriorityBoost's
-//     fair-rotation victim rule (rotation recency lives in
-//     w.rotation.lastWatched);
-//  5. campaign-semantic total tie: login, independent of candidate/index order;
-//  6. non-campaign cold-start tie (equal rank, no recorded recency — e.g. the bot
-//     never enters rotation because configured streamers are always ≤2 online):
-//     alternate the victim between the tied channels across displacements via
-//     displaceParity, so neither is pinned for the whole uptime. Within a single
+//  3. among equal ranks/utilities, an occupant still inside its committed
+//     ordinary residence is not evicted while the other one can take the
+//     displacement instead (residentOrdinarySlot — the same authority
+//     applyPriorityBoost's victim rule consults). This sits below rank and
+//     campaign semantics, so it changes no admission decision, and above every
+//     ordinary tie-break below, which is the ranking residence holds off;
+//  4. among occupants residence cannot separate — both resident, or neither —
+//     greater persisted watch minutes, so the most-owed configured occupant
+//     keeps the fair seat. This applies to plain ordinary seats as well as
+//     campaign ties, and it is what keeps service even when a stronger occupant
+//     churns: a cohort re-anchored on every evaluation never reaches its
+//     deadline, so residence stops separating the seats and this is the only
+//     fairness input left;
+//  5. among equal persisted minutes with real rotation recency,
+//     most-recently-watched — so the least-recently-watched keeps its slot,
+//     mirroring applyPriorityBoost's fair-rotation victim rule (rotation recency
+//     lives in w.rotation.lastWatched and records COMMITTED grants);
+//  6. campaign-semantic total tie: login, independent of candidate/index order;
+//  7. non-campaign cold-start tie (equal rank, equal persisted minutes, no
+//     recorded recency): alternate the victim between the tied channels across
+//     displacements via displaceParity, so neither is pinned. Within a single
 //     selection pass the parity is constant, so this stays a consistent total
 //     order; pickDisplaceable advances it only after a cold-start-tie eviction.
 //
-// Rotation mode always has real (equal, non-zero) recency for the pair, so it
-// takes branch 2 and never alternates — its behaviour is unchanged.
-func (w *MinuteWatcher) betterDisplaceVictim(a, b slotOccupant) bool {
+// The cold-start branch is reachable from rotation mode too, on the first
+// evaluation after startup or a roster change: recency records COMMITTED grants,
+// so before the first commit both pair members legitimately carry none. That
+// first displacement is the one that forms the cohort. It is now a genuinely
+// last-resort branch — from the next evaluation on, the committed occupant
+// carries real recency AND is resident, and even under churn that defeats
+// residence, branch 4 settles the victim before this one is reached.
+func (w *MinuteWatcher) betterDisplaceVictim(a, b slotOccupant, now time.Time) bool {
 	if ra, rb := slotRank(a.reasonCode), slotRank(b.reasonCode); ra != rb {
 		return ra < rb
 	}
 	if cmp := w.compareSlotCampaignSemantics(a, b); cmp != 0 {
 		return cmp < 0 // evict the semantically weaker occupant
 	}
+	// Committed ordinary residence, the same authority applyPriorityBoost's
+	// victim rule consults: an ordinary seat still inside its minimum residence
+	// is not the one to evict while the other configured occupant can take the
+	// displacement. It sits below rank and campaign semantics, so no admission
+	// decision changes, and above the persisted-deficit, recency and cold-start
+	// branches below, which are the ordinary ranking it holds off.
+	if ra, rb := w.residentOrdinarySlot(a, now), w.residentOrdinarySlot(b, now); ra != rb {
+		return !ra
+	}
 	campaignTie := slotUsesCampaignSemantics(a) && slotUsesCampaignSemantics(b)
-	if campaignTie {
-		aw := w.effectiveDeficitMinutes(a.idx)
-		bw := w.effectiveDeficitMinutes(b.idx)
-		if aw != bw {
-			return aw > bw // evict the less-owed occupant
-		}
+	// Persisted deficit decides between occupants residence cannot separate —
+	// both resident, or neither — by evicting the LESS owed, for plain ordinary
+	// seats as well as campaign ties. It is the same fairness evidence the
+	// ranking itself uses, and without it a pair that is re-anchored together on
+	// every evaluation would fall through to a fixed order and pin one channel.
+	aw := w.effectiveDeficitMinutes(a.idx)
+	bw := w.effectiveDeficitMinutes(b.idx)
+	if aw != bw {
+		return aw > bw // evict the less-owed occupant
 	}
 	la, lb := w.rotation.lastWatched[a.idx], w.rotation.lastWatched[b.idx]
 	if !la.Equal(lb) {
@@ -688,6 +715,13 @@ func (w *MinuteWatcher) betterDisplaceVictim(a, b slotOccupant) bool {
 
 func slotUsesCampaignSemantics(s slotOccupant) bool {
 	return s.reasonCode == ReasonRestrictedDrop || s.reasonCode == ReasonActiveDrop
+}
+
+// residentOrdinarySlot reports whether this occupant holds a committed ordinary
+// seat still inside its minimum residence. Only configured occupants can: an
+// external proposal never joins the ordinary cohort in the first place.
+func (w *MinuteWatcher) residentOrdinarySlot(s slotOccupant, now time.Time) bool {
+	return s.idx >= 0 && w.residentOrdinaryAt(s.streamer.GetUsername(), now)
 }
 
 // publishBrokerSnapshot stores the immutable slot allocation for the dashboard,

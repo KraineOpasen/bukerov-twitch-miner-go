@@ -242,14 +242,24 @@ func configuredSurvivor(slots []slotOccupant) string {
 }
 
 // TestArbitrateColdStartVictimAlternatesDeterministically is the regression for
-// the cold-start alternating fallback: with two equal-rank configured channels
-// in direct mode and no rotation recency, a strictly-higher-rank external
-// candidate displaces one of them each tick, and the victim must (a) alternate
-// between the two channels rather than pinning one for the whole uptime, and
-// (b) do so deterministically — driven by the loop-owned parity, NOT by
-// selectByPriority's randomized map-iteration order (the old thrash bug). Two
-// independent runs must therefore produce an identical, strictly-alternating
-// victim sequence.
+// the cold-start alternating fallback, at the seam where that fallback is
+// actually reached: two equal-rank configured channels with no rotation recency
+// and no persisted minutes, arbitrated directly, so a strictly-higher-rank
+// external candidate displaces one of them each pass. The victim must (a)
+// alternate between the two channels rather than pinning one, and (b) do so
+// deterministically — driven by the loop-owned parity, NOT by selectByPriority's
+// randomized map-iteration order (the old thrash bug). Two independent runs must
+// therefore produce an identical, strictly-alternating victim sequence.
+//
+// This drives arbitrate WITHOUT committing, which is what keeps the cold-start
+// branch reachable: it is the last-resort tie-break, below committed-ordinary
+// residence and below persisted deficit. In production a real loop commits, so
+// the anti-pin guarantee for a granted seat belongs to those two and is owned by
+// TestCommittedOrdinaryResidenceHoldsUnderExternalStrongerDiscovery (a granted
+// seat is NOT alternated away) and
+// TestCommittedOrdinaryResidenceDoesNotPinAChannelUnderStrongerChurn (and is not
+// pinned either). What this test still pins, and what those two do not, is that
+// the fallback itself stays deterministic and order-independent.
 func TestArbitrateColdStartVictimAlternatesDeterministically(t *testing.T) {
 	const ticks = 40
 	run := func() (seq []string, s0, s1 string) {
@@ -263,7 +273,7 @@ func TestArbitrateColdStartVictimAlternatesDeterministically(t *testing.T) {
 		for tick := 0; tick < ticks; tick++ {
 			w.selectionReasons = make(map[int]string)
 			w.selectionMode = ModeIdle
-			cw := w.selectStreamersToWatch([]int{0, 1}) // direct mode: map order varies
+			cw := w.selectStreamersToWatch([]int{0, 1}, time.Now()) // direct mode: map order varies
 			slots, _ := w.arbitrate(cw, extra, time.Now())
 			survivor := configuredSurvivor(slots)
 			evicted := s0

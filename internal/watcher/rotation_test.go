@@ -56,7 +56,7 @@ func openWatchTimeStore(t *testing.T, path string) (*WatchTimeStore, *sql.DB) {
 
 func TestSelectRotatingNoRotationBelowLimit(t *testing.T) {
 	w, online := newTestWatcher(2)
-	got := w.selectStreamersToWatch(online)
+	got := w.selectStreamersToWatch(online, time.Now())
 	if len(got) != 2 {
 		t.Fatalf("expected both online streamers watched with count <= max, got %d", len(got))
 	}
@@ -78,7 +78,7 @@ func TestSelectRotatingCoversEveryoneOverManyTicks(t *testing.T) {
 		watchedCount := make(map[int]int)
 		for tick := 0; tick < n*2; tick++ {
 			openFairRotationResidence(w)
-			pair := w.selectRotating(online)
+			pair := selectAndCommitRotating(w, online)
 			if len(pair) != 2 {
 				t.Fatalf("n=%d tick=%d: expected 2 streamers selected, got %d", n, tick, len(pair))
 			}
@@ -128,7 +128,7 @@ func TestWeightedSelectionPrefersLowerAccumulatedTime(t *testing.T) {
 		// Ticks model broker evaluations spaced past the minimum residence, so
 		// the weighting - not the residence floor - is what decides each pair.
 		openFairRotationResidence(w)
-		pair := w.selectRotating(online)
+		pair := selectAndCommitRotating(w, online)
 		for _, idx := range pair {
 			watchedCount[idx]++
 		}
@@ -188,7 +188,7 @@ func TestAvoidExcludedFromSelectionWhenOthersOnline(t *testing.T) {
 	w.streamers[1].Settings.Preference = models.PreferenceAvoid
 
 	for tick := 0; tick < 10; tick++ {
-		got := w.selectStreamersToWatch(online)
+		got := w.selectStreamersToWatch(online, time.Now())
 		for _, idx := range got {
 			if idx == 1 {
 				t.Fatalf("tick %d: avoided streamer 1 was selected while other streamers were online: %v", tick, got)
@@ -203,7 +203,7 @@ func TestAvoidStillWatchedWhenOnlyOnlineChannel(t *testing.T) {
 	w, _ := newTestWatcher(1)
 	w.streamers[0].Settings.Preference = models.PreferenceAvoid
 
-	got := w.selectStreamersToWatch([]int{0})
+	got := w.selectStreamersToWatch([]int{0}, time.Now())
 	if len(got) != 1 || got[0] != 0 {
 		t.Fatalf("expected the sole online (avoided) streamer to still be watched, got %v", got)
 	}
@@ -229,7 +229,7 @@ func TestPreferBiasesRotationTowardPreferredStreamer(t *testing.T) {
 	const ticks = 20
 	for i := 0; i < ticks; i++ {
 		openFairRotationResidence(w)
-		pair := w.selectRotating(online)
+		pair := selectAndCommitRotating(w, online)
 		for _, idx := range pair {
 			watchedCount[idx]++
 		}
@@ -266,7 +266,7 @@ func TestApplyPriorityBoostSwapsInDropsStreamer(t *testing.T) {
 		1: time.Now().Add(-time.Minute),
 	}
 
-	boosted := w.applyPriorityBoost(pair, online)
+	boosted := w.applyPriorityBoost(pair, online, time.Now())
 	if boosted[0] != 2 && boosted[1] != 2 {
 		t.Fatalf("expected drops-eligible streamer 2 to be swapped into the pair, got %v", boosted)
 	}
@@ -298,7 +298,7 @@ func TestApplyPriorityBoostPrefersChannelRestrictedDrop(t *testing.T) {
 		3: time.Now().Add(-time.Minute / 2),
 	}
 
-	boosted := w.applyPriorityBoost(pair, online)
+	boosted := w.applyPriorityBoost(pair, online, time.Now())
 	if boosted[0] != 3 && boosted[1] != 3 {
 		t.Fatalf("expected channel-restricted-campaign streamer 3 to win the boost seat over streamer 2, got %v", boosted)
 	}
@@ -321,7 +321,7 @@ func TestNearStreakCompletionProtectsFromSwap(t *testing.T) {
 	w.streamers[0].Stream.MinuteWatched = 6.5
 	w.streamers[1].Stream.MinuteWatched = 6.8
 
-	boosted := w.applyPriorityBoost(pair, online)
+	boosted := w.applyPriorityBoost(pair, online, time.Now())
 	if boosted != pair {
 		t.Fatalf("expected pair unchanged when both members are near streak completion, got %v want %v", boosted, pair)
 	}

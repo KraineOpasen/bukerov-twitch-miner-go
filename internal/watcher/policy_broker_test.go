@@ -767,7 +767,7 @@ func TestCampaignPolicyKeepsFairSeatProgressingAcrossLowerClasses(t *testing.T) 
 		// keeps progressing across lower semantic classes over time, not that it
 		// moves on every single evaluation.
 		openFairRotationResidence(w)
-		pair := w.selectRotating([]int{0, 1, 2, 3})
+		pair := selectAndCommitRotating(w, []int{0, 1, 2, 3})
 		if len(pair) != 2 {
 			t.Fatalf("tick %d allocated %d configured slots, want 2", tick, len(pair))
 		}

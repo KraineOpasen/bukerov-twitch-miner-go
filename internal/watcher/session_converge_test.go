@@ -683,7 +683,7 @@ func TestSessionConverge_DoesNotAlterSelection(t *testing.T) {
 	w, _, _, aLogin, bLogin, cLogin := lateOnlineFixture(t)
 	online := []int{0, 1, 2} // a, b, c in lateOnlineFixture's construction order
 
-	pairBefore := append([]int(nil), w.selectStreamersToWatch(online)...)
+	pairBefore := append([]int(nil), w.selectStreamersToWatch(online, time.Now())...)
 
 	usernames := []string{aLogin, bLogin, cLogin}
 	now := time.Now()
@@ -703,7 +703,7 @@ func TestSessionConverge_DoesNotAlterSelection(t *testing.T) {
 		t.Fatalf("convergence must never touch the watch-time store, got before=%v after=%v", weightsBefore, weightsAfter)
 	}
 
-	pairAfter := append([]int(nil), w.selectStreamersToWatch(online)...)
+	pairAfter := append([]int(nil), w.selectStreamersToWatch(online, time.Now())...)
 
 	if !reflect.DeepEqual(pairBefore, pairAfter) {
 		t.Fatalf("expected the fix to leave selection byte-identical for the same eligible state, got before=%v after=%v", pairBefore, pairAfter)
