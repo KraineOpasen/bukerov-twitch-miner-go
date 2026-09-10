@@ -546,6 +546,36 @@ func sameOrdinaryMembers(a, b map[string]string) bool {
 	return true
 }
 
+// commitFinalAllocation settles ordinary residence and rotation recency against
+// the allocation this tick actually committed, and reports whether the tick may
+// continue.
+//
+// The generation check and the two mutations happen TOGETHER, under w.mu,
+// because Stop cancels under that same lock (see Stop). Reading ctx.Err() beside
+// them instead of under the lock only narrows the window rather than closing it:
+// reconciliation waits on observationMu, which Stop releases BEFORE it cancels,
+// so a cancellation can land between an unguarded check and the commits. It
+// would then credit committed service to a generation that no longer exists —
+// the send loop refuses to start a beacon a moment later — and the NEXT
+// generation would protect seats this one never served and rank channels as
+// watched. Under the lock there is no such window: either this tick observes the
+// cancelled generation and commits nothing, or it commits while the generation
+// is still live and Stop's cancellation is ordered after it.
+//
+// Holding w.mu here cannot delay Stop beyond the commit itself: both callees are
+// in-memory updates to loop-owned state, with no I/O, no other lock ordered
+// after this one, and no wait.
+func (w *MinuteWatcher) commitFinalAllocation(ctx context.Context, slots []slotOccupant, now time.Time) bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if ctx.Err() != nil {
+		return false
+	}
+	w.commitOrdinaryResidence(slots, now)
+	w.noteCommittedRecency(slots, now)
+	return true
+}
+
 // noteCommittedRecency records rotation recency for the configured channels that
 // actually RECEIVED a slot this tick.
 //
@@ -1183,23 +1213,16 @@ func (w *MinuteWatcher) processWatching(ctx context.Context) {
 	slots, waiting, provisionalContenders := w.arbitrateWithProvisionalContenders(configuredWatch, extra, now)
 	slots, waiting = w.reconcileProvisionalSlots(slots, waiting, now, provisionalContenders)
 
-	if ctx.Err() != nil {
-		// The generation ended while this tick was arbitrating — reconciliation
-		// waits on observationMu, which Stop can cancel underneath. Granting
-		// residence and a turn here would credit committed service on behalf of a
-		// generation that no longer exists, and the next generation would then
-		// protect and rank against seats this one never actually served. End the
-		// tick instead, like the sibling guards around it.
-		return
-	}
-
 	// The allocation is final from here: this is the first point at which the
 	// committed grants — as opposed to anyone's proposal — are known. Ordinary
 	// residence and rotation recency are both settled against them, so a
 	// rejected proposal or a rolled-back provisional overlay costs its channel
-	// neither tenure nor a turn.
-	w.commitOrdinaryResidence(slots, now)
-	w.noteCommittedRecency(slots, now)
+	// neither tenure nor a turn. A generation that ended while this tick was
+	// arbitrating commits nothing and ends the tick, like the sibling guards
+	// around it.
+	if !w.commitFinalAllocation(ctx, slots, now) {
+		return
+	}
 
 	// The per-streamer debug state reflects the FINAL configured-watched set
 	// (a pick displaced by a higher-priority discovery drop is reported as not

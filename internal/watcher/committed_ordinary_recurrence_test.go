@@ -1595,33 +1595,48 @@ func TestCommittedOrdinaryResidenceProtectsASeatCommittedBeforeItsBroadcastWasKn
 	}
 }
 
-// waitUntilTickBlocksOnObservationMu blocks until the goroutine running the tick
-// is parked acquiring observationMu.
+// waitUntilParkedOn blocks until some goroutine is parked acquiring a mutex
+// inside one of the named frames.
 //
-// It waits for that STATE, never for a duration: there is no sleep, and a tick
-// that never reaches the mutex fails the test instead of passing on a timer. The
-// deadline is a failure bound, not a wait.
-func waitUntilTickBlocksOnObservationMu(t *testing.T) {
+// It waits for that STATE, never for a duration: there is no sleep, and a run
+// that never parks fails the test instead of passing on a timer. The deadline is
+// a failure bound, not a wait. The frame and the mutex must appear in the SAME
+// goroutine's stack, so an unrelated goroutine blocked elsewhere cannot satisfy
+// it.
+func waitUntilParkedOn(t *testing.T, frames ...string) {
 	t.Helper()
 
 	buf := make([]byte, 1<<20)
 	deadline := time.Now().Add(30 * time.Second)
 	for {
 		dump := string(buf[:runtime.Stack(buf, true)])
-		blocked := strings.Contains(dump, "sync.(*Mutex).Lock") ||
-			strings.Contains(dump, "sync.(*Mutex).lockSlow") ||
-			strings.Contains(dump, "sync.runtime_SemacquireMutex")
-		inSection := strings.Contains(dump, "provenProvisionalCandidates") ||
-			strings.Contains(dump, "reconcileProvisionalSlots")
-		if blocked && inSection {
-			return
+		for _, g := range strings.Split(dump, "\n\ngoroutine ") {
+			parked := strings.Contains(g, "sync.(*Mutex).Lock") ||
+				strings.Contains(g, "sync.(*Mutex).lockSlow") ||
+				strings.Contains(g, "sync.runtime_SemacquireMutex")
+			if !parked {
+				continue
+			}
+			for _, frame := range frames {
+				if strings.Contains(g, frame) {
+					return
+				}
+			}
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("the tick never parked on observationMu inside arbitration or final reconciliation; "+
-				"this fixture cannot exercise the window the guard exists for. Goroutines:\n%s", dump)
+			t.Fatalf("no goroutine parked on a mutex inside %v; this fixture cannot exercise the window "+
+				"the guard exists for. Goroutines:\n%s", frames, dump)
 		}
 		runtime.Gosched()
 	}
+}
+
+// waitUntilTickBlocksOnObservationMu blocks until the goroutine running the tick
+// is parked acquiring observationMu — the section in which the allocation is
+// settled, and which Stop can cancel underneath.
+func waitUntilTickBlocksOnObservationMu(t *testing.T) {
+	t.Helper()
+	waitUntilParkedOn(t, "provenProvisionalCandidates", "reconcileProvisionalSlots")
 }
 
 // TestCommittedOrdinaryResidenceSurvivesAStopThatLandsInsideArbitration pins
@@ -1675,5 +1690,111 @@ func TestCommittedOrdinaryResidenceSurvivesAStopThatLandsInsideArbitration(t *te
 	}
 	if snap := w.BrokerSnapshot(); !snap.EvaluatedAt.IsZero() || len(snap.Slots) != 0 {
 		t.Fatalf("a generation that died inside arbitration published a broker snapshot: %+v", snap)
+	}
+}
+
+// TestCommittedOrdinaryResidenceCommitsNothingWhenTheGenerationDiesAtTheCommit
+// closes the last window in the cancellation rule: the one BETWEEN observing a
+// live generation and mutating the committed scheduling state.
+//
+// Stop releases observationMu before it cancels, so the mutex the allocation is
+// settled under does not serialise the tick against cancellation. A generation
+// check read beside the commits rather than together with them would therefore
+// still let a cancellation land in between, credit committed service to a dead
+// generation, and leave the next generation protecting seats this one never
+// served — the send loop refuses to start a beacon a moment later, so nothing
+// downstream repairs it.
+//
+// The interleaving is driven, not modelled. The tick is first parked inside
+// arbitration, the commit lock is taken while it is parked, the tick is released
+// so it runs on and parks at the commit, and only THEN does the generation end.
+// Every gate before the commit has already observed a live context, exactly as
+// it would under a real Stop.
+func TestCommittedOrdinaryResidenceCommitsNothingWhenTheGenerationDiesAtTheCommit(t *testing.T) {
+	f := newResidenceFixture(t, 4)
+	w := f.w
+	f.seedWeights(t, time.Now(), map[string]float64{"streamerb": 0.5, "streamerc": 30, "streamerd": 90})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	w.observationMu.Lock()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		w.processWatching(ctx)
+	}()
+
+	// Parked inside arbitration: past every earlier gate, holding no lock.
+	waitUntilTickBlocksOnObservationMu(t)
+
+	// Take the commit lock while it cannot be held by the tick, then let the
+	// tick run on. It settles the allocation and parks at the commit.
+	w.mu.Lock()
+	w.observationMu.Unlock()
+	waitUntilParkedOn(t, "commitFinalAllocation")
+
+	// The generation ends here — after the tick decided to commit, before it did.
+	cancel()
+	w.mu.Unlock()
+	<-done
+
+	if got := cohortLogins(w); len(got) != 0 {
+		t.Fatalf("a generation that died between the check and the commit granted residence to %v: "+
+			"the check and the mutation must happen together under the lock Stop cancels under", got)
+	}
+	if !w.rotation.cohortSince.IsZero() {
+		t.Fatalf("a generation that died at the commit stamped a residence anchor: %v", w.rotation.cohortSince)
+	}
+	if len(w.rotation.lastWatched) != 0 {
+		t.Fatalf("a generation that died at the commit consumed a turn for %d channel(s); it sent no beacon",
+			len(w.rotation.lastWatched))
+	}
+	if snap := w.BrokerSnapshot(); !snap.EvaluatedAt.IsZero() || len(snap.Slots) != 0 {
+		t.Fatalf("a generation that died at the commit published a broker snapshot: %+v", snap)
+	}
+}
+
+// TestStopDoesNotCancelBeforeTakingTheCommitLock drives the REAL Stop against a
+// held commit lock: while a tick holds w.mu, Stop must not have ended the
+// generation, and once the lock is released it must.
+//
+// This is the dynamic half of the atomicity the rule above rests on, and it is
+// deliberately not the whole of it: it cannot separate "cancels while holding
+// w.mu" from "reads the cancel func under w.mu and calls it after releasing",
+// because both block Stop for exactly as long as the lock is held. That
+// ordering is pinned in the source instead, by
+// TestStopCancelsInsideTheCommitLock.
+func TestStopDoesNotCancelBeforeTakingTheCommitLock(t *testing.T) {
+	f := newResidenceFixture(t, 4)
+	w := f.w
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	// Wire the generation the way Start does; the fixture drives ticks directly
+	// and so never sets the cancel half.
+	w.mu.Lock()
+	w.ctx, w.cancel = ctx, cancel
+	w.mu.Unlock()
+
+	// Stand in for a tick inside commitFinalAllocation.
+	w.mu.Lock()
+
+	stopped := make(chan error, 1)
+	go func() { stopped <- w.Stop() }()
+
+	waitUntilParkedOn(t, "MinuteWatcher).Stop")
+	if err := ctx.Err(); err != nil {
+		t.Fatalf("Stop cancelled the generation without holding the commit lock (%v): "+
+			"a commit in progress could then be credited to a generation already gone", err)
+	}
+
+	w.mu.Unlock()
+	if err := <-stopped; err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	if ctx.Err() == nil {
+		t.Fatalf("Stop returned without cancelling the generation")
 	}
 }

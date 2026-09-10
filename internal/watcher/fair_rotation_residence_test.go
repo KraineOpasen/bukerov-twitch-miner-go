@@ -7,6 +7,7 @@ import (
 	"go/token"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -984,5 +985,120 @@ func TestFairRotationResidenceIsNotAConfigurableSetting(t *testing.T) {
 		if strings.Contains(name, "residence") && name != "slotresidence" {
 			t.Fatalf("a residence owner appeared outside rotationState: MinuteWatcher.%s", watcher.Field(i).Name)
 		}
+	}
+}
+
+// mutexCallOn reports whether the node is a call to w.<field>.<method>() — e.g.
+// w.mu.Lock().
+func mutexCallOn(n ast.Node, field, method string) bool {
+	call, ok := n.(*ast.CallExpr)
+	if !ok {
+		return false
+	}
+	outer, ok := call.Fun.(*ast.SelectorExpr)
+	if !ok || outer.Sel.Name != method {
+		return false
+	}
+	inner, ok := outer.X.(*ast.SelectorExpr)
+	if !ok || inner.Sel.Name != field {
+		return false
+	}
+	recv, ok := inner.X.(*ast.Ident)
+	return ok && recv.Name == "w"
+}
+
+// receiverFieldCall reports whether the node is a call to w.<field>() — e.g.
+// w.cancel().
+func receiverFieldCall(n ast.Node, field string) bool {
+	call, ok := n.(*ast.CallExpr)
+	if !ok {
+		return false
+	}
+	sel, ok := call.Fun.(*ast.SelectorExpr)
+	if !ok || sel.Sel.Name != field {
+		return false
+	}
+	recv, ok := sel.X.(*ast.Ident)
+	return ok && recv.Name == "w"
+}
+
+// TestStopCancelsInsideTheCommitLock pins the invariant the committed-allocation
+// commit rests on: Stop must cancel the generation while HOLDING w.mu, the same
+// lock commitFinalAllocation takes around its generation check and its two
+// mutations.
+//
+// If Stop instead reads the cancel func under the lock and calls it after
+// releasing, the commit lock buys nothing: the cancellation can then land while
+// a tick holds w.mu, between its check and its mutation, and that tick credits
+// committed service to a generation already ended. No dynamic test can separate
+// the two orderings — both block Stop for as long as the lock is held, and the
+// difference is an interleaving inside two critical sections — so the ordering
+// is pinned where it is actually decided, in the source, the same way this file
+// already pins that residence has no background owner.
+func TestStopCancelsInsideTheCommitLock(t *testing.T) {
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "watcher.go", nil, 0)
+	if err != nil {
+		t.Fatalf("parse watcher.go: %v", err)
+	}
+
+	var stop *ast.FuncDecl
+	for _, decl := range file.Decls {
+		fn, ok := decl.(*ast.FuncDecl)
+		if ok && fn.Name.Name == "Stop" && fn.Recv != nil {
+			stop = fn
+			break
+		}
+	}
+	if stop == nil {
+		t.Fatal("Stop not found: this test no longer guards the cancellation ordering")
+	}
+
+	type event struct {
+		pos  token.Pos
+		kind string
+	}
+	var events []event
+	ast.Inspect(stop.Body, func(n ast.Node) bool {
+		switch {
+		case mutexCallOn(n, "mu", "Lock"):
+			events = append(events, event{n.Pos(), "lock"})
+		case mutexCallOn(n, "mu", "Unlock"):
+			events = append(events, event{n.Pos(), "unlock"})
+		case receiverFieldCall(n, "cancel"):
+			events = append(events, event{n.Pos(), "cancel"})
+		}
+		return true
+	})
+	// A deferred unlock would keep the lock to the end of the function, which the
+	// depth walk below would misread. Stop does not use one; fail loudly rather
+	// than silently mis-measuring if that changes.
+	for _, stmt := range stop.Body.List {
+		if def, ok := stmt.(*ast.DeferStmt); ok && mutexCallOn(def.Call, "mu", "Unlock") {
+			t.Fatalf("Stop now defers w.mu.Unlock at %s: update this test before trusting it",
+				fset.Position(def.Pos()))
+		}
+	}
+	sort.Slice(events, func(i, j int) bool { return events[i].pos < events[j].pos })
+
+	depth, sawCancel := 0, false
+	for _, e := range events {
+		switch e.kind {
+		case "lock":
+			depth++
+		case "unlock":
+			depth--
+		case "cancel":
+			sawCancel = true
+			if depth <= 0 {
+				t.Fatalf("Stop calls w.cancel() at %s without holding w.mu: "+
+					"the generation could then end while a tick holds the commit lock, between its "+
+					"generation check and its commit, and that tick would credit committed service "+
+					"to a generation already gone", fset.Position(e.pos))
+			}
+		}
+	}
+	if !sawCancel {
+		t.Fatal("Stop no longer calls w.cancel(): this test no longer guards the cancellation ordering")
 	}
 }
