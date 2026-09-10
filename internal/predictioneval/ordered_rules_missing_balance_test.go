@@ -249,6 +249,127 @@ func TestOrderedRulesMissingBalanceFailedDrawThenDefaultKeepsOneDraw(t *testing.
 	}
 }
 
+// TestOrderedRulesBalanceIsNeverForwardFilledToALaterCandidate pins the OTHER
+// borrow direction.
+//
+// Carrying a balance BACKWARDS is the obvious mistake and is refused at
+// projection. Carrying one FORWARDS is the subtle one, because it looks
+// harmless: the earlier candidate really did hold that balance, and reusing it
+// requires no back-dating at all. It is still a value the later candidate never
+// held, and the model would report a confident stake for it.
+//
+// C1 holds a known balance and its draw fails; C2 holds none and admits. The
+// stake must stay unknown.
+func TestOrderedRulesBalanceIsNeverForwardFilledToALaterCandidate(t *testing.T) {
+	cs := []predictioneval.OrderedRulesCandidate{
+		orCandidate("C1", 10, orKnownBalance(1000), orOutcome("A", 4), orOutcome("B", 6)),
+		orCandidate("C2", 20, orMissingBalance(), orOutcome("A", 4), orOutcome("B", 6)),
+	}
+	ev := predictioneval.EvaluateOrderedRules(orProject(t, cs, mbCall()),
+		mbConfig([]predictioneval.OrderedRule{mbPointsRule(50)}, 80, 90),
+		orDraws(orWordRefuse, orWordAdmit))
+
+	mbAssertUnknownStakeStop(t, ev, "A")
+	if ev.Selected.CandidateIdentity != "C2" {
+		t.Fatalf("admitted on %q, want \"C2\"", ev.Selected.CandidateIdentity)
+	}
+	// C1's balance of 1000 at ten percent, capped at 500, would have sized 100.
+	// Seeing that number here means a balance travelled forward.
+	if ev.Stake.Presence == predictioneval.SuppliedKnown {
+		t.Fatalf("C2's stake was sized as %d from C1's balance; a balance belongs to the candidate it "+
+			"was supplied with and to no other", ev.Stake.Value)
+	}
+	if mbVisit(t, ev, "C2").BalanceUse != predictioneval.BalanceRequiredButMissing {
+		t.Fatalf("C2 balance use = %q, want REQUIRED_BUT_MISSING",
+			mbVisit(t, ev, "C2").BalanceUse)
+	}
+}
+
+// TestOrderedRulesZeroPercentDoesNotLicenseAZeroStakeForAMissingBalance closes
+// the one shortcut that looks mathematically safe.
+//
+// With a percentage of zero the stake is zero for EVERY balance, so it is
+// tempting to answer without consulting one — and a cap of zero looks the same
+// way. But the model's claim would then be "it would have staked zero", which
+// is a statement about an amount, and the amount is exactly what is unknown
+// here. The distinction is epistemic, not arithmetic: participation is known,
+// the stake is not, and a computed-looking zero would erase that.
+func TestOrderedRulesZeroPercentDoesNotLicenseAZeroStakeForAMissingBalance(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		percent  float64
+		maxValue uint32
+	}{
+		{"a zero percentage", 0, 500},
+		{"a zero percentage and a zero cap", 0, 0},
+		{"a cap of zero with a real percentage", 10, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cs := []predictioneval.OrderedRulesCandidate{
+				orCandidate("C1", 10, orMissingBalance(), orOutcome("A", 4), orOutcome("B", 6)),
+			}
+			cfg := orConfig([]predictioneval.OrderedRule{
+				orRule(predictioneval.ComparatorLe, 50, 100, tc.maxValue, tc.percent),
+			}, 80, 90, tc.maxValue, tc.percent)
+			ev := predictioneval.EvaluateOrderedRules(orProject(t, cs, mbCall()), cfg, orDraws())
+
+			mbAssertUnknownStakeStop(t, ev, "A")
+			if ev.Reason != predictioneval.ReasonBalanceNotSupplied {
+				t.Fatalf("reason = %q, want BALANCE_NOT_SUPPLIED", ev.Reason)
+			}
+		})
+	}
+
+	// Non-vacuity: the SAME zero-percent config with a known balance does
+	// produce a computable zero, so the stops above are about the missing
+	// balance and not about the percentage.
+	known := []predictioneval.OrderedRulesCandidate{
+		orCandidate("C1", 10, orKnownBalance(1000), orOutcome("A", 4), orOutcome("B", 6)),
+	}
+	cfg := orConfig([]predictioneval.OrderedRule{
+		orRule(predictioneval.ComparatorLe, 50, 100, 500, 0),
+	}, 80, 90, 500, 0)
+	ev := predictioneval.EvaluateOrderedRules(orProject(t, known, mbCall()), cfg, orDraws())
+	if ev.Status != predictioneval.StatusWouldAttempt || ev.Stake.Value != 0 ||
+		ev.Stake.Presence != predictioneval.SuppliedKnown {
+		t.Fatalf("with a balance in hand a zero percentage is a computable zero: status %q stake %+v",
+			ev.Status, ev.Stake)
+	}
+}
+
+// TestOrderedRulesInvalidBalanceIsDistinctFromMissing pins the two non-KNOWN
+// presences apart.
+//
+// "We do not have it" and "we have it and it is unusable" are different pieces
+// of evidence, and a reader deciding whether the gap is fixable needs to know
+// which one it is. Both stop, and they stop with different reasons.
+func TestOrderedRulesInvalidBalanceIsDistinctFromMissing(t *testing.T) {
+	invalid := predictioneval.SuppliedInt64{
+		Presence: predictioneval.SuppliedInvalid,
+		Reason:   "stored balance failed the source's own domain check",
+	}
+	cs := []predictioneval.OrderedRulesCandidate{
+		orCandidate("C1", 10, invalid, orOutcome("A", 4), orOutcome("B", 6)),
+	}
+	ev := predictioneval.EvaluateOrderedRules(orProject(t, cs, mbCall()),
+		mbConfig([]predictioneval.OrderedRule{mbPointsRule(50)}, 80, 90), orDraws(orWordAdmit))
+
+	mbAssertUnknownStakeStop(t, ev, "A")
+	switch {
+	case ev.Reason != predictioneval.ReasonBalanceInvalid:
+		t.Fatalf("reason = %q, want BALANCE_INVALID — an unusable balance is not an absent one", ev.Reason)
+	case ev.Stake.Presence != predictioneval.SuppliedInvalid:
+		t.Fatalf("stake presence = %q, want INVALID", ev.Stake.Presence)
+	case mbVisit(t, ev, "C1").BalanceUse != predictioneval.BalanceRequiredButInvalid:
+		t.Fatalf("balance use = %q, want REQUIRED_BUT_INVALID", mbVisit(t, ev, "C1").BalanceUse)
+	}
+	// The caller's own explanation survives into the result rather than being
+	// replaced by this package's closed reason.
+	if ev.Stake.Reason != invalid.Reason {
+		t.Fatalf("stake reason = %q, want the caller's %q", ev.Stake.Reason, invalid.Reason)
+	}
+}
+
 // TestOrderedRulesMissingBalanceIsNeverBorrowedFromAnotherCandidate pins the
 // last route to a fabricated stake.
 //

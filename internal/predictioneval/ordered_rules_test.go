@@ -443,6 +443,124 @@ func TestOrderedRulesBalanceOutsideTheStakeDomainLeavesTheAdmissionStanding(t *t
 	}
 }
 
+// TestOrderedRulesConfigOutsideTheAdmittedNumericDomainIsRefused pins the
+// domain guard on every raw percentage.
+//
+// The donor validates each percentage field independently against 0..100. A
+// value outside that range — or a non-finite one — is not normalized, not
+// clamped and not treated as a zero: it is a config this model will not
+// evaluate, reported as a typed refusal rather than as a mechanism result.
+//
+// NaN matters most, because it is the value that would otherwise pass silently:
+// every comparison against it is false, so an unguarded NaN threshold would
+// simply never match and the run would report a confident
+// NO_ATTEMPT_IN_SUPPLIED_PREFIX over a configuration nobody could have written.
+func TestOrderedRulesConfigOutsideTheAdmittedNumericDomainIsRefused(t *testing.T) {
+	cs := []predictioneval.OrderedRulesCandidate{
+		orCandidate("c1", 10, orKnownBalance(1000), orOutcome("A", 4), orOutcome("B", 6)),
+	}
+	nan, inf := math.NaN(), math.Inf(1)
+
+	for _, tc := range []struct {
+		name string
+		cfg  predictioneval.OrderedRulesConfig
+	}{
+		{"threshold above one hundred", orConfig([]predictioneval.OrderedRule{
+			orRule(predictioneval.ComparatorLe, 150, 100, 0, 10)}, 95, 100, 0, 10)},
+		{"negative threshold", orConfig([]predictioneval.OrderedRule{
+			orRule(predictioneval.ComparatorLe, -1, 100, 0, 10)}, 95, 100, 0, 10)},
+		{"NaN threshold", orConfig([]predictioneval.OrderedRule{
+			orRule(predictioneval.ComparatorLe, nan, 100, 0, 10)}, 95, 100, 0, 10)},
+		{"NaN attempt rate", orConfig([]predictioneval.OrderedRule{
+			orRule(predictioneval.ComparatorLe, 50, nan, 0, 10)}, 95, 100, 0, 10)},
+		{"infinite attempt rate", orConfig([]predictioneval.OrderedRule{
+			orRule(predictioneval.ComparatorLe, 50, inf, 0, 10)}, 95, 100, 0, 10)},
+		{"points percentage above one hundred", orConfig([]predictioneval.OrderedRule{
+			orRule(predictioneval.ComparatorLe, 50, 100, 0, 101)}, 95, 100, 0, 10)},
+		{"unknown comparator", orConfig([]predictioneval.OrderedRule{
+			orRule(predictioneval.OrderedRuleComparator("Lt"), 50, 100, 0, 10)}, 95, 100, 0, 10)},
+		{"NaN default bound", orConfig(nil, nan, 100, 0, 10)},
+		{"default bound above one hundred", orConfig(nil, 0, 101, 0, 10)},
+		{"default points percentage negative", orConfig(nil, 0, 100, 0, -5)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ev := orEval(t, cs, tc.cfg)
+			if ev.Status != predictioneval.StatusRefused ||
+				ev.Reason != predictioneval.ReasonConfigOutOfDomain {
+				t.Fatalf("status %q reason %q, want REFUSED / CONFIG_OUT_OF_ADMITTED_DOMAIN "+
+					"(selected %+v)", ev.Status, ev.Reason, ev.Selected)
+			}
+			if ev.Selected != nil || ev.RawWordsConsumed != 0 {
+				t.Fatal("a refused config evaluates nothing and spends nothing")
+			}
+		})
+	}
+
+	// Non-vacuity: the boundary values themselves are INSIDE the domain, so
+	// these cases reject out-of-range values rather than rejecting extremes.
+	for _, ok := range []predictioneval.OrderedRulesConfig{
+		orConfig([]predictioneval.OrderedRule{
+			orRule(predictioneval.ComparatorLe, 100, 100, 0, 100)}, 0, 100, 0, 0),
+		orConfig([]predictioneval.OrderedRule{
+			orRule(predictioneval.ComparatorGe, 0, 0, 0, 0)}, 0, 0, 0, 0),
+	} {
+		if ev := orEval(t, cs, ok, orWordAdmit); ev.Status == predictioneval.StatusRefused {
+			t.Fatalf("a config at the domain's own boundaries must be accepted: reason %q", ev.Reason)
+		}
+	}
+}
+
+// TestOrderedRulesNegativeOrOverflowingPoolPointsAreUnknownNotZero pins the
+// deliberate divergence from the donor's unchecked arithmetic.
+//
+// The donor folds i64 points with a plain +, so a negative entry yields a
+// negative share it goes on to compare, and a large sum wraps. Neither is
+// something this model may reproduce: a wrapped total is undefined behaviour to
+// lean on, and a negative share cannot have come from a real pool. Both are
+// reported as a typed unknown — and never normalized to zero, which would let a
+// corrupted vector produce a confident decision.
+func TestOrderedRulesNegativeOrOverflowingPoolPointsAreUnknownNotZero(t *testing.T) {
+	cfg := orConfig([]predictioneval.OrderedRule{
+		orRule(predictioneval.ComparatorLe, 100, 100, 0, 10),
+	}, 0, 100, 0, 10)
+
+	for _, tc := range []struct {
+		name       string
+		a, b       int64
+		wantReason string
+	}{
+		{"a negative outcome", -5, 10, predictioneval.ReasonOutcomePointsOutOfDomain},
+		{"a sum past int64", math.MaxInt64, 1, predictioneval.ReasonPoolSumOverflow},
+		{"two maxima", math.MaxInt64, math.MaxInt64, predictioneval.ReasonPoolSumOverflow},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cs := []predictioneval.OrderedRulesCandidate{
+				orCandidate("c1", 10, orKnownBalance(1000), orOutcome("A", tc.a), orOutcome("B", tc.b)),
+			}
+			ev := orEval(t, cs, cfg, orWordAdmit)
+			if ev.Status != predictioneval.StatusUnknownInput || ev.Reason != tc.wantReason {
+				t.Fatalf("status %q reason %q, want UNKNOWN_INPUT / %q", ev.Status, ev.Reason,
+					tc.wantReason)
+			}
+			if ev.Selected != nil {
+				t.Fatalf("nothing may be decided from an unsound pool; got %+v", ev.Selected)
+			}
+			if len(ev.Visits) != 1 || ev.Visits[0].PoolTotalKnown {
+				t.Fatalf("the visit must record the total as NOT known: %+v", ev.Visits)
+			}
+		})
+	}
+
+	// Non-vacuity: this config admits immediately on a sound pool, so the stops
+	// above are caused by the arithmetic and not by an unreachable rule.
+	sound := []predictioneval.OrderedRulesCandidate{
+		orCandidate("c1", 10, orKnownBalance(1000), orOutcome("A", 4), orOutcome("B", 6)),
+	}
+	if ev := orEval(t, sound, cfg, orWordAdmit); ev.Selected == nil {
+		t.Fatalf("the control run must admit; got %q", ev.Status)
+	}
+}
+
 // TestOrderedRulesFewerThanTwoOutcomesIsDeclinedWithoutADraw pins the donor's
 // pre-check: a pool it cannot compare is declined before any rule is read, so
 // no entropy is spent on it and the traversal moves on.
