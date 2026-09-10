@@ -1614,3 +1614,49 @@ func TestASkipThatNamesAnOutcomeSlotDisagrees(t *testing.T) {
 		t.Errorf("terminalOutcomeSlot verdict = %q, want DISAGREE (%+v)", got.Verdict, *got)
 	}
 }
+
+// TestOneQuantityIsNotCountedInTwoEvidenceBuckets pins the terminal outcome
+// slot to the same basis as the choice index it echoes.
+//
+// The two comparisons are of the SAME quantity. The chosen index is a function
+// of the outcome vector and the strategy alone — established with no observed
+// value, which is why `choiceIndex` stays INDEPENDENT even when the stake was
+// conditioned on a stealth realization. Its terminal echo carried the derived
+// basis instead, so under stealth one quantity landed in two evidence buckets:
+// counted as independent evidence in one comparison and as conditioned in the
+// other.
+//
+// Nothing agreed that should have disagreed. But this stage exists to keep the
+// evidence bases apart, and a scorecard that splits one quantity across two of
+// them is not doing that — it understates the independent evidence and
+// overstates what rests on the stealth draw.
+func TestOneQuantityIsNotCountedInTwoEvidenceBuckets(t *testing.T) {
+	for _, stealth := range []struct {
+		name    string
+		outcome string
+	}{
+		{"with no stealth", predictioneval.StealthNotApplicable},
+		{"conditioned on an observed realization",
+			predictioneval.StealthConditionedOnObservedRealization},
+	} {
+		t.Run(stealth.name, func(t *testing.T) {
+			c, ev := ncAgreeingCase()
+			ev.Stealth.Outcome = stealth.outcome
+			sc := predictioneval.Score(c, ev, predictioneval.SettlementFacts{})
+
+			index := findComparison(t, sc, "choiceIndex")
+			slot := findComparison(t, sc, "terminalOutcomeSlot")
+			if index.Basis != slot.Basis {
+				t.Errorf("choiceIndex has basis %s and terminalOutcomeSlot has basis %s. "+
+					"They compare the same quantity — the chosen index — so splitting them "+
+					"across two evidence bases counts one thing twice, in two different "+
+					"columns of the same scorecard.", index.Basis, slot.Basis)
+			}
+			if slot.Basis != predictioneval.BasisIndependent {
+				t.Errorf("terminalOutcomeSlot has basis %s, want INDEPENDENT: the chosen index "+
+					"is a function of the outcome vector and the strategy alone, and is "+
+					"established without any observed value even under stealth", slot.Basis)
+			}
+		})
+	}
+}

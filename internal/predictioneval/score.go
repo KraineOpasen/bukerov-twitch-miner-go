@@ -477,8 +477,17 @@ func Score(c DecisionCase, ev Evaluation, s SettlementFacts) Scorecard {
 			if rec.TerminalOutcomeSlot != nil {
 				slot, slotHas = *rec.TerminalOutcomeSlot, true
 			}
+			//
+			// INDEPENDENT, not derived — for the same reason choiceIndex is,
+			// and this must not disagree with it. The slot IS the chosen
+			// index: a function of the outcome vector and the strategy alone,
+			// established without any observed value even under stealth.
+			// Labelling its terminal echo CONDITIONED while labelling
+			// choiceIndex INDEPENDENT put one quantity in two evidence
+			// buckets, which is the accounting this whole stage exists to
+			// keep straight.
 			add(compareInt("terminalOutcomeSlot", slot, ev.Choice.Index, slotHas,
-				terminalBasis(ev, derived),
+				BasisIndependent,
 				"the pinned producer names an outcome slot on every placing terminal fact"))
 			// The producer writes the amount it is about to send, which is the
 			// post-clamp final. That equality is only meaningful where the
@@ -494,9 +503,12 @@ func Score(c DecisionCase, ev Evaluation, s SettlementFacts) Scorecard {
 			// and which stage's amount it holds varies by exit, so comparing
 			// it would assert a meaning this model has not established.
 			add(Comparison{
-				Field:    "terminalOutcomeSlot",
-				Verdict:  VerdictDisagree,
-				Basis:    terminalBasis(ev, derived),
+				Field:   "terminalOutcomeSlot",
+				Verdict: VerdictDisagree,
+				// Independent for the same reason as above, and structurally
+				// so here: whether the producer writes a slot at all is a
+				// function of which path it took, not of any drawn value.
+				Basis:    BasisIndependent,
 				Recorded: itoa(int64(*rec.TerminalOutcomeSlot)),
 				Computed: "absent",
 				Note:     "the replay skips, and the pinned producer names an outcome slot only when it places",
