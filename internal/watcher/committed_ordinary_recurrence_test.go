@@ -1760,12 +1760,9 @@ func TestCommittedOrdinaryResidenceCommitsNothingWhenTheGenerationDiesAtTheCommi
 // held commit lock: while a tick holds w.mu, Stop must not have ended the
 // generation, and once the lock is released it must.
 //
-// This is the dynamic half of the atomicity the rule above rests on, and it is
-// deliberately not the whole of it: it cannot separate "cancels while holding
-// w.mu" from "reads the cancel func under w.mu and calls it after releasing",
-// because both block Stop for exactly as long as the lock is held. That
-// ordering is pinned in the source instead, by
-// TestStopCancelsInsideTheCommitLock.
+// It is the coarse half of the atomicity the rule above rests on — it proves
+// Stop waits for the lock, not that it still holds it when it cancels.
+// TestStopCancelsWhileHoldingTheCommitLock settles that.
 func TestStopDoesNotCancelBeforeTakingTheCommitLock(t *testing.T) {
 	f := newResidenceFixture(t, 4)
 	w := f.w
@@ -1796,5 +1793,117 @@ func TestStopDoesNotCancelBeforeTakingTheCommitLock(t *testing.T) {
 	}
 	if ctx.Err() == nil {
 		t.Fatalf("Stop returned without cancelling the generation")
+	}
+}
+
+// TestStopCancelsWhileHoldingTheCommitLock settles the ordering the committed
+// allocation rests on, at RUNTIME: Stop must still hold w.mu at the moment it
+// cancels, not merely have passed through it.
+//
+// The difference is the whole invariant. If Stop read the cancel func under the
+// lock and called it after releasing, a cancellation could land while a tick
+// holds w.mu, between its generation check and its mutation, and that tick would
+// credit committed service to a generation already ended.
+//
+// Lock OWNERSHIP is observed rather than inferred: the generation's cancel func
+// is replaced with one that blocks while it runs, and w.mu.TryLock is asked,
+// from another goroutine, whether the lock is free during exactly that window.
+// A non-blocking probe of the real mutex answers the real question, which is why
+// this replaced an earlier source-level assertion — that one walked lexical call
+// order and would have accepted a conditional lock with an unlocked path to the
+// same cancel.
+func TestStopCancelsWhileHoldingTheCommitLock(t *testing.T) {
+	f := newResidenceFixture(t, 4)
+	w := f.w
+
+	cancelling := make(chan struct{})
+	release := make(chan struct{})
+	var cancelled atomic.Bool
+
+	// Wire the generation the way Start does, with a cancel that parks inside
+	// Stop so the lock can be probed while the cancellation is in progress.
+	w.mu.Lock()
+	w.cancel = func() {
+		cancelled.Store(true)
+		close(cancelling)
+		<-release
+	}
+	w.mu.Unlock()
+
+	stopped := make(chan error, 1)
+	go func() { stopped <- w.Stop() }()
+
+	<-cancelling
+	free := w.mu.TryLock()
+	if free {
+		w.mu.Unlock()
+	}
+	close(release)
+
+	if err := <-stopped; err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	if free {
+		t.Fatal("w.mu was free while Stop was cancelling the generation: Stop must cancel while HOLDING the " +
+			"commit lock, or a tick can commit between its generation check and its mutation on a generation " +
+			"that has already ended")
+	}
+	if !cancelled.Load() {
+		t.Fatal("Stop returned without calling the generation's cancel func")
+	}
+}
+
+// TestCommittedOrdinaryResidenceIsNotInheritedByAFreshGeneration closes the one
+// window the commit lock cannot: a caller cancelling the PARENT context passed
+// to Start ends the derived generation through the context package, holding no
+// lock of ours, so a tick can still commit an instant after its generation died.
+//
+// That is made inconsequential rather than raced: admitting a fresh generation
+// drops the previous one's residence and turn evidence, so whatever a dying
+// generation managed to write, the next one starts from nothing. Persisted
+// fairness history is untouched — it is in the store, not here.
+//
+// The existing restart case models a new PROCESS, which has no tenure to
+// inherit by construction. This one keeps the same watcher, which is where the
+// inheritance would actually happen.
+func TestCommittedOrdinaryResidenceIsNotInheritedByAFreshGeneration(t *testing.T) {
+	f := newResidenceFixture(t, 4)
+	w := f.w
+	f.seedWeights(t, time.Now(), map[string]float64{"streamerb": 0.5, "streamerc": 30, "streamerd": 90})
+
+	w.processWatching(tickCtx(w))
+	requireCohort(t, w, "before the new generation", 2, "streamera", "streamerb")
+	if len(w.rotation.lastWatched) == 0 {
+		t.Fatal("fixture: the first generation consumed no turn, so there is no inheritance to test")
+	}
+
+	// A generation whose context is already dead: the loop exits at once, and the
+	// admission itself is what must clear the previous generation's tenure.
+	dead, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := w.Start(dead); err != nil {
+		t.Fatalf("Start a fresh generation: %v", err)
+	}
+	if err := w.Stop(); err != nil {
+		t.Fatalf("Stop the fresh generation: %v", err)
+	}
+
+	if got := cohortLogins(w); len(got) != 0 {
+		t.Fatalf("a fresh generation inherited committed residence from the one it replaced: %v", got)
+	}
+	if !w.rotation.cohortSince.IsZero() {
+		t.Fatalf("a fresh generation inherited a residence anchor: %v", w.rotation.cohortSince)
+	}
+	if w.rotation.cohortCapacity != 0 {
+		t.Fatalf("a fresh generation inherited a residual capacity of %d", w.rotation.cohortCapacity)
+	}
+	if len(w.rotation.lastWatched) != 0 {
+		t.Fatalf("a fresh generation inherited turn evidence for %d channel(s) it never served",
+			len(w.rotation.lastWatched))
+	}
+
+	// The persisted history is untouched: the store still ranks the same way.
+	if got := f.windowMinutes(t, "streamerb"); got < 0.5 {
+		t.Fatalf("persisted fairness history was lost with the tenure: streamerb window = %v, want >= 0.5", got)
 	}
 }

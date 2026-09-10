@@ -596,6 +596,21 @@ func (w *MinuteWatcher) noteCommittedRecency(slots []slotOccupant, now time.Time
 	}
 }
 
+// forgetGenerationTenure drops the residence and turn evidence one watch
+// generation accumulated: the committed ordinary cohort, its common anchor, the
+// capacity it was committed against, and rotation recency.
+//
+// It deliberately leaves the base pair alone — that is a proposal the next
+// evaluation re-derives from the ranking, not tenure — and it touches no
+// persisted state at all: accumulated watch time is the store's, and a new
+// generation must keep reading the same fairness history it always did.
+func (r *rotationState) forgetGenerationTenure() {
+	r.committedCohort = nil
+	r.cohortSince = time.Time{}
+	r.cohortCapacity = 0
+	r.lastWatched = nil
+}
+
 func (r *rotationState) clearActiveDeferral() {
 	r.deferUntil = time.Time{}
 	r.deferStreamer = 0
@@ -805,6 +820,26 @@ func (w *MinuteWatcher) Start(ctx context.Context) error {
 			return ErrGenerationLive
 		}
 	}
+	// A fresh generation inherits no LOCAL tenure from the one it replaces.
+	// Persisted fairness history survives — it lives in WatchTimeStore — but
+	// residence and rotation recency are evidence about service a PARTICULAR
+	// generation delivered, and the new one has delivered none.
+	//
+	// This is also what makes the committed allocation safe against a
+	// cancellation the watcher cannot serialize. Stop cancels under w.mu, so
+	// commitFinalAllocation is atomic against it; but a caller cancelling the
+	// PARENT context passed to Start — the signal path in cmd/miner — cancels the
+	// derived generation through the context package, taking no lock of ours, so
+	// a tick can still commit an instant after its generation ended. Rather than
+	// racing to prevent that, this makes it inconsequential: whatever a dying
+	// generation managed to write, the next one starts from nothing.
+	//
+	// Touching loop-owned state from the caller's goroutine is safe at exactly
+	// this point: it is reached only when no loop is running — either none ever
+	// started, or its loopDone is already closed, which happens-after every write
+	// that loop made.
+	w.rotation.forgetGenerationTenure()
+
 	w.ctx, w.cancel = context.WithCancel(ctx)
 	loopCtx := w.ctx
 	done := make(chan struct{})
