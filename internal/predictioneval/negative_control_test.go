@@ -1,0 +1,1947 @@
+package predictioneval_test
+
+// NEGATIVE CONTROLS.
+//
+// An independent test-honesty review found that no test in this repository
+// ever made Score emit a DISAGREE. Replacing verdictOf's false arm with a
+// constant AGREE survived the entire suite — every existing assertion was of
+// the form "IndependentDisagree == 0" or "Verdict == AGREE", i.e. every one of
+// them asserted the ABSENCE of the thing that was never produced.
+//
+// That is the worst shape a test suite can have for this package. The
+// deliverable IS a comparison; a Score that structurally could not report a
+// mismatch would have shipped green, and a comparator wired to the wrong
+// recorded field would have certified the replay against nothing.
+//
+// So this file drives the disagreeing half on purpose: recorded results that
+// deliberately contradict the evaluation, at every basis, and asserts that the
+// mismatch is caught, counted in the RIGHT tally, and propagated to the
+// settlement. The same review found several refusal paths reachable only
+// through inputs no fixture supplied; those are here too.
+
+import (
+	"math"
+	"reflect"
+	"testing"
+
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/models"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/predictioneval"
+)
+
+// ncOutcomes is the ordinary two-outcome round the goldens use.
+func ncOutcomes() []predictioneval.OutcomeInput {
+	return []predictioneval.OutcomeInput{
+		go1(0, "o1", 6, 600, 90, 60, 1.66, 60.24),
+		go1(1, "o2", 4, 400, 80, 40, 2.5, 40),
+	}
+}
+
+// ncAgreeingCase is a case whose recorded results match what Evaluate derives:
+// MOST_VOTED picks slot 0, 5% of 1000 = 50, no gates, 50 >= 10 so it places.
+func ncAgreeingCase() (predictioneval.DecisionCase, predictioneval.Evaluation) {
+	in := gi(predictioneval.StrategyMostVoted, 5, 20, 50_000, 1000, 0, 0, ncOutcomes(), nil, false)
+	in.CommonInputDigest = "nc-digest"
+	ev := predictioneval.Evaluate(in, predictioneval.ObservedRealization{})
+
+	compared := 0.0
+	c := predictioneval.DecisionCase{
+		// Model provenance is now part of what Score checks: a case and an
+		// evaluation from a different build must not be scored together.
+		Model:             predictioneval.CurrentModelProvenance(),
+		CommonInputDigest: "nc-digest",
+		// A fully captured round. The origin is what says so — it is nullable
+		// in the store, so a blank one is a real state meaning "this build
+		// cannot claim to know the round's history", and it qualifies the
+		// scorecard. A clean fixture has to say which it is.
+		RoundCaptureOrigin: predictioneval.RoundOriginActiveAtAdmission,
+		Eligibility:        predictioneval.CaseEligibility{Eligible: true, ExercisesPolicy: true},
+		Recorded: predictioneval.RecordedResults{
+			ChoiceIndex: 0, ChoiceIndexRecorded: true,
+			ChoiceOutcomeID:      "o1",
+			ChoiceAmount:         50,
+			ChoiceAmountRecorded: true,
+			SkipResult:           false, SkipResultRecorded: true,
+			SkipCompared: &compared,
+			StakeAllowed: 50, StakeAllowedRecorded: true,
+			StakeReason: predictioneval.GateNone,
+			StakeLimit:  0, StakeLimitRecorded: true,
+			ClampApplied: false, ClampAppliedRecorded: true,
+			FinalAmount: 50, FinalAmountRecorded: true,
+			TerminalReason: "OK",
+			// The terminal ACTION, not only its reason. Both are compared
+			// unconditionally now: a blank decision beside a matching phase
+			// and reason used to raise no disagreement at all, which is how an
+			// incomplete record reached an affirmative settlement.
+			TerminalPhase:    predictioneval.PhaseAutoDecided,
+			TerminalDecision: "PLACE",
+			// And the terminal fact's ARGUMENTS. The pinned producer writes
+			// the outcome slot and the stake it is about to send on every
+			// placing terminal fact, so a fixture without them describes a
+			// record it cannot have written — which is what an earlier
+			// version of this helper did, and it meant every control case
+			// here carried two UNAVAILABLE comparisons nobody noticed.
+			TerminalOutcomeSlot:   func() *int { i := 0; return &i }(),
+			TerminalStake:         50,
+			TerminalStakeRecorded: true,
+			HealthStage:           predictioneval.HealthAllowed,
+		},
+	}
+	return c, ev
+}
+
+// ncBoundFacts stamps hand-built settlement facts with the case's identity and
+// the one placement shape the pinned producer writes.
+//
+// Score refuses to make an affirmative assessment from facts that carry
+// neither, because a stake and a two-option slot are low-cardinality enough
+// that a DIFFERENT attempt on the same round can carry the same pair.
+func ncBoundFacts(c predictioneval.DecisionCase, s predictioneval.SettlementFacts) predictioneval.SettlementFacts {
+	key := c.Key
+	s.Attempt = &key
+	s.CommonInputDigest = c.CommonInputDigest
+	if s.PlacementCoherence == "" {
+		s.PlacementCoherence = predictioneval.PlacementShapeCoherent
+	}
+	return s
+}
+
+// TestScoreActuallyReportsADisagreementWhenTheRecordContradictsTheReplay is the
+// negative control the suite was missing.
+func TestScoreActuallyReportsADisagreementWhenTheRecordContradictsTheReplay(t *testing.T) {
+	base, ev := ncAgreeingCase()
+
+	// Sanity: the unmodified case must AGREE, or the mutations below prove
+	// nothing about which field caused the disagreement.
+	agreed := predictioneval.Score(base, ev, predictioneval.SettlementFacts{})
+	if agreed.IndependentDisagree != 0 {
+		t.Fatalf("the control case disagreed on %d comparison(s): %+v",
+			agreed.IndependentDisagree, disagreementsOf(agreed))
+	}
+	if agreed.IndependentAgree == 0 {
+		t.Fatal("the control case produced no independent agreement at all")
+	}
+
+	wrongCompared := 999.0
+	tests := []struct {
+		name   string
+		field  string
+		mutate func(*predictioneval.RecordedResults)
+	}{
+		{"a different chosen index", "choiceIndex", func(r *predictioneval.RecordedResults) { r.ChoiceIndex = 1 }},
+		{"a different chosen outcome id", "choiceOutcomeId", func(r *predictioneval.RecordedResults) { r.ChoiceOutcomeID = "o2" }},
+		{"a different proposed stake", "choiceAmount", func(r *predictioneval.RecordedResults) { r.ChoiceAmount = 51 }},
+		{"the opposite filter answer", "skipResult", func(r *predictioneval.RecordedResults) { r.SkipResult = true }},
+		{"a different compared value", "skipCompared", func(r *predictioneval.RecordedResults) { r.SkipCompared = &wrongCompared }},
+		{"a different gate allowance", "stakeAllowed", func(r *predictioneval.RecordedResults) { r.StakeAllowed = 49 }},
+		{"a different gate reason", "stakeReason", func(r *predictioneval.RecordedResults) { r.StakeReason = predictioneval.GatePercent }},
+		{"a different gate limit", "stakeLimit", func(r *predictioneval.RecordedResults) { r.StakeLimit = 7 }},
+		{"the opposite clamp decision", "clampApplied", func(r *predictioneval.RecordedResults) { r.ClampApplied = true }},
+		{"a different post-gate stake", "finalAmount", func(r *predictioneval.RecordedResults) { r.FinalAmount = 49 }},
+		{"a different terminal reason", "terminalReason", func(r *predictioneval.RecordedResults) { r.TerminalReason = "FILTER_REJECTED" }},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			c := base
+			c.Recorded = base.Recorded
+			tc.mutate(&c.Recorded)
+
+			sc := predictioneval.Score(c, ev, predictioneval.SettlementFacts{
+				PlacementCallStarted: true, PlacementCallReturned: true, PlacementAccepted: true,
+			})
+
+			cmp := findComparison(t, sc, tc.field)
+			if cmp.Verdict != predictioneval.VerdictDisagree {
+				t.Fatalf("%s = %s, want DISAGREE (recorded %q vs computed %q). A comparator that "+
+					"cannot report a mismatch certifies the replay against nothing",
+					tc.field, cmp.Verdict, cmp.Recorded, cmp.Computed)
+			}
+			if cmp.Basis != predictioneval.BasisIndependent {
+				t.Errorf("%s basis = %s, want INDEPENDENT for a non-stealth case", tc.field, cmp.Basis)
+			}
+			if sc.IndependentDisagree == 0 {
+				t.Errorf("the disagreement was not counted: independentDisagree = 0")
+			}
+			if sc.ConditionedDisagree != 0 {
+				t.Errorf("a non-stealth disagreement was counted as conditioned (%d)", sc.ConditionedDisagree)
+			}
+			// The settlement guard: a replay that did not reproduce the decision
+			// must not claim the original bet's outcome as its own.
+			if sc.Settlement.Assessment != predictioneval.SettlementUnknown {
+				t.Errorf("settlement = %q despite a disagreement, want UNKNOWN: the recorded "+
+					"settlement belongs to a DIFFERENT decision", sc.Settlement.Assessment)
+			}
+		})
+	}
+}
+
+// TestTheFloatComparisonIsBitExactAndNotATolerance pins a documented property
+// that was previously unfalsifiable.
+//
+// compareFloat's doc comment says it compares bit-for-bit precisely so that a
+// tolerance cannot hide the drift worth finding — and substituting a tolerance
+// of 1e6 survived the whole suite, because no test ever reached the comparator
+// with a disagreeing pair. skipCompared is the only float the scorecard
+// compares and it is the output of the filter arithmetic: the one place where a
+// re-implementation would drift by a ULP.
+func TestTheFloatComparisonIsBitExactAndNotATolerance(t *testing.T) {
+	base, ev := ncAgreeingCase()
+	if ev.Filter.Compared != 0 {
+		t.Fatalf("fixture compared = %v, want 0", ev.Filter.Compared)
+	}
+
+	for _, tc := range []struct {
+		name     string
+		recorded float64
+		want     string
+	}{
+		{"the smallest representable difference disagrees", math.SmallestNonzeroFloat64, predictioneval.VerdictDisagree},
+		{"one ULP above the computed value disagrees", math.Nextafter(0, 1), predictioneval.VerdictDisagree},
+		{"an exact match agrees", 0, predictioneval.VerdictAgree},
+		{"negative zero agrees with zero", math.Copysign(0, -1), predictioneval.VerdictAgree},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := base
+			c.Recorded = base.Recorded
+			v := tc.recorded
+			c.Recorded.SkipCompared = &v
+
+			cmp := findComparison(t, predictioneval.Score(c, ev, predictioneval.SettlementFacts{}), "skipCompared")
+			if cmp.Verdict != tc.want {
+				t.Fatalf("skipCompared(%v vs %v) = %s, want %s. A tolerance here would report "+
+					"genuine arithmetic drift as agreement", tc.recorded, ev.Filter.Compared,
+					cmp.Verdict, tc.want)
+			}
+		})
+	}
+
+	// Two NaNs are the same recorded fact and must not be reported as a
+	// disagreement just because NaN != NaN.
+	c := base
+	c.Recorded = base.Recorded
+	nan := math.NaN()
+	c.Recorded.SkipCompared = &nan
+	nanEv := ev
+	nanEv.Filter.Compared = math.NaN()
+	cmp := findComparison(t, predictioneval.Score(c, nanEv, predictioneval.SettlementFacts{}), "skipCompared")
+	if cmp.Verdict != predictioneval.VerdictAgree {
+		t.Errorf("two NaNs compared as %s, want AGREE: they are the same recorded fact", cmp.Verdict)
+	}
+}
+
+// TestStealthAppliesWhenTheStakeExactlyEqualsTheTopStake pins the boundary that
+// decides whether a value is independent evidence or conditioned reconstruction.
+//
+// The pinned policy's condition is `amount >= TopPoints`. Mutating the model's
+// `>=` to `>` survived the whole suite, because every stealth fixture sat
+// strictly above the top stake. At the boundary the real policy DOES draw and
+// reduce; a model answering NOT_APPLICABLE there would present a stake it never
+// reproduced as independently derived, and — since the recorded stake is
+// topPoints minus 1..4 — emit a false INDEPENDENT disagreement against a
+// decision the miner made correctly.
+func TestStealthAppliesWhenTheStakeExactlyEqualsTheTopStake(t *testing.T) {
+	const balance, topPoints = 2000, 1000 // 50% of 2000 == 1000 == topPoints
+
+	// First establish, against the REAL policy, that the boundary really does
+	// reduce. If internal/models ever changed to a strict >, this fails here
+	// and the model's mirror must be revisited rather than quietly diverging.
+	realBet := &models.Bet{
+		Outcomes: []*models.Outcome{
+			mkOutcome("s1", 9, 900, topPoints, 60, 1.66, 60.24),
+			mkOutcome("s2", 1, 100, 10, 40, 2.5, 40),
+		},
+		Settings: models.BetSettings{
+			Strategy: models.StrategySmartMoney, Percentage: 50, PercentageGap: 20,
+			MaxPoints: 50_000, StealthMode: true,
+		},
+	}
+	decision := realBet.Calculate(balance)
+	if decision.Amount >= topPoints {
+		t.Fatalf("the real policy did NOT reduce at amount == topPoints (got %d); its stealth "+
+			"condition is no longer >=, and this model's mirror is now wrong", decision.Amount)
+	}
+	reduction := topPoints - decision.Amount
+	if reduction < 1 || reduction > 4 {
+		t.Fatalf("the real policy reduced by %d at the boundary, outside 1..4", reduction)
+	}
+
+	// Now the model, at the same boundary.
+	in := gi(predictioneval.StrategySmartMoney, 50, 20, 50_000, balance, 0, 0,
+		[]predictioneval.OutcomeInput{
+			go1(0, "s1", 9, 900, topPoints, 60, 1.66, 60.24),
+			go1(1, "s2", 1, 100, 10, 40, 2.5, 40),
+		}, nil, true)
+
+	ev := predictioneval.Evaluate(in, predictioneval.ObservedRealization{
+		StealthAmount: int64Ptr(int64(decision.Amount)),
+	})
+	if !ev.Stealth.Applies {
+		t.Fatalf("the model says stealth does not apply at base == topPoints (%d), but the real "+
+			"policy reduced to %d. This is the condition that decides whether the stake is "+
+			"independent evidence or conditioned reconstruction", topPoints, decision.Amount)
+	}
+	if ev.Stealth.Outcome != predictioneval.StealthConditionedOnObservedRealization {
+		t.Fatalf("stealth outcome = %q at the boundary, want CONDITIONED_ON_OBSERVED_REALIZATION",
+			ev.Stealth.Outcome)
+	}
+	if ev.Stealth.Realized != decision.Amount || ev.Stealth.Reduction != reduction {
+		t.Errorf("realized = %d / reduction = %d, real policy produced %d / %d",
+			ev.Stealth.Realized, ev.Stealth.Reduction, decision.Amount, reduction)
+	}
+	if !containsString(ev.Limitations, predictioneval.LimitationStealthConditioned) {
+		t.Errorf("the boundary case did not carry the stealth-conditioning limitation: %v",
+			ev.Limitations)
+	}
+
+	// One below the boundary must still be independent, so the assertion above
+	// is about the boundary and not about stealth mode in general.
+	below := gi(predictioneval.StrategySmartMoney, 50, 20, 50_000, balance, 0, 0,
+		[]predictioneval.OutcomeInput{
+			go1(0, "s1", 9, 900, topPoints+1, 60, 1.66, 60.24),
+			go1(1, "s2", 1, 100, 10, 40, 2.5, 40),
+		}, nil, true)
+	belowEv := predictioneval.Evaluate(below, predictioneval.ObservedRealization{})
+	if belowEv.Stealth.Applies {
+		t.Errorf("stealth applied at base(%d) < topPoints(%d)", topPoints, topPoints+1)
+	}
+}
+
+// TestARefusalPathIsReachableAndReportsItself covers the "refuse rather than
+// truncate" arithmetic the specification advertises for hostile input. All
+// three paths were reachable through the public API and exercised by nothing.
+func TestARefusalPathIsReachableAndReportsItself(t *testing.T) {
+	t.Run("a stake the policy's int cannot represent is INDETERMINATE", func(t *testing.T) {
+		// 200% of MaxInt64 exceeds what int can hold, so the conversion the
+		// pinned policy performs is not defined for it.
+		in := gi(predictioneval.StrategyMostVoted, 200, 20, math.MaxInt, math.MaxInt, 0, 0,
+			ncOutcomes(), nil, false)
+		ev := predictioneval.Evaluate(in, predictioneval.ObservedRealization{})
+
+		if ev.Action != predictioneval.ActionIndeterminate {
+			t.Fatalf("action = %q, want INDETERMINATE", ev.Action)
+		}
+		if ev.BaseStake.State != predictioneval.StageStateIndeterminate {
+			t.Errorf("base stake state = %q, want INDETERMINATE", ev.BaseStake.State)
+		}
+		if !containsString(ev.Limitations, predictioneval.LimitationUnrepresentableStake) {
+			t.Errorf("limitations = %v, missing %q", ev.Limitations,
+				predictioneval.LimitationUnrepresentableStake)
+		}
+		if ev.PolicyAmountKnown {
+			t.Error("the model claimed to know a stake it just called unrepresentable")
+		}
+	})
+
+	t.Run("stake-gate arithmetic that would wrap is INDETERMINATE", func(t *testing.T) {
+		// balance * maxStakePercent overflows int, which the pinned policy
+		// computes without a guard.
+		in := gi(predictioneval.StrategyMostVoted, 5, 20, 50_000, math.MaxInt, 100, 0,
+			ncOutcomes(), nil, false)
+		ev := predictioneval.Evaluate(in, predictioneval.ObservedRealization{})
+
+		if ev.Action != predictioneval.ActionIndeterminate {
+			t.Fatalf("action = %q, want INDETERMINATE (base stake %d, state %q)",
+				ev.Action, ev.BaseStake.Amount, ev.BaseStake.State)
+		}
+		if !containsString(ev.Limitations, predictioneval.LimitationArchDependentOverflow) &&
+			!containsString(ev.Limitations, predictioneval.LimitationUnrepresentableStake) {
+			t.Errorf("limitations = %v, want an explicit arithmetic limitation", ev.Limitations)
+		}
+	})
+
+	t.Run("a missing risk input is UNSUPPORTED, never a zero gate", func(t *testing.T) {
+		in := gi(predictioneval.StrategyMostVoted, 5, 20, 50_000, 1000, 0, 0, ncOutcomes(), nil, false)
+		in.RiskPresent = false
+
+		ev := predictioneval.Evaluate(in, predictioneval.ObservedRealization{})
+		if ev.Action != predictioneval.ActionUnsupported {
+			t.Fatalf("action = %q, want UNSUPPORTED", ev.Action)
+		}
+		if ev.StakeGate.State != predictioneval.StageStateUnsupported {
+			t.Errorf("stake gate = %q, want UNSUPPORTED — an absent gate configuration must not "+
+				"become a gate of zero", ev.StakeGate.State)
+		}
+		if ev.Clamp.HasFinal {
+			t.Error("a post-gate stake was produced without the gate's inputs")
+		}
+	})
+}
+
+// TestARejectedPlacementIsReadAsRejected covers ProjectSettlementFacts itself.
+//
+// An earlier test asserted the settlement consequence by handing Score a
+// hand-built SettlementFacts, which skipped the projection entirely: mutating
+// `PlacementAccepted = ReasonCode == "OK"` to a constant true survived.
+func TestARejectedPlacementIsReadAsRejected(t *testing.T) {
+	for _, tc := range []struct {
+		reason     string
+		errorClass string
+		want       bool
+	}{
+		{"OK", "NONE", true},
+		{"REJECTED", "REJECTED_BY_TWITCH", false},
+		{"REJECTED", "NOT_ENOUGH_POINTS", false},
+	} {
+		t.Run(tc.reason+"/"+tc.errorClass, func(t *testing.T) {
+			terminal := peRecord(2, predictioneval.KindAutoDecision, predictioneval.PhaseAutoDecided, 7)
+			terminal.Payload.ReasonCode = "OK"
+			terminal.Payload.DecisionEnvelope = peMinimalEnvelope(7)
+
+			pk, err := predictioneval.MaterializePairedKnowledge(peDatasetOf(peProvenance(),
+				peRecord(1, predictioneval.KindAutoDecision, predictioneval.PhaseAutoDue, 7),
+				terminal,
+				pePlacement(3, 7, predictioneval.PhaseCallStarted, 50, 0, "OK", "NONE"),
+				pePlacement(4, 7, predictioneval.PhaseCallReturned, 50, 0, tc.reason, tc.errorClass),
+			))
+			if err != nil || len(pk.Attempts) != 1 {
+				t.Fatalf("materialize: %v (%d attempts)", err, len(pk.Attempts))
+			}
+
+			facts := predictioneval.ProjectSettlementFacts(pk.Attempts[0])
+			if !facts.PlacementCallReturned {
+				t.Fatal("the placement return was not read at all")
+			}
+			if facts.PlacementAccepted != tc.want {
+				t.Errorf("PlacementAccepted = %v, want %v for reason %q. A Twitch-rejected "+
+					"placement read as accepted would let a scorecard claim a settlement for a "+
+					"bet that was never taken", facts.PlacementAccepted, tc.want, tc.reason)
+			}
+			if facts.PlacementErrorClass != tc.errorClass {
+				t.Errorf("error class = %q, want %q", facts.PlacementErrorClass, tc.errorClass)
+			}
+		})
+	}
+}
+
+// TestTheCommonInputDigestCoversTheWholeEncoding pins the digest against a
+// golden.
+//
+// The only previous sensitivity test moved the row witness, so dropping the
+// encoding version, the attempt id or the causal sequence from the hash all
+// survived — two of the digest's three stated jobs had no oracle. A golden
+// covers every field at once: any change to what is hashed, or to the order it
+// is hashed in, moves this constant.
+func TestTheCommonInputDigestCoversTheWholeEncoding(t *testing.T) {
+	pk, err := predictioneval.MaterializePairedKnowledge(peDataset(peProvenance()))
+	if err != nil || len(pk.Attempts) != 1 {
+		t.Fatalf("materialize: %v", err)
+	}
+	got := pk.Attempts[0].CommonInputDigest
+
+	// The golden, pinned. It was previously left empty behind an `if want !=
+	// ""` guard, which made this assertion UNREACHABLE while the comment above
+	// claimed it covered every field at once — the sensitivity cases below
+	// were doing all the work, and a field-ORDER change moves none of them.
+	const want = "b80d21dc33fb537d778b8b45571102486b6567c36b8d3acb5381e221cf677d13"
+	if got != want {
+		t.Fatalf("common-input digest = %q, want %q.\n"+
+			"Every field this digest hashes, and the order it hashes them in, is pinned by "+
+			"this constant. If the encoding changed deliberately, bump CommonInputDigestVersion "+
+			"in the same commit — a digest that changes silently makes two builds' scorecards "+
+			"incomparable while both claim the same version.", got, want)
+	}
+	if len(got) != 64 {
+		t.Fatalf("digest %q is not a sha256 hex string", got)
+	}
+
+	// Sensitivity, field by field: each of these must move the digest.
+	for _, tc := range []struct {
+		name   string
+		mutate func(*predictioneval.SourceDataset)
+	}{
+		{"the attempt id", func(ds *predictioneval.SourceDataset) {
+			for i := range ds.Records {
+				ds.Records[i].Payload.Counters[predictioneval.CounterAutoAttemptID] = 8
+				if env := ds.Records[i].Payload.DecisionEnvelope; env != nil {
+					env.AttemptID = 8
+				}
+			}
+		}},
+		{"a causal sequence", func(ds *predictioneval.SourceDataset) {
+			ds.Records[0].CollectorSequence = 99
+			ds.Records[1].CollectorSequence = 100
+		}},
+		{"the collector epoch", func(ds *predictioneval.SourceDataset) {
+			ds.Source.CollectorEpoch = 4242
+			for i := range ds.Records {
+				ds.Records[i].CollectorEpoch = 4242
+			}
+		}},
+		{"the pool instance", func(ds *predictioneval.SourceDataset) {
+			for i := range ds.Records {
+				ds.Records[i].PoolInstanceID = "another-pool"
+			}
+		}},
+		{"the round incarnation", func(ds *predictioneval.SourceDataset) {
+			for i := range ds.Records {
+				ds.Records[i].RoundIncarnationID = "another-round"
+			}
+		}},
+		{"the row witness", func(ds *predictioneval.SourceDataset) {
+			ds.Records[1].ObservationSHA256 = "a-different-witness"
+		}},
+		{"the capture gap cause", func(ds *predictioneval.SourceDataset) {
+			ds.Records[1].RoundCaptureGapCause = "COLLECTOR_NOT_RUNNING"
+		}},
+	} {
+		t.Run(tc.name+" changes the digest", func(t *testing.T) {
+			ds := peDataset(peProvenance())
+			tc.mutate(&ds)
+			mutated, err := predictioneval.MaterializePairedKnowledge(ds)
+			if err != nil || len(mutated.Attempts) != 1 {
+				t.Fatalf("materialize mutated: %v (%d attempts, excluded %+v)",
+					err, len(mutated.Attempts), mutated.Excluded)
+			}
+			if mutated.Attempts[0].CommonInputDigest == got {
+				t.Errorf("changing %s left the digest unchanged (%s); the digest does not "+
+					"witness that field, so a replay could read different inputs under the "+
+					"same provenance", tc.name, got)
+			}
+		})
+	}
+}
+
+// TestAnExplicitZeroAttemptCounterIsNotAnAttemptID pins a boundary the producer
+// cannot emit but a corrupt row can.
+//
+// The counter starts at 1, so a stored zero means the key was absent — or the
+// row is corrupt. Accepting it would mint AttemptID 0 and group unrelated facts
+// under one identity.
+func TestAnExplicitZeroAttemptCounterIsNotAnAttemptID(t *testing.T) {
+	for _, id := range []int64{0, -1} {
+		ds := peDataset(peProvenance())
+		for i := range ds.Records {
+			ds.Records[i].Payload.Counters[predictioneval.CounterAutoAttemptID] = id
+		}
+		pk, err := predictioneval.MaterializePairedKnowledge(ds)
+		if err != nil {
+			t.Fatalf("materialize: %v", err)
+		}
+		if len(pk.Attempts) != 0 {
+			t.Fatalf("an attempt counter of %d produced %d attempts, want 0 (key %+v)",
+				id, len(pk.Attempts), pk.Attempts[0].Key)
+		}
+		found := false
+		for _, e := range pk.Excluded {
+			if e.Reason == predictioneval.ExclusionNoAttemptID {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("an attempt counter of %d was not excluded as %q: %+v",
+				id, predictioneval.ExclusionNoAttemptID, pk.Excluded)
+		}
+	}
+}
+
+func disagreementsOf(sc predictioneval.Scorecard) []predictioneval.Comparison {
+	var out []predictioneval.Comparison
+	for _, c := range sc.Comparisons {
+		if c.Verdict == predictioneval.VerdictDisagree {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+// The second Codex code review found six more ways the model could claim more
+// than it proved. Each is reproduced here as the case that would otherwise slip
+// through.
+
+// TestAnEvaluationFromAnotherBuildIsNotScored closes the gap the digest check
+// left open.
+//
+// A case and an evaluation serialized by an OLDER build carry the same old
+// common-input digest as each other, so the digest check passes — while the
+// scorecard is stamped with THIS build's provenance and its comparisons are
+// read as this model's work.
+func TestAnEvaluationFromAnotherBuildIsNotScored(t *testing.T) {
+	c, ev := ncAgreeingCase()
+
+	for _, tc := range []struct {
+		name   string
+		mutate func(*predictioneval.DecisionCase, *predictioneval.Evaluation)
+	}{
+		{"the case was produced by another model version", func(dc *predictioneval.DecisionCase, _ *predictioneval.Evaluation) {
+			dc.Model.ModelVersion = "predictioneval/v0"
+		}},
+		{"the evaluation was produced by another model version", func(_ *predictioneval.DecisionCase, e *predictioneval.Evaluation) {
+			e.Model.ModelVersion = "predictioneval/v0"
+		}},
+		{"the evaluation replays another policy revision", func(_ *predictioneval.DecisionCase, e *predictioneval.Evaluation) {
+			e.Model.PolicyRevision = "policy-0000000000000000000000000000000000000000"
+		}},
+		{"the case was read under another producer contract", func(dc *predictioneval.DecisionCase, _ *predictioneval.Evaluation) {
+			dc.Model.SupportedProducerRevision = "obs-v3|policy-whatever"
+		}},
+		{"the evaluation came from a different int width", func(_ *predictioneval.DecisionCase, e *predictioneval.Evaluation) {
+			e.Model.PlatformIntBits = 32
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dc, e := c, ev
+			tc.mutate(&dc, &e)
+
+			sc := predictioneval.Score(dc, e, predictioneval.SettlementFacts{
+				PlacementCallStarted: true, PlacementCallReturned: true, PlacementAccepted: true,
+			})
+			if !containsString(sc.Limitations, predictioneval.LimitationModelProvenanceMismatch) {
+				t.Fatalf("scored without the %q limitation: %v",
+					predictioneval.LimitationModelProvenanceMismatch, sc.Limitations)
+			}
+			if sc.IndependentAgree != 0 || sc.ConditionedAgree != 0 {
+				t.Errorf("counted %d independent and %d conditioned agreements across builds",
+					sc.IndependentAgree, sc.ConditionedAgree)
+			}
+			if sc.Settlement.Assessment != predictioneval.SettlementUnknown {
+				t.Errorf("settlement = %q, want UNKNOWN", sc.Settlement.Assessment)
+			}
+		})
+	}
+
+	// The matching pair still scores, so the guard did not refuse everything.
+	good := predictioneval.Score(c, ev, predictioneval.SettlementFacts{})
+	if containsString(good.Limitations, predictioneval.LimitationModelProvenanceMismatch) {
+		t.Error("a matching case and evaluation were flagged as a provenance mismatch")
+	}
+	if good.IndependentAgree == 0 {
+		t.Error("the matching pair produced no independent agreement")
+	}
+}
+
+// TestAnIneligibleCaseNeverClaimsAnAffirmativeSettlement closes a
+// self-contradiction.
+//
+// An ineligible case has an input the model could not use. Scoring it anyway
+// produced UNAVAILABLE comparisons — which are not disagreements — so an
+// accepted placement could carry it all the way to APPLIES_TO_REPLAY. A
+// scorecard calling a case unevaluable while affirmatively claiming its
+// settlement is contradicting itself in the same document.
+func TestAnIneligibleCaseNeverClaimsAnAffirmativeSettlement(t *testing.T) {
+	c, ev := ncAgreeingCase()
+	c.Eligibility = predictioneval.CaseEligibility{
+		Eligible:        false,
+		Reasons:         []string{predictioneval.IneligibleInconsistentStageStates},
+		ExercisesPolicy: true,
+	}
+	if ev.Action != predictioneval.ActionWouldAttemptPlacement {
+		t.Fatalf("fixture action = %q; the point of this test is an ineligible case whose "+
+			"inputs still replay to a placement", ev.Action)
+	}
+
+	slot := ev.Choice.Index
+	stake := int64(ev.Clamp.FinalAmount)
+	sc := predictioneval.Score(c, ev, predictioneval.SettlementFacts{
+		PlacementCallStarted: true, PlacementCallReturned: true, PlacementAccepted: true,
+		PlacementStake: &stake, PlacementSlot: &slot,
+	})
+
+	if sc.Settlement.Assessment != predictioneval.SettlementUnknown {
+		t.Fatalf("an ineligible case produced settlement %q, want UNKNOWN",
+			sc.Settlement.Assessment)
+	}
+	if !containsString(sc.Limitations, predictioneval.LimitationCaseExcluded) {
+		t.Errorf("the scorecard did not say the case was unevaluable: %v", sc.Limitations)
+	}
+	if sc.IndependentAgree != 0 {
+		t.Errorf("an unevaluable case produced %d independent agreements", sc.IndependentAgree)
+	}
+}
+
+// TestASettlementNeedsThePlacementThisReplayDerived closes attribution by
+// acceptance alone.
+//
+// SettlementFacts carries no attempt key of its own, so batch code can hand
+// over another attempt's facts, and a corrupt post-decision slice can hold an
+// accepted call with the wrong stake or slot. Acceptance is not attribution.
+func TestASettlementNeedsThePlacementThisReplayDerived(t *testing.T) {
+	c, ev := ncAgreeingCase()
+	rightSlot := ev.Choice.Index
+	rightStake := int64(ev.Clamp.FinalAmount)
+	wrongSlot := rightSlot + 1
+	wrongStake := rightStake + 1
+
+	for _, tc := range []struct {
+		name  string
+		facts predictioneval.SettlementFacts
+		want  string
+	}{
+		{"the recorded stake is not the replayed one", predictioneval.SettlementFacts{
+			PlacementCallReturned: true, PlacementAccepted: true,
+			PlacementStake: &wrongStake, PlacementSlot: &rightSlot,
+		}, predictioneval.SettlementUnknown},
+		{"the recorded slot is not the replayed one", predictioneval.SettlementFacts{
+			PlacementCallReturned: true, PlacementAccepted: true,
+			PlacementStake: &rightStake, PlacementSlot: &wrongSlot,
+		}, predictioneval.SettlementUnknown},
+		{"the facts carry no arguments at all", predictioneval.SettlementFacts{
+			PlacementCallReturned: true, PlacementAccepted: true,
+		}, predictioneval.SettlementUnknown},
+		{"the arguments are the replayed ones", predictioneval.SettlementFacts{
+			PlacementCallReturned: true, PlacementAccepted: true,
+			PlacementStake: &rightStake, PlacementSlot: &rightSlot,
+		}, predictioneval.SettlementAppliesToReplay},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sc := predictioneval.Score(c, ev, ncBoundFacts(c, tc.facts))
+			if sc.Settlement.Assessment != tc.want {
+				t.Errorf("settlement = %q, want %q. Acceptance alone attributes nothing: the "+
+					"recorded call has to be the one this replay derived",
+					sc.Settlement.Assessment, tc.want)
+			}
+		})
+	}
+
+	// Matching arguments are not attribution on their own. The same stake and
+	// slot belonging to a DIFFERENT attempt — a routine collision on a
+	// two-option round — must not produce an affirmative settlement.
+	right := predictioneval.SettlementFacts{
+		PlacementCallStarted: true, PlacementCallReturned: true, PlacementAccepted: true,
+		PlacementStake: &rightStake, PlacementSlot: &rightSlot,
+	}
+	for _, tc := range []struct {
+		name string
+		mut  func(predictioneval.SettlementFacts) predictioneval.SettlementFacts
+		want string
+	}{
+		{"facts carrying no identity at all", func(s predictioneval.SettlementFacts) predictioneval.SettlementFacts {
+			s.PlacementCoherence = predictioneval.PlacementShapeCoherent
+			return s
+		}, predictioneval.SettlementUnknown},
+		{"facts stamped with another attempt", func(s predictioneval.SettlementFacts) predictioneval.SettlementFacts {
+			s = ncBoundFacts(c, s)
+			other := *s.Attempt
+			other.AttemptID++
+			s.Attempt = &other
+			return s
+		}, predictioneval.SettlementUnknown},
+		{"facts stamped with another slice's digest", func(s predictioneval.SettlementFacts) predictioneval.SettlementFacts {
+			s = ncBoundFacts(c, s)
+			s.CommonInputDigest = "some-other-slice"
+			return s
+		}, predictioneval.SettlementUnknown},
+		{"an incoherent placement shape", func(s predictioneval.SettlementFacts) predictioneval.SettlementFacts {
+			s = ncBoundFacts(c, s)
+			s.PlacementCoherence = predictioneval.PlacementShapeIncoherent
+			return s
+		}, predictioneval.SettlementUnknown},
+		{"this attempt's own coherent facts", func(s predictioneval.SettlementFacts) predictioneval.SettlementFacts {
+			return ncBoundFacts(c, s)
+		}, predictioneval.SettlementAppliesToReplay},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sc := predictioneval.Score(c, ev, tc.mut(right))
+			if sc.Settlement.Assessment != tc.want {
+				t.Errorf("settlement = %q, want %q", sc.Settlement.Assessment, tc.want)
+			}
+		})
+	}
+}
+
+// TestARecordedTerminalActionIsComparedNotJustItsReason closes a hole where the
+// reason code agreed and the action did not.
+func TestARecordedTerminalActionIsComparedNotJustItsReason(t *testing.T) {
+	c, ev := ncAgreeingCase()
+	if ev.Action != predictioneval.ActionWouldAttemptPlacement {
+		t.Fatalf("fixture action = %q, want WOULD_ATTEMPT_PLACEMENT", ev.Action)
+	}
+
+	// A record whose reason still says OK while its phase and decision say the
+	// attempt was skipped. Before the phase was compared, this counted as
+	// agreement.
+	c.Recorded.TerminalPhase = predictioneval.PhaseAutoSkipped
+	c.Recorded.TerminalDecision = "SKIP"
+
+	sc := predictioneval.Score(c, ev, predictioneval.SettlementFacts{})
+
+	phase := findComparison(t, sc, "terminalPhase")
+	if phase.Verdict != predictioneval.VerdictDisagree {
+		t.Errorf("terminalPhase = %s (recorded %q, computed %q), want DISAGREE",
+			phase.Verdict, phase.Recorded, phase.Computed)
+	}
+	decision := findComparison(t, sc, "terminalDecision")
+	if decision.Verdict != predictioneval.VerdictDisagree {
+		t.Errorf("terminalDecision = %s, want DISAGREE", decision.Verdict)
+	}
+	if sc.IndependentDisagree == 0 {
+		t.Error("a record whose action contradicts the replay produced no disagreement")
+	}
+	if sc.Settlement.Assessment != predictioneval.SettlementUnknown {
+		t.Errorf("settlement = %q despite a contradicted action", sc.Settlement.Assessment)
+	}
+}
+
+// TestAFutureRevisionIsNotMistakenForTheLegacyOne closes a string-arithmetic
+// hole in the revision binding.
+//
+// "obs-v10|…" and "obs-v11|…" begin with "obs-v1". A byte-prefix test therefore
+// classified them as the one KNOWN readable exception and let them through the
+// binding, to be replayed under obs-v2 invariants.
+func TestAFutureRevisionIsNotMistakenForTheLegacyOne(t *testing.T) {
+	for _, tc := range []struct {
+		revision string
+		legacy   bool
+	}{
+		{"obs-v1|policy-deadbeef", true},
+		{"obs-v1", true},
+		{"obs-v10|policy-deadbeef", false},
+		{"obs-v11|policy-deadbeef", false},
+		{"obs-v1x", false},
+		{"obs-v2|policy-378d05d6ccc7d2a914730a1e1d023ff754bcf873", false}, // the supported one
+	} {
+		t.Run(tc.revision, func(t *testing.T) {
+			src := peProvenance()
+			src.ProducerRevision = tc.revision
+
+			// The legacy leg gets a dataset the legacy producer could
+			// actually have written. Handing it the shared obs-v2 fixture
+			// would ask what this model does with facts that cannot exist,
+			// and would answer with a full replay of an envelope the
+			// pre-envelope contract never wrote.
+			ds := peDataset(src)
+			if tc.legacy {
+				ds = peLegacyDataset(src)
+			}
+
+			pk, err := predictioneval.MaterializePairedKnowledge(ds)
+			if err != nil {
+				t.Fatalf("materialize: %v", err)
+			}
+
+			supported := tc.revision == predictioneval.SupportedProducerRevision
+			switch {
+			case supported:
+				if len(pk.Attempts) != 1 {
+					t.Fatalf("the supported revision yielded %d attempts, want 1", len(pk.Attempts))
+				}
+				return
+			case tc.legacy:
+				// Readable: the facts are refused by NAME, not as an unknown
+				// contract, and never as an unsupported revision.
+				named := false
+				for _, e := range pk.Excluded {
+					if e.Reason == predictioneval.ExclusionUnsupportedProducerRevision {
+						t.Fatalf("the KNOWN pre-envelope contract was refused as unsupported: %+v", e)
+					}
+					if e.Reason == predictioneval.ExclusionLegacyProducerNoEnvelope {
+						named = true
+					}
+				}
+				if !named {
+					t.Fatalf("the pre-envelope contract produced no %q exclusion: %+v",
+						predictioneval.ExclusionLegacyProducerNoEnvelope, pk.Excluded)
+				}
+			default:
+				found := false
+				for _, e := range pk.Excluded {
+					if e.Reason == predictioneval.ExclusionUnsupportedProducerRevision {
+						found = true
+					}
+				}
+				if !found {
+					t.Fatalf("%q was not refused as an unsupported revision: %+v. A revision that "+
+						"merely starts with the legacy one may have changed what a field means",
+						tc.revision, pk.Excluded)
+				}
+			}
+			if len(pk.Attempts) != 0 {
+				t.Fatalf("%q yielded %d attempts, want 0", tc.revision, len(pk.Attempts))
+			}
+		})
+	}
+}
+
+// TestTwoTerminalPhasesAreTwoEndingsEvenWhenOneCarriesNoEnvelope closes a
+// counting hole.
+//
+// isTerminalFact requires an envelope, so an ending WITHOUT one followed by an
+// ending WITH one counted as a single terminal: the attempt materialized, and
+// the first ending stayed silently inside the second one's input prefix — an
+// extra claimed ending, read as an input.
+func TestTwoTerminalPhasesAreTwoEndingsEvenWhenOneCarriesNoEnvelope(t *testing.T) {
+	// An ending with no envelope, then the real one.
+	envelopeless := peRecord(2, predictioneval.KindAutoDecision, predictioneval.PhaseAutoSkipped, 7)
+	envelopeless.Payload.ReasonCode = "NOT_ELIGIBLE"
+
+	terminal := peRecord(3, predictioneval.KindAutoDecision, predictioneval.PhaseAutoDecided, 7)
+	terminal.Payload.ReasonCode = "OK"
+	terminal.Payload.DecisionEnvelope = peMinimalEnvelope(7)
+
+	pk, err := predictioneval.MaterializePairedKnowledge(peDatasetOf(peProvenance(),
+		peRecord(1, predictioneval.KindAutoDecision, predictioneval.PhaseAutoDue, 7),
+		envelopeless,
+		terminal,
+	))
+	if err != nil {
+		t.Fatalf("materialize: %v", err)
+	}
+	if len(pk.Attempts) != 0 {
+		t.Fatalf("an attempt with two endings materialized (%d); the envelope-less ending would "+
+			"have been read as an input to the other one. Slice: %v",
+			len(pk.Attempts), pk.Attempts[0].CommonInputSlice)
+	}
+	found := false
+	for _, e := range pk.Excluded {
+		if e.Reason == predictioneval.ExclusionMultipleTerminalFacts {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("no %q exclusion: %+v", predictioneval.ExclusionMultipleTerminalFacts, pk.Excluded)
+	}
+}
+
+// TestPlacementFactsMustBeOneCoherentPair closes an attribution hole where two
+// unrelated placement facts combined into one affirmative settlement.
+//
+// ProjectSettlementFacts folded facts in as it walked them: the stake and slot
+// came from any CALL_STARTED, acceptance came from any CALL_RETURNED, and
+// neither the count, the order, nor the arguments recorded on the RETURNED
+// fact were examined. So a corrupt slice holding a CALL_STARTED with the
+// replay's arguments plus an unrelated accepted CALL_RETURNED passed every
+// check and reached APPLIES_TO_REPLAY, although no single observed call
+// supported it.
+//
+// The producer emits exactly one CALL_STARTED immediately before the one
+// existing call and exactly one CALL_RETURNED immediately after it, passing
+// the SAME stake and outcome slot to both. Anything else is a shape it cannot
+// have written.
+func TestPlacementFactsMustBeOneCoherentPair(t *testing.T) {
+	const attempt = 7
+	terminal := peRecord(2, predictioneval.KindAutoDecision, predictioneval.PhaseAutoDecided, attempt)
+	terminal.Payload.ReasonCode = "OK"
+	terminal.Payload.Decision = "PLACE"
+	// The arguments the producer writes beside a placing decision.
+	terminal.Payload.OutcomeSlot = func() *int { i := 0; return &i }()
+	terminal.Payload.Counters[predictioneval.CounterStake] = 50
+	terminal.Payload.DecisionEnvelope = peMinimalEnvelope(attempt)
+
+	started := func(seq int64, stake int64, slot int) predictioneval.SourceRecord {
+		return pePlacement(seq, attempt, predictioneval.PhaseCallStarted, stake, slot, "OK", "NONE")
+	}
+	returned := func(seq int64, stake int64, slot int) predictioneval.SourceRecord {
+		return pePlacement(seq, attempt, predictioneval.PhaseCallReturned, stake, slot, "OK", "NONE")
+	}
+
+	for _, tc := range []struct {
+		name  string
+		post  []predictioneval.SourceRecord
+		want  string
+		bound bool // the pair is the one the producer writes
+	}{
+		{"the pair the producer writes", []predictioneval.SourceRecord{
+			started(3, 50, 0), returned(4, 50, 0),
+		}, predictioneval.PlacementShapeCoherent, true},
+
+		{"no placement at all", nil, predictioneval.PlacementShapeAbsent, false},
+
+		{"two calls started", []predictioneval.SourceRecord{
+			started(3, 50, 0), started(4, 90, 1), returned(5, 90, 1),
+		}, predictioneval.PlacementShapeIncoherent, false},
+
+		{"two calls returned", []predictioneval.SourceRecord{
+			started(3, 50, 0), returned(4, 50, 0), returned(5, 50, 0),
+		}, predictioneval.PlacementShapeIncoherent, false},
+
+		{"a return with no start", []predictioneval.SourceRecord{
+			returned(3, 50, 0),
+		}, predictioneval.PlacementShapeIncoherent, false},
+
+		{"a start with no return", []predictioneval.SourceRecord{
+			started(3, 50, 0),
+		}, predictioneval.PlacementShapeIncoherent, false},
+
+		{"the return precedes the start", []predictioneval.SourceRecord{
+			returned(3, 50, 0), started(4, 50, 0),
+		}, predictioneval.PlacementShapeIncoherent, false},
+
+		// The one the old fold could not see: both facts present, in order,
+		// but describing DIFFERENT calls.
+		{"the two facts disagree on the stake", []predictioneval.SourceRecord{
+			started(3, 50, 0), returned(4, 90, 0),
+		}, predictioneval.PlacementShapeIncoherent, false},
+
+		{"the two facts disagree on the slot", []predictioneval.SourceRecord{
+			started(3, 50, 0), returned(4, 50, 1),
+		}, predictioneval.PlacementShapeIncoherent, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			records := []predictioneval.SourceRecord{
+				peRecord(1, predictioneval.KindAutoDecision, predictioneval.PhaseAutoDue, attempt),
+				terminal,
+			}
+			records = append(records, tc.post...)
+
+			pk, err := predictioneval.MaterializePairedKnowledge(peDatasetOf(peProvenance(), records...))
+			if err != nil || len(pk.Attempts) != 1 {
+				t.Fatalf("materialize: %v (%d attempts)", err, len(pk.Attempts))
+			}
+
+			facts := predictioneval.ProjectSettlementFacts(pk.Attempts[0])
+			if facts.PlacementCoherence != tc.want {
+				t.Fatalf("placement coherence = %q, want %q (facts %+v)",
+					facts.PlacementCoherence, tc.want, facts)
+			}
+
+			// An incoherent or absent shape must never carry arguments
+			// downstream, because arguments are what an affirmative settlement
+			// is built from.
+			if !tc.bound && (facts.PlacementStake != nil || facts.PlacementSlot != nil ||
+				facts.PlacementAccepted) {
+				t.Fatalf("a %s shape still carried placement arguments or acceptance: %+v",
+					tc.want, facts)
+			}
+
+			dc, err := predictioneval.ProjectDecisionCase(pk.Attempts[0])
+			if err != nil {
+				t.Fatalf("project: %v", err)
+			}
+			ev := predictioneval.Evaluate(dc.Inputs, dc.Observed)
+			sc := predictioneval.Score(dc, ev, facts)
+
+			want := predictioneval.SettlementUnknown
+			if tc.bound && ev.Action == predictioneval.ActionWouldAttemptPlacement {
+				want = predictioneval.SettlementAppliesToReplay
+			}
+			if sc.Settlement.Assessment != want {
+				t.Fatalf("settlement = %q, want %q for a %s placement shape",
+					sc.Settlement.Assessment, want, tc.want)
+			}
+		})
+	}
+}
+
+// TestATerminalFactThatNamesNoActionIsRefused closes a hole where a blank
+// value agreed with everything.
+//
+// terminalDecision was compared only when the recorded value was non-empty, so
+// a terminal fact carrying a matching phase and reason but NO decision produced
+// no comparison at all — and therefore no disagreement. A placement case could
+// reach an affirmative settlement on a record that never said what it did.
+//
+// The producer writes SKIP or PLACE on every terminal auto fact, at both of its
+// terminal write sites, so a blank decision is not an absence to tolerate.
+func TestATerminalFactThatNamesNoActionIsRefused(t *testing.T) {
+	// Leg 1: the projection refuses such a record outright.
+	terminal := peRecord(2, predictioneval.KindAutoDecision, predictioneval.PhaseAutoDecided, 7)
+	terminal.Payload.ReasonCode = "OK"
+	terminal.Payload.Decision = "" // the producer never writes this
+	terminal.Payload.DecisionEnvelope = peMinimalEnvelope(7)
+
+	pk, err := predictioneval.MaterializePairedKnowledge(peDatasetOf(peProvenance(),
+		peRecord(1, predictioneval.KindAutoDecision, predictioneval.PhaseAutoDue, 7),
+		terminal,
+	))
+	if err != nil || len(pk.Attempts) != 1 {
+		t.Fatalf("materialize: %v (%d attempts)", err, len(pk.Attempts))
+	}
+	dc, err := predictioneval.ProjectDecisionCase(pk.Attempts[0])
+	if err != nil {
+		t.Fatalf("project: %v", err)
+	}
+	if dc.Eligibility.Eligible {
+		t.Fatal("a terminal fact naming no action produced an eligible case")
+	}
+	if !containsString(dc.Eligibility.Reasons, predictioneval.IneligibleIncompleteTerminalRecord) {
+		t.Fatalf("eligibility reasons = %v, want %q",
+			dc.Eligibility.Reasons, predictioneval.IneligibleIncompleteTerminalRecord)
+	}
+
+	// Leg 2: even handed straight to Score as an eligible case — which is how
+	// a caller assembling its own case would reach it — the blank decision
+	// DISAGREES rather than being skipped.
+	c, ev := ncAgreeingCase()
+	if ev.Action != predictioneval.ActionWouldAttemptPlacement {
+		t.Fatalf("fixture action = %q, want WOULD_ATTEMPT_PLACEMENT", ev.Action)
+	}
+	c.Recorded.TerminalDecision = ""
+
+	slot := ev.Choice.Index
+	stake := int64(ev.Clamp.FinalAmount)
+	sc := predictioneval.Score(c, ev, ncBoundFacts(c, predictioneval.SettlementFacts{
+		PlacementCallStarted: true, PlacementCallReturned: true, PlacementAccepted: true,
+		PlacementStake: &stake, PlacementSlot: &slot,
+	}))
+
+	cmp := findComparison(t, sc, "terminalDecision")
+	if cmp.Verdict != predictioneval.VerdictDisagree {
+		t.Fatalf("terminalDecision verdict = %q, want DISAGREE. A blank recorded action that "+
+			"produces no comparison agrees with every replayed action", cmp.Verdict)
+	}
+	if sc.Settlement.Assessment != predictioneval.SettlementUnknown {
+		t.Fatalf("settlement = %q, want UNKNOWN: the record never said what it did",
+			sc.Settlement.Assessment)
+	}
+}
+
+// TestAnUnavailableComparisonNeverBecomesAnAffirmativeSettlement closes a hole
+// where missing evidence read as agreement.
+//
+// assessSettlement blocked only DISAGREEMENTS, and an UNAVAILABLE comparison is
+// not one. So a case whose recorded choice amount was never recorded — or any
+// other field a caller left unset — produced no disagreement, and an accepted
+// placement carried it all the way to APPLIES_TO_REPLAY. An affirmative
+// settlement asserts that the recorded settlement describes the replayed
+// decision, and that claim cannot rest on a field nobody could check.
+func TestAnUnavailableComparisonNeverBecomesAnAffirmativeSettlement(t *testing.T) {
+	c, ev := ncAgreeingCase()
+	if ev.Action != predictioneval.ActionWouldAttemptPlacement {
+		t.Fatalf("fixture action = %q, want WOULD_ATTEMPT_PLACEMENT", ev.Action)
+	}
+	slot := ev.Choice.Index
+	stake := int64(ev.Clamp.FinalAmount)
+	facts := func(c predictioneval.DecisionCase) predictioneval.SettlementFacts {
+		return ncBoundFacts(c, predictioneval.SettlementFacts{
+			PlacementCallStarted: true, PlacementCallReturned: true, PlacementAccepted: true,
+			PlacementStake: &stake, PlacementSlot: &slot,
+		})
+	}
+
+	// The control: everything recorded, everything agrees, settlement applies.
+	base := predictioneval.Score(c, ev, facts(c))
+	if base.UnavailablePairs != 0 {
+		t.Fatalf("the control case already has %d unavailable comparison(s): %+v",
+			base.UnavailablePairs, base.Comparisons)
+	}
+	if base.Settlement.Assessment != predictioneval.SettlementAppliesToReplay {
+		t.Fatalf("the control settlement = %q, want APPLIES_TO_REPLAY. The mutations below "+
+			"prove nothing if the control does not reach it", base.Settlement.Assessment)
+	}
+
+	for _, tc := range []struct {
+		name  string
+		field string
+		blank func(*predictioneval.RecordedResults)
+	}{
+		{"the recorded stake the strategy proposed", "choiceAmount",
+			func(r *predictioneval.RecordedResults) { r.ChoiceAmountRecorded = false }},
+		{"the recorded filter result", "skipResult",
+			func(r *predictioneval.RecordedResults) { r.SkipResultRecorded = false }},
+		{"the recorded gate allowance", "stakeAllowed",
+			func(r *predictioneval.RecordedResults) { r.StakeAllowedRecorded = false }},
+		{"the recorded final stake", "finalAmount",
+			func(r *predictioneval.RecordedResults) { r.FinalAmountRecorded = false }},
+		{"the recorded filter comparison", "skipCompared",
+			func(r *predictioneval.RecordedResults) { r.SkipCompared = nil }},
+	} {
+		t.Run(tc.name+" is missing", func(t *testing.T) {
+			mut := c
+			mut.Recorded = c.Recorded
+			tc.blank(&mut.Recorded)
+
+			sc := predictioneval.Score(mut, ev, facts(mut))
+
+			cmp := findComparison(t, sc, tc.field)
+			if cmp.Verdict != predictioneval.VerdictUnavailable {
+				t.Fatalf("%s verdict = %q, want UNAVAILABLE; this case is not exercising "+
+					"missing evidence at all", tc.field, cmp.Verdict)
+			}
+			if sc.IndependentDisagree != 0 || sc.ConditionedDisagree != 0 {
+				t.Fatalf("blanking %s produced a disagreement, so the disagreement guard "+
+					"would have caught it and this test proves nothing about UNAVAILABLE",
+					tc.field)
+			}
+			if sc.Settlement.Assessment != predictioneval.SettlementUnknown {
+				t.Fatalf("settlement = %q with %s unavailable, want UNKNOWN. Missing evidence "+
+					"is not agreement", sc.Settlement.Assessment, tc.field)
+			}
+		})
+	}
+}
+
+// TestAPostDecisionFactFromAnotherAdmissionIsRefused closes the half of the
+// round-incarnation check that fed the settlement.
+//
+// The agreement check walked the input prefix only. A placement fact carrying
+// this attempt's counter but a DIFFERENT RoundIncarnationID therefore landed in
+// PostDecision, reached ProjectSettlementFacts, and could supply the stake and
+// slot for a settlement about another admission of the same round.
+func TestAPostDecisionFactFromAnotherAdmissionIsRefused(t *testing.T) {
+	const attempt = 7
+	terminal := peRecord(2, predictioneval.KindAutoDecision, predictioneval.PhaseAutoDecided, attempt)
+	terminal.Payload.ReasonCode = "OK"
+	terminal.Payload.Decision = "PLACE"
+	// The arguments the producer writes beside a placing decision.
+	terminal.Payload.OutcomeSlot = func() *int { i := 0; return &i }()
+	terminal.Payload.Counters[predictioneval.CounterStake] = 50
+	terminal.Payload.DecisionEnvelope = peMinimalEnvelope(attempt)
+
+	started := pePlacement(3, attempt, predictioneval.PhaseCallStarted, 50, 0, "OK", "NONE")
+	returned := pePlacement(4, attempt, predictioneval.PhaseCallReturned, 50, 0, "OK", "NONE")
+	// The call belongs to a different admission of the round.
+	returned.RoundIncarnationID = "round-2"
+
+	pk, err := predictioneval.MaterializePairedKnowledge(peDatasetOf(peProvenance(),
+		peRecord(1, predictioneval.KindAutoDecision, predictioneval.PhaseAutoDue, attempt),
+		terminal, started, returned,
+	))
+	if err != nil {
+		t.Fatalf("materialize: %v", err)
+	}
+	if len(pk.Attempts) != 0 {
+		t.Fatalf("an attempt materialized with a post-decision fact from another admission "+
+			"(%d attempts). Its placement facts would have supplied the stake and slot for a "+
+			"settlement about a different round admission", len(pk.Attempts))
+	}
+	found := false
+	for _, e := range pk.Excluded {
+		if e.Reason == predictioneval.ExclusionInconsistentRoundIncarnation {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("no %q exclusion: %+v",
+			predictioneval.ExclusionInconsistentRoundIncarnation, pk.Excluded)
+	}
+
+	// The same shape with a consistent incarnation still materializes, so the
+	// check did not simply refuse every attempt carrying placement facts.
+	returned.RoundIncarnationID = started.RoundIncarnationID
+	ok, err := predictioneval.MaterializePairedKnowledge(peDatasetOf(peProvenance(),
+		peRecord(1, predictioneval.KindAutoDecision, predictioneval.PhaseAutoDue, attempt),
+		terminal, started, returned,
+	))
+	if err != nil || len(ok.Attempts) != 1 {
+		t.Fatalf("a consistent attempt failed to materialize: %v (%d attempts, excluded %+v)",
+			err, len(ok.Attempts), ok.Excluded)
+	}
+}
+
+// TestAnyCaptureOriginButActiveQualifiesTheScorecard closes a completeness
+// predicate that keyed on the wrong field.
+//
+// The limitation was raised only when RoundCaptureGapCause was non-empty. But
+// the schema makes both capture columns nullable and admits UNKNOWN and
+// PREFIX_UNOBSERVED_AT_ADMISSION as origins WITHOUT a gap cause, so a round
+// whose history this build cannot claim to know passed as fully captured —
+// with both capture fields dropped from the scorecard, which is exactly the
+// shape of a case that looks complete.
+func TestAnyCaptureOriginButActiveQualifiesTheScorecard(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		origin  string
+		gap     string
+		qualify bool
+	}{
+		{"a fully captured round", predictioneval.RoundOriginActiveAtAdmission, "", false},
+		{"an unknown origin with no gap cause", "UNKNOWN", "", true},
+		{"a prefix-unobserved origin with no gap cause",
+			"PREFIX_UNOBSERVED_AT_ADMISSION", "", true},
+		{"no origin at all", "", "", true},
+		{"an active origin that still names a gap cause",
+			predictioneval.RoundOriginActiveAtAdmission, "CLOSING", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c, ev := ncAgreeingCase()
+			c.RoundCaptureOrigin = tc.origin
+			c.RoundCaptureGapCause = tc.gap
+
+			sc := predictioneval.Score(c, ev, predictioneval.SettlementFacts{})
+			got := containsString(sc.Limitations, predictioneval.LimitationCaptureGap)
+			if got != tc.qualify {
+				t.Fatalf("origin %q / gap %q produced capture limitation = %v, want %v "+
+					"(limitations %v). Only ACTIVE_AT_ADMISSION means the round's history is "+
+					"known; every other value, and an absent one, has to be reported.",
+					tc.origin, tc.gap, got, tc.qualify, sc.Limitations)
+			}
+		})
+	}
+}
+
+// TestAnEvaluationWhoseStagesContradictItsActionIsRefused closes a hole where
+// skipped stages produced no comparison at all.
+//
+// Score emits each stage's comparison only when that stage is EXECUTED. A
+// partially decoded or caller-edited Evaluation can carry
+// WOULD_ATTEMPT_PLACEMENT with those stages blank, and then the comparisons are
+// not UNAVAILABLE — they are absent. UnavailablePairs stays zero, the
+// unavailable-evidence guard sees nothing, and a matching terminal plus a
+// coherent accepted placement carried the case to APPLIES_TO_REPLAY having
+// checked almost nothing the evaluation claimed to contain.
+func TestAnEvaluationWhoseStagesContradictItsActionIsRefused(t *testing.T) {
+	c, ev := ncAgreeingCase()
+	if ev.Action != predictioneval.ActionWouldAttemptPlacement {
+		t.Fatalf("fixture action = %q, want WOULD_ATTEMPT_PLACEMENT", ev.Action)
+	}
+	slot := ev.Choice.Index
+	stake := int64(ev.Clamp.FinalAmount)
+	facts := ncBoundFacts(c, predictioneval.SettlementFacts{
+		PlacementCallStarted: true, PlacementCallReturned: true, PlacementAccepted: true,
+		PlacementStake: &stake, PlacementSlot: &slot,
+	})
+
+	// The control reaches an affirmative settlement, or the mutations below
+	// prove nothing.
+	if base := predictioneval.Score(c, ev, facts); base.Settlement.Assessment !=
+		predictioneval.SettlementAppliesToReplay {
+		t.Fatalf("control settlement = %q, want APPLIES_TO_REPLAY", base.Settlement.Assessment)
+	}
+
+	for _, tc := range []struct {
+		name  string
+		blank func(*predictioneval.Evaluation)
+	}{
+		{"the choice stage never ran", func(e *predictioneval.Evaluation) {
+			e.Choice.State = predictioneval.StageStateNotReached
+		}},
+		{"the filter stage never ran", func(e *predictioneval.Evaluation) {
+			e.Filter.State = predictioneval.StageStateNotReached
+		}},
+		{"the clamp stage never ran", func(e *predictioneval.Evaluation) {
+			e.Clamp.State = predictioneval.StageStateNotReached
+		}},
+		{"the stage states are blank entirely", func(e *predictioneval.Evaluation) {
+			e.Choice.State, e.Filter.State, e.Clamp.State = "", "", ""
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mut := ev
+			tc.blank(&mut)
+
+			sc := predictioneval.Score(c, mut, facts)
+
+			if !containsString(sc.Limitations,
+				predictioneval.LimitationEvaluationShapeInconsistent) {
+				t.Errorf("scored without the %q limitation: %v",
+					predictioneval.LimitationEvaluationShapeInconsistent, sc.Limitations)
+			}
+			if sc.Settlement.Assessment != predictioneval.SettlementUnknown {
+				t.Fatalf("settlement = %q, want UNKNOWN. An action claiming stages the "+
+					"evaluation does not carry has not been checked, and skipped stages "+
+					"produce no comparison at all rather than an UNAVAILABLE one",
+					sc.Settlement.Assessment)
+			}
+		})
+	}
+}
+
+// TestTheScorecardDoesNotAliasTheCallersSettlementFacts closes an aliasing hole
+// between the validation and the artifact it produced.
+//
+// SettlementFacts carries pointers. Copying the struct into the scorecard kept
+// them, so a caller mutating its own facts after Score returned changed the
+// stored result: the assessment still said APPLIES_TO_REPLAY while the evidence
+// beside it had become evidence that would have failed attribution.
+func TestTheScorecardDoesNotAliasTheCallersSettlementFacts(t *testing.T) {
+	c, ev := ncAgreeingCase()
+	slot := ev.Choice.Index
+	stake := int64(ev.Clamp.FinalAmount)
+	facts := ncBoundFacts(c, predictioneval.SettlementFacts{
+		PlacementCallStarted: true, PlacementCallReturned: true, PlacementAccepted: true,
+		PlacementStake: &stake, PlacementSlot: &slot,
+	})
+
+	sc := predictioneval.Score(c, ev, facts)
+	if sc.Settlement.Assessment != predictioneval.SettlementAppliesToReplay {
+		t.Fatalf("control settlement = %q, want APPLIES_TO_REPLAY", sc.Settlement.Assessment)
+	}
+
+	recordedStake := *sc.Settlement.Facts.PlacementStake
+	recordedSlot := *sc.Settlement.Facts.PlacementSlot
+	recordedAttempt := *sc.Settlement.Facts.Attempt
+
+	// The caller mutates its own facts to evidence that would have been
+	// refused — a different attempt, a different stake, a different slot.
+	*facts.PlacementStake = stake + 12345
+	*facts.PlacementSlot = slot + 7
+	facts.Attempt.AttemptID += 99
+
+	if got := *sc.Settlement.Facts.PlacementStake; got != recordedStake {
+		t.Errorf("the scorecard's placement stake changed from %d to %d after the caller "+
+			"mutated its own facts", recordedStake, got)
+	}
+	if got := *sc.Settlement.Facts.PlacementSlot; got != recordedSlot {
+		t.Errorf("the scorecard's placement slot changed from %d to %d after the caller "+
+			"mutated its own facts", recordedSlot, got)
+	}
+	if got := *sc.Settlement.Facts.Attempt; got != recordedAttempt {
+		t.Errorf("the scorecard's attempt key changed from %+v to %+v after the caller "+
+			"mutated its own facts. The assessment still reflects the validation that ran "+
+			"against the ORIGINAL values, so the artifact would disagree with its own check",
+			recordedAttempt, got)
+	}
+}
+
+// TestTheRequiredPlacementShapeIsTheOneRealEvaluationsProduce keeps
+// stagesMatchAction honest by deriving the expected shape from real
+// evaluations instead of from a hand-written list.
+//
+// A hand-written list is how the check got it wrong the first time: it named
+// the choice, the filter and the clamp, and omitted the stake gate — the
+// risk-gate result that determines the final stake — and the health stage. An
+// evaluation could then claim a placement with StakeGate NOT_REACHED, and Score
+// would skip the stakeAllowed / stakeReason / stakeLimit comparisons entirely
+// rather than marking them UNAVAILABLE.
+//
+// So this drives REAL placements through Evaluate and asserts that every stage
+// state they produce is one the guard requires. If a future change makes a
+// placement leave some stage in a different state, this fails rather than the
+// guard silently rejecting legitimate work — and if a stage is dropped from the
+// guard, the negative controls below fail.
+func TestTheRequiredPlacementShapeIsTheOneRealEvaluationsProduce(t *testing.T) {
+	_, ev := ncAgreeingCase()
+	if ev.Action != predictioneval.ActionWouldAttemptPlacement {
+		t.Fatalf("fixture action = %q, want WOULD_ATTEMPT_PLACEMENT", ev.Action)
+	}
+
+	// The shape a real placement actually produces, read off the evaluation.
+	for _, tc := range []struct {
+		stage string
+		got   string
+		want  string
+	}{
+		{"Choice", ev.Choice.State, predictioneval.StageStateExecuted},
+		{"BaseStake", ev.BaseStake.State, predictioneval.StageStateExecuted},
+		{"Filter", ev.Filter.State, predictioneval.StageStateExecuted},
+		{"Health", ev.Health.State, predictioneval.StageStateWitnessed},
+		{"StakeGate", ev.StakeGate.State, predictioneval.StageStateExecuted},
+		{"Clamp", ev.Clamp.State, predictioneval.StageStateExecuted},
+		{"Minimum", ev.Minimum.State, predictioneval.StageStateExecuted},
+	} {
+		if tc.got != tc.want {
+			t.Errorf("a real placement leaves %s in state %q, but the shape guard requires %q. "+
+				"Either the evaluator changed and the guard now rejects legitimate work, or "+
+				"this expectation is stale — both are bugs.", tc.stage, tc.got, tc.want)
+		}
+	}
+	if !ev.Clamp.HasFinal {
+		t.Error("a real placement produced no final amount, which the shape guard requires")
+	}
+}
+
+// TestEveryStageAPlacementRunsIsRequiredByTheShapeGuard is the negative control
+// for the shape guard: blanking ANY stage a placement runs must refuse it.
+//
+// Named separately from the shape test above because they fail for opposite
+// reasons — that one catches a guard that demands too much, this one a guard
+// that demands too little. The stake gate is the case that motivated it.
+func TestEveryStageAPlacementRunsIsRequiredByTheShapeGuard(t *testing.T) {
+	c, ev := ncAgreeingCase()
+	slot := ev.Choice.Index
+	stake := int64(ev.Clamp.FinalAmount)
+	facts := ncBoundFacts(c, predictioneval.SettlementFacts{
+		PlacementCallStarted: true, PlacementCallReturned: true, PlacementAccepted: true,
+		PlacementStake: &stake, PlacementSlot: &slot,
+	})
+	if base := predictioneval.Score(c, ev, facts); base.Settlement.Assessment !=
+		predictioneval.SettlementAppliesToReplay {
+		t.Fatalf("control settlement = %q, want APPLIES_TO_REPLAY", base.Settlement.Assessment)
+	}
+
+	for _, tc := range []struct {
+		name   string
+		break_ func(*predictioneval.Evaluation)
+	}{
+		{"the choice stage", func(e *predictioneval.Evaluation) {
+			e.Choice.State = predictioneval.StageStateNotReached
+		}},
+		{"the base stake stage", func(e *predictioneval.Evaluation) {
+			e.BaseStake.State = predictioneval.StageStateNotReached
+		}},
+		{"the filter stage", func(e *predictioneval.Evaluation) {
+			e.Filter.State = predictioneval.StageStateNotReached
+		}},
+		{"the witnessed health gate", func(e *predictioneval.Evaluation) {
+			e.Health.State = predictioneval.StageStateNotReached
+		}},
+		// The one the first version of the guard missed. Score skips the
+		// stakeAllowed / stakeReason / stakeLimit comparisons when this stage
+		// is not EXECUTED, so an affirmative settlement could follow without
+		// the risk gate that sets the final stake ever being compared.
+		{"the stake gate", func(e *predictioneval.Evaluation) {
+			e.StakeGate.State = predictioneval.StageStateNotReached
+		}},
+		{"the clamp stage", func(e *predictioneval.Evaluation) {
+			e.Clamp.State = predictioneval.StageStateNotReached
+		}},
+		{"the minimum-stake stage", func(e *predictioneval.Evaluation) {
+			e.Minimum.State = predictioneval.StageStateNotReached
+		}},
+		{"the final amount", func(e *predictioneval.Evaluation) {
+			e.Clamp.HasFinal = false
+		}},
+	} {
+		t.Run(tc.name+" is required", func(t *testing.T) {
+			mut := ev
+			tc.break_(&mut)
+
+			sc := predictioneval.Score(c, mut, facts)
+			if !containsString(sc.Limitations,
+				predictioneval.LimitationEvaluationShapeInconsistent) {
+				t.Errorf("blanking %s scored without the %q limitation: %v",
+					tc.name, predictioneval.LimitationEvaluationShapeInconsistent, sc.Limitations)
+			}
+			if sc.Settlement.Assessment != predictioneval.SettlementUnknown {
+				t.Fatalf("blanking %s produced settlement %q, want UNKNOWN. A stage the "+
+					"action claims but does not carry is a stage nothing compared.",
+					tc.name, sc.Settlement.Assessment)
+			}
+		})
+	}
+}
+
+// TestATerminalFactThatNamesOtherArgumentsThanTheReplayIsRefused closes a hole
+// where the terminal fact's ARGUMENTS were projected and never read.
+//
+// Phase and decision say how the attempt ended. They say nothing about what it
+// ended ON. A terminal fact naming outcome slot X while its envelope and its
+// placement call both name Y agreed with every comparison the scorer made, and
+// could carry the case to APPLIES_TO_REPLAY on evidence that contradicts
+// itself. `TerminalOutcomeSlot` was populated by ProjectDecisionCase and read
+// by nothing; the terminal stake counter was not projected at all.
+//
+// The placement facts are already required to match the replay, so pinning the
+// terminal fact to the replay too closes the triangle: the two recorded halves
+// cannot disagree with each other while both agree with the model.
+func TestATerminalFactThatNamesOtherArgumentsThanTheReplayIsRefused(t *testing.T) {
+	base, ev := ncAgreeingCase()
+	if ev.Action != predictioneval.ActionWouldAttemptPlacement {
+		t.Fatalf("the control case replays to %q, not a placement", ev.Action)
+	}
+	stake, slot := int64(50), 0
+	facts := predictioneval.SettlementFacts{
+		PlacementCallStarted: true, PlacementCallReturned: true, PlacementAccepted: true,
+		PlacementStake: &stake, PlacementSlot: &slot,
+	}
+
+	for _, tc := range []struct {
+		name  string
+		mut   func(*predictioneval.DecisionCase)
+		field string
+		want  string
+	}{
+		{"the control case, untouched", func(*predictioneval.DecisionCase) {},
+			"terminalOutcomeSlot", predictioneval.SettlementAppliesToReplay},
+		{"a terminal slot the replay did not choose", func(c *predictioneval.DecisionCase) {
+			other := ev.Choice.Index + 1
+			c.Recorded.TerminalOutcomeSlot = &other
+		}, "terminalOutcomeSlot", predictioneval.SettlementUnknown},
+		{"a terminal stake the replay did not reach", func(c *predictioneval.DecisionCase) {
+			c.Recorded.TerminalStake = int64(ev.Clamp.FinalAmount) + 1
+		}, "terminalStake", predictioneval.SettlementUnknown},
+		{"a placing terminal fact naming no slot at all", func(c *predictioneval.DecisionCase) {
+			c.Recorded.TerminalOutcomeSlot = nil
+		}, "terminalOutcomeSlot", predictioneval.SettlementUnknown},
+		{"a placing terminal fact carrying no stake at all", func(c *predictioneval.DecisionCase) {
+			c.Recorded.TerminalStake, c.Recorded.TerminalStakeRecorded = 0, false
+		}, "terminalStake", predictioneval.SettlementUnknown},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := base
+			tc.mut(&c)
+			sc := predictioneval.Score(c, ev, ncBoundFacts(c, facts))
+
+			var got predictioneval.Comparison
+			found := false
+			for _, cmp := range sc.Comparisons {
+				if cmp.Field == tc.field {
+					got, found = cmp, true
+				}
+			}
+			if !found {
+				t.Fatalf("no %s comparison was produced at all; a field nobody compares is "+
+					"exactly the hole this test exists for", tc.field)
+			}
+			if sc.Settlement.Assessment != tc.want {
+				t.Errorf("settlement = %q, want %q (the %s comparison was %+v)",
+					sc.Settlement.Assessment, tc.want, tc.field, got)
+			}
+		})
+	}
+}
+
+// TestASkipThatNamesAnOutcomeSlotDisagrees pins the other direction.
+//
+// The pinned producer names an outcome slot on its placing path ALONE — every
+// skip write site omits it. So a slot present beside a replayed skip is a
+// record it cannot have written, and silence about that would be the same
+// unread-field hole in the other direction.
+//
+// The terminal STAKE is deliberately not checked on a skip: every skip path
+// does write one, and which stage's amount it holds varies by exit, so
+// comparing it would assert a meaning this model has not established.
+func TestASkipThatNamesAnOutcomeSlotDisagrees(t *testing.T) {
+	c, ev := ncAgreeingCase()
+	// Turn the control case into a filter-rejected skip by rejecting it at the
+	// filter, so the replayed action changes rather than the record alone.
+	ev.Action = predictioneval.ActionFilterRejected
+	c.Recorded.TerminalPhase, c.Recorded.TerminalDecision =
+		predictioneval.PhaseAutoSkipped, "SKIP"
+	c.Recorded.TerminalReason = "FILTER_REJECTED"
+
+	// A local lookup, because this test needs to tell "no comparison" from "a
+	// comparison that agreed" and the package helper fatals on absence.
+	lookup := func(sc predictioneval.Scorecard) *predictioneval.Comparison {
+		for i := range sc.Comparisons {
+			if sc.Comparisons[i].Field == "terminalOutcomeSlot" {
+				return &sc.Comparisons[i]
+			}
+		}
+		return nil
+	}
+
+	clean := c
+	clean.Recorded.TerminalOutcomeSlot = nil
+	if got := lookup(predictioneval.Score(clean, ev, predictioneval.SettlementFacts{})); got != nil {
+		t.Fatalf("a skip with no recorded slot produced a terminalOutcomeSlot comparison "+
+			"(%+v); there is nothing to compare and manufacturing one would be noise", *got)
+	}
+
+	slot := 1
+	c.Recorded.TerminalOutcomeSlot = &slot
+	got := lookup(predictioneval.Score(c, ev, predictioneval.SettlementFacts{}))
+	if got == nil {
+		t.Fatal("a skip carrying an outcome slot produced no comparison; the producer never " +
+			"writes one on a skip, so this is a record it cannot have emitted")
+	}
+	if got.Verdict != predictioneval.VerdictDisagree {
+		t.Errorf("terminalOutcomeSlot verdict = %q, want DISAGREE (%+v)", got.Verdict, *got)
+	}
+}
+
+// TestOneQuantityIsNotCountedInTwoEvidenceBuckets pins the terminal outcome
+// slot to the same basis as the choice index it echoes.
+//
+// The two comparisons are of the SAME quantity. The chosen index is a function
+// of the outcome vector and the strategy alone — established with no observed
+// value, which is why `choiceIndex` stays INDEPENDENT even when the stake was
+// conditioned on a stealth realization. Its terminal echo carried the derived
+// basis instead, so under stealth one quantity landed in two evidence buckets:
+// counted as independent evidence in one comparison and as conditioned in the
+// other.
+//
+// Nothing agreed that should have disagreed. But this stage exists to keep the
+// evidence bases apart, and a scorecard that splits one quantity across two of
+// them is not doing that — it understates the independent evidence and
+// overstates what rests on the stealth draw.
+func TestOneQuantityIsNotCountedInTwoEvidenceBuckets(t *testing.T) {
+	for _, stealth := range []struct {
+		name    string
+		outcome string
+	}{
+		{"with no stealth", predictioneval.StealthNotApplicable},
+		{"conditioned on an observed realization",
+			predictioneval.StealthConditionedOnObservedRealization},
+	} {
+		t.Run(stealth.name, func(t *testing.T) {
+			c, ev := ncAgreeingCase()
+			ev.Stealth.Outcome = stealth.outcome
+			sc := predictioneval.Score(c, ev, predictioneval.SettlementFacts{})
+
+			index := findComparison(t, sc, "choiceIndex")
+			slot := findComparison(t, sc, "terminalOutcomeSlot")
+			if index.Basis != slot.Basis {
+				t.Errorf("choiceIndex has basis %s and terminalOutcomeSlot has basis %s. "+
+					"They compare the same quantity — the chosen index — so splitting them "+
+					"across two evidence bases counts one thing twice, in two different "+
+					"columns of the same scorecard.", index.Basis, slot.Basis)
+			}
+			if slot.Basis != predictioneval.BasisIndependent {
+				t.Errorf("terminalOutcomeSlot has basis %s, want INDEPENDENT: the chosen index "+
+					"is a function of the outcome vector and the strategy alone, and is "+
+					"established without any observed value even under stealth", slot.Basis)
+			}
+		})
+	}
+}
+
+// TestADrawDependentAbsenceIsNotIndependentEvidence pins the other half of that
+// invariant, and the reason the two branches of the same comparison differ.
+//
+// On the placing branch a VALUE is compared: the chosen index, computed with no
+// observed input, so agreement there is independent of the stealth draw. On the
+// skip branch nothing is computed at all — the claim is that a slot should be
+// ABSENT, and that follows from the PATH the replay took. A skip reached
+// through the stake gates is a path the conditioned stake chose, so a different
+// draw could have reached placement, where a slot belongs.
+//
+// Counting that contradiction as independent would present draw-dependent
+// evidence as independent of the draw, which is the same error as the one the
+// test above closes, pointing the other way.
+//
+// It costs no refusal either way: the settlement guard blocks on conditioned
+// and independent disagreements alike, so this is purely about what the
+// scorecard CLAIMS its evidence is.
+func TestADrawDependentAbsenceIsNotIndependentEvidence(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		stealth string
+		want    string
+	}{
+		{"with no stealth", predictioneval.StealthNotApplicable,
+			predictioneval.BasisIndependent},
+		{"conditioned on an observed realization",
+			predictioneval.StealthConditionedOnObservedRealization,
+			predictioneval.BasisConditioned},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c, ev := ncAgreeingCase()
+			ev.Stealth.Outcome = tc.stealth
+			// A skip reached THROUGH the stake gates: the exit the conditioned
+			// stake selects.
+			ev.Action = predictioneval.ActionBelowMinimum
+			c.Recorded.TerminalPhase, c.Recorded.TerminalDecision =
+				predictioneval.PhaseAutoSkipped, "SKIP"
+			c.Recorded.TerminalReason = "BELOW_MINIMUM_POINTS"
+			slot := 1
+			c.Recorded.TerminalOutcomeSlot = &slot
+
+			sc := predictioneval.Score(c, ev, predictioneval.SettlementFacts{})
+			got := findComparison(t, sc, "terminalOutcomeSlot")
+			if got.Verdict != predictioneval.VerdictDisagree {
+				t.Fatalf("terminalOutcomeSlot verdict = %q, want DISAGREE: the producer names "+
+					"no slot on a skip, so this record is one it cannot have written", got.Verdict)
+			}
+			if got.Basis != tc.want {
+				t.Errorf("terminalOutcomeSlot basis = %s, want %s. A skip reached through the "+
+					"stake gates is a path the conditioned stake chose, so the absence it "+
+					"implies is conditioned with it.", got.Basis, tc.want)
+			}
+			// Either way the disagreement has to block the settlement, so the
+			// basis is about what the scorecard claims, not about the verdict.
+			if sc.IndependentDisagree+sc.ConditionedDisagree == 0 {
+				t.Error("the disagreement was counted in neither bucket, so it blocks nothing")
+			}
+		})
+	}
+}
+
+// TestAPlacementWhoseReasonAndErrorClassDisagreeIsIncoherent closes an
+// affirmative settlement drawn from a record that reports its own failure.
+//
+// The pinned producer computes the reason code and the error class from ONE
+// error value: a nil error yields OK beside NONE, and a non-nil error yields a
+// rejection beside a class naming it. Neither half can move without the other.
+//
+// Acceptance was read from the reason alone, and the error class was carried
+// through beside it unexamined. So a record claiming both — accepted, and
+// carrying a TRANSPORT or INTERNAL class — passed every remaining attribution
+// check and could reach APPLIES_TO_REPLAY while its own facts said the call
+// failed.
+func TestAPlacementWhoseReasonAndErrorClassDisagreeIsIncoherent(t *testing.T) {
+	const attempt = 7
+	for _, tc := range []struct {
+		name                          string
+		startReason, startClass       string
+		returnReason, returnClass     string
+		wantCoherence, wantSettlement string
+		wantAccepted                  bool
+	}{
+		{"the pairing the producer writes on success", "OK", "NONE", "OK", "NONE",
+			predictioneval.PlacementShapeCoherent, predictioneval.SettlementAppliesToReplay, true},
+		{"the pairing it writes on a rejection", "OK", "NONE", "REJECTED", "ROUND_CLOSED",
+			predictioneval.PlacementShapeCoherent, predictioneval.SettlementUnknown, false},
+		{"accepted while naming a transport failure", "OK", "NONE", "OK", "TRANSPORT",
+			predictioneval.PlacementShapeIncoherent, predictioneval.SettlementUnknown, false},
+		{"rejected while naming no failure at all", "OK", "NONE", "REJECTED", "NONE",
+			predictioneval.PlacementShapeIncoherent, predictioneval.SettlementUnknown, false},
+		{"accepted with no error class at all", "OK", "NONE", "OK", "",
+			predictioneval.PlacementShapeIncoherent, predictioneval.SettlementUnknown, false},
+		{"a started fact that reports a failure", "REJECTED", "TRANSPORT", "OK", "NONE",
+			predictioneval.PlacementShapeIncoherent, predictioneval.SettlementUnknown, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			terminal := peRecord(2, predictioneval.KindAutoDecision,
+				predictioneval.PhaseAutoDecided, attempt)
+			terminal.Payload.ReasonCode = "OK"
+			terminal.Payload.Decision = "PLACE"
+			terminal.Payload.OutcomeSlot = func() *int { i := 0; return &i }()
+			terminal.Payload.Counters[predictioneval.CounterStake] = 50
+			terminal.Payload.DecisionEnvelope = peMinimalEnvelope(attempt)
+
+			pk, err := predictioneval.MaterializePairedKnowledge(peDatasetOf(peProvenance(),
+				peRecord(1, predictioneval.KindAutoDecision, predictioneval.PhaseAutoDue, attempt),
+				terminal,
+				pePlacement(3, attempt, predictioneval.PhaseCallStarted, 50, 0,
+					tc.startReason, tc.startClass),
+				pePlacement(4, attempt, predictioneval.PhaseCallReturned, 50, 0,
+					tc.returnReason, tc.returnClass),
+			))
+			if err != nil || len(pk.Attempts) != 1 {
+				t.Fatalf("materialize: %v (%d attempts)", err, len(pk.Attempts))
+			}
+			facts := predictioneval.ProjectSettlementFacts(pk.Attempts[0])
+			if facts.PlacementCoherence != tc.wantCoherence {
+				t.Errorf("placement coherence = %q, want %q", facts.PlacementCoherence, tc.wantCoherence)
+			}
+			if facts.PlacementAccepted != tc.wantAccepted {
+				t.Errorf("placement accepted = %v, want %v", facts.PlacementAccepted, tc.wantAccepted)
+			}
+
+			c, evErr := predictioneval.ProjectDecisionCase(pk.Attempts[0])
+			if evErr != nil {
+				t.Fatalf("project: %v", evErr)
+			}
+			sc := predictioneval.Score(c, predictioneval.Evaluate(c.Inputs, c.Observed), facts)
+			if sc.Settlement.Assessment != tc.wantSettlement {
+				t.Errorf("settlement = %q, want %q", sc.Settlement.Assessment, tc.wantSettlement)
+			}
+		})
+	}
+}
+
+// TestARefusalStateDoesNotClaimThereWasNoPlacement separates two different
+// answers that shared one code path.
+//
+// NOT_APPLICABLE is a CLAIM: the replayed decision reached no placement, so
+// there is nothing for a settlement to describe. It was returned for every
+// action that is not a placement — including the three that establish no such
+// thing. LEGACY_FAILURE, INDETERMINATE and UNSUPPORTED say the model could not
+// get far enough to know what the decision would have done, and answering
+// "not applicable" there asserts the stronger reading on the strength of the
+// weaker one, while the terminal comparisons that would have said so are
+// UNAVAILABLE.
+func TestARefusalStateDoesNotClaimThereWasNoPlacement(t *testing.T) {
+	for _, tc := range []struct {
+		action string
+		want   string
+	}{
+		// Determined skips: the model followed the policy to an exit and knows
+		// no bet was reached.
+		{predictioneval.ActionFilterRejected, predictioneval.SettlementNotApplicable},
+		{predictioneval.ActionBelowMinimum, predictioneval.SettlementNotApplicable},
+		{predictioneval.ActionReserveViolation, predictioneval.SettlementNotApplicable},
+		{predictioneval.ActionHealthGated, predictioneval.SettlementNotApplicable},
+		// Refusals: the model does not know what the decision would have done.
+		{predictioneval.ActionLegacyFailure, predictioneval.SettlementUnknown},
+		{predictioneval.ActionIndeterminate, predictioneval.SettlementUnknown},
+		{predictioneval.ActionUnsupported, predictioneval.SettlementUnknown},
+	} {
+		t.Run(tc.action, func(t *testing.T) {
+			c, ev := ncAgreeingCase()
+			ev.Action = tc.action
+			c.Recorded.TerminalPhase, c.Recorded.TerminalDecision =
+				predictioneval.PhaseAutoSkipped, "SKIP"
+			c.Recorded.TerminalOutcomeSlot = nil
+			// The recorded reason has to be the one the producer writes for
+			// this exit, or the case disagrees and the FIRST guard answers
+			// UNKNOWN for every row — which would make the refusal rows below
+			// pass while proving nothing. The refusal actions have no producer
+			// counterpart at all, so their comparison is UNAVAILABLE and the
+			// recorded reason is left as it stands.
+			if tc.want == predictioneval.SettlementNotApplicable {
+				c.Recorded.TerminalReason = tc.action
+			}
+
+			sc := predictioneval.Score(c, ev, predictioneval.SettlementFacts{})
+			if tc.want == predictioneval.SettlementNotApplicable &&
+				sc.IndependentDisagree+sc.ConditionedDisagree > 0 {
+				t.Fatalf("the fixture disagrees (%d independent, %d conditioned), so the "+
+					"disagreement guard answers before the one under test: %+v",
+					sc.IndependentDisagree, sc.ConditionedDisagree, sc.Comparisons)
+			}
+			if sc.Settlement.Assessment != tc.want {
+				t.Errorf("settlement for %s = %q, want %q. NOT_APPLICABLE asserts that no "+
+					"placement was reached; a refusal state establishes only that the model "+
+					"could not tell.", tc.action, sc.Settlement.Assessment, tc.want)
+			}
+		})
+	}
+}
+
+// TestTheScorecardDoesNotAliasTheCallersEvaluation is the settlement-facts
+// aliasing repair, one level further in.
+//
+// The scorecard's top-level Limitations were copied; the nested evaluation's
+// were not, and a struct assignment shares the backing array. A caller that
+// appended to ev.Limitations after Score returned therefore mutated a scorecard
+// that had already been validated — and could leave it carrying two different
+// accounts of the same evaluation's limitations.
+func TestTheScorecardDoesNotAliasTheCallersEvaluation(t *testing.T) {
+	c, ev := ncAgreeingCase()
+	ev.Limitations = append(ev.Limitations, "ORIGINAL_LIMITATION")
+
+	sc := predictioneval.Score(c, ev, predictioneval.SettlementFacts{})
+	before := append([]string(nil), sc.Evaluation.Limitations...)
+
+	// Mutate through the caller's own slice, in place and by appending.
+	if len(ev.Limitations) > 0 {
+		ev.Limitations[len(ev.Limitations)-1] = "TAMPERED"
+	}
+	ev.Limitations = append(ev.Limitations, "APPENDED_AFTER_SCORING")
+
+	if !reflect.DeepEqual(sc.Evaluation.Limitations, before) {
+		t.Errorf("the scorecard's evaluation limitations changed after Score returned:\n"+
+			"  before %v\n  after  %v\nA validated scorecard that its caller can still edit "+
+			"is not a record of anything.", before, sc.Evaluation.Limitations)
+	}
+	for _, got := range sc.Evaluation.Limitations {
+		if got == "TAMPERED" || got == "APPENDED_AFTER_SCORING" {
+			t.Errorf("the scorecard picked up %q from the caller's slice after scoring", got)
+		}
+	}
+}
+
+// TestADatasetThatContradictsItsOwnProvenanceIsRefused closes a silent change
+// of verdict.
+//
+// A real load never produces one: the reader refuses rather than truncating,
+// and keeps an undecodable payload as a row rather than dropping it. But the
+// seam takes a VALUE, so a caller can slice a dataset while keeping the
+// classification that described the whole of it — and the classification is
+// what downstream stages trust.
+//
+// Dropping one of two terminal facts is the sharp case: an attempt that must be
+// excluded as MULTIPLE_TERMINAL_FACTS becomes an ordinary materializable case,
+// and every scorecard drawn from it carries a clean AS_FINALIZED provenance
+// describing facts the dataset does not contain.
+func TestADatasetThatContradictsItsOwnProvenanceIsRefused(t *testing.T) {
+	const attempt = 7
+	terminal := func(seq int64) predictioneval.SourceRecord {
+		r := peRecord(seq, predictioneval.KindAutoDecision, predictioneval.PhaseAutoDecided, attempt)
+		r.Payload.ReasonCode = "OK"
+		r.Payload.Decision = "PLACE"
+		r.Payload.OutcomeSlot = func() *int { i := 0; return &i }()
+		r.Payload.Counters[predictioneval.CounterStake] = 50
+		r.Payload.DecisionEnvelope = peMinimalEnvelope(attempt)
+		return r
+	}
+	due := peRecord(1, predictioneval.KindAutoDecision, predictioneval.PhaseAutoDue, attempt)
+
+	// Two endings: the honest dataset is refused for the right reason.
+	both := peDatasetOf(peProvenance(), due, terminal(2), terminal(3))
+	pk, err := predictioneval.MaterializePairedKnowledge(both)
+	if err != nil {
+		t.Fatalf("materialize: %v", err)
+	}
+	if !ncHasExclusion(pk, predictioneval.ExclusionMultipleTerminalFacts) {
+		t.Fatalf("a dataset with two terminal facts was not excluded as MULTIPLE_TERMINAL_FACTS "+
+			"(exclusions %v)", ncReasons(pk))
+	}
+
+	// Now drop one ending while keeping the provenance that described both.
+	// Without the cardinality check this materializes as an ordinary case.
+	sliced := both
+	sliced.Records = []predictioneval.SourceRecord{due, terminal(2)}
+	pk, err = predictioneval.MaterializePairedKnowledge(sliced)
+	if err != nil {
+		t.Fatalf("materialize sliced: %v", err)
+	}
+	if len(pk.Attempts) != 0 {
+		t.Errorf("a dataset holding %d facts under a provenance reporting %d materialized "+
+			"%d attempts. The provenance describes a set this dataset does not contain, and "+
+			"every scorecard drawn from it would carry that clean classification.",
+			len(sliced.Records), sliced.Source.FactsPresent, len(pk.Attempts))
+	}
+	if !ncHasExclusion(pk, predictioneval.ExclusionRecordCountContradictsProvenance) {
+		t.Errorf("the sliced dataset was not excluded as RECORD_COUNT_CONTRADICTS_PROVENANCE "+
+			"(exclusions %v)", ncReasons(pk))
+	}
+}
+
+func ncHasExclusion(pk predictioneval.PairedKnowledge, reason string) bool {
+	for _, e := range pk.Excluded {
+		if e.Reason == reason {
+			return true
+		}
+	}
+	return false
+}
+
+func ncReasons(pk predictioneval.PairedKnowledge) []string {
+	out := make([]string, 0, len(pk.Excluded))
+	for _, e := range pk.Excluded {
+		out = append(out, e.Reason)
+	}
+	return out
+}

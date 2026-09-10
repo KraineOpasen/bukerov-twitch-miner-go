@@ -2167,6 +2167,16 @@ func (r *SQLiteRepository) RecountObservationQuotas(ctx context.Context, l *obse
 // Repository: readers
 // ---------------------------------------------------------------------------
 
+// observationSessionSelectColumns is the column list ReadObservationSession
+// materializes. It is a named constant so the replay reader's session-row
+// width expression can be checked against it structurally, the same way
+// observationRowWidthBytes is checked against observationSelectColumns.
+const observationSessionSelectColumns = `
+	collector_epoch, collector_session_id, producer_revision, started_at_ms,
+	closed_at_ms, close_state, last_assigned_sequence, committed_count,
+	dropped_count, unsettled_obligation_count, post_fence_producer_count,
+	producer_shutdown_uncertain_count`
+
 const observationSelectColumns = `
 	id, observation_id, collector_session_id, collector_epoch, collector_sequence,
 	pool_instance_id, COALESCE(round_incarnation_id, ''),
@@ -2269,22 +2279,72 @@ func (r *SQLiteRepository) ObservationsByFingerprint(ctx context.Context, finger
 // ONE transaction, so the count can never belong to a different committed
 // state than the row it qualifies.
 func (r *SQLiteRepository) ReadObservationSession(ctx context.Context, epoch int64) (ObservationSessionReading, bool, error) {
+	out, found, _, err := r.readObservationSession(ctx, epoch, 0, 0)
+	return out, found, err
+}
+
+// ObservationReadBudget says which bound, if any, refused a bounded read.
+type ObservationReadBudget int
+
+const (
+	// ObservationReadWithinBudget means nothing was refused.
+	ObservationReadWithinBudget ObservationReadBudget = iota
+	// ObservationReadSessionRowTooWide means the epoch HAS a session row and
+	// that row is wider than the bound. It is distinct from "no session here",
+	// which is not a refusal at all.
+	ObservationReadSessionRowTooWide
+	// ObservationReadFactRowTooWide means a fact the witness sweep would have
+	// materialized is wider than the bound.
+	ObservationReadFactRowTooWide
+)
+
+// readObservationSession is the body both entry points share.
+//
+// maxRowBytes of 0 means no width predicate at all, which is what
+// ReadObservationSession has always done and continues to do byte for byte.
+// A positive value adds the predicate to the SELECT that materializes the row,
+// so an oversized session row produces NO row: the engine still evaluates the
+// width, but no oversized value crosses the driver into a Go string, which is
+// the boundary the bound is about. And it does so in the SAME statement, which
+// is the only place a width bound on this read can be enforced without leaving
+// a window another connection can commit into.
+func (r *SQLiteRepository) readObservationSession(
+	ctx context.Context, epoch int64, maxRowBytes, maxFactRowBytes int64,
+) (reading ObservationSessionReading, found bool, budget ObservationReadBudget, err error) {
 	var out ObservationSessionReading
-	var found bool
-	err := r.db.WithTx(ctx, func(tx *sql.Tx) error {
+	budget = ObservationReadWithinBudget
+	where := `WHERE collector_epoch = ?`
+	args := []interface{}{epoch}
+	if maxRowBytes > 0 {
+		where += ` AND ` + observationSessionRowWidthBytes + ` <= ?`
+		args = append(args, maxRowBytes)
+	}
+	err = r.db.WithTx(ctx, func(tx *sql.Tx) error {
 		var s ObservationSessionRecord
 		var closedAt, lastSeq sql.NullInt64
-		e := tx.QueryRowContext(ctx, `
-			SELECT collector_epoch, collector_session_id, producer_revision, started_at_ms,
-			       closed_at_ms, close_state, last_assigned_sequence, committed_count,
-			       dropped_count, unsettled_obligation_count, post_fence_producer_count,
-			       producer_shutdown_uncertain_count
-			  FROM prediction_observation_sessions WHERE collector_epoch = ?`, epoch).
+		e := tx.QueryRowContext(ctx, `SELECT `+observationSessionSelectColumns+`
+			  FROM prediction_observation_sessions `+where, args...).
 			Scan(&s.CollectorEpoch, &s.CollectorSessionID, &s.ProducerRevision, &s.StartedAtMS,
 				&closedAt, &s.CloseState, &lastSeq, &s.CommittedCount,
 				&s.DroppedCount, &s.UnsettledObligationCount, &s.PostFenceProducerCount,
 				&s.ProducerShutdownUncertainCount)
 		if e == sql.ErrNoRows {
+			// With a width predicate in play, no row means one of two things
+			// and the caller has to be able to tell them apart: the epoch has
+			// no session, or it has one this read refused to materialize. The
+			// EXISTS below asks the second question without selecting a single
+			// column of the row it is asking about.
+			if maxRowBytes > 0 {
+				var exists int64
+				if x := tx.QueryRowContext(ctx, `
+					SELECT EXISTS(SELECT 1 FROM prediction_observation_sessions
+					              WHERE collector_epoch = ?)`, epoch).Scan(&exists); x != nil {
+					return x
+				}
+				if exists != 0 {
+					budget = ObservationReadSessionRowTooWide
+				}
+			}
 			return nil
 		}
 		if e != nil {
@@ -2314,18 +2374,61 @@ func (r *SQLiteRepository) ReadObservationSession(ctx context.Context, epoch int
 		// a session that does not own it, or an epoch that does not. Either
 		// way the dataset is not internally consistent and no reading of this
 		// session can be trusted.
-		if e := tx.QueryRowContext(ctx, `
-			SELECT COUNT(*) FROM prediction_observations
-			 WHERE (collector_epoch =  ? AND collector_session_id <> ?)
-			    OR (collector_epoch <> ? AND collector_session_id =  ?)`,
-			epoch, s.CollectorSessionID, epoch, s.CollectorSessionID).Scan(&facts.HalfPair); e != nil {
+		//
+		// EXISTS rather than COUNT, and that is a bound rather than a
+		// micro-optimization. The classification only ever asks whether an
+		// orphan exists, so counting them is work done to produce a number
+		// nobody reads — and in the case the bound exists for, that number is
+		// expensive: a tampered store holding 500,000 rows under this session
+		// id and other epochs made the counting form walk all of them before
+		// refusing (measured at 5,000,029 VM steps against 24 for the caller's
+		// preflight).
+		//
+		// EXISTS stops at the first match, and that is enough to bound BOTH
+		// directions. Either a row matches — so the scan ends immediately — or
+		// no row matches, which means every row carrying this session id also
+		// carries this epoch, and the caller's epoch count already refused the
+		// load if there were more of those than its limit.
+		var orphan int64
+		if e := tx.QueryRowContext(ctx, observationOrphanExistsQuery,
+			epoch, s.CollectorSessionID, epoch, s.CollectorSessionID).Scan(&orphan); e != nil {
 			return e
 		}
+		facts.HalfPairPresent = orphan != 0
 		// Every surviving fact carries a digest of its own content, and until
 		// something RECOMPUTES it the column witnesses nothing: a row whose
 		// payload, identity or parent was edited in place after the write
 		// reads back as authentic. Recompute a bounded prefix here and let the
 		// reading carry both what was proved and what was not.
+		// The witness sweep is the other read in this transaction that
+		// materializes rows, and it is bounded HERE rather than by a probe the
+		// caller took beforehand. Both statements run inside one transaction,
+		// so they see one snapshot: a writer that enlarges a fact between them
+		// cannot make this measurement stale, which is exactly what a separate
+		// preflight query could not promise.
+		if maxFactRowBytes > 0 {
+			var widest int64
+			if x := tx.QueryRowContext(ctx, `
+				SELECT COALESCE(MAX(w), 0) FROM (
+					SELECT `+observationRowWidthBytes+` AS w
+					FROM prediction_observations
+					WHERE collector_epoch = ? AND collector_session_id = ?
+					ORDER BY collector_sequence ASC
+					LIMIT ?)`,
+				epoch, s.CollectorSessionID, observationWitnessBudget).Scan(&widest); x != nil {
+				return x
+			}
+			// Measured over exactly the rows the sweep would touch: the same
+			// key, the same ordering, the same budget. A narrower set would
+			// leave rows unmeasured; a wider one would refuse loads for rows
+			// the sweep never reads.
+			if widest > maxFactRowBytes {
+				budget = ObservationReadFactRowTooWide
+				found = false
+				out = ObservationSessionReading{}
+				return nil
+			}
+		}
 		verified, mismatched, unchecked, e := verifyObservationWitnesses(ctx, tx, epoch, s.CollectorSessionID)
 		if e != nil {
 			return e
@@ -2343,8 +2446,50 @@ func (r *SQLiteRepository) ReadObservationSession(ctx context.Context, epoch int
 		}
 		return nil
 	})
-	return out, found, err
+	if err != nil {
+		return ObservationSessionReading{}, false, ObservationReadWithinBudget, err
+	}
+	return out, found, budget, nil
 }
+
+// ReadObservationSessionWithinBudget reads one session ONLY if its row fits
+// maxRowBytes, with the bound evaluated in the same statement that selects and
+// scans the row.
+//
+// That co-location is the point. A width measured by an earlier, separate
+// query is a time-of-check/time-of-use gap: another connection can enlarge a
+// column in between, and the read then transfers the enlarged value across the
+// driver having never been covered by any bound. A coherence re-read afterwards
+// detects that the session changed; it cannot un-allocate what was already
+// scanned.
+//
+// It bounds BOTH reads that materialize rows: the session row itself, and the
+// fact rows the witness sweep scans one at a time to recompute their digests.
+// The second bound is evaluated in the same TRANSACTION as the sweep rather
+// than by the caller beforehand, which buys the same thing co-location buys for
+// the first: one snapshot, so a writer cannot enlarge a row between the
+// measurement and the read that materializes it.
+//
+// The returned budget names which bound refused, with found false and a zero
+// reading. A caller that gets found false and a within-budget result is looking
+// at an epoch with no session, which is not a refusal.
+func (r *SQLiteRepository) ReadObservationSessionWithinBudget(
+	ctx context.Context, epoch int64, maxRowBytes, maxFactRowBytes int64,
+) (ObservationSessionReading, bool, ObservationReadBudget, error) {
+	return r.readObservationSession(ctx, epoch, maxRowBytes, maxFactRowBytes)
+}
+
+// observationOrphanExistsQuery asks whether ANY fact matches exactly one half
+// of the (epoch, session id) pair.
+//
+// It is a named constant so its SHAPE can be pinned by a test: the bound this
+// query carries is the fact that it stops at the first match, and that lives in
+// the EXISTS rather than in anything observable from its result.
+const observationOrphanExistsQuery = `
+	SELECT EXISTS(
+		SELECT 1 FROM prediction_observations
+		 WHERE (collector_epoch =  ? AND collector_session_id <> ?)
+		    OR (collector_epoch <> ? AND collector_session_id =  ?))`
 
 // observationWitnessBudget bounds how many stored digests one reading
 // recomputes. A session may legitimately hold MaxSessionRows facts, and this
@@ -2352,6 +2497,25 @@ func (r *SQLiteRepository) ReadObservationSession(ctx context.Context, epoch int
 // reading verifies a bounded prefix and SAYS how much it verified rather than
 // holding the connection for an unbounded hash sweep.
 const observationWitnessBudget = 4096
+
+// observationWitnessSelectColumns is the column list verifyObservationWitnesses
+// materializes, one row at a time, to recompute a stored digest.
+//
+// It is a named constant so the replay reader's per-row byte bound can be
+// checked against it structurally. That bound is computed from
+// observationRowWidthBytes, which measures the columns of the FACT read; this
+// list must stay a subset of those columns, or a row could carry bytes the
+// witness sweep materializes and no bound measures.
+const observationWitnessSelectColumns = `
+	observation_id, collector_sequence, pool_instance_id, round_incarnation_id,
+	round_capture_origin, round_capture_gap_cause,
+	routed_streamer_id, routed_channel_id,
+	round_owner_streamer_id, round_owner_channel_id,
+	retention_group_owner_streamer_id, retention_group_owner_channel_id,
+	event_id, kind, source_topic_type, source_message_type, source_fingerprint,
+	producer_at_ms, producer_time_source, received_at_ms,
+	connection_index, connection_generation, connection_sequence,
+	payload_json, observation_sha256`
 
 // verifyObservationWitnesses recomputes the stored digest of a bounded prefix
 // of one session's surviving facts and reports how many matched.
@@ -2369,15 +2533,7 @@ func verifyObservationWitnesses(ctx context.Context, tx *sql.Tx, epoch int64, se
 		return 0, 0, 0, e
 	}
 	rows, e := tx.QueryContext(ctx, `
-		SELECT observation_id, collector_sequence, pool_instance_id, round_incarnation_id,
-		       round_capture_origin, round_capture_gap_cause,
-		       routed_streamer_id, routed_channel_id,
-		       round_owner_streamer_id, round_owner_channel_id,
-		       retention_group_owner_streamer_id, retention_group_owner_channel_id,
-		       event_id, kind, source_topic_type, source_message_type, source_fingerprint,
-		       producer_at_ms, producer_time_source, received_at_ms,
-		       connection_index, connection_generation, connection_sequence,
-		       payload_json, observation_sha256
+		SELECT `+observationWitnessSelectColumns+`
 		  FROM prediction_observations
 		 WHERE collector_epoch = ? AND collector_session_id = ?
 		 ORDER BY collector_sequence ASC
@@ -2460,8 +2616,12 @@ type observationSessionFacts struct {
 	MinSequence       int64
 	MaxSequence       int64
 	DistinctSequences int64
-	// HalfPair counts facts matching exactly one half of the pair.
-	HalfPair int64
+	// HalfPairPresent reports whether ANY fact matches exactly one half of the
+	// pair. It is a presence flag rather than a count because the
+	// classification only asks whether one exists, and asking that way is what
+	// lets the query stop at the first match instead of walking every orphan a
+	// tampered store cares to insert.
+	HalfPairPresent bool
 }
 
 // classifyObservationSession is the reader contract: it decides which of the
@@ -2493,7 +2653,7 @@ func classifyObservationSession(s ObservationSessionRecord, facts observationSes
 		return integrity("finalized session carries no close time")
 	case s.CommittedCount < 0 || s.DroppedCount < 0:
 		return integrity("negative session counter")
-	case facts.HalfPair > 0:
+	case facts.HalfPairPresent:
 		return integrity("facts exist that match only one half of this session's (epoch, session id) pair")
 	}
 

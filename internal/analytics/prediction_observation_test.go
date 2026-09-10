@@ -2846,7 +2846,7 @@ func TestSessionReadingEnforcesTheCounterForm(t *testing.T) {
 		{
 			name:    "an orphan fact matching one half of the pair",
 			session: func(s ObservationSessionRecord) ObservationSessionRecord { return s },
-			facts:   observationSessionFacts{Present: 2, MinSequence: 1, MaxSequence: 2, DistinctSequences: 2, HalfPair: 1},
+			facts:   observationSessionFacts{Present: 2, MinSequence: 1, MaxSequence: 2, DistinctSequences: 2, HalfPairPresent: true},
 			want:    ReadingIntegrityError,
 		},
 		{

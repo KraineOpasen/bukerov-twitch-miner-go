@@ -2857,6 +2857,335 @@ id needed to link a choice to its placement call. Outcome titles and colours are
 not projected, and beyond the `TopPoints` figure described above no predictor
 data is retained.
 
+#### Offline decision replay
+
+`internal/predictioneval` reads the envelope back and re-derives the decision it
+describes. It is an offline reader: it never places a bet, never changes a
+stake, never proposes or selects a strategy, and has no runtime, scheduler or
+HTTP surface. Its only product is a versioned, machine-readable comparison
+between what a decision was recorded to have *read* and what it was recorded to
+have *produced*.
+
+The pipeline is four pure value-in/value-out functions —
+`MaterializePairedKnowledge` → `ProjectDecisionCase` → `Evaluate` → `Score`.
+Acquiring data is the separate job of `internal/predictioneval/reader`, the only
+part that touches SQLite. The four core stages reach no database, network,
+Twitch, PubSub, live setting, environment variable, wall clock or global RNG,
+and a dependency-fence test enforces that over the package's whole transitive
+import graph rather than by convention. The fence pins that graph EXACTLY rather
+than screening it against a list of packages someone thought to name: any
+reachable package that is not pinned fails, so a capability nobody anticipated
+cannot arrive unnoticed. A Go toolchain upgrade that changes what those imports
+drag in is expected to trip it, which is the point — that change is reviewed,
+not absorbed.
+
+**Causal separation.** The producer persists an attempt's inputs and its results
+in one terminal envelope, so the reader performs the split the writer could not.
+`MaterializePairedKnowledge` groups facts by the minted `autoAttemptId` — together
+with the pool instance and collector session, because the attempt counter
+restarts with the process — and bounds each attempt's *common-input slice*: the
+causally-closed prefix up to and including its terminal fact. Both placement
+facts carry the same attempt id and fall **after** that boundary, so they reach
+`Score` alone and can never feed the decision that produced them. The slice is
+digested before any model projection, so appending later facts to the store
+cannot change an earlier case or its digest. `Evaluate` receives only
+`DecisionInputs`; a recorded choice, a later outcome, a post-placement state and
+a settlement are not merely unused there, they are unrepresentable in its
+signature.
+
+**Faithful baseline, not a substitute strategy.** The model reconstructs the
+policy each decision was actually configured with — every strategy the pinned
+policy dispatches on, its strict-`>` tie handling that keeps the lowest index,
+`SMART`'s strict-`<` gap comparison, the `NUMBER_*` fallback to slot 0, the
+`decision_*` → `total_*` key remapping, the int truncation in the stake, and the
+caller's `Calculate → Skip → health → stake → clamp → minimum → filter` ordering,
+in which the filter is *computed* early and *acted on* last. Derived odds and
+percentages are read from the envelope as the model held them, never recomputed
+from newer wire totals. `EvaluateStake`'s returned allowance and the amount the
+caller actually adopted stay distinct facts, and a reserve violation produces no
+post-gate stake because the pinned caller returns from inside the gate block.
+Where an unrecognised strategy, filter key or comparison operator was stored as
+`UNKNOWN`, the replay is still exact: the pinned switches have no `default`, so
+every value outside a closed set takes the same branch.
+
+**What cannot be proven is not claimed.** Stealth mode consumes a random draw
+that was never recorded. The model establishes the choice, the base stake and
+whether stealth applies *without* any observed value, and only then uses the
+recorded pre-risk stake to pin down which of the four legal integer reductions
+occurred. That stage is reported as `CONDITIONED_ON_OBSERVED_REALIZATION`,
+everything derived from it is counted apart from independent evidence, and the
+comparison of the reconstructed stake against the stake it was conditioned on is
+labelled circular rather than counted as a passed oracle. A realization that is
+missing or unreachable by any legal reduction stays `UNPROVEN`; it never becomes
+the base stake. Eligibility and health verdicts are echoed as witnessed external
+inputs — the replay cannot see the transport health or round state behind them,
+and agreement about them proves nothing about that hidden state.
+
+**Refusals.** The reader binds to `payload_version` 1 and producer revision
+`obs-v2|policy-378d05d6ccc7d2a914730a1e1d023ff754bcf873`; the replay model and
+its results carry their own version and the pinned policy revision, which are
+never restamped with the SHA of whatever build is replaying.
+
+The revision BINDS rather than merely annotating. A session stamped with a
+revision this model does not know yields no cases at all: an unknown contract
+may have changed what a field means, and a confident verdict against a contract
+nobody re-read is worse than no verdict. `obs-v1` is the one known exception —
+it stays readable and acquires nothing, because a missing envelope is a contract
+fact there, and no default, current setting or neighbouring fact is used to
+manufacture one. A pre-envelope auto fact carries no attempt discriminator
+either (the counter and the envelope shipped in the same commit), so it is
+refused by name as a legacy-contract fact rather than as a fact whose attempt
+never began.
+
+The strength of the integrity check has a bound, and the replay states it
+rather than trading on it: the store's row witness is an UNKEYED SHA-256 stored
+beside the data it covers. It detects accidental corruption — a torn write, a
+bad page, a partial restore — and it does not authenticate against an adversary
+who can write to the database file, who can recompute the witness after editing
+a payload and repair the session counters to match. The common-input digest
+inherits exactly that property and adds no authenticity of its own; what it does
+hold against a hostile store is narrower and still useful, namely that a case,
+an evaluation and a settlement cannot be recombined across attempts. Detecting
+malicious edits would need a MAC or signature keyed outside the database, which
+is a producer change.
+
+Session integrity, truncation and witness verification are consumed from
+`ReadObservationSession` rather than re-implemented — the reader-facing
+projection COALESCEs NULL parent ids and re-marshals the payload, so it could
+not reproduce the digest's inputs even from copied code. A session the store
+calls `INTEGRITY_ERROR` yields no cases, and so does one written under an
+unsupported revision; an unfinalized or truncated session yields cases carrying
+that qualification, and the qualification travels ON the case — a scorecard
+names the session, the witness counts and the loss counters it was read under,
+so a result from a truncated, unwitnessed session is never mistaken for one from
+a fully verified run.
+
+**A dataset must describe itself.** `MaterializePairedKnowledge` takes a VALUE,
+so a caller can slice a dataset while keeping the classification that described
+the whole of it — and the classification is what every downstream stage trusts.
+Dropping one of two terminal facts is the sharp case: an attempt that must be
+excluded as `MULTIPLE_TERMINAL_FACTS` becomes an ordinary materializable case,
+and the scorecards drawn from it carry a clean `AS_FINALIZED` provenance
+describing facts the dataset does not contain. So the count of facts the session
+OWNS is compared with `FactsPresent`, and a mismatch yields no cases. It is
+counted over owned facts because a dataset may legitimately carry another
+session's rows, which were never part of that count. A real load always
+satisfies this: the reader refuses rather than truncating, and keeps an
+undecodable payload as a row rather than dropping it.
+
+**A placement fact's status is one fact, not two.** The producer computes a
+placement call's reason code and its error class from ONE error value: a nil
+error yields `OK` beside `NONE`, and a non-nil error yields a rejection beside a
+class naming it. Reading acceptance from the reason alone let a record claim
+both — accepted, and carrying a `TRANSPORT` or `INTERNAL` class — pass every
+attribution check and reach an affirmative settlement while its own facts
+reported the call had failed. The pairing is validated on both placement facts
+before the shape is called coherent.
+
+**A refusal is not a claim that nothing happened.** `NOT_APPLICABLE` asserts
+that the replayed decision reached no placement. `LEGACY_FAILURE`,
+`INDETERMINATE` and `UNSUPPORTED` establish no such thing — they say the model
+could not get far enough to know what the decision would have done. Those three
+yield `UNKNOWN`; only a determined skip, where the model followed the policy to
+an exit, yields `NOT_APPLICABLE`.
+
+**Bounded acquisition.** A load is bounded at four levels — the session row,
+the facts the witness sweep reads, the row count and the bytes — plus a
+preflight count that bounds the work of getting there. Every byte bound is
+enforced before the data it bounds is materialized.
+
+The SESSION ROW is measured first, because it is read first, and — like the
+fact row — **every** column it selects is measured.
+`prediction_observation_sessions` is not `STRICT` either, so its nine
+INTEGER-affinity columns hold arbitrarily large TEXT as readily as its three
+TEXT ones. The `CHECK (col >= 0)` constraints on five of them close nothing:
+SQLite ranks the TEXT storage class above INTEGER, so a TEXT value compared
+against the integer literal 0 with `>=` passes whatever it contains — measured,
+a 250 KB string inserts into such a column and reports `typeof() = "text"`.
+Bounding the facts while scanning this row unguarded would leave the earliest
+allocation of the whole load the only unbounded one (`MaxSessionMetaBytes`,
+64 KiB). One structural test covers every `SELECT`/width pair, so none can
+drift from the columns it is meant to measure.
+
+The WITNESS SWEEP is the read that hid behind the other three.
+`ReadObservationSession` is not only a session-row read: inside the same
+transaction it recomputes the stored witness of a bounded prefix of the
+session's facts, and doing so scans `payload_json` and a dozen identifier
+columns of each row into memory one row at a time. Every other byte bound is
+keyed on the SESSION ID, which the load learns *from that call* — so they all
+applied strictly after those rows had been materialized. Measured on a
+`payload_json` tampered to 4 MiB, four times `MaxRecordBytes`: the sweep
+scanned and hashed it in full, and the load then returned no facts and no
+error, having already paid for it. `MaxRecordBytes` is therefore applied to the
+sweep as well, inside the SAME TRANSACTION, measured over exactly the rows the
+sweep would touch — the same key, the same ordering, the same budget. A bound
+narrower than that leaves rows unmeasured; a wider one refuses loads for rows
+the sweep never reads.
+
+The EPOCH bound is the fourth level and bounds WORK, not bytes. The session
+read classifies by aggregating over the session's facts before recomputing any
+witness, so a store that assigns millions of rows to one epoch spends unbounded
+database CPU and I/O inside that call before any row limit could refuse the
+load. Counting a bounded window of `limit+1` rows first makes the refusal cost
+the size of the answer, and a count that REACHES the window is itself the
+refusal: it was truncated, so it describes a prefix rather than the epoch. An
+earlier version measured the widest row here too; that was both over-broad (it
+covered rows the sweep never reads) and stale (a separate statement leaves a
+window a writer can commit into), and the width now travels with the sweep.
+
+Every byte bound travels IN the statement — or, for the witness sweep, the
+transaction — that reads what it bounds,
+and that co-location is the property rather than an optimization. A width
+measured by an earlier, separate query is a time-of-check/time-of-use gap:
+another connection commits into it, and the read then transfers the enlarged
+value across the driver having never been covered by any bound. The session row
+is read TWICE — once for the classification, once to prove the snapshot did not
+span two committed states — and BOTH readings carry the bound, because an
+unbounded re-read still reports that the store changed, by scanning the row it
+should have refused. Tests observe the bound travelling with each read rather
+than inferring it from the verdict, since the verdict is identical either way.
+
+The epoch COUNT is a preflight rather than a co-located bound, and it is stated
+as one: it bounds work, and a store that adds rows between that count and the
+read is caught by the coherence re-read rather than prevented. No byte bound
+rests on it.
+
+The ORPHAN CHECK is the one scan no caller-side preflight can cover, and it is
+bounded by the SHAPE of its question rather than by a limit. Inside the
+classification, `ReadObservationSession` asks whether any fact matches exactly
+ONE half of the `(epoch, session id)` pair. The epoch count covers the disjunct
+keyed on the epoch; the disjunct keyed on the session id reaches rows under
+OTHER epochs, which that count never saw. Asked as `COUNT(*)` this walks every
+one of them to produce a number the classification does not read — measured at
+500,000 such rows: 5,000,029 VM steps against 24 for the preflight.
+
+Asked as `EXISTS` it stops at the first match, and that bounds both directions
+without weakening anything. Either a row matches, so the scan ends there, or
+none does — which means every row carrying this session id also carries this
+epoch, and the epoch count already refused the load if there were more of those
+than the limit. A `LIMIT N` would have been the wrong instrument for exactly the
+reason a limit is wrong here: "no orphan found within N rows" is not "no
+orphan", and buying a cost bound by weakening an integrity check is not a trade
+this reader makes. The bound is pinned structurally, because a count and a
+presence flag are indistinguishable in the result.
+
+The byte aggregates run over a BOUNDED candidate set of `limit+1` rows, not the
+whole session. Measuring every row first would let a store holding millions of
+small rows spend unbounded database CPU and I/O to produce a number whose only
+use was to refuse the load — a bounded allocation reached by unbounded work.
+`limit+1` keeps a session AT the bound distinguishable from one over it. The row count is capped
+(`DefaultMaxRecords` 20000, ceiling `MaxLoadLimit` 2^20 — a bound large enough
+to overflow the `limit+1` probe is not a bound and is refused), and the
+AGGREGATE width of the session is capped (`MaxSessionPayloadBytes`, 128 MiB)
+alongside the width of any single row (`MaxRecordBytes`, 1 MiB), by
+`COUNT`/`SUM`/`MAX` aggregates the database evaluates without handing any value
+across the driver boundary. The byte bound is not redundant with the row bound:
+`MaxObservationPayloadBytes` is enforced by the WRITER, so it bounds a store
+the writer filled and bounds nothing in a tampered or foreign database file —
+and even where it holds, 20000 facts at 64 KiB is 1.25 GiB. A session over any
+bound is refused, never truncated, because a prefix is indistinguishable from a
+complete dataset to every stage downstream.
+
+Two details of that bound are load-bearing. The measured width is **every**
+column the read materializes — not `payload_json` alone, and not "the
+variable-width ones" either. `prediction_observations` is not a `STRICT` table,
+and outside a `STRICT` table SQLite treats a declared type as an affinity rather
+than a constraint: an INTEGER-affinity column such as `received_at_ms` holds an
+arbitrarily large TEXT or BLOB. Measured directly, a 300 KB value stored there
+reports `typeof() = "text"` and a 300 000-byte width while an expression
+covering only the nominally variable-width columns reports 2. Affinity is
+therefore not consulted at all, and a structural test compares the width
+expression against the `SELECT` list itself, admitting no exemptions and failing
+when either grows a column the other lacks. And
+the bounds are restated INSIDE the reading statement rather than inherited from
+the earlier measurement, because two statements are two snapshots: a value
+enlarged in between would leave the row count unchanged, pass a count re-check,
+and be materialized having never been bounded. The per-row cap exists for what
+an aggregate cannot cover — a read aborted on exceeding a running total has
+already materialized the row that exceeded it. A session the store already
+classified `INTEGRITY_ERROR` is refused before the rows are read at all: it was
+going to yield no cases, so there is nothing to gain by paying for its content.
+
+Neither a `COMPLETE` session nor a verified digest is ever treated as proof that
+an individual decision case is complete: the envelope's own stage states are
+checked against the producer's structural invariants, and a snapshot that breaks
+one is refused rather than read under assumptions that do not hold for it. A
+missing or unusable input makes its stage `UNSUPPORTED` or `INDETERMINATE` —
+never `0`, `false`, `SMART` or "skip" — and a stake the pinned policy's `int`
+arithmetic could not represent or would wrap is reported explicitly instead of
+being silently truncated.
+
+A round is qualified by its capture ORIGIN, not by the presence of a gap cause.
+Both capture columns are nullable and the schema admits `UNKNOWN` and
+`PREFIX_UNOBSERVED_AT_ADMISSION` with no cause, so anything but
+`ACTIVE_AT_ADMISSION` — including an absent origin — reports
+`ROUND_ADMITTED_WITH_INCOMPLETE_CAPTURE` rather than passing as fully captured.
+
+**Attribution, not coincidence.** An affirmative settlement requires the
+recorded placement to be *this* attempt's. Three things are checked and none of
+them alone is enough. The placement facts must have the SHAPE the producer
+writes — exactly one `CALL_STARTED` followed by exactly one `CALL_RETURNED`,
+both carrying the stake and outcome slot the producer puts on both, and both
+carrying the same ones; anything else is `INCOHERENT` and settles nothing,
+because a stake read from one call beside an acceptance read from another is
+not one observed call. Those arguments must be the ones the replay derived. And
+the facts must be stamped by `ProjectSettlementFacts` with the attempt key and
+common-input digest of the case being scored, because a stake and a two-option
+slot are low-cardinality enough that a different attempt on the same round can
+carry the same pair by coincidence — matching arguments are evidence, not
+identity.
+
+A terminal action is also a claim about which stages ran, and the claim is
+checked in full: `WOULD_ATTEMPT_PLACEMENT` requires the choice, base stake,
+filter, stake gate, clamp and minimum stages each to be `EXECUTED`, the health
+gate to be `WITNESSED`, and a final amount to be present. Every stage, not the
+conspicuous ones — omitting the stake gate would leave the risk-gate result that
+determines the final stake uncompared. The required shape is derived from what
+real evaluations produce rather than restated, so the guard and the evaluator
+cannot drift apart. A partially decoded or caller-edited evaluation can carry
+that action with those stages blank, and the per-stage comparisons are then not
+`UNAVAILABLE` — they are **absent**, so the unavailable-evidence guard below
+sees nothing to object to.
+
+No comparison may be UNAVAILABLE either. A comparison that could not be made is
+evidence that is *missing*, and it is not a disagreement — so counting only
+disagreements let a case with an unrecorded field carry an accepted placement to
+an affirmative settlement. An affirmative assessment asserts that the recorded
+settlement describes the replayed decision, and that claim cannot rest on a
+field nobody could check.
+
+Every fact of an attempt must describe ONE admission of the round, on both
+sides of the causal cut. Checking only the input prefix left the half that feeds
+the settlement unguarded: a placement fact carrying this attempt's counter but a
+different `round_incarnation_id` reached the settlement projection and could
+supply the stake and slot for a different admission.
+
+The recorded terminal fact must also NAME its action. The producer writes
+`PLACE` beside `AUTO_DECIDED` and `SKIP` beside `AUTO_SKIPPED` on every terminal
+auto fact it emits, so a blank decision is a record it cannot have written: the
+case is refused as `INCOMPLETE_TERMINAL_RECORD`, and the phase and decision are
+compared unconditionally rather than skipped when absent — a value that produces
+no comparison agrees with every replayed action.
+
+How a round SETTLED is not attributable to an attempt at this producer revision.
+The discriminator that links an attempt's facts is absent from the
+`user_terminal` fact carrying the win/loss verdict and the payout, and a round
+can carry more than one attempt — so joining on the round would credit one
+attempt with another's payout. Resolution, payout and returned stake are
+therefore reported `UNKNOWN` rather than guessed. Making them attributable is a
+producer change, not a reader change.
+
+`WOULD_ATTEMPT_PLACEMENT` is a statement about the policy reaching the placement
+call, not a claim that a bet was placed or accepted. Settlement facts reach
+`Score` only after `Evaluate` has run, and describe the *replayed* decision only
+when the replay independently reproduced the recorded one; otherwise they are
+`UNKNOWN`. Profitability, ROI and bankroll effects are not computed at all.
+
+The module is proven against controlled datasets written through the real store
+and read back through the real reader, and against real decisions driven through
+the real pool. It has **not** been validated against a production observation
+dataset; collection and empirical replay are separate work.
+
 ### Event Types for Series
 
 Reasons tagged on balance-timeline samples (`points.event_type`, display form
