@@ -282,10 +282,10 @@ func TestCommittedOrdinaryResidenceHoldsUnderExternalStrongerDiscovery(t *testin
 		{Streamer: discoveryStreamer("disco", true), Origin: OriginDiscovery},
 	}})
 
-	f.seedWeights(t, time.Now(), map[string]float64{
-		"streamera": 0,
-		"streamerb": 0,
-	})
+	// No seeding: both configured channels start with NO persisted history, which
+	// is what this fixture needs. The ordinary ranking cannot separate them, so
+	// the committed-cohort residence is the only thing that can hold one seat
+	// still. (seedWeights would skip zero-valued entries anyway.)
 
 	const ticks = 6
 	cohorts := make([][]string, 0, ticks)

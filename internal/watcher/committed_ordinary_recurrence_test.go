@@ -710,14 +710,16 @@ func TestCommittedOrdinaryResidenceFairnessBoundAtCapacityTwo(t *testing.T) {
 	}
 
 	first := firstGrantEvaluation(seen, ordinary)
+	for login, at := range first {
+		if at < 0 {
+			t.Fatalf("eligible ordinary channel %q was never served: %v (%v)", login, first, seen)
+		}
+	}
 	third := -1
 	for _, at := range first {
 		if at > third {
 			third = at
 		}
-	}
-	if third < 0 {
-		t.Fatalf("an eligible ordinary channel was never served: %v (%v)", first, seen)
 	}
 	if third != int(fairRotationResidence/step) {
 		t.Fatalf("the third channel was first served at evaluation %d, want the first evaluation past the %v minimum residence: %v",
@@ -1318,5 +1320,62 @@ func TestCommittedOrdinaryResidenceNeverProtectsAnExternalOccupant(t *testing.T)
 	configured := slotOccupant{streamer: w.streamers[0], origin: OriginConfigured, idx: 0}
 	if !w.residentOrdinarySlot(configured, time.Now()) {
 		t.Fatal("the configured seat that holds the committed ordinary service is not resident")
+	}
+}
+
+// TestColdStartParityAdvancesOnlyWhenAlternationDecidedTheVictim pins that
+// displaceParity is spent only by the branch it belongs to.
+//
+// pickDisplaceable advances the parity when coldStartTie says the victim came
+// from the cold-start alternation. That predicate filters on rank, campaign
+// semantics and recency — so once persisted deficit also settles plain ordinary
+// seats, a victim decided by DEFICIT would still be reported as an alternation
+// and would spend a turn no alternation consumed. The drift is not cosmetic: the
+// next genuine cold-start tie would start from the other parity and evict the
+// other channel for no reason.
+func TestColdStartParityAdvancesOnlyWhenAlternationDecidedTheVictim(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		history     map[string]float64
+		wantAdvance bool
+	}{
+		{
+			// Persisted deficit separates the two seats, so branch 4 decides and
+			// the alternation branch is never reached.
+			name:        "deficit decided the victim",
+			history:     map[string]float64{"streamerb": 30},
+			wantAdvance: false,
+		},
+		{
+			// Nothing separates them: equal history, no recency. This is the
+			// genuine cold-start tie the parity exists for.
+			name:        "alternation decided the victim",
+			history:     nil,
+			wantAdvance: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newResidenceFixture(t, 2)
+			w := f.w
+			if tc.history != nil {
+				f.seedWeights(t, time.Now(), tc.history)
+			}
+			src := strongerSource(w)
+			propose(src, Candidate{Streamer: discoveryStreamer("disco", true), Origin: OriginDiscovery})
+
+			before := w.displaceParity
+			w.processWatching(tickCtx(w))
+
+			snap := w.BrokerSnapshot()
+			if !brokerHasChannel(snap, "disco") {
+				t.Fatalf("precondition: the stronger contender did not displace anyone: %v", brokerChannels(snap))
+			}
+			advanced := w.displaceParity != before
+			if advanced != tc.wantAdvance {
+				t.Fatalf("displaceParity advanced = %v, want %v (parity %d -> %d): the parity may only be spent "+
+					"when the cold-start alternation actually chose the victim",
+					advanced, tc.wantAdvance, before, w.displaceParity)
+			}
+		})
 	}
 }

@@ -594,10 +594,13 @@ func slotCampaignPolicyUtility(s slotOccupant) (policy.SemanticUtility, bool) {
 }
 
 // coldStartTie reports whether the chosen victim was decided by the cold-start
-// alternation branch: it has no rotation recency and at least one other
-// eligible configured occupant shares its rank and (zero) recency. Only then is
-// the choice an alternation decision worth advancing; a rank- or recency-decided
-// victim, or a lone eligible occupant, must not perturb the parity.
+// alternation branch: it has no rotation recency and at least one other eligible
+// configured occupant shares its rank, its campaign semantics, its persisted
+// deficit and its (zero) recency. Only then is the choice an alternation
+// decision worth advancing; a victim decided by rank, by campaign semantics, by
+// persisted deficit or by recency — or a lone eligible occupant — must not
+// perturb the parity. Every branch of betterDisplaceVictim above the alternation
+// therefore has a matching filter here.
 func (w *MinuteWatcher) coldStartTie(slots []slotOccupant, victim int) bool {
 	v := slots[victim]
 	if slotUsesCampaignSemantics(v) {
@@ -617,6 +620,13 @@ func (w *MinuteWatcher) coldStartTie(slots []slotOccupant, victim int) bool {
 			continue
 		}
 		if w.compareSlotCampaignSemantics(s, v) != 0 {
+			continue
+		}
+		if w.effectiveDeficitMinutes(s.idx) != w.effectiveDeficitMinutes(v.idx) {
+			// Persisted deficit separates these two, so the deficit branch —
+			// not the alternation — settles the victim. Counting them as tied
+			// would spend a parity turn no alternation consumed, and the next
+			// genuine cold-start tie would start from the other parity.
 			continue
 		}
 		if !w.rotation.lastWatched[s.idx].IsZero() {
