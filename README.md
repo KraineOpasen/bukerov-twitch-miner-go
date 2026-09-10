@@ -780,7 +780,10 @@ other one is held for that same minimum instead of being swapped out on every
 evaluation, and when the stronger channel leaves, the freed slot refills
 immediately. Capacity is counted from the slots a stronger channel really took,
 so a channel that merely *carries* a drop reserves nothing and keeps competing
-for an ordinary slot on accumulated watch time.
+for an ordinary slot on accumulated watch time. A channel that ends its stream
+and starts a new one gives up its own hold on that slot — it cannot extend it,
+and it never extends the other slot's, so restarting a broadcast is not a way to
+keep the same two channels watched.
 Setting a channel to "prefer" is the one preference that only re-ranks fair
 rotation, so it takes effect at the next ordinary reconciliation rather than
 immediately. One channel can never hold both slots. The Overview "Now

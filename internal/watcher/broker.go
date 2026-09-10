@@ -731,7 +731,7 @@ func slotUsesCampaignSemantics(s slotOccupant) bool {
 // seat still inside its minimum residence. Only configured occupants can: an
 // external proposal never joins the ordinary cohort in the first place.
 func (w *MinuteWatcher) residentOrdinarySlot(s slotOccupant, now time.Time) bool {
-	return s.idx >= 0 && w.residentOrdinaryAt(s.streamer.GetUsername(), now)
+	return s.idx >= 0 && w.residentOrdinaryAt(s.streamer.GetUsername(), s.streamer.Stream.GetBroadcastID(), now)
 }
 
 // publishBrokerSnapshot stores the immutable slot allocation for the dashboard,

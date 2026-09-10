@@ -1,8 +1,11 @@
 package watcher
 
 import (
+	"context"
 	"errors"
+	"fmt"
 	"sort"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -300,10 +303,55 @@ func TestCommittedOrdinaryResidenceAnchorIsInertForNonChanges(t *testing.T) {
 	}
 }
 
-// TestCommittedOrdinaryResidenceRestampsOnBroadcastReplacement pins the other
-// half of that rule: the same login on a REPLACED broadcast is not the same
-// committed service, so stale tenure does not carry across it.
-func TestCommittedOrdinaryResidenceRestampsOnBroadcastReplacement(t *testing.T) {
+// TestCommittedOrdinaryResidenceEndsOnlyTheReplacedMembersTerm pins the other
+// half of that rule, and the direction it has to act in.
+//
+// The same login on a REPLACED broadcast is not the same committed service, so
+// its stale tenure does not carry across. But one anchor is COMMON to the whole
+// cohort, so ending that member's term must never be expressed by re-stamping
+// the anchor: that would also renew a partner whose service never stopped, and
+// a channel that starts a new broadcast every few minutes could then hold both
+// ordinary seats for the whole uptime. The replacement therefore expires one
+// member's protection and leaves the anchor — and the partner's term — alone.
+func TestCommittedOrdinaryResidenceEndsOnlyTheReplacedMembersTerm(t *testing.T) {
+	f := newResidenceFixture(t, 4)
+	w := f.w
+	byLogin := streamersByLogin(w.streamers)
+	// streamera stays the most owed channel throughout, so it keeps its seat on
+	// merit even once it stops being protected: the cohort does not change, which
+	// is what makes the anchor assertion below meaningful.
+	f.seedWeights(t, time.Now(), map[string]float64{"streamerb": 0.5, "streamerc": 30, "streamerd": 90})
+
+	w.processWatching(tickCtx(w))
+	requireCohort(t, w, "initial", 2, "streamera", "streamerb")
+	anchor := w.rotation.cohortSince
+	if !w.residentOrdinaryIndex(indexOfLogin(t, w, "streamera"), time.Now()) {
+		t.Fatalf("streamera did not hold a protected seat before its broadcast changed")
+	}
+
+	// Same channel, same seat, a genuinely new broadcast.
+	byLogin["streamera"].Stream.Update("broadcast-streamera-2", "", nil, nil, 1)
+	w.processWatching(tickCtx(w))
+	requireCohort(t, w, "after broadcast replacement", 2, "streamera", "streamerb")
+
+	if !w.rotation.cohortSince.Equal(anchor) {
+		t.Fatalf("one member's broadcast replacement re-stamped the cohort's common anchor: %v -> %v: "+
+			"a replacement must never renew a term, its own or a partner's", anchor, w.rotation.cohortSince)
+	}
+	if w.residentOrdinaryIndex(indexOfLogin(t, w, "streamera"), time.Now()) {
+		t.Fatalf("streamera kept its protected seat across a broadcast replacement: stale tenure must not carry across")
+	}
+	if !w.residentOrdinaryIndex(indexOfLogin(t, w, "streamerb"), time.Now()) {
+		t.Fatalf("streamerb lost its term because its PARTNER replaced a broadcast; its own service never stopped")
+	}
+}
+
+// TestCommittedOrdinaryResidenceCannotBeRenewedByRepeatedBroadcastChanges is the
+// starvation falsifier for the rule above. A member that keeps replacing its
+// broadcast must not be able to hold the cohort's protection open: the moment it
+// stops being the most owed channel it yields its seat to a waiter, exactly like
+// any unprotected occupant.
+func TestCommittedOrdinaryResidenceCannotBeRenewedByRepeatedBroadcastChanges(t *testing.T) {
 	f := newResidenceFixture(t, 4)
 	w := f.w
 	byLogin := streamersByLogin(w.streamers)
@@ -311,15 +359,33 @@ func TestCommittedOrdinaryResidenceRestampsOnBroadcastReplacement(t *testing.T) 
 
 	w.processWatching(tickCtx(w))
 	requireCohort(t, w, "initial", 2, "streamera", "streamerb")
-	anchor := w.rotation.cohortSince
 
-	// Same channel, same seat, a genuinely new broadcast.
-	byLogin["streamera"].Stream.Update("broadcast-streamera-2", "", nil, nil, 1)
-	w.processWatching(tickCtx(w))
-	requireCohort(t, w, "after broadcast replacement", 2, "streamera", "streamerb")
-	if !w.rotation.cohortSince.After(anchor) {
-		t.Fatalf("a broadcast replacement did not invalidate stale tenure: %v -> %v", anchor, w.rotation.cohortSince)
+	// streamerc is now clearly the most owed channel, and the cohort is still
+	// deep inside its 15-minute term — the only thing that can hand streamerc a
+	// seat this early is streamera losing its protection.
+	f.seedWeights(t, time.Now(), map[string]float64{"streamera": 500, "streamerb": 500})
+
+	for i := 0; i < 3; i++ {
+		byLogin["streamera"].Stream.Update(fmt.Sprintf("broadcast-streamera-%d", i+2), "", nil, nil, 1)
+		w.processWatching(tickCtx(w))
+		if containsLogin(cohortLogins(w), "streamerc") {
+			return
+		}
 	}
+	t.Fatalf("streamerc never reached a seat across three broadcast replacements by streamera: cohort=%v: "+
+		"repeatedly replacing a broadcast must not renew residence", cohortLogins(w))
+}
+
+// indexOfLogin resolves a configured login to its current roster index.
+func indexOfLogin(t *testing.T, w *MinuteWatcher, login string) int {
+	t.Helper()
+	for i, s := range w.streamers {
+		if s.GetUsername() == login {
+			return i
+		}
+	}
+	t.Fatalf("login %q is not on the roster", login)
+	return -1
 }
 
 // TestCommittedOrdinaryResidenceDeadlineBoundaries drives R-epsilon, exactly R
@@ -858,11 +924,17 @@ func TestCommittedOrdinaryResidenceKeepsTermWhenABroadcastBecomesKnown(t *testin
 		t.Fatalf("learning the broadcast identity restarted a residence that never lapsed: %v -> %v", anchor, w.rotation.cohortSince)
 	}
 
-	// A real replacement of that now-known broadcast still invalidates the term.
+	// A real replacement of that now-known broadcast still ends that member's
+	// term — which is the only observable proof that the fill-in was RECORDED
+	// rather than discarded.
 	byLogin["streamera"].Stream.Update("broadcast-streamera-2", "", nil, nil, 1)
 	w.processWatching(tickCtx(w))
-	if !w.rotation.cohortSince.After(anchor) {
-		t.Fatalf("a replacement of the known broadcast did not invalidate stale tenure: %v -> %v", anchor, w.rotation.cohortSince)
+	if w.residentOrdinaryIndex(indexOfLogin(t, w, "streamera"), time.Now()) {
+		t.Fatalf("a replacement of the now-known broadcast left stale tenure in place: " +
+			"the filled-in identity was not recorded")
+	}
+	if !w.rotation.cohortSince.Equal(anchor) {
+		t.Fatalf("the replacement re-stamped the common anchor: %v -> %v", anchor, w.rotation.cohortSince)
 	}
 }
 
@@ -1377,5 +1449,139 @@ func TestColdStartParityAdvancesOnlyWhenAlternationDecidedTheVictim(t *testing.T
 					advanced, tc.wantAdvance, before, w.displaceParity)
 			}
 		})
+	}
+}
+
+// armingSource is a candidate source that runs a hook while the tick is inside
+// candidate preparation, and proposes nothing. It exists only to order a test's
+// action against the tick's own progress instead of against wall-clock time.
+type armingSource struct{ arm func() }
+
+func (s *armingSource) SourceName() string { return "arming" }
+
+func (s *armingSource) WatchCandidates(context.Context) []Candidate {
+	s.arm()
+	return nil
+}
+
+// generationEndsBeforeCommit is a generation context that ends inside one tick,
+// in the exact window a Stop can land in: after candidate preparation has been
+// cleared, while arbitration and final-proof reconciliation are running.
+// Reconciliation takes observationMu, which a Stop can cancel underneath, so the
+// allocation can become final on behalf of a generation that is already gone.
+//
+// Cancellation is ordered against the tick's OWN gates rather than a duration:
+// the source arms it from inside candidate preparation, the candidate-preparation
+// gate is then allowed to observe a live generation, and the next observation —
+// the commit gate — sees it cancelled. Nothing between those two gates reads the
+// context, so the ordering is exact with no sleep, goroutine or scheduler
+// assumption.
+type generationEndsBeforeCommit struct {
+	context.Context
+	cancel    context.CancelFunc
+	armed     atomic.Bool
+	observed  atomic.Int32
+	gatesLive int32
+}
+
+func (c *generationEndsBeforeCommit) Err() error {
+	if c.armed.Load() && c.observed.Add(1) > c.gatesLive {
+		c.cancel()
+	}
+	return c.Context.Err()
+}
+
+// TestCommittedOrdinaryResidenceIsNotGrantedByACancelledGeneration pins that a
+// generation that ends before the allocation is final grants no residence and
+// consumes no turn.
+//
+// Committing either one would credit service on behalf of a generation that no
+// longer exists: the next generation would protect seats this one never served,
+// and would rank channels as though they had been watched when no beacon was
+// ever started for them — the tick returns before any send.
+func TestCommittedOrdinaryResidenceIsNotGrantedByACancelledGeneration(t *testing.T) {
+	// A live generation reaching the same point DOES commit. Without this control
+	// the cancelled case could pass on a fixture that never got that far.
+	t.Run("live generation commits the allocation", func(t *testing.T) {
+		f := newResidenceFixture(t, 4)
+		w := f.w
+		f.seedWeights(t, time.Now(), map[string]float64{"streamerb": 0.5, "streamerc": 30, "streamerd": 90})
+		w.AddSource(&armingSource{arm: func() {}})
+
+		w.processWatching(tickCtx(w))
+
+		requireCohort(t, w, "live generation", 2, "streamera", "streamerb")
+		if len(w.rotation.lastWatched) == 0 {
+			t.Fatalf("a live generation committed grants but consumed no turn")
+		}
+	})
+
+	t.Run("generation that ends before the commit grants nothing", func(t *testing.T) {
+		f := newResidenceFixture(t, 4)
+		w := f.w
+		f.seedWeights(t, time.Now(), map[string]float64{"streamerb": 0.5, "streamerc": 30, "streamerd": 90})
+
+		inner, cancel := context.WithCancel(context.Background())
+		t.Cleanup(cancel)
+		// One live observation after arming: the candidate-preparation gate.
+		ctx := &generationEndsBeforeCommit{Context: inner, cancel: cancel, gatesLive: 1}
+		w.AddSource(&armingSource{arm: func() { ctx.armed.Store(true) }})
+
+		w.processWatching(ctx)
+
+		if got := cohortLogins(w); len(got) != 0 {
+			t.Fatalf("a generation that ended before the allocation was final granted residence to %v", got)
+		}
+		if !w.rotation.cohortSince.IsZero() {
+			t.Fatalf("a cancelled generation stamped a residence anchor: %v", w.rotation.cohortSince)
+		}
+		if len(w.rotation.lastWatched) != 0 {
+			t.Fatalf("a cancelled generation consumed a turn for %d channel(s); it started no send for any of them",
+				len(w.rotation.lastWatched))
+		}
+		if snap := w.BrokerSnapshot(); !snap.EvaluatedAt.IsZero() || len(snap.Slots) != 0 {
+			t.Fatalf("a cancelled generation published a broker snapshot: %+v", snap)
+		}
+		if n := ctx.observed.Load(); n < 2 {
+			t.Fatalf("the tick made %d context observation(s) after candidate preparation, want at least 2: "+
+				"the commit gate was never reached, so this case proves nothing", n)
+		}
+	})
+}
+
+// TestCommittedOrdinaryResidenceProtectsASeatCommittedBeforeItsBroadcastWasKnown
+// pins the fill-in from the protection side, where it is decided.
+//
+// A seat committed before its session was identifiable is inside its term like
+// any other. Learning the identity is not a replacement, so the term has to
+// survive the tick that learns it — and the only way to observe that is to make
+// the channel stop being the most owed one, so nothing but residence can keep it
+// in its seat.
+func TestCommittedOrdinaryResidenceProtectsASeatCommittedBeforeItsBroadcastWasKnown(t *testing.T) {
+	f := newResidenceFixture(t, 4)
+	w := f.w
+	unidentified := models.NewStreamer("streamera", models.DefaultStreamerSettings())
+	unidentified.ChannelID = "ch-streamera"
+	unidentified.SetConfirmedOnline()
+	unidentified.OnlineAt = time.Now().Add(-time.Minute)
+	unidentified.SetChannelPointsCapability(models.CapabilityEnabled, models.CapReasonConfirmedContext)
+	roster := append([]*models.Streamer(nil), w.streamers...)
+	roster[0] = unidentified
+	w.applyStreamerList(roster)
+	byLogin := streamersByLogin(w.streamers)
+	f.seedWeights(t, time.Now(), map[string]float64{"streamerb": 0.5, "streamerc": 30, "streamerd": 90})
+
+	w.processWatching(tickCtx(w))
+	requireCohort(t, w, "committed before the broadcast was known", 2, "streamera", "streamerb")
+
+	// streamerc is now the most owed channel by a wide margin: only residence can
+	// keep streamera in its seat through the tick that identifies its broadcast.
+	f.seedWeights(t, time.Now(), map[string]float64{"streamera": 500})
+	byLogin["streamera"].Stream.Update("broadcast-streamera", "", nil, nil, 1)
+	w.processWatching(tickCtx(w))
+
+	requireCohort(t, w, "after the broadcast became known", 2, "streamera", "streamerb")
+	if !w.residentOrdinaryIndex(indexOfLogin(t, w, "streamera"), time.Now()) {
+		t.Fatalf("learning a broadcast identity ended a term that never lapsed")
 	}
 }

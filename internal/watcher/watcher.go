@@ -320,17 +320,25 @@ type rotationState struct {
 	// committedCohort is the single process-local residence owner: the ordinary
 	// watch-slot service that was actually GRANTED, keyed by login (index-free,
 	// like lastConfiguredWatched, so a streamer-list reorder needs no remap) and
-	// valued by the broadcast identity the seat held when it was committed, so a
-	// broadcast replacement invalidates stale tenure while a same-broadcast
-	// refresh does not.
+	// valued by the broadcast identity that member was holding when the term
+	// below was stamped.
 	//
 	// cohortSince is its ONE common anchor and cohortCapacity the residual
 	// ordinary capacity C the cohort was committed against. A real change of
-	// membership, identity or capacity starts a fresh common anchor; a
-	// permutation, a cosmetic reason/campaign relabel, a refresh, a rejected
-	// proposal, a change among unselected candidates, or a stronger occupant
-	// handing off to another stronger occupant does not. An empty cohort
-	// invalidates residence outright — nothing is promised at zero capacity.
+	// MEMBERSHIP or capacity starts a fresh common anchor; a permutation, a
+	// cosmetic reason/campaign relabel, a refresh, a rejected proposal, a change
+	// among unselected candidates, or a stronger occupant handing off to another
+	// stronger occupant does not. An empty cohort invalidates residence
+	// outright — nothing is promised at zero capacity.
+	//
+	// A broadcast REPLACEMENT is deliberately not in the restamp list. One
+	// anchor is common to the whole cohort, so restamping on one member's new
+	// broadcast would also renew the term of a partner whose service never
+	// stopped — a channel that starts a new broadcast every few minutes could
+	// then hold both seats indefinitely and starve the rest of the ranking.
+	// The recorded identity is used the other way instead: it EXPIRES that one
+	// member's protection early (see residentOrdinaryAt) and cannot extend
+	// anyone's.
 	//
 	// It is process-local by design: a restart keeps the persisted fairness
 	// history and deliberately keeps no tenure.
@@ -394,13 +402,24 @@ func (r *rotationState) clearBoostLatch() {
 // Expiry only RE-OPENS ordinary ranking. Nothing switches because the deadline
 // passed; the ranking simply becomes free to choose again, and it keeps the same
 // cohort whenever that cohort is still the most owed.
-func (w *MinuteWatcher) residentOrdinaryAt(login string, now time.Time) bool {
+func (w *MinuteWatcher) residentOrdinaryAt(login, broadcast string, now time.Time) bool {
 	// An invalidated cohort has no anchor, and a login that holds no committed
 	// ordinary seat is not in the map at all — a nil map answers that correctly.
 	if w.rotation.cohortSince.IsZero() {
 		return false
 	}
-	if _, held := w.rotation.committedCohort[login]; !held {
+	granted, held := w.rotation.committedCohort[login]
+	if !held {
+		return false
+	}
+	// The term was granted on a specific broadcast. Replacing it ends the
+	// committed service the term was protecting, so this member drops out of
+	// residence right away and goes back to competing on persisted deficit like
+	// any other candidate. It expires protection and never grants it: the common
+	// anchor is untouched, so a member that keeps starting new broadcasts can
+	// neither renew itself nor extend a partner's term. An identity that is
+	// merely unknown on either side is not a replacement.
+	if granted != "" && broadcast != "" && granted != broadcast {
 		return false
 	}
 	return now.Sub(w.rotation.cohortSince) < fairRotationResidence
@@ -411,7 +430,8 @@ func (w *MinuteWatcher) residentOrdinaryIndex(idx int, now time.Time) bool {
 	if idx < 0 || idx >= len(w.streamers) {
 		return false
 	}
-	return w.residentOrdinaryAt(w.streamers[idx].GetUsername(), now)
+	st := w.streamers[idx]
+	return w.residentOrdinaryAt(st.GetUsername(), st.Stream.GetBroadcastID(), now)
 }
 
 // ordinarySeat reports whether a committed slot was obtained by the ORDINARY
@@ -481,37 +501,45 @@ func (w *MinuteWatcher) commitOrdinaryResidence(slots []slotOccupant, now time.T
 
 	if w.rotation.cohortSince.IsZero() ||
 		capacity != w.rotation.cohortCapacity ||
-		!sameOrdinaryCohort(cohort, w.rotation.committedCohort) {
+		!sameOrdinaryMembers(cohort, w.rotation.committedCohort) {
+		// A real membership or capacity change ends the term the cohort was
+		// serving, so a fresh common anchor is stamped on the identities the new
+		// term is granted on.
 		w.rotation.cohortSince = now
+		w.rotation.committedCohort = cohort
+		w.rotation.cohortCapacity = capacity
+		return
 	}
-	// Storing the new observation is also what UPGRADES a seat that was committed
-	// before its broadcast was known: sameOrdinaryCohort treats "" -> "x" as the
-	// same cohort, and this assignment then records "x", so a later real
-	// replacement of "x" is still measured against a known identity.
-	w.rotation.committedCohort = cohort
+
+	// Same members, same capacity: the term continues, so both the anchor and the
+	// identities it was stamped on stand. Refreshing the recorded identities here
+	// would erase the evidence residentOrdinaryAt needs to expire a member whose
+	// broadcast was replaced. Only a seat committed before its broadcast was known
+	// is filled in — that identifies the session the term already covers rather
+	// than replacing it, so a later real replacement is still measured against a
+	// known identity.
+	for login, broadcast := range cohort {
+		if broadcast != "" && w.rotation.committedCohort[login] == "" {
+			w.rotation.committedCohort[login] = broadcast
+		}
+	}
 	w.rotation.cohortCapacity = capacity
 }
 
-// sameOrdinaryCohort compares two committed cohorts as UNORDERED sets of
-// (login, broadcast identity). Seat ordering and candidate permutation are
-// therefore not changes, while a member swap or a broadcast REPLACEMENT is.
+// sameOrdinaryMembers compares two committed cohorts as UNORDERED sets of
+// logins. Seat ordering and candidate permutation are therefore not changes,
+// while a member swap, an arrival and a departure are.
 //
-// A seat committed before its broadcast identity was known (an empty id, which a
-// cold start and the convergence refresh both produce) and later observed on a
-// real broadcast has not been replaced — the same session merely became
-// identifiable. Treating that fill-in as a change would restart the residence of
-// a channel that never stopped being served, so only a transition FROM a known
-// identity counts.
-func sameOrdinaryCohort(a, b map[string]string) bool {
+// Broadcast identity is deliberately NOT part of this comparison. It decides one
+// member's own residence, not the cohort's term: see residentOrdinaryAt and the
+// committedCohort field comment for why a single common anchor must never be
+// restamped by one member's new broadcast.
+func sameOrdinaryMembers(a, b map[string]string) bool {
 	if len(a) != len(b) {
 		return false
 	}
-	for login, broadcast := range a {
-		prev, held := b[login]
-		if !held {
-			return false
-		}
-		if prev != "" && prev != broadcast {
+	for login := range a {
+		if _, held := b[login]; !held {
 			return false
 		}
 	}
@@ -1154,6 +1182,16 @@ func (w *MinuteWatcher) processWatching(ctx context.Context) {
 	}
 	slots, waiting, provisionalContenders := w.arbitrateWithProvisionalContenders(configuredWatch, extra, now)
 	slots, waiting = w.reconcileProvisionalSlots(slots, waiting, now, provisionalContenders)
+
+	if ctx.Err() != nil {
+		// The generation ended while this tick was arbitrating — reconciliation
+		// waits on observationMu, which Stop can cancel underneath. Granting
+		// residence and a turn here would credit committed service on behalf of a
+		// generation that no longer exists, and the next generation would then
+		// protect and rank against seats this one never actually served. End the
+		// tick instead, like the sibling guards around it.
+		return
+	}
 
 	// The allocation is final from here: this is the first point at which the
 	// committed grants — as opposed to anyone's proposal — are known. Ordinary
