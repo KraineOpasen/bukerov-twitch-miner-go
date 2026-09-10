@@ -1,6 +1,7 @@
 package analytics
 
 import (
+	"context"
 	"strings"
 	"testing"
 
@@ -170,5 +171,91 @@ func TestTheOrphanCheckStopsAtTheFirstMatch(t *testing.T) {
 	facts.HalfPairPresent = true
 	if got := classifyObservationSession(base, facts); got.Reading != ReadingIntegrityError {
 		t.Errorf("a session with an orphaned fact read as %q, want INTEGRITY_ERROR", got.Reading)
+	}
+}
+
+// TestTheOrphanCheckIsServedByIndexSeeksRatherThanATableScan pins the half of
+// the orphan bound that lives in the SCHEMA rather than in the SQL.
+//
+// Review suggested this instrument in answer to a direct question about the
+// weakness of the shape check above, and it is a genuinely better one — for a
+// different property than the one it was offered for. Both claims were
+// measured rather than taken:
+//
+//	EXISTS: SCAN CONSTANT ROW
+//	EXISTS: SCALAR SUBQUERY 1
+//	EXISTS: MULTI-INDEX OR
+//	EXISTS:   SEARCH prediction_observations USING COVERING INDEX idx_predobs_exact_pair (collector_epoch=?)
+//	EXISTS:   SEARCH prediction_observations USING INDEX idx_predobs_session (collector_session_id=?)
+//	COUNT:  MULTI-INDEX OR
+//	COUNT:    SEARCH prediction_observations USING COVERING INDEX idx_predobs_exact_pair (collector_epoch=?)
+//	COUNT:    SEARCH prediction_observations USING INDEX idx_predobs_session (collector_session_id=?)
+//
+// The suggestion came with the claim that swapping EXISTS for COUNT(*) would
+// change the plan's shape and so make this a pin on early termination. It does
+// change the shape — the EXISTS form carries the two scalar-subquery rows — but
+// the ACCESS PATH is identical, so the plan says nothing about stopping at the
+// first match. That property stays pinned by the shape check above, and this
+// test does not claim it.
+//
+// What this test does pin is the other half, which the shape check cannot see:
+// that both branches of the OR are served by index SEEKS. An index dropped or
+// renamed would leave the SQL still saying EXISTS while the database walked the
+// whole table for every load — the bound gone, with every string assertion
+// still passing.
+func TestTheOrphanCheckIsServedByIndexSeeksRatherThanATableScan(t *testing.T) {
+	repo := newTestRepo(t)
+	rows, err := repo.db.QueryContext(context.Background(),
+		"EXPLAIN QUERY PLAN "+observationOrphanExistsQuery,
+		int64(1), "some-session", int64(1), "some-session")
+	if err != nil {
+		t.Fatalf("explain query plan: %v", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var steps []string
+	for rows.Next() {
+		var id, parent, notUsed int64
+		var detail string
+		if err := rows.Scan(&id, &parent, &notUsed, &detail); err != nil {
+			t.Fatalf("scan plan row: %v", err)
+		}
+		steps = append(steps, detail)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate plan: %v", err)
+	}
+	if len(steps) == 0 {
+		t.Fatal("the planner returned no steps, so this check is inspecting nothing")
+	}
+
+	var touches []string
+	for _, step := range steps {
+		if strings.Contains(step, "prediction_observations") {
+			touches = append(touches, step)
+		}
+	}
+	if len(touches) != 2 {
+		t.Fatalf("the plan touches prediction_observations %d times, want 2 — one per branch "+
+			"of the pair. A single access means one branch stopped being asked about:\n  %s",
+			len(touches), strings.Join(steps, "\n  "))
+	}
+	for _, step := range touches {
+		if !strings.HasPrefix(step, "SEARCH ") || !strings.Contains(step, "INDEX") {
+			t.Errorf("the planner reads prediction_observations as %q rather than an indexed "+
+				"SEARCH. A full scan here walks every row of the table on every load, and the "+
+				"SQL would still say EXISTS while it did.\n  %s",
+				step, strings.Join(steps, "\n  "))
+		}
+	}
+
+	// Named, because these two indexes are what make each branch a seek. The
+	// bound is a property of the schema and the query TOGETHER, so a test that
+	// pinned only the query would be pinning half of it.
+	plan := strings.Join(steps, "\n")
+	for _, index := range []string{"idx_predobs_exact_pair", "idx_predobs_session"} {
+		if !strings.Contains(plan, index) {
+			t.Errorf("the plan does not use %s:\n%s", index, plan)
+		}
 	}
 }
