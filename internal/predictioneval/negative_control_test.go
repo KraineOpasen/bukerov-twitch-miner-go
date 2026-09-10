@@ -48,7 +48,12 @@ func ncAgreeingCase() (predictioneval.DecisionCase, predictioneval.Evaluation) {
 		// evaluation from a different build must not be scored together.
 		Model:             predictioneval.CurrentModelProvenance(),
 		CommonInputDigest: "nc-digest",
-		Eligibility:       predictioneval.CaseEligibility{Eligible: true, ExercisesPolicy: true},
+		// A fully captured round. The origin is what says so — it is nullable
+		// in the store, so a blank one is a real state meaning "this build
+		// cannot claim to know the round's history", and it qualifies the
+		// scorecard. A clean fixture has to say which it is.
+		RoundCaptureOrigin: predictioneval.RoundOriginActiveAtAdmission,
+		Eligibility:        predictioneval.CaseEligibility{Eligible: true, ExercisesPolicy: true},
 		Recorded: predictioneval.RecordedResults{
 			ChoiceIndex: 0, ChoiceIndexRecorded: true,
 			ChoiceOutcomeID:      "o1",
@@ -1200,5 +1205,160 @@ func TestAPostDecisionFactFromAnotherAdmissionIsRefused(t *testing.T) {
 	if err != nil || len(ok.Attempts) != 1 {
 		t.Fatalf("a consistent attempt failed to materialize: %v (%d attempts, excluded %+v)",
 			err, len(ok.Attempts), ok.Excluded)
+	}
+}
+
+// TestAnyCaptureOriginButActiveQualifiesTheScorecard closes a completeness
+// predicate that keyed on the wrong field.
+//
+// The limitation was raised only when RoundCaptureGapCause was non-empty. But
+// the schema makes both capture columns nullable and admits UNKNOWN and
+// PREFIX_UNOBSERVED_AT_ADMISSION as origins WITHOUT a gap cause, so a round
+// whose history this build cannot claim to know passed as fully captured —
+// with both capture fields dropped from the scorecard, which is exactly the
+// shape of a case that looks complete.
+func TestAnyCaptureOriginButActiveQualifiesTheScorecard(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		origin  string
+		gap     string
+		qualify bool
+	}{
+		{"a fully captured round", predictioneval.RoundOriginActiveAtAdmission, "", false},
+		{"an unknown origin with no gap cause", "UNKNOWN", "", true},
+		{"a prefix-unobserved origin with no gap cause",
+			"PREFIX_UNOBSERVED_AT_ADMISSION", "", true},
+		{"no origin at all", "", "", true},
+		{"an active origin that still names a gap cause",
+			predictioneval.RoundOriginActiveAtAdmission, "CLOSING", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c, ev := ncAgreeingCase()
+			c.RoundCaptureOrigin = tc.origin
+			c.RoundCaptureGapCause = tc.gap
+
+			sc := predictioneval.Score(c, ev, predictioneval.SettlementFacts{})
+			got := containsString(sc.Limitations, predictioneval.LimitationCaptureGap)
+			if got != tc.qualify {
+				t.Fatalf("origin %q / gap %q produced capture limitation = %v, want %v "+
+					"(limitations %v). Only ACTIVE_AT_ADMISSION means the round's history is "+
+					"known; every other value, and an absent one, has to be reported.",
+					tc.origin, tc.gap, got, tc.qualify, sc.Limitations)
+			}
+		})
+	}
+}
+
+// TestAnEvaluationWhoseStagesContradictItsActionIsRefused closes a hole where
+// skipped stages produced no comparison at all.
+//
+// Score emits each stage's comparison only when that stage is EXECUTED. A
+// partially decoded or caller-edited Evaluation can carry
+// WOULD_ATTEMPT_PLACEMENT with those stages blank, and then the comparisons are
+// not UNAVAILABLE — they are absent. UnavailablePairs stays zero, the
+// unavailable-evidence guard sees nothing, and a matching terminal plus a
+// coherent accepted placement carried the case to APPLIES_TO_REPLAY having
+// checked almost nothing the evaluation claimed to contain.
+func TestAnEvaluationWhoseStagesContradictItsActionIsRefused(t *testing.T) {
+	c, ev := ncAgreeingCase()
+	if ev.Action != predictioneval.ActionWouldAttemptPlacement {
+		t.Fatalf("fixture action = %q, want WOULD_ATTEMPT_PLACEMENT", ev.Action)
+	}
+	slot := ev.Choice.Index
+	stake := int64(ev.Clamp.FinalAmount)
+	facts := ncBoundFacts(c, predictioneval.SettlementFacts{
+		PlacementCallStarted: true, PlacementCallReturned: true, PlacementAccepted: true,
+		PlacementStake: &stake, PlacementSlot: &slot,
+	})
+
+	// The control reaches an affirmative settlement, or the mutations below
+	// prove nothing.
+	if base := predictioneval.Score(c, ev, facts); base.Settlement.Assessment !=
+		predictioneval.SettlementAppliesToReplay {
+		t.Fatalf("control settlement = %q, want APPLIES_TO_REPLAY", base.Settlement.Assessment)
+	}
+
+	for _, tc := range []struct {
+		name  string
+		blank func(*predictioneval.Evaluation)
+	}{
+		{"the choice stage never ran", func(e *predictioneval.Evaluation) {
+			e.Choice.State = predictioneval.StageStateNotReached
+		}},
+		{"the filter stage never ran", func(e *predictioneval.Evaluation) {
+			e.Filter.State = predictioneval.StageStateNotReached
+		}},
+		{"the clamp stage never ran", func(e *predictioneval.Evaluation) {
+			e.Clamp.State = predictioneval.StageStateNotReached
+		}},
+		{"the stage states are blank entirely", func(e *predictioneval.Evaluation) {
+			e.Choice.State, e.Filter.State, e.Clamp.State = "", "", ""
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mut := ev
+			tc.blank(&mut)
+
+			sc := predictioneval.Score(c, mut, facts)
+
+			if !containsString(sc.Limitations,
+				predictioneval.LimitationEvaluationShapeInconsistent) {
+				t.Errorf("scored without the %q limitation: %v",
+					predictioneval.LimitationEvaluationShapeInconsistent, sc.Limitations)
+			}
+			if sc.Settlement.Assessment != predictioneval.SettlementUnknown {
+				t.Fatalf("settlement = %q, want UNKNOWN. An action claiming stages the "+
+					"evaluation does not carry has not been checked, and skipped stages "+
+					"produce no comparison at all rather than an UNAVAILABLE one",
+					sc.Settlement.Assessment)
+			}
+		})
+	}
+}
+
+// TestTheScorecardDoesNotAliasTheCallersSettlementFacts closes an aliasing hole
+// between the validation and the artifact it produced.
+//
+// SettlementFacts carries pointers. Copying the struct into the scorecard kept
+// them, so a caller mutating its own facts after Score returned changed the
+// stored result: the assessment still said APPLIES_TO_REPLAY while the evidence
+// beside it had become evidence that would have failed attribution.
+func TestTheScorecardDoesNotAliasTheCallersSettlementFacts(t *testing.T) {
+	c, ev := ncAgreeingCase()
+	slot := ev.Choice.Index
+	stake := int64(ev.Clamp.FinalAmount)
+	facts := ncBoundFacts(c, predictioneval.SettlementFacts{
+		PlacementCallStarted: true, PlacementCallReturned: true, PlacementAccepted: true,
+		PlacementStake: &stake, PlacementSlot: &slot,
+	})
+
+	sc := predictioneval.Score(c, ev, facts)
+	if sc.Settlement.Assessment != predictioneval.SettlementAppliesToReplay {
+		t.Fatalf("control settlement = %q, want APPLIES_TO_REPLAY", sc.Settlement.Assessment)
+	}
+
+	recordedStake := *sc.Settlement.Facts.PlacementStake
+	recordedSlot := *sc.Settlement.Facts.PlacementSlot
+	recordedAttempt := *sc.Settlement.Facts.Attempt
+
+	// The caller mutates its own facts to evidence that would have been
+	// refused — a different attempt, a different stake, a different slot.
+	*facts.PlacementStake = stake + 12345
+	*facts.PlacementSlot = slot + 7
+	facts.Attempt.AttemptID += 99
+
+	if got := *sc.Settlement.Facts.PlacementStake; got != recordedStake {
+		t.Errorf("the scorecard's placement stake changed from %d to %d after the caller "+
+			"mutated its own facts", recordedStake, got)
+	}
+	if got := *sc.Settlement.Facts.PlacementSlot; got != recordedSlot {
+		t.Errorf("the scorecard's placement slot changed from %d to %d after the caller "+
+			"mutated its own facts", recordedSlot, got)
+	}
+	if got := *sc.Settlement.Facts.Attempt; got != recordedAttempt {
+		t.Errorf("the scorecard's attempt key changed from %+v to %+v after the caller "+
+			"mutated its own facts. The assessment still reflects the validation that ran "+
+			"against the ORIGINAL values, so the artifact would disagree with its own check",
+			recordedAttempt, got)
 	}
 }

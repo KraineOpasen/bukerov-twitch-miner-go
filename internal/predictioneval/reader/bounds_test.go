@@ -6,9 +6,11 @@ import (
 	"context"
 	"errors"
 	"math"
+	"strings"
 	"testing"
 
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/analytics"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/database"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/predictioneval/reader"
 )
 
@@ -374,5 +376,85 @@ func TestTheBoundTravelsWithTheReadNotWithAnEarlierMeasurement(t *testing.T) {
 	}
 	if len(ds.Records) != 3 {
 		t.Fatalf("read %d facts, want 3", len(ds.Records))
+	}
+}
+
+// TestAnOversizedValueInAnIntegerColumnIsCounted closes a bypass created by
+// trusting a column's declared type.
+//
+// prediction_observations is not a STRICT table, and outside a STRICT table
+// SQLite treats a declared type as an AFFINITY, not a constraint: an
+// INTEGER-affinity column such as received_at_ms will hold an arbitrarily
+// large TEXT or BLOB. The width expression used to skip those columns on the
+// stated grounds that "their width is bounded by their type", which measured
+// a 300 KB value as 2 bytes and handed it across the driver before Scan
+// rejected its type — past both the per-row and the session bound.
+//
+// Written against the store directly, because the repository's own writer
+// cannot produce this row: only a tampered or foreign database file can, and
+// that is precisely the input the bound exists for.
+func TestAnOversizedValueInAnIntegerColumnIsCounted(t *testing.T) {
+	ctx := context.Background()
+	repo := observationStore(t)
+
+	f := baseFact(analytics.KindChannelEvent)
+	f.Payload = analytics.ObservationPayload{Phase: "ROUND_UPDATED", RoundState: "ACTIVE"}
+	_, sessionID := seedSession(t, repo, "integer-affinity", []analytics.PredictionObservation{f})
+
+	before, err := repo.ObservationSessionSizeBySession(ctx, sessionID)
+	if err != nil {
+		t.Fatalf("measure: %v", err)
+	}
+
+	// Tamper: put a large TEXT value into an INTEGER-affinity column.
+	db, err := database.Open(observationTestDir)
+	if err != nil {
+		t.Fatalf("open database: %v", err)
+	}
+	fat := strings.Repeat("A", 300_000)
+	if _, err := db.ExecContext(ctx,
+		`UPDATE prediction_observations SET received_at_ms = ? WHERE collector_session_id = ?`,
+		fat, sessionID); err != nil {
+		t.Fatalf("tamper: %v", err)
+	}
+
+	var storedType string
+	if err := db.QueryRowContext(ctx,
+		`SELECT typeof(received_at_ms) FROM prediction_observations WHERE collector_session_id = ?`,
+		sessionID).Scan(&storedType); err != nil {
+		t.Fatalf("typeof: %v", err)
+	}
+	if storedType != "text" {
+		t.Fatalf("the INTEGER-affinity column stored a %q, not a text value; this SQLite build "+
+			"appears to enforce affinity and the scenario under test cannot occur", storedType)
+	}
+
+	after, err := repo.ObservationSessionSizeBySession(ctx, sessionID)
+	if err != nil {
+		t.Fatalf("measure after tamper: %v", err)
+	}
+
+	grew := after.TotalBytes - before.TotalBytes
+	if grew < 250_000 {
+		t.Fatalf("a %d-byte value hidden in an INTEGER-affinity column moved the measured "+
+			"width by only %d bytes (%d -> %d). A column excused from measurement because of "+
+			"its declared type is a place for an oversized value to hide, because this table "+
+			"is not STRICT and the declared type constrains nothing.",
+			len(fat), grew, before.TotalBytes, after.TotalBytes)
+	}
+	if after.WidestRowBytes < 250_000 {
+		t.Fatalf("the widest-row measure was %d for a row carrying a %d-byte value",
+			after.WidestRowBytes, len(fat))
+	}
+
+	// And the bound now actually refuses it, in the statement that reads.
+	rows, within, err := repo.ObservationsBySessionWithinBudget(ctx, sessionID, 10,
+		200_000, reader.MaxSessionPayloadBytes)
+	if err != nil {
+		t.Fatalf("bounded read: %v", err)
+	}
+	if within || len(rows) != 0 {
+		t.Fatalf("within=%v rows=%d; the per-row bound did not refuse a row whose oversized "+
+			"value sits in an INTEGER-affinity column", within, len(rows))
 	}
 }

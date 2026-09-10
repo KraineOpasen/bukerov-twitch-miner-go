@@ -2974,12 +2974,17 @@ and even where it holds, 20000 facts at 64 KiB is 1.25 GiB. A session over any
 bound is refused, never truncated, because a prefix is indistinguishable from a
 complete dataset to every stage downstream.
 
-Two details of that bound are load-bearing. The measured width is every
-VARIABLE-WIDTH column the read materializes, not `payload_json` alone: the row
-carries a dozen further TEXT columns whose length the schema does not
-constrain, so measuring one of them would report a small number for a row that
-is read in full. A structural test compares the width expression against the
-`SELECT` list itself and fails when either grows a column the other lacks. And
+Two details of that bound are load-bearing. The measured width is **every**
+column the read materializes — not `payload_json` alone, and not "the
+variable-width ones" either. `prediction_observations` is not a `STRICT` table,
+and outside a `STRICT` table SQLite treats a declared type as an affinity rather
+than a constraint: an INTEGER-affinity column such as `received_at_ms` holds an
+arbitrarily large TEXT or BLOB. Measured directly, a 300 KB value stored there
+reports `typeof() = "text"` and a 300 000-byte width while an expression
+covering only the nominally variable-width columns reports 2. Affinity is
+therefore not consulted at all, and a structural test compares the width
+expression against the `SELECT` list itself, admitting no exemptions and failing
+when either grows a column the other lacks. And
 the bounds are restated INSIDE the reading statement rather than inherited from
 the earlier measurement, because two statements are two snapshots: a value
 enlarged in between would leave the row count unchanged, pass a count re-check,
@@ -2998,6 +3003,12 @@ never `0`, `false`, `SMART` or "skip" — and a stake the pinned policy's `int`
 arithmetic could not represent or would wrap is reported explicitly instead of
 being silently truncated.
 
+A round is qualified by its capture ORIGIN, not by the presence of a gap cause.
+Both capture columns are nullable and the schema admits `UNKNOWN` and
+`PREFIX_UNOBSERVED_AT_ADMISSION` with no cause, so anything but
+`ACTIVE_AT_ADMISSION` — including an absent origin — reports
+`ROUND_ADMITTED_WITH_INCOMPLETE_CAPTURE` rather than passing as fully captured.
+
 **Attribution, not coincidence.** An affirmative settlement requires the
 recorded placement to be *this* attempt's. Three things are checked and none of
 them alone is enough. The placement facts must have the SHAPE the producer
@@ -3011,6 +3022,13 @@ common-input digest of the case being scored, because a stake and a two-option
 slot are low-cardinality enough that a different attempt on the same round can
 carry the same pair by coincidence — matching arguments are evidence, not
 identity.
+
+A terminal action is also a claim about which stages ran, and the claim is
+checked: `WOULD_ATTEMPT_PLACEMENT` requires the choice, the filter and the clamp
+each to be `EXECUTED`. A partially decoded or caller-edited evaluation can carry
+that action with those stages blank, and the per-stage comparisons are then not
+`UNAVAILABLE` — they are **absent**, so the unavailable-evidence guard below
+sees nothing to object to.
 
 No comparison may be UNAVAILABLE either. A comparison that could not be made is
 evidence that is *missing*, and it is not a disagreement — so counting only

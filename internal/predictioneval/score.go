@@ -71,8 +71,11 @@ const (
 	LimitationNoROIComputed = "ROI_BANKROLL_AND_PROFITABILITY_NOT_COMPUTED"
 	LimitationCaseExcluded  = "CASE_NOT_EVALUABLE"
 	LimitationCaptureGap    = "ROUND_ADMITTED_WITH_INCOMPLETE_CAPTURE"
-	LimitationNoDueFact     = "ATTEMPT_OPENING_FACT_ABSENT_FROM_SLICE"
-	LimitationPolicyNotRun  = "ATTEMPT_EXITED_BEFORE_THE_POLICY_RAN"
+	// LimitationEvaluationShapeInconsistent — the evaluation's terminal action
+	// claims stages it does not carry as EXECUTED.
+	LimitationEvaluationShapeInconsistent = "EVALUATION_SHAPE_INCONSISTENT_WITH_ACTION"
+	LimitationNoDueFact                   = "ATTEMPT_OPENING_FACT_ABSENT_FROM_SLICE"
+	LimitationPolicyNotRun                = "ATTEMPT_EXITED_BEFORE_THE_POLICY_RAN"
 	// LimitationEvaluationCaseMismatch marks a scorecard whose evaluation was
 	// produced from DIFFERENT evidence than the case it is scored against.
 	LimitationEvaluationCaseMismatch = "EVALUATION_DOES_NOT_BELONG_TO_THIS_CASE"
@@ -257,7 +260,7 @@ func Score(c DecisionCase, ev Evaluation, s SettlementFacts) Scorecard {
 	if ev.CommonInputDigest != c.CommonInputDigest {
 		sc.Limitations = appendOnce(sc.Limitations, LimitationEvaluationCaseMismatch)
 		sc.Settlement = SettlementAssessment{
-			Facts: s, ROI: SettlementUnknown, Assessment: SettlementUnknown,
+			Facts: detachSettlementFacts(s), ROI: SettlementUnknown, Assessment: SettlementUnknown,
 		}
 		return sc
 	}
@@ -271,7 +274,7 @@ func Score(c DecisionCase, ev Evaluation, s SettlementFacts) Scorecard {
 	if c.Model != current || ev.Model != current {
 		sc.Limitations = appendOnce(sc.Limitations, LimitationModelProvenanceMismatch)
 		sc.Settlement = SettlementAssessment{
-			Facts: s, ROI: SettlementUnknown, Assessment: SettlementUnknown,
+			Facts: detachSettlementFacts(s), ROI: SettlementUnknown, Assessment: SettlementUnknown,
 		}
 		return sc
 	}
@@ -287,12 +290,34 @@ func Score(c DecisionCase, ev Evaluation, s SettlementFacts) Scorecard {
 	if !c.Eligibility.ExercisesPolicy {
 		sc.Limitations = appendOnce(sc.Limitations, LimitationPolicyNotRun)
 	}
-	if c.RoundCaptureGapCause != "" {
+	// The GAP CAUSE is not the completeness predicate — the ORIGIN is. The
+	// schema admits UNKNOWN and PREFIX_UNOBSERVED_AT_ADMISSION with a NULL gap
+	// cause, so keying the limitation on a non-empty cause let a round whose
+	// history this build cannot claim to know pass as fully captured, with both
+	// capture fields dropped from the scorecard. Anything but
+	// ACTIVE_AT_ADMISSION is qualified, and so is a missing origin.
+	if c.RoundCaptureOrigin != RoundOriginActiveAtAdmission || c.RoundCaptureGapCause != "" {
 		sc.Limitations = appendOnce(sc.Limitations, LimitationCaptureGap)
 	}
 	if !c.SawDueFact {
 		sc.Limitations = appendOnce(sc.Limitations, LimitationNoDueFact)
 	}
+	// An action is a claim about which stages ran. WOULD_ATTEMPT_PLACEMENT says
+	// the policy went all the way through, so the choice, the filter and the
+	// clamp must each be EXECUTED. A partially decoded or caller-edited
+	// evaluation can carry that action with those stages empty or NOT_REACHED,
+	// and the per-stage `if ... == StageStateExecuted` guards below then emit
+	// NO comparison at all for them — not an UNAVAILABLE one. UnavailablePairs
+	// therefore stays zero, and a scorecard could report APPLIES_TO_REPLAY
+	// having checked almost nothing the evaluation purported to contain.
+	if ev.Action == ActionWouldAttemptPlacement && !stagesMatchAction(ev) {
+		sc.Limitations = appendOnce(sc.Limitations, LimitationEvaluationShapeInconsistent)
+		sc.Settlement = SettlementAssessment{
+			Facts: detachSettlementFacts(s), ROI: SettlementUnknown, Assessment: SettlementUnknown,
+		}
+		return sc
+	}
+
 	// The refusal is placed AFTER the remaining limitations are recorded and
 	// BEFORE any comparison is emitted. An unevaluable case is still worth
 	// describing — a capture gap and a missing AUTO_DUE are why an operator
@@ -300,7 +325,7 @@ func Score(c DecisionCase, ev Evaluation, s SettlementFacts) Scorecard {
 	// settlement may be affirmed on comparisons that were never made.
 	if !c.Eligibility.Eligible {
 		sc.Settlement = SettlementAssessment{
-			Facts: s, ROI: SettlementUnknown, Assessment: SettlementUnknown,
+			Facts: detachSettlementFacts(s), ROI: SettlementUnknown, Assessment: SettlementUnknown,
 		}
 		return sc
 	}
@@ -543,7 +568,9 @@ func ProjectSettlementFacts(a AttemptKnowledge) SettlementFacts {
 // assessSettlement decides what the recorded settlement says about the
 // REPLAYED decision — which is not the same question as what happened.
 func assessSettlement(sc Scorecard, ev Evaluation, conditioned bool, s SettlementFacts) SettlementAssessment {
-	out := SettlementAssessment{Facts: s, ROI: SettlementUnknown, Assessment: SettlementUnknown}
+	out := SettlementAssessment{
+		Facts: detachSettlementFacts(s), ROI: SettlementUnknown, Assessment: SettlementUnknown,
+	}
 	switch {
 	case sc.IndependentDisagree > 0 || sc.ConditionedDisagree > 0:
 		// The replay did not reproduce the recorded decision, so the recorded
@@ -741,4 +768,55 @@ func boolText(v bool, yes, no string) string {
 		return yes
 	}
 	return no
+}
+
+// RoundOriginActiveAtAdmission is the one capture origin that means the round's
+// history is fully known. Every other value, and an absent one, qualifies the
+// case rather than passing as complete.
+const RoundOriginActiveAtAdmission = "ACTIVE_AT_ADMISSION"
+
+// stagesMatchAction reports whether the evaluation carries the stages its own
+// terminal action claims to have run.
+//
+// It is not a redundant check on this package's own evaluator, which cannot
+// produce a mismatch. It is a check on the VALUE Score was handed: Evaluation
+// is an exported struct a caller can build, serialize, partially decode or
+// edit, and Score's other guards (digest, provenance) all pass for a value that
+// is internally inconsistent in this particular way.
+func stagesMatchAction(ev Evaluation) bool {
+	return ev.Choice.State == StageStateExecuted &&
+		ev.Filter.State == StageStateExecuted &&
+		ev.Clamp.State == StageStateExecuted
+}
+
+// detachSettlementFacts deep-copies the reference fields of the settlement
+// facts before they are retained in a scorecard.
+//
+// Without it the scorecard shares the caller's pointers: mutating
+// *Attempt, *PlacementStake or *PlacementSlot after Score returned would change
+// the stored artifact while its assessment still reflected the validation that
+// ran against the ORIGINAL values — a machine-readable result that disagrees
+// with the check that produced it.
+func detachSettlementFacts(s SettlementFacts) SettlementFacts {
+	if s.Attempt != nil {
+		key := *s.Attempt
+		s.Attempt = &key
+	}
+	if s.PlacementStake != nil {
+		stake := *s.PlacementStake
+		s.PlacementStake = &stake
+	}
+	if s.PlacementSlot != nil {
+		slot := *s.PlacementSlot
+		s.PlacementSlot = &slot
+	}
+	if s.Payout != nil {
+		payout := *s.Payout
+		s.Payout = &payout
+	}
+	if s.ReturnedStake != nil {
+		returned := *s.ReturnedStake
+		s.ReturnedStake = &returned
+	}
+	return s
 }

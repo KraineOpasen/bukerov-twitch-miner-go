@@ -12,38 +12,63 @@ import "context"
 // from elsewhere. A reader that trusts the writer's ceiling has no ceiling at
 // all against exactly the input it is most important to bound.
 
-// observationRowWidthBytes is the byte width of every VARIABLE-WIDTH column a
-// read of observationSelectColumns materializes.
+// observationRowWidthBytes is the ACTUAL stored byte width of every column a
+// read of observationSelectColumns materializes. Every column, without
+// exception — the choice of which to measure is not a judgement call.
 //
-// payload_json alone is not the bound. The row also carries a dozen TEXT
-// columns, and the schema constrains the length of NONE of them: a store that
-// kept payload_json small while putting a very large value in, say,
-// pool_instance_id or source_fingerprint would measure as tiny and still be
-// scanned into Go strings in full. The integer, REAL and fixed-vocabulary
-// columns are omitted because their width is bounded by their type.
+// payload_json alone is not the bound: the row carries a dozen further TEXT
+// columns whose length the schema does not constrain. Neither is "the
+// variable-width ones", which is where an earlier version of this expression
+// stopped, on the reasoning that integer and REAL columns are bounded by their
+// declared type. That reasoning is FALSE here, and measurably so.
+//
+// prediction_observations is not a STRICT table, and outside a STRICT table
+// SQLite treats a column's declared type as an affinity, not a constraint: an
+// INTEGER-affinity column will hold an arbitrarily large TEXT or BLOB. Measured
+// directly against modernc.org/sqlite, a 300 KB string stored in an
+// INTEGER-affinity column yields typeof() = "text" and a stored width of
+// 300,000 bytes, while an expression covering only the "variable-width" columns
+// reports 2. The guarded SELECT would then hand that value across the driver
+// before Scan rejected its type — past both the per-row and the session bound.
+//
+// So affinity is not consulted at all. Every selected column is measured by its
+// real stored length, and the structural test in this package fails if the
+// SELECT list and this expression ever disagree about which columns exist.
 //
 // LENGTH is applied to each value CAST to BLOB because LENGTH on TEXT counts
-// CHARACTERS. A value of multi-byte runes would otherwise measure smaller than
-// the memory it occupies, and a bound computed from it would be an
-// underestimate in precisely the case that matters.
+// CHARACTERS: a value of multi-byte runes would otherwise measure smaller than
+// the memory it occupies. COALESCE covers NULL columns, since LENGTH(NULL) is
+// NULL and one NULL would poison the whole SUM.
 const observationRowWidthBytes = `(
-	LENGTH(CAST(observation_id AS BLOB)) +
-	LENGTH(CAST(collector_session_id AS BLOB)) +
-	LENGTH(CAST(pool_instance_id AS BLOB)) +
-	LENGTH(CAST(COALESCE(round_incarnation_id, '') AS BLOB)) +
-	LENGTH(CAST(COALESCE(round_capture_origin, '') AS BLOB)) +
-	LENGTH(CAST(COALESCE(round_capture_gap_cause, '') AS BLOB)) +
-	LENGTH(CAST(COALESCE(routed_channel_id, '') AS BLOB)) +
-	LENGTH(CAST(COALESCE(round_owner_channel_id, '') AS BLOB)) +
-	LENGTH(CAST(COALESCE(retention_group_owner_channel_id, '') AS BLOB)) +
-	LENGTH(CAST(COALESCE(event_id, '') AS BLOB)) +
-	LENGTH(CAST(kind AS BLOB)) +
-	LENGTH(CAST(COALESCE(source_topic_type, '') AS BLOB)) +
-	LENGTH(CAST(COALESCE(source_message_type, '') AS BLOB)) +
-	LENGTH(CAST(COALESCE(source_fingerprint, '') AS BLOB)) +
-	LENGTH(CAST(producer_time_source AS BLOB)) +
-	LENGTH(CAST(payload_json AS BLOB)) +
-	LENGTH(CAST(observation_sha256 AS BLOB))
+	COALESCE(LENGTH(CAST(id AS BLOB)), 0) +
+	COALESCE(LENGTH(CAST(observation_id AS BLOB)), 0) +
+	COALESCE(LENGTH(CAST(collector_session_id AS BLOB)), 0) +
+	COALESCE(LENGTH(CAST(collector_epoch AS BLOB)), 0) +
+	COALESCE(LENGTH(CAST(collector_sequence AS BLOB)), 0) +
+	COALESCE(LENGTH(CAST(pool_instance_id AS BLOB)), 0) +
+	COALESCE(LENGTH(CAST(round_incarnation_id AS BLOB)), 0) +
+	COALESCE(LENGTH(CAST(round_capture_origin AS BLOB)), 0) +
+	COALESCE(LENGTH(CAST(round_capture_gap_cause AS BLOB)), 0) +
+	COALESCE(LENGTH(CAST(routed_streamer_id AS BLOB)), 0) +
+	COALESCE(LENGTH(CAST(routed_channel_id AS BLOB)), 0) +
+	COALESCE(LENGTH(CAST(round_owner_streamer_id AS BLOB)), 0) +
+	COALESCE(LENGTH(CAST(round_owner_channel_id AS BLOB)), 0) +
+	COALESCE(LENGTH(CAST(retention_group_owner_streamer_id AS BLOB)), 0) +
+	COALESCE(LENGTH(CAST(retention_group_owner_channel_id AS BLOB)), 0) +
+	COALESCE(LENGTH(CAST(event_id AS BLOB)), 0) +
+	COALESCE(LENGTH(CAST(kind AS BLOB)), 0) +
+	COALESCE(LENGTH(CAST(source_topic_type AS BLOB)), 0) +
+	COALESCE(LENGTH(CAST(source_message_type AS BLOB)), 0) +
+	COALESCE(LENGTH(CAST(source_fingerprint AS BLOB)), 0) +
+	COALESCE(LENGTH(CAST(producer_at_ms AS BLOB)), 0) +
+	COALESCE(LENGTH(CAST(producer_time_source AS BLOB)), 0) +
+	COALESCE(LENGTH(CAST(received_at_ms AS BLOB)), 0) +
+	COALESCE(LENGTH(CAST(connection_index AS BLOB)), 0) +
+	COALESCE(LENGTH(CAST(connection_generation AS BLOB)), 0) +
+	COALESCE(LENGTH(CAST(connection_sequence AS BLOB)), 0) +
+	COALESCE(LENGTH(CAST(payload_version AS BLOB)), 0) +
+	COALESCE(LENGTH(CAST(payload_json AS BLOB)), 0) +
+	COALESCE(LENGTH(CAST(observation_sha256 AS BLOB)), 0)
 )`
 
 // ObservationSessionSize is the measured cost of loading one session's facts,

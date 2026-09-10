@@ -7,39 +7,22 @@ import (
 	"testing"
 )
 
-// TestTheWidthExpressionCoversEveryVariableWidthColumnTheReadSelects is the
-// anti-drift check behind the replay reader's byte budget.
+// TestTheWidthExpressionCoversEveryColumnTheReadSelects is the anti-drift check
+// behind the replay reader's byte budget.
 //
-// The budget is only a bound on memory if it measures what the read actually
-// materializes. Sampling a few columns in a behavioural test cannot establish
-// that: it passes while any unnamed column stays unmeasured, and an unmeasured
-// TEXT column is exactly where an oversized value hides. So this compares the
-// two constants STRUCTURALLY — every column observationSelectColumns reads must
-// appear in observationRowWidthBytes, or be listed here as fixed-width with a
-// reason.
+// The budget bounds memory only if it measures what the read materializes.
+// Sampling a few columns behaviourally cannot establish that: it passes while
+// any unnamed column stays unmeasured. So the two constants are compared
+// STRUCTURALLY, and the comparison admits no exemptions.
 //
-// It also fails when a column is added to the SELECT and to neither list, which
-// is the drift that matters: the schema constrains the length of none of these
-// TEXT columns, so a new one is a new hiding place by default.
-func TestTheWidthExpressionCoversEveryVariableWidthColumnTheReadSelects(t *testing.T) {
-	// Columns whose width is bounded by their TYPE, not by any constraint:
-	// integers and the REAL columns. Listing them explicitly is what makes the
-	// absence of every other column an error rather than an oversight.
-	fixedWidth := map[string]bool{
-		"id":                                true,
-		"collector_epoch":                   true,
-		"collector_sequence":                true,
-		"routed_streamer_id":                true,
-		"round_owner_streamer_id":           true,
-		"retention_group_owner_streamer_id": true,
-		"producer_at_ms":                    true,
-		"received_at_ms":                    true,
-		"connection_index":                  true,
-		"connection_generation":             true,
-		"connection_sequence":               true,
-		"payload_version":                   true,
-	}
-
+// It used to allow a fixedWidth list — integer and REAL columns excused on the
+// grounds that their declared type bounds them. It does not any more, because
+// that reasoning was false: prediction_observations is not STRICT, so an
+// INTEGER-affinity column holds arbitrarily large TEXT or BLOB, and a column
+// excused from measurement is a place for an oversized value to hide. Removing
+// the exemption is also what makes this test simple to keep honest — there is
+// no judgement left in it.
+func TestTheWidthExpressionCoversEveryColumnTheReadSelects(t *testing.T) {
 	// The column names the read selects, taken from the SELECT list itself
 	// rather than restated: a restated list is one more thing that can drift.
 	ident := regexp.MustCompile(`[a-z][a-z0-9_]*`)
@@ -52,23 +35,20 @@ func TestTheWidthExpressionCoversEveryVariableWidthColumnTheReadSelects(t *testi
 		// Each entry is a bare column or COALESCE(column, default); the first
 		// identifier that is not a SQL keyword is the column.
 		for _, tok := range ident.FindAllString(part, -1) {
-			if tok == "coalesce" || tok == "COALESCE" {
+			if strings.EqualFold(tok, "coalesce") {
 				continue
 			}
 			selected[tok] = true
 			break
 		}
 	}
-	if len(selected) < 20 {
+	if len(selected) < 25 {
 		t.Fatalf("parsed only %d columns out of the select list, so this check is not "+
 			"actually inspecting it: %v", len(selected), selected)
 	}
 
 	var unmeasured []string
 	for col := range selected {
-		if fixedWidth[col] {
-			continue
-		}
 		if !strings.Contains(observationRowWidthBytes, col) {
 			unmeasured = append(unmeasured, col)
 		}
@@ -76,17 +56,16 @@ func TestTheWidthExpressionCoversEveryVariableWidthColumnTheReadSelects(t *testi
 	sort.Strings(unmeasured)
 	if len(unmeasured) > 0 {
 		t.Errorf("the read materializes %v, and the width expression does not measure them.\n"+
-			"The schema constrains the length of none of these columns, so an unmeasured one "+
-			"lets an oversized value pass a byte budget that reports a small number. Add each "+
-			"to observationRowWidthBytes, or to fixedWidth here if its width is bounded by its "+
-			"type.", unmeasured)
+			"This table is not STRICT, so a column's declared type bounds nothing: an "+
+			"INTEGER-affinity column holds arbitrarily large TEXT or BLOB. Every selected "+
+			"column must be measured — there is no type that earns an exemption.", unmeasured)
 	}
 
 	// And the reverse: the width expression must not measure a column the read
 	// does not select, or the budget refuses loads on bytes nobody pays for.
 	var phantom []string
 	for _, tok := range ident.FindAllString(observationRowWidthBytes, -1) {
-		switch tok {
+		switch strings.ToLower(tok) {
 		case "length", "cast", "as", "blob", "coalesce":
 			continue
 		}
