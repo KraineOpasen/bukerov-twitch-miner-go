@@ -2279,18 +2279,56 @@ func (r *SQLiteRepository) ObservationsByFingerprint(ctx context.Context, finger
 // ONE transaction, so the count can never belong to a different committed
 // state than the row it qualifies.
 func (r *SQLiteRepository) ReadObservationSession(ctx context.Context, epoch int64) (ObservationSessionReading, bool, error) {
+	out, found, _, err := r.readObservationSession(ctx, epoch, 0)
+	return out, found, err
+}
+
+// readObservationSession is the body both entry points share.
+//
+// maxRowBytes of 0 means no width predicate at all, which is what
+// ReadObservationSession has always done and continues to do byte for byte.
+// A positive value adds the predicate to the SELECT that materializes the row,
+// so an oversized session row produces no row rather than an oversized scan —
+// and it does so in the SAME statement, which is the only place a width bound
+// on this read can be enforced without a window another connection can commit
+// into.
+func (r *SQLiteRepository) readObservationSession(
+	ctx context.Context, epoch int64, maxRowBytes int64,
+) (reading ObservationSessionReading, found, withinBudget bool, err error) {
 	var out ObservationSessionReading
-	var found bool
-	err := r.db.WithTx(ctx, func(tx *sql.Tx) error {
+	withinBudget = true
+	where := `WHERE collector_epoch = ?`
+	args := []interface{}{epoch}
+	if maxRowBytes > 0 {
+		where += ` AND ` + observationSessionRowWidthBytes + ` <= ?`
+		args = append(args, maxRowBytes)
+	}
+	err = r.db.WithTx(ctx, func(tx *sql.Tx) error {
 		var s ObservationSessionRecord
 		var closedAt, lastSeq sql.NullInt64
 		e := tx.QueryRowContext(ctx, `SELECT `+observationSessionSelectColumns+`
-			  FROM prediction_observation_sessions WHERE collector_epoch = ?`, epoch).
+			  FROM prediction_observation_sessions `+where, args...).
 			Scan(&s.CollectorEpoch, &s.CollectorSessionID, &s.ProducerRevision, &s.StartedAtMS,
 				&closedAt, &s.CloseState, &lastSeq, &s.CommittedCount,
 				&s.DroppedCount, &s.UnsettledObligationCount, &s.PostFenceProducerCount,
 				&s.ProducerShutdownUncertainCount)
 		if e == sql.ErrNoRows {
+			// With a width predicate in play, no row means one of two things
+			// and the caller has to be able to tell them apart: the epoch has
+			// no session, or it has one this read refused to materialize. The
+			// EXISTS below asks the second question without selecting a single
+			// column of the row it is asking about.
+			if maxRowBytes > 0 {
+				var exists int64
+				if x := tx.QueryRowContext(ctx, `
+					SELECT EXISTS(SELECT 1 FROM prediction_observation_sessions
+					              WHERE collector_epoch = ?)`, epoch).Scan(&exists); x != nil {
+					return x
+				}
+				if exists != 0 {
+					withinBudget = false
+				}
+			}
 			return nil
 		}
 		if e != nil {
@@ -2349,7 +2387,30 @@ func (r *SQLiteRepository) ReadObservationSession(ctx context.Context, epoch int
 		}
 		return nil
 	})
-	return out, found, err
+	if err != nil {
+		return ObservationSessionReading{}, false, false, err
+	}
+	return out, found, withinBudget, nil
+}
+
+// ReadObservationSessionWithinBudget reads one session ONLY if its row fits
+// maxRowBytes, with the bound evaluated in the same statement that selects and
+// scans the row.
+//
+// That co-location is the point. A width measured by an earlier, separate
+// query is a time-of-check/time-of-use gap: another connection can enlarge a
+// column in between, and the read then transfers the enlarged value across the
+// driver having never been covered by any bound. A coherence re-read afterwards
+// detects that the session changed; it cannot un-allocate what was already
+// scanned.
+//
+// withinBudget is false — with found false and a zero reading — when the epoch
+// HAS a session row and that row is wider than the bound. A caller that gets
+// found false and withinBudget true is looking at an epoch with no session.
+func (r *SQLiteRepository) ReadObservationSessionWithinBudget(
+	ctx context.Context, epoch int64, maxRowBytes int64,
+) (ObservationSessionReading, bool, bool, error) {
+	return r.readObservationSession(ctx, epoch, maxRowBytes)
 }
 
 // observationWitnessBudget bounds how many stored digests one reading

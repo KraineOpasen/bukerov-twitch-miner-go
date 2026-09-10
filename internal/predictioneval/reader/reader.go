@@ -85,12 +85,21 @@ const (
 	// the whole load the only unbounded one. 64 KiB is orders of magnitude
 	// above a session id plus a revision string and the counters beside them.
 	//
+	// It is applied as a predicate IN the reading statement, on BOTH readings
+	// of that row — the classification and the coherence re-read. An unbounded
+	// re-read would still report that the store changed, by scanning the row it
+	// should have refused, which is the right verdict reached in the wrong
+	// order.
+	//
 	// MaxRecordBytes above bounds a fact row, and it is applied TWICE for two
 	// different reads: once keyed on the epoch, before ReadObservationSession
 	// recomputes stored witnesses over a prefix of the session's facts, and
 	// once inside the statement that reads the facts themselves. The first is
 	// not redundant — the witness sweep runs before this function holds a
-	// session id, so nothing keyed on the session could reach it.
+	// session id, so nothing keyed on the session could reach it — and it is
+	// the one bound here that is a separate statement from the read it guards,
+	// because ReadObservationSession is code this package consumes rather than
+	// modifies.
 	MaxSessionMetaBytes = 64 << 10
 )
 
@@ -131,16 +140,23 @@ var (
 //
 // *analytics.SQLiteRepository satisfies it.
 type ObservationSource interface {
-	ReadObservationSession(ctx context.Context, epoch int64) (analytics.ObservationSessionReading, bool, error)
+	// ReadObservationSessionWithinBudget reads the session row ONLY if it
+	// fits the given width, with the bound evaluated in the SAME statement
+	// that selects and scans the row.
+	//
+	// A width measured by an earlier, separate query would be a
+	// time-of-check/time-of-use gap: another connection can enlarge a column
+	// between the measurement and the read, and the read then transfers the
+	// enlarged value across the driver having never been covered by any
+	// bound. The coherence re-read below detects that the session changed; it
+	// cannot un-allocate what was already scanned.
+	ReadObservationSessionWithinBudget(ctx context.Context, epoch int64,
+		maxRowBytes int64) (analytics.ObservationSessionReading, bool, bool, error)
 	// ObservationSessionSizeBySession measures what a load would cost without
 	// paying it. It is part of the read surface rather than an optimization:
 	// a byte bound cannot be enforced after the rows are in memory.
 	ObservationSessionSizeBySession(ctx context.Context, sessionID string,
 		candidateRows int) (analytics.ObservationSessionSize, error)
-	// ObservationSessionMetaWidthBytes measures the session row before it is
-	// read, because that read is the first allocation of the load and the
-	// sessions table constrains no column's length either.
-	ObservationSessionMetaWidthBytes(ctx context.Context, epoch int64) (int64, error)
 	// ObservationEpochRowBounds measures the FACT rows an epoch holds, also
 	// before ReadObservationSession runs. That call verifies stored witnesses
 	// over a prefix of the session's facts, scanning each row's payload and
@@ -176,28 +192,6 @@ func LoadSession(ctx context.Context, src ObservationSource, epoch int64, limit 
 		return predictioneval.SourceDataset{}, ErrLimitOutOfRange
 	}
 
-	// Measure the session row BEFORE reading it. ReadObservationSession scans
-	// every column of that row into Go values, and it runs before any bound
-	// keyed on the session id can apply — so without this, the earliest
-	// allocation of the whole load is the one nothing bounds.
-	//
-	// This bound and the epoch bound below are separate STATEMENTS from the
-	// read they guard, which the bound on the facts themselves is deliberately
-	// not. The difference is not an oversight and is worth stating: the fact
-	// read belongs to this change and could carry its guard in the same
-	// statement, while ReadObservationSession is production code this change
-	// does not modify. So these two are decisive against a static tampered or
-	// foreign file — the input they exist for — and advisory against a writer
-	// enlarging a value concurrently, which the coherence re-read below
-	// detects afterwards rather than prevents.
-	metaWidth, err := src.ObservationSessionMetaWidthBytes(ctx, epoch)
-	if err != nil {
-		return predictioneval.SourceDataset{}, err
-	}
-	if metaWidth > MaxSessionMetaBytes {
-		return predictioneval.SourceDataset{}, ErrSessionMetaTooLarge
-	}
-
 	// And measure the FACT rows the epoch holds, also before
 	// ReadObservationSession runs. That call is not only a session-row read:
 	// inside its transaction it recomputes the stored witness of a bounded
@@ -226,9 +220,18 @@ func LoadSession(ctx context.Context, src ObservationSource, epoch int64, limit 
 		return predictioneval.SourceDataset{}, ErrRecordTooLarge
 	}
 
-	before, found, err := src.ReadObservationSession(ctx, epoch)
+	// Read the session row under a width bound carried IN the reading
+	// statement. The session row is the first thing the load materializes and
+	// prediction_observation_sessions constrains no column's length, so
+	// without the bound the earliest allocation of the whole load is the one
+	// nothing covers — and without the co-location, the bound is a measurement
+	// another connection can commit past before the read runs.
+	before, found, within, err := src.ReadObservationSessionWithinBudget(ctx, epoch, MaxSessionMetaBytes)
 	if err != nil {
 		return predictioneval.SourceDataset{}, err
+	}
+	if !within {
+		return predictioneval.SourceDataset{}, ErrSessionMetaTooLarge
 	}
 	if !found {
 		return predictioneval.SourceDataset{}, ErrSessionNotFound
@@ -298,9 +301,16 @@ func LoadSession(ctx context.Context, src ObservationSource, epoch int64, limit 
 		return predictioneval.SourceDataset{}, ErrLimitExceeded
 	}
 
-	after, found, err := src.ReadObservationSession(ctx, epoch)
+	after, found, within, err := src.ReadObservationSessionWithinBudget(ctx, epoch, MaxSessionMetaBytes)
 	if err != nil {
 		return predictioneval.SourceDataset{}, err
+	}
+	if !within {
+		// The session row grew past the bound during the load. That is the
+		// store changing underneath the snapshot, and the bound in the reading
+		// statement is what kept the enlarged row from being scanned to find
+		// it out.
+		return predictioneval.SourceDataset{}, ErrSnapshotIncoherent
 	}
 	if !found || after != before {
 		return predictioneval.SourceDataset{}, ErrSnapshotIncoherent

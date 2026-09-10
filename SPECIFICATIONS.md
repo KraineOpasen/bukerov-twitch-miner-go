@@ -2995,14 +2995,32 @@ its widest-row figure would bound the load by rows nobody measured. The bounded
 window and that refusal are one mechanism — unbounded work without the window,
 an unsound bound without the refusal.
 
-Two of these four bounds are separate STATEMENTS from the read they guard,
-which the bound on the facts themselves deliberately is not, and the difference
-is stated rather than glossed. The fact read carries its guard in the same
-statement because it belongs to this module; the session-row and epoch bounds
-guard `ReadObservationSession`, production code the replay does not modify. They
-are therefore decisive against a static tampered or foreign file — the input
-they exist for — and advisory against a writer enlarging a value concurrently,
-which the coherence re-read detects afterwards rather than prevents.
+Three of these four bounds travel IN the statement that reads what they bound,
+and that co-location is the property rather than an optimization. A width
+measured by an earlier, separate query is a time-of-check/time-of-use gap:
+another connection commits into it, and the read then transfers the enlarged
+value across the driver having never been covered by any bound. The session row
+is read TWICE — once for the classification, once to prove the snapshot did not
+span two committed states — and BOTH readings carry the bound, because an
+unbounded re-read still reports that the store changed, by scanning the row it
+should have refused. Tests observe the bound travelling with each read rather
+than inferring it from the verdict, since the verdict is identical either way.
+
+The EPOCH bound is the exception and is stated as one: it is a probe taken
+before `ReadObservationSession`, which is code the replay consumes rather than
+modifies, so it is decisive against a static tampered or foreign file — the
+input it exists for — and advisory against a writer enlarging a fact row
+concurrently.
+
+One residue is recorded rather than closed. Inside the classification,
+`ReadObservationSession` also counts facts that match exactly ONE half of the
+`(epoch, session id)` pair. The epoch bound covers the disjunct keyed on the
+epoch; the disjunct keyed on the session id can scan rows the epoch bound never
+saw. It is a `COUNT` — O(1) memory, no value crossing the driver — so what is
+unbounded there is WORK, not allocation, and bounding it with a `LIMIT` would
+make "no orphan found within N rows" read as "no orphan", weakening an
+integrity check to buy a cost bound. The bound is therefore left off and the
+cost stated.
 
 The byte aggregates run over a BOUNDED candidate set of `limit+1` rows, not the
 whole session. Measuring every row first would let a store holding millions of

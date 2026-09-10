@@ -83,17 +83,14 @@ type budgetProbe struct {
 	loads int
 }
 
-func (p *budgetProbe) ReadObservationSession(ctx context.Context, epoch int64) (analytics.ObservationSessionReading, bool, error) {
-	return p.real.ReadObservationSession(ctx, epoch)
+func (p *budgetProbe) ReadObservationSessionWithinBudget(ctx context.Context, epoch int64,
+	maxRowBytes int64) (analytics.ObservationSessionReading, bool, bool, error) {
+	return p.real.ReadObservationSessionWithinBudget(ctx, epoch, maxRowBytes)
 }
 
 func (p *budgetProbe) ObservationSessionSizeBySession(ctx context.Context, sessionID string,
 	candidateRows int) (analytics.ObservationSessionSize, error) {
 	return p.size, nil
-}
-
-func (p *budgetProbe) ObservationSessionMetaWidthBytes(ctx context.Context, epoch int64) (int64, error) {
-	return p.real.ObservationSessionMetaWidthBytes(ctx, epoch)
 }
 
 func (p *budgetProbe) ObservationEpochRowBounds(ctx context.Context, epoch int64,
@@ -173,17 +170,14 @@ type passThrough struct {
 	size analytics.ObservationSessionSize
 }
 
-func (p *passThrough) ReadObservationSession(ctx context.Context, epoch int64) (analytics.ObservationSessionReading, bool, error) {
-	return p.real.ReadObservationSession(ctx, epoch)
+func (p *passThrough) ReadObservationSessionWithinBudget(ctx context.Context, epoch int64,
+	maxRowBytes int64) (analytics.ObservationSessionReading, bool, bool, error) {
+	return p.real.ReadObservationSessionWithinBudget(ctx, epoch, maxRowBytes)
 }
 
 func (p *passThrough) ObservationSessionSizeBySession(ctx context.Context, sessionID string,
 	candidateRows int) (analytics.ObservationSessionSize, error) {
 	return p.size, nil
-}
-
-func (p *passThrough) ObservationSessionMetaWidthBytes(ctx context.Context, epoch int64) (int64, error) {
-	return p.real.ObservationSessionMetaWidthBytes(ctx, epoch)
 }
 
 func (p *passThrough) ObservationEpochRowBounds(ctx context.Context, epoch int64,
@@ -482,11 +476,19 @@ func TestAnOversizedValueInAnIntegerColumnIsCounted(t *testing.T) {
 // TestOversizedSessionMetadataIsRefusedBeforeItIsScanned closes the earliest
 // unbounded allocation in the load.
 //
-// prediction_observation_sessions is not STRICT either, and neither
-// collector_session_id nor producer_revision carries a length constraint.
-// ReadObservationSession scans both into Go strings and it runs FIRST — before
-// any observation-row bound applies — so bounding the facts while reading their
-// session metadata unguarded left the first allocation the only unbounded one.
+// prediction_observation_sessions is not STRICT either, so no column of that
+// row is bounded by its declared type and none carries a length constraint.
+// The session read scans every one of them into Go values and it runs FIRST —
+// before any observation-row bound applies — so bounding the facts while
+// reading their session metadata unguarded left the first allocation the only
+// unbounded one.
+//
+// The bound travels IN the reading statement rather than in a measurement
+// taken beforehand, and the two are not interchangeable: a separate measuring
+// statement leaves a window another connection can commit into, after which
+// the read materializes a value no bound ever covered. The refusal here is
+// therefore observed through the read itself — an oversized row produces NO
+// row, not a scanned one.
 func TestOversizedSessionMetadataIsRefusedBeforeItIsScanned(t *testing.T) {
 	ctx := context.Background()
 	repo := observationStore(t)
@@ -511,13 +513,26 @@ func TestOversizedSessionMetadataIsRefusedBeforeItIsScanned(t *testing.T) {
 		t.Fatalf("tamper: %v", err)
 	}
 
-	width, err := repo.ObservationSessionMetaWidthBytes(ctx, epoch)
+	// The bounded read refuses the row and says WHY: the session exists, it
+	// just does not fit. "No row" and "a row too wide to read" are different
+	// answers and the caller has to be able to tell them apart.
+	rd, found, within, err := repo.ReadObservationSessionWithinBudget(ctx, epoch, reader.MaxSessionMetaBytes)
 	if err != nil {
-		t.Fatalf("measure session meta: %v", err)
+		t.Fatalf("bounded session read: %v", err)
 	}
-	if width < int64(len(fat)) {
-		t.Fatalf("the session row measured %d bytes while carrying a %d-byte revision",
-			width, len(fat))
+	if within {
+		t.Fatalf("the bounded read accepted a session row carrying a %d-byte revision "+
+			"under a %d-byte bound", len(fat), reader.MaxSessionMetaBytes)
+	}
+	if found || rd.Session.ProducerRevision != "" {
+		t.Fatalf("the refused read still handed back the row (found=%v revision=%d bytes); "+
+			"a bound that returns the value it refused has not bounded anything",
+			found, len(rd.Session.ProducerRevision))
+	}
+	// And the same row IS readable without the bound, so the refusal above is
+	// the bound acting and not the row being unreadable.
+	if _, found, _, err := repo.ReadObservationSessionWithinBudget(ctx, epoch, 0); err != nil || !found {
+		t.Fatalf("unbounded read of the same row: found=%v err=%v", found, err)
 	}
 
 	ds, err := reader.LoadSession(ctx, repo, epoch, reader.DefaultMaxRecords)
@@ -638,9 +653,12 @@ func TestOversizedSessionMetadataIsCountedInEveryColumn(t *testing.T) {
 			epoch, _ := seedSession(t, repo, "meta-col-"+column,
 				[]analytics.PredictionObservation{f})
 
-			before, err := repo.ObservationSessionMetaWidthBytes(ctx, epoch)
-			if err != nil {
-				t.Fatalf("measure: %v", err)
+			// The clean row reads under the bound, so a refusal below is the
+			// tampering and not the fixture.
+			if _, found, within, err := repo.ReadObservationSessionWithinBudget(
+				ctx, epoch, reader.MaxSessionMetaBytes); err != nil || !found || !within {
+				t.Fatalf("the clean session row was not readable under the bound: "+
+					"found=%v within=%v err=%v", found, within, err)
 			}
 
 			if _, err := db.ExecContext(ctx,
@@ -661,15 +679,20 @@ func TestOversizedSessionMetadataIsCountedInEveryColumn(t *testing.T) {
 					"here and the scenario under test cannot occur", column, storedType)
 			}
 
-			after, err := repo.ObservationSessionMetaWidthBytes(ctx, epoch)
+			// The predicate in the reading statement now refuses the row, and
+			// it can only do that if the width expression measures this
+			// column: the read scans every one of the twelve, so a column
+			// left out of the expression is a place for an oversized value to
+			// hide from the very statement that materializes it.
+			_, found, within, err := repo.ReadObservationSessionWithinBudget(
+				ctx, epoch, reader.MaxSessionMetaBytes)
 			if err != nil {
-				t.Fatalf("measure after tamper: %v", err)
+				t.Fatalf("bounded read after tamper: %v", err)
 			}
-			if grew := after - before; grew < 200_000 {
-				t.Fatalf("a %d-byte value hidden in %s moved the measured session width by "+
-					"only %d bytes (%d -> %d). ReadObservationSession scans that column, so "+
-					"a column left out of the width expression is a place for an oversized "+
-					"value to hide.", len(fat), column, grew, before, after)
+			if within || found {
+				t.Fatalf("a %d-byte value hidden in %s was read under a %d-byte bound "+
+					"(found=%v within=%v)", len(fat), column,
+					reader.MaxSessionMetaBytes, found, within)
 			}
 
 			ds, err := reader.LoadSession(ctx, repo, epoch, reader.DefaultMaxRecords)
@@ -696,21 +719,18 @@ type sweepProbe struct {
 	reads int
 }
 
-func (p *sweepProbe) ReadObservationSession(ctx context.Context, epoch int64) (analytics.ObservationSessionReading, bool, error) {
+func (p *sweepProbe) ReadObservationSessionWithinBudget(ctx context.Context, epoch int64,
+	maxRowBytes int64) (analytics.ObservationSessionReading, bool, bool, error) {
 	p.reads++
 	p.t.Errorf("the session was read even though the epoch holds a row wider than " +
 		"MaxRecordBytes; this call verifies stored witnesses over the session's facts and " +
 		"materializes each row to do it, so the refusal has to happen BEFORE it")
-	return p.real.ReadObservationSession(ctx, epoch)
+	return p.real.ReadObservationSessionWithinBudget(ctx, epoch, maxRowBytes)
 }
 
 func (p *sweepProbe) ObservationSessionSizeBySession(ctx context.Context, sessionID string,
 	candidateRows int) (analytics.ObservationSessionSize, error) {
 	return p.real.ObservationSessionSizeBySession(ctx, sessionID, candidateRows)
-}
-
-func (p *sweepProbe) ObservationSessionMetaWidthBytes(ctx context.Context, epoch int64) (int64, error) {
-	return p.real.ObservationSessionMetaWidthBytes(ctx, epoch)
 }
 
 func (p *sweepProbe) ObservationEpochRowBounds(ctx context.Context, epoch int64,
@@ -844,5 +864,122 @@ func TestAnEpochThatFillsTheMeasurementWindowIsRefusedRatherThanTrusted(t *testi
 	if _, err := repo.ObservationEpochRowBounds(ctx, epoch, 0); err == nil {
 		t.Fatal("a candidate bound of zero was accepted; a measurement with no bound is " +
 			"the unbounded scan the window exists to prevent")
+	}
+}
+
+// growingSource enlarges the session row while the load is between its two
+// readings of it, by tampering during the fact read that sits in between.
+type growingSource struct {
+	real reader.ObservationSource
+	t    *testing.T
+	fire func()
+}
+
+// ReadObservationSessionWithinBudget also asserts the property the co-located
+// bound exists for, on EVERY session read the load performs.
+//
+// Asserting only on the error LoadSession returns cannot do that. The load
+// reads the session row twice and compares the two, so an unbounded re-read
+// still reports ErrSnapshotIncoherent — by scanning the enlarged row and
+// noticing it differs, which is the outcome with the cost still paid. The
+// bound has to be observed travelling with each read, not inferred from the
+// verdict.
+func (g *growingSource) ReadObservationSessionWithinBudget(ctx context.Context, epoch int64,
+	maxRowBytes int64) (analytics.ObservationSessionReading, bool, bool, error) {
+	if maxRowBytes <= 0 {
+		g.t.Errorf("the load read the session row with maxRowBytes=%d, which is no bound at "+
+			"all. Both readings of that row have to carry it: an unbounded re-read still "+
+			"reports the snapshot changed, but only by scanning the row it should have "+
+			"refused.", maxRowBytes)
+	}
+	return g.real.ReadObservationSessionWithinBudget(ctx, epoch, maxRowBytes)
+}
+
+func (g *growingSource) ObservationSessionSizeBySession(ctx context.Context, sessionID string,
+	candidateRows int) (analytics.ObservationSessionSize, error) {
+	return g.real.ObservationSessionSizeBySession(ctx, sessionID, candidateRows)
+}
+
+func (g *growingSource) ObservationEpochRowBounds(ctx context.Context, epoch int64,
+	candidateRows int) (analytics.ObservationEpochSize, error) {
+	return g.real.ObservationEpochRowBounds(ctx, epoch, candidateRows)
+}
+
+func (g *growingSource) ObservationsBySessionWithinBudget(ctx context.Context, sessionID string,
+	limit int, maxRowBytes, maxTotalBytes int64) ([]analytics.ObservationRecord, bool, error) {
+	rows, within, err := g.real.ObservationsBySessionWithinBudget(ctx, sessionID, limit,
+		maxRowBytes, maxTotalBytes)
+	g.fire()
+	return rows, within, err
+}
+
+// TestASessionRowThatGrowsPastTheBoundMidLoadIsNeverScanned is what the
+// co-located bound buys over a measurement taken beforehand.
+//
+// The session row is read TWICE — once for the classification, once to prove
+// the snapshot did not span two committed states — and the facts are read in
+// between. A width checked by an earlier, separate statement covers neither
+// read: another connection commits into the gap, and the second read then
+// transfers the enlarged value across the driver having never been bounded.
+// The coherence comparison would notice the session changed, but only after
+// paying for it, which is the wrong order for a bound.
+//
+// Here the predicate lives in the statement that selects and scans the row, so
+// the enlarged row yields NO row at all. The load still reports the store
+// changing underneath it — that fact is not lost — but it reports it without
+// materializing what it refused.
+func TestASessionRowThatGrowsPastTheBoundMidLoadIsNeverScanned(t *testing.T) {
+	ctx := context.Background()
+	repo := observationStore(t)
+
+	f := baseFact(analytics.KindChannelEvent)
+	f.Payload = analytics.ObservationPayload{Phase: "ROUND_UPDATED", RoundState: "ACTIVE"}
+	epoch, _ := seedSession(t, repo, "grows-mid-load", []analytics.PredictionObservation{f})
+
+	// Undisturbed, the same source loads. Whatever the run below reports is
+	// therefore the tampering and not the fixture.
+	quiet := &growingSource{real: repo, t: t, fire: func() {}}
+	if _, err := reader.LoadSession(ctx, quiet, epoch, reader.DefaultMaxRecords); err != nil {
+		t.Fatalf("the undisturbed load failed: %v", err)
+	}
+
+	db, err := database.Open(observationTestDir)
+	if err != nil {
+		t.Fatalf("open database: %v", err)
+	}
+	fat := strings.Repeat("G", 200_000)
+	fired := 0
+	src := &growingSource{real: repo, t: t, fire: func() {
+		fired++
+		if _, err := db.ExecContext(ctx,
+			`UPDATE prediction_observation_sessions SET producer_revision = ? WHERE collector_epoch = ?`,
+			fat, epoch); err != nil {
+			t.Errorf("tamper mid-load: %v", err)
+		}
+	}}
+
+	ds, err := reader.LoadSession(ctx, src, epoch, reader.DefaultMaxRecords)
+	if fired == 0 {
+		t.Fatal("the load never reached the fact read, so nothing was tampered and this " +
+			"test proves nothing")
+	}
+	if !errors.Is(err, reader.ErrSnapshotIncoherent) {
+		t.Fatalf("LoadSession returned %d facts and err %v, want ErrSnapshotIncoherent",
+			len(ds.Records), err)
+	}
+	if len(ds.Records) != 0 {
+		t.Fatalf("the refused load still handed back %d facts", len(ds.Records))
+	}
+
+	// And the row that grew is genuinely past the bound, so the refusal above
+	// is the width predicate acting rather than the values merely differing.
+	rd, found, within, err := repo.ReadObservationSessionWithinBudget(
+		ctx, epoch, reader.MaxSessionMetaBytes)
+	if err != nil {
+		t.Fatalf("bounded read after the load: %v", err)
+	}
+	if within || found || rd.Session.ProducerRevision != "" {
+		t.Fatalf("the grown row still read under the bound (found=%v within=%v revision=%d bytes)",
+			found, within, len(rd.Session.ProducerRevision))
 	}
 }

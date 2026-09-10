@@ -2,7 +2,6 @@ package analytics
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 )
 
@@ -144,6 +143,12 @@ func (r *SQLiteRepository) ObservationSessionSizeBySession(
 // observationSessionRowWidthBytes is the actual stored byte width of EVERY
 // column ReadObservationSession materializes.
 //
+// It is applied as a predicate INSIDE that read (see
+// ReadObservationSessionWithinBudget) rather than by a measurement taken
+// beforehand. A separate measuring statement leaves a window another
+// connection can commit into, after which the read materializes a value no
+// bound ever covered.
+//
 // Every column again, and for the same reason as observationRowWidthBytes:
 // prediction_observation_sessions is not STRICT either, so a declared type is
 // an affinity and not a constraint. An earlier version of this expression
@@ -172,28 +177,6 @@ const observationSessionRowWidthBytes = `(
 	COALESCE(LENGTH(CAST(post_fence_producer_count AS BLOB)), 0) +
 	COALESCE(LENGTH(CAST(producer_shutdown_uncertain_count AS BLOB)), 0)
 )`
-
-// ObservationSessionMetaWidthBytes measures ONE session row without
-// materializing it.
-//
-// That row is read FIRST — before any observation-row bound applies — so
-// bounding the facts while scanning their session metadata unguarded would
-// leave the earliest allocation of the whole load the only unbounded one.
-func (r *SQLiteRepository) ObservationSessionMetaWidthBytes(ctx context.Context, epoch int64) (int64, error) {
-	var width int64
-	err := r.db.QueryRowContext(ctx, `
-		SELECT `+observationSessionRowWidthBytes+`
-		FROM prediction_observation_sessions WHERE collector_epoch = ?`, epoch).Scan(&width)
-	if err == sql.ErrNoRows {
-		// No session row is not an oversized one. The caller's own not-found
-		// path reports it.
-		return 0, nil
-	}
-	if err != nil {
-		return 0, err
-	}
-	return width, nil
-}
 
 // ObservationEpochSize is the measured cost of the fact rows one COLLECTOR
 // EPOCH holds, obtained without materializing any of them.
