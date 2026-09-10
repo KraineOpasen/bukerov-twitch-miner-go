@@ -456,6 +456,52 @@ func Score(c DecisionCase, ev Evaluation, s SettlementFacts) Scorecard {
 			terminalBasis(ev, derived), ""))
 		add(compareString("terminalDecision", rec.TerminalDecision, decision, true,
 			terminalBasis(ev, derived), ""))
+
+		// The terminal fact's ARGUMENTS, which were projected and then never
+		// read. Phase and decision say how the attempt ended; they say nothing
+		// about what it ended on. A terminal fact naming outcome slot X while
+		// its envelope and its placement call both name Y agreed with
+		// everything compared above, and could carry the case to an
+		// affirmative settlement on evidence that contradicts itself.
+		//
+		// The placement facts are already required to match the replay, so
+		// pinning the terminal fact to the replay closes the triangle: the two
+		// recorded halves cannot disagree with each other while both agree
+		// with the model.
+		if ev.Action == ActionWouldAttemptPlacement {
+			// Absent is not agreement: compareInt reports a missing recorded
+			// value as UNAVAILABLE, which blocks the settlement rather than
+			// passing it. The pinned producer writes this slot on every
+			// placing terminal fact, so absent here is missing evidence.
+			slot, slotHas := 0, false
+			if rec.TerminalOutcomeSlot != nil {
+				slot, slotHas = *rec.TerminalOutcomeSlot, true
+			}
+			add(compareInt("terminalOutcomeSlot", slot, ev.Choice.Index, slotHas,
+				terminalBasis(ev, derived),
+				"the pinned producer names an outcome slot on every placing terminal fact"))
+			// The producer writes the amount it is about to send, which is the
+			// post-clamp final. That equality is only meaningful where the
+			// model reached a final, so it is compared under the same guard.
+			if ev.Clamp.HasFinal {
+				add(compareInt64("terminalStake", rec.TerminalStake, int64(ev.Clamp.FinalAmount),
+					rec.TerminalStakeRecorded, terminalBasis(ev, derived), ""))
+			}
+		} else if rec.TerminalOutcomeSlot != nil {
+			// Every skip path writes no outcome slot at all, so one present
+			// beside a replayed skip is a record the producer cannot have
+			// written. The stake is NOT checked here: a skip does carry one,
+			// and which stage's amount it holds varies by exit, so comparing
+			// it would assert a meaning this model has not established.
+			add(Comparison{
+				Field:    "terminalOutcomeSlot",
+				Verdict:  VerdictDisagree,
+				Basis:    terminalBasis(ev, derived),
+				Recorded: itoa(int64(*rec.TerminalOutcomeSlot)),
+				Computed: "absent",
+				Note:     "the replay skips, and the pinned producer names an outcome slot only when it places",
+			})
+		}
 	}
 
 	for _, cmp := range sc.Comparisons {

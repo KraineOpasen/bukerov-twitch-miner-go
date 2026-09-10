@@ -262,6 +262,9 @@ func peDataset(src predictioneval.SourceProvenance) predictioneval.SourceDataset
 	// AUTO_SKIPPED. A blank decision is a record it cannot emit, and the
 	// projection refuses one rather than letting it agree with everything.
 	terminal.Payload.Decision = "PLACE"
+	// And its arguments, which the producer writes on the same path.
+	terminal.Payload.OutcomeSlot = func() *int { i := 0; return &i }()
+	terminal.Payload.Counters[predictioneval.CounterStake] = 50
 	terminal.Payload.DecisionEnvelope = peMinimalEnvelope(7)
 
 	ds := predictioneval.SourceDataset{

@@ -283,9 +283,17 @@ func TestScoreCountsAConditionedStealthComparisonApartFromIndependentEvidence(t 
 	// "the record agrees" if the case ever stops being a placement.
 	c.Recorded.TerminalPhase, c.Recorded.TerminalDecision =
 		predictioneval.PhaseAutoSkipped, "SKIP"
+	c.Recorded.TerminalOutcomeSlot = nil
 	if ev.Action == predictioneval.ActionWouldAttemptPlacement {
 		c.Recorded.TerminalPhase, c.Recorded.TerminalDecision =
 			predictioneval.PhaseAutoDecided, "PLACE"
+		// A placing terminal fact names the slot and the stake it is about to
+		// send; a skip names neither slot nor a stake with a pinned meaning.
+		// Derived from the replay for the same reason the phase is.
+		slot := ev.Choice.Index
+		c.Recorded.TerminalOutcomeSlot = &slot
+		c.Recorded.TerminalStake = int64(ev.Clamp.FinalAmount)
+		c.Recorded.TerminalStakeRecorded = ev.Clamp.HasFinal
 	}
 	sc := predictioneval.Score(c, ev, predictioneval.SettlementFacts{})
 

@@ -73,7 +73,16 @@ func ncAgreeingCase() (predictioneval.DecisionCase, predictioneval.Evaluation) {
 			// incomplete record reached an affirmative settlement.
 			TerminalPhase:    predictioneval.PhaseAutoDecided,
 			TerminalDecision: "PLACE",
-			HealthStage:      predictioneval.HealthAllowed,
+			// And the terminal fact's ARGUMENTS. The pinned producer writes
+			// the outcome slot and the stake it is about to send on every
+			// placing terminal fact, so a fixture without them describes a
+			// record it cannot have written — which is what an earlier
+			// version of this helper did, and it meant every control case
+			// here carried two UNAVAILABLE comparisons nobody noticed.
+			TerminalOutcomeSlot:   func() *int { i := 0; return &i }(),
+			TerminalStake:         50,
+			TerminalStakeRecorded: true,
+			HealthStage:           predictioneval.HealthAllowed,
 		},
 	}
 	return c, ev
@@ -907,6 +916,9 @@ func TestPlacementFactsMustBeOneCoherentPair(t *testing.T) {
 	terminal := peRecord(2, predictioneval.KindAutoDecision, predictioneval.PhaseAutoDecided, attempt)
 	terminal.Payload.ReasonCode = "OK"
 	terminal.Payload.Decision = "PLACE"
+	// The arguments the producer writes beside a placing decision.
+	terminal.Payload.OutcomeSlot = func() *int { i := 0; return &i }()
+	terminal.Payload.Counters[predictioneval.CounterStake] = 50
 	terminal.Payload.DecisionEnvelope = peMinimalEnvelope(attempt)
 
 	started := func(seq int64, stake int64, slot int) predictioneval.SourceRecord {
@@ -1159,6 +1171,9 @@ func TestAPostDecisionFactFromAnotherAdmissionIsRefused(t *testing.T) {
 	terminal := peRecord(2, predictioneval.KindAutoDecision, predictioneval.PhaseAutoDecided, attempt)
 	terminal.Payload.ReasonCode = "OK"
 	terminal.Payload.Decision = "PLACE"
+	// The arguments the producer writes beside a placing decision.
+	terminal.Payload.OutcomeSlot = func() *int { i := 0; return &i }()
+	terminal.Payload.Counters[predictioneval.CounterStake] = 50
 	terminal.Payload.DecisionEnvelope = peMinimalEnvelope(attempt)
 
 	started := pePlacement(3, attempt, predictioneval.PhaseCallStarted, 50, 0, "OK", "NONE")
@@ -1478,5 +1493,124 @@ func TestEveryStageAPlacementRunsIsRequiredByTheShapeGuard(t *testing.T) {
 					tc.name, sc.Settlement.Assessment)
 			}
 		})
+	}
+}
+
+// TestATerminalFactThatNamesOtherArgumentsThanTheReplayIsRefused closes a hole
+// where the terminal fact's ARGUMENTS were projected and never read.
+//
+// Phase and decision say how the attempt ended. They say nothing about what it
+// ended ON. A terminal fact naming outcome slot X while its envelope and its
+// placement call both name Y agreed with every comparison the scorer made, and
+// could carry the case to APPLIES_TO_REPLAY on evidence that contradicts
+// itself. `TerminalOutcomeSlot` was populated by ProjectDecisionCase and read
+// by nothing; the terminal stake counter was not projected at all.
+//
+// The placement facts are already required to match the replay, so pinning the
+// terminal fact to the replay too closes the triangle: the two recorded halves
+// cannot disagree with each other while both agree with the model.
+func TestATerminalFactThatNamesOtherArgumentsThanTheReplayIsRefused(t *testing.T) {
+	base, ev := ncAgreeingCase()
+	if ev.Action != predictioneval.ActionWouldAttemptPlacement {
+		t.Fatalf("the control case replays to %q, not a placement", ev.Action)
+	}
+	stake, slot := int64(50), 0
+	facts := predictioneval.SettlementFacts{
+		PlacementCallStarted: true, PlacementCallReturned: true, PlacementAccepted: true,
+		PlacementStake: &stake, PlacementSlot: &slot,
+	}
+
+	for _, tc := range []struct {
+		name  string
+		mut   func(*predictioneval.DecisionCase)
+		field string
+		want  string
+	}{
+		{"the control case, untouched", func(*predictioneval.DecisionCase) {},
+			"terminalOutcomeSlot", predictioneval.SettlementAppliesToReplay},
+		{"a terminal slot the replay did not choose", func(c *predictioneval.DecisionCase) {
+			other := ev.Choice.Index + 1
+			c.Recorded.TerminalOutcomeSlot = &other
+		}, "terminalOutcomeSlot", predictioneval.SettlementUnknown},
+		{"a terminal stake the replay did not reach", func(c *predictioneval.DecisionCase) {
+			c.Recorded.TerminalStake = int64(ev.Clamp.FinalAmount) + 1
+		}, "terminalStake", predictioneval.SettlementUnknown},
+		{"a placing terminal fact naming no slot at all", func(c *predictioneval.DecisionCase) {
+			c.Recorded.TerminalOutcomeSlot = nil
+		}, "terminalOutcomeSlot", predictioneval.SettlementUnknown},
+		{"a placing terminal fact carrying no stake at all", func(c *predictioneval.DecisionCase) {
+			c.Recorded.TerminalStake, c.Recorded.TerminalStakeRecorded = 0, false
+		}, "terminalStake", predictioneval.SettlementUnknown},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := base
+			tc.mut(&c)
+			sc := predictioneval.Score(c, ev, ncBoundFacts(c, facts))
+
+			var got predictioneval.Comparison
+			found := false
+			for _, cmp := range sc.Comparisons {
+				if cmp.Field == tc.field {
+					got, found = cmp, true
+				}
+			}
+			if !found {
+				t.Fatalf("no %s comparison was produced at all; a field nobody compares is "+
+					"exactly the hole this test exists for", tc.field)
+			}
+			if sc.Settlement.Assessment != tc.want {
+				t.Errorf("settlement = %q, want %q (the %s comparison was %+v)",
+					sc.Settlement.Assessment, tc.want, tc.field, got)
+			}
+		})
+	}
+}
+
+// TestASkipThatNamesAnOutcomeSlotDisagrees pins the other direction.
+//
+// The pinned producer names an outcome slot on its placing path ALONE — every
+// skip write site omits it. So a slot present beside a replayed skip is a
+// record it cannot have written, and silence about that would be the same
+// unread-field hole in the other direction.
+//
+// The terminal STAKE is deliberately not checked on a skip: every skip path
+// does write one, and which stage's amount it holds varies by exit, so
+// comparing it would assert a meaning this model has not established.
+func TestASkipThatNamesAnOutcomeSlotDisagrees(t *testing.T) {
+	c, ev := ncAgreeingCase()
+	// Turn the control case into a filter-rejected skip by rejecting it at the
+	// filter, so the replayed action changes rather than the record alone.
+	ev.Action = predictioneval.ActionFilterRejected
+	c.Recorded.TerminalPhase, c.Recorded.TerminalDecision =
+		predictioneval.PhaseAutoSkipped, "SKIP"
+	c.Recorded.TerminalReason = "FILTER_REJECTED"
+
+	// A local lookup, because this test needs to tell "no comparison" from "a
+	// comparison that agreed" and the package helper fatals on absence.
+	lookup := func(sc predictioneval.Scorecard) *predictioneval.Comparison {
+		for i := range sc.Comparisons {
+			if sc.Comparisons[i].Field == "terminalOutcomeSlot" {
+				return &sc.Comparisons[i]
+			}
+		}
+		return nil
+	}
+
+	clean := c
+	clean.Recorded.TerminalOutcomeSlot = nil
+	if got := lookup(predictioneval.Score(clean, ev, predictioneval.SettlementFacts{})); got != nil {
+		t.Fatalf("a skip with no recorded slot produced a terminalOutcomeSlot comparison "+
+			"(%+v); there is nothing to compare and manufacturing one would be noise", *got)
+	}
+
+	slot := 1
+	c.Recorded.TerminalOutcomeSlot = &slot
+	got := lookup(predictioneval.Score(c, ev, predictioneval.SettlementFacts{}))
+	if got == nil {
+		t.Fatal("a skip carrying an outcome slot produced no comparison; the producer never " +
+			"writes one on a skip, so this is a record it cannot have emitted")
+	}
+	if got.Verdict != predictioneval.VerdictDisagree {
+		t.Errorf("terminalOutcomeSlot verdict = %q, want DISAGREE (%+v)", got.Verdict, *got)
 	}
 }

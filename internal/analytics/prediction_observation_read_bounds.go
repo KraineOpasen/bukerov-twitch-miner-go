@@ -178,68 +178,46 @@ const observationSessionRowWidthBytes = `(
 	COALESCE(LENGTH(CAST(producer_shutdown_uncertain_count AS BLOB)), 0)
 )`
 
-// ObservationEpochSize is the measured cost of the fact rows one COLLECTOR
-// EPOCH holds, obtained without materializing any of them.
+// ObservationEpochRowCount counts the fact rows one COLLECTOR EPOCH holds,
+// bounded to a candidate window, without materializing any of them.
 //
-// It is keyed on the epoch rather than the session id because it answers a
-// question asked BEFORE the session id is known — see
-// ObservationEpochRowBounds.
-type ObservationEpochSize struct {
-	// Rows is how many facts the epoch holds, counted over the candidate
-	// window only. A count equal to the window means the window truncated and
-	// the measurement describes a prefix, not the epoch.
-	Rows int64
-	// WidestRowBytes is the largest single row's stored width within that
-	// window.
-	WidestRowBytes int64
-}
-
-// ObservationEpochRowBounds measures the fact rows an epoch holds, bounded to
-// a candidate window, without materializing any of them.
+// It is keyed on the epoch because it answers a question asked BEFORE the
+// session id is known, and it exists for WORK rather than for allocation.
+// ReadObservationSession classifies a session by aggregating over its facts and
+// then recomputing a prefix of their witnesses; a store that assigns millions of
+// rows to one epoch would spend unbounded database CPU and I/O inside that call
+// before any row-count limit could refuse the load. Counting a bounded window
+// first makes the refusal cost the size of the answer.
 //
-// It exists for one specific allocation, which no other bound in this file
-// covers. ReadObservationSession does not only read the session row: inside
-// the same transaction it recomputes the stored witness of a bounded PREFIX of
-// that session's facts, and doing so scans payload_json and a dozen other
-// columns of each row into memory one row at a time. Those rows are read
-// before LoadSession has any session id to measure against, so every per-row
-// and aggregate bound in this file applied strictly after the store had
-// already materialized them. Measured directly: a payload_json tampered to
-// 4 MiB — four times the reader's per-row ceiling — was scanned and hashed in
-// full, and the load then returned no facts and no error, having already paid
-// for it.
+// The window also bounds this count's own work, and the two only hold together:
+// a count that REACHES the window was truncated by it, so the caller must refuse
+// rather than read on. Ordering is deliberately absent — any ordering would make
+// the window a particular prefix instead of a set the caller can only accept
+// when it is complete.
 //
-// The window is keyed on collector_epoch alone, because that is the only key
-// the caller holds at that point. That makes the measured set a SUPERSET of
-// the rows the witness sweep can touch, which is what soundness needs here: the
-// sweep is scoped to (epoch, session id) and this covers the epoch entire.
-//
-// The window also makes the work bounded, and the two properties only hold
-// together. A truncated window would describe a prefix rather than the epoch,
-// so the caller must refuse any epoch whose count reaches the window rather
-// than read on — at which point the window provably covered every row the
-// sweep could reach. Ordering is deliberately absent: any ordering would make
-// the window a particular prefix of the epoch instead of a set the caller can
-// only accept when it is complete.
-func (r *SQLiteRepository) ObservationEpochRowBounds(
+// The WIDTH of those rows is deliberately not measured here. It was, once, and
+// that bound was both over-broad and stale: over-broad because the witness sweep
+// only touches rows matching the (epoch, session id) pair while this window
+// covers the epoch entire, and stale because a separate statement leaves a
+// window a writer can commit into. The width now travels with the sweep, in the
+// transaction that reads it — see ReadObservationSessionWithinBudget.
+func (r *SQLiteRepository) ObservationEpochRowCount(
 	ctx context.Context, epoch int64, candidateRows int,
-) (ObservationEpochSize, error) {
+) (int64, error) {
 	if candidateRows <= 0 {
-		return ObservationEpochSize{}, errNonPositiveCandidateBound
+		return 0, errNonPositiveCandidateBound
 	}
-	var out ObservationEpochSize
+	var rows int64
 	err := r.db.QueryRowContext(ctx, `
-		SELECT COUNT(*), COALESCE(MAX(w), 0)
-		FROM (
-			SELECT `+observationRowWidthBytes+` AS w
-			FROM prediction_observations
+		SELECT COUNT(*) FROM (
+			SELECT 1 FROM prediction_observations
 			WHERE collector_epoch = ?
 			LIMIT ?
-		)`, epoch, candidateRows).Scan(&out.Rows, &out.WidestRowBytes)
+		)`, epoch, candidateRows).Scan(&rows)
 	if err != nil {
-		return ObservationEpochSize{}, err
+		return 0, err
 	}
-	return out, nil
+	return rows, nil
 }
 
 // ObservationsBySessionWithinBudget reads a session's facts ONLY if they fit
@@ -265,6 +243,17 @@ func (r *SQLiteRepository) ObservationEpochRowBounds(
 func (r *SQLiteRepository) ObservationsBySessionWithinBudget(
 	ctx context.Context, sessionID string, limit int, maxRowBytes, maxTotalBytes int64,
 ) (records []ObservationRecord, withinBudget bool, err error) {
+	// A nonpositive limit is refused rather than interpreted, because the two
+	// places it appears in this statement interpret it OPPOSITELY. The guard
+	// subqueries would run over LIMIT 0 — aggregating no rows, so COALESCE
+	// hands back 0 and both bounds pass whatever the table holds — while the
+	// outer LIMIT is omitted entirely and every row is scanned and decoded.
+	// The one value that reads as "no rows" to the guards reads as "all rows"
+	// to the read they guard, so a method that promises a bounded read would
+	// deliver an unbounded one.
+	if limit <= 0 {
+		return nil, false, errNonPositiveCandidateBound
+	}
 	// The two guard subqueries are uncorrelated, so SQLite evaluates each once
 	// for the statement — over the same snapshot that produces the rows.
 	query := `SELECT ` + observationSelectColumns + `
@@ -285,10 +274,8 @@ func (r *SQLiteRepository) ObservationsBySessionWithinBudget(
 		sessionID, limit, maxTotalBytes,
 		sessionID, limit, maxRowBytes,
 	}
-	if limit > 0 {
-		query += ` LIMIT ?`
-		args = append(args, limit)
-	}
+	query += ` LIMIT ?`
+	args = append(args, limit)
 
 	rows, err := r.db.QueryContext(ctx, query, args...)
 	if err != nil {

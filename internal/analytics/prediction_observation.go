@@ -2279,9 +2279,24 @@ func (r *SQLiteRepository) ObservationsByFingerprint(ctx context.Context, finger
 // ONE transaction, so the count can never belong to a different committed
 // state than the row it qualifies.
 func (r *SQLiteRepository) ReadObservationSession(ctx context.Context, epoch int64) (ObservationSessionReading, bool, error) {
-	out, found, _, err := r.readObservationSession(ctx, epoch, 0)
+	out, found, _, err := r.readObservationSession(ctx, epoch, 0, 0)
 	return out, found, err
 }
+
+// ObservationReadBudget says which bound, if any, refused a bounded read.
+type ObservationReadBudget int
+
+const (
+	// ObservationReadWithinBudget means nothing was refused.
+	ObservationReadWithinBudget ObservationReadBudget = iota
+	// ObservationReadSessionRowTooWide means the epoch HAS a session row and
+	// that row is wider than the bound. It is distinct from "no session here",
+	// which is not a refusal at all.
+	ObservationReadSessionRowTooWide
+	// ObservationReadFactRowTooWide means a fact the witness sweep would have
+	// materialized is wider than the bound.
+	ObservationReadFactRowTooWide
+)
 
 // readObservationSession is the body both entry points share.
 //
@@ -2294,10 +2309,10 @@ func (r *SQLiteRepository) ReadObservationSession(ctx context.Context, epoch int
 // is the only place a width bound on this read can be enforced without leaving
 // a window another connection can commit into.
 func (r *SQLiteRepository) readObservationSession(
-	ctx context.Context, epoch int64, maxRowBytes int64,
-) (reading ObservationSessionReading, found, withinBudget bool, err error) {
+	ctx context.Context, epoch int64, maxRowBytes, maxFactRowBytes int64,
+) (reading ObservationSessionReading, found bool, budget ObservationReadBudget, err error) {
 	var out ObservationSessionReading
-	withinBudget = true
+	budget = ObservationReadWithinBudget
 	where := `WHERE collector_epoch = ?`
 	args := []interface{}{epoch}
 	if maxRowBytes > 0 {
@@ -2327,7 +2342,7 @@ func (r *SQLiteRepository) readObservationSession(
 					return x
 				}
 				if exists != 0 {
-					withinBudget = false
+					budget = ObservationReadSessionRowTooWide
 				}
 			}
 			return nil
@@ -2371,6 +2386,35 @@ func (r *SQLiteRepository) readObservationSession(
 		// payload, identity or parent was edited in place after the write
 		// reads back as authentic. Recompute a bounded prefix here and let the
 		// reading carry both what was proved and what was not.
+		// The witness sweep is the other read in this transaction that
+		// materializes rows, and it is bounded HERE rather than by a probe the
+		// caller took beforehand. Both statements run inside one transaction,
+		// so they see one snapshot: a writer that enlarges a fact between them
+		// cannot make this measurement stale, which is exactly what a separate
+		// preflight query could not promise.
+		if maxFactRowBytes > 0 {
+			var widest int64
+			if x := tx.QueryRowContext(ctx, `
+				SELECT COALESCE(MAX(w), 0) FROM (
+					SELECT `+observationRowWidthBytes+` AS w
+					FROM prediction_observations
+					WHERE collector_epoch = ? AND collector_session_id = ?
+					ORDER BY collector_sequence ASC
+					LIMIT ?)`,
+				epoch, s.CollectorSessionID, observationWitnessBudget).Scan(&widest); x != nil {
+				return x
+			}
+			// Measured over exactly the rows the sweep would touch: the same
+			// key, the same ordering, the same budget. A narrower set would
+			// leave rows unmeasured; a wider one would refuse loads for rows
+			// the sweep never reads.
+			if widest > maxFactRowBytes {
+				budget = ObservationReadFactRowTooWide
+				found = false
+				out = ObservationSessionReading{}
+				return nil
+			}
+		}
 		verified, mismatched, unchecked, e := verifyObservationWitnesses(ctx, tx, epoch, s.CollectorSessionID)
 		if e != nil {
 			return e
@@ -2389,9 +2433,9 @@ func (r *SQLiteRepository) readObservationSession(
 		return nil
 	})
 	if err != nil {
-		return ObservationSessionReading{}, false, false, err
+		return ObservationSessionReading{}, false, ObservationReadWithinBudget, err
 	}
-	return out, found, withinBudget, nil
+	return out, found, budget, nil
 }
 
 // ReadObservationSessionWithinBudget reads one session ONLY if its row fits
@@ -2405,13 +2449,20 @@ func (r *SQLiteRepository) readObservationSession(
 // detects that the session changed; it cannot un-allocate what was already
 // scanned.
 //
-// withinBudget is false — with found false and a zero reading — when the epoch
-// HAS a session row and that row is wider than the bound. A caller that gets
-// found false and withinBudget true is looking at an epoch with no session.
+// It bounds BOTH reads that materialize rows: the session row itself, and the
+// fact rows the witness sweep scans one at a time to recompute their digests.
+// The second bound is evaluated in the same TRANSACTION as the sweep rather
+// than by the caller beforehand, which buys the same thing co-location buys for
+// the first: one snapshot, so a writer cannot enlarge a row between the
+// measurement and the read that materializes it.
+//
+// The returned budget names which bound refused, with found false and a zero
+// reading. A caller that gets found false and a within-budget result is looking
+// at an epoch with no session, which is not a refusal.
 func (r *SQLiteRepository) ReadObservationSessionWithinBudget(
-	ctx context.Context, epoch int64, maxRowBytes int64,
-) (ObservationSessionReading, bool, bool, error) {
-	return r.readObservationSession(ctx, epoch, maxRowBytes)
+	ctx context.Context, epoch int64, maxRowBytes, maxFactRowBytes int64,
+) (ObservationSessionReading, bool, ObservationReadBudget, error) {
+	return r.readObservationSession(ctx, epoch, maxRowBytes, maxFactRowBytes)
 }
 
 // observationWitnessBudget bounds how many stored digests one reading

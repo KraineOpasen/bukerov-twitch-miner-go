@@ -151,19 +151,20 @@ type ObservationSource interface {
 	// bound. The coherence re-read below detects that the session changed; it
 	// cannot un-allocate what was already scanned.
 	ReadObservationSessionWithinBudget(ctx context.Context, epoch int64,
-		maxRowBytes int64) (analytics.ObservationSessionReading, bool, bool, error)
+		maxRowBytes, maxFactRowBytes int64) (analytics.ObservationSessionReading, bool,
+		analytics.ObservationReadBudget, error)
 	// ObservationSessionSizeBySession measures what a load would cost without
 	// paying it. It is part of the read surface rather than an optimization:
 	// a byte bound cannot be enforced after the rows are in memory.
 	ObservationSessionSizeBySession(ctx context.Context, sessionID string,
 		candidateRows int) (analytics.ObservationSessionSize, error)
-	// ObservationEpochRowBounds measures the FACT rows an epoch holds, also
-	// before ReadObservationSession runs. That call verifies stored witnesses
-	// over a prefix of the session's facts, scanning each row's payload and
-	// identifiers into memory — so without this, the load materialized rows of
-	// unbounded width before it held a session id to bound them by.
-	ObservationEpochRowBounds(ctx context.Context, epoch int64,
-		candidateRows int) (analytics.ObservationEpochSize, error)
+	// ObservationEpochRowCount counts the FACT rows an epoch holds, bounded to
+	// a candidate window, before the session read runs. That read classifies
+	// the session by aggregating over its facts and recomputing a prefix of
+	// their witnesses, so an epoch nobody has counted can cost unbounded
+	// database work before any limit here could refuse it.
+	ObservationEpochRowCount(ctx context.Context, epoch int64,
+		candidateRows int) (int64, error)
 	// ObservationsBySessionWithinBudget reads the rows only if they fit, with
 	// the bounds evaluated in the SAME statement as the read. The measurement
 	// above cannot carry that job alone: between a separate measuring query
@@ -192,32 +193,21 @@ func LoadSession(ctx context.Context, src ObservationSource, epoch int64, limit 
 		return predictioneval.SourceDataset{}, ErrLimitOutOfRange
 	}
 
-	// And measure the FACT rows the epoch holds, also before
-	// ReadObservationSession runs. That call is not only a session-row read:
-	// inside its transaction it recomputes the stored witness of a bounded
-	// prefix of the session's facts, which scans each row's payload_json and
-	// identifiers into memory. Those reads happen before this function holds a
-	// session id, so every bound below applied strictly after the store had
-	// already materialized them — a payload tampered to 4 MiB, four times
-	// MaxRecordBytes, was scanned and hashed in full and the load then returned
-	// no facts and no error.
+	// Count the epoch's facts before the session read, because that read is
+	// not cheap on a hostile store: it classifies the session by aggregating
+	// over its facts and then recomputes a prefix of their witnesses. An epoch
+	// nobody has counted can therefore cost unbounded database work before any
+	// limit below could refuse it. The window is limit+1 so an epoch AT the
+	// bound stays distinguishable from one over it.
 	//
-	// The window is limit+1 so an epoch AT the bound stays distinguishable from
-	// one over it, exactly as for the session probe below.
-	epochSize, err := src.ObservationEpochRowBounds(ctx, epoch, limit+1)
+	// This bounds WORK. The bytes those rows carry are bounded inside the read
+	// that materializes them, not here — see the fact-row bound passed below.
+	epochRows, err := src.ObservationEpochRowCount(ctx, epoch, limit+1)
 	if err != nil {
 		return predictioneval.SourceDataset{}, err
 	}
-	// An epoch whose count reaches the window was TRUNCATED by it, so the
-	// measurement describes a prefix and the width bound below would be a claim
-	// about rows nobody measured. Refusing is not a fallback here, it is what
-	// makes the bounded window sound: past this point the window provably
-	// covered every row of the epoch.
-	if epochSize.Rows > int64(limit) {
+	if epochRows > int64(limit) {
 		return predictioneval.SourceDataset{}, ErrLimitExceeded
-	}
-	if epochSize.WidestRowBytes > MaxRecordBytes {
-		return predictioneval.SourceDataset{}, ErrRecordTooLarge
 	}
 
 	// Read the session row under a width bound carried IN the reading
@@ -226,12 +216,13 @@ func LoadSession(ctx context.Context, src ObservationSource, epoch int64, limit 
 	// without the bound the earliest allocation of the whole load is the one
 	// nothing covers — and without the co-location, the bound is a measurement
 	// another connection can commit past before the read runs.
-	before, found, within, err := src.ReadObservationSessionWithinBudget(ctx, epoch, MaxSessionMetaBytes)
+	before, found, budget, err := src.ReadObservationSessionWithinBudget(
+		ctx, epoch, MaxSessionMetaBytes, MaxRecordBytes)
 	if err != nil {
 		return predictioneval.SourceDataset{}, err
 	}
-	if !within {
-		return predictioneval.SourceDataset{}, ErrSessionMetaTooLarge
+	if refusal := budgetRefusal(budget); refusal != nil {
+		return predictioneval.SourceDataset{}, refusal
 	}
 	if !found {
 		return predictioneval.SourceDataset{}, ErrSessionNotFound
@@ -301,15 +292,16 @@ func LoadSession(ctx context.Context, src ObservationSource, epoch int64, limit 
 		return predictioneval.SourceDataset{}, ErrLimitExceeded
 	}
 
-	after, found, within, err := src.ReadObservationSessionWithinBudget(ctx, epoch, MaxSessionMetaBytes)
+	after, found, budget, err := src.ReadObservationSessionWithinBudget(
+		ctx, epoch, MaxSessionMetaBytes, MaxRecordBytes)
 	if err != nil {
 		return predictioneval.SourceDataset{}, err
 	}
-	if !within {
-		// The session row grew past the bound during the load. That is the
-		// store changing underneath the snapshot, and the bound in the reading
-		// statement is what kept the enlarged row from being scanned to find
-		// it out.
+	if budget != analytics.ObservationReadWithinBudget {
+		// A row grew past a bound during the load. That is the store changing
+		// underneath the snapshot, and the bounds carried inside the reading
+		// transaction are what kept the enlarged row from being scanned to
+		// find it out.
 		return predictioneval.SourceDataset{}, ErrSnapshotIncoherent
 	}
 	if !found || after != before {
@@ -323,6 +315,21 @@ func LoadSession(ctx context.Context, src ObservationSource, epoch int64, limit 
 		Source:  convertProvenance(before),
 		Records: convertRecords(rows),
 	}, nil
+}
+
+// budgetRefusal maps the store's refusal onto this package's error, or nil
+// when nothing was refused. The two are kept distinct so a caller learns WHICH
+// bound stopped the load: an oversized session row and an oversized fact are
+// different facts about the store.
+func budgetRefusal(b analytics.ObservationReadBudget) error {
+	switch b {
+	case analytics.ObservationReadSessionRowTooWide:
+		return ErrSessionMetaTooLarge
+	case analytics.ObservationReadFactRowTooWide:
+		return ErrRecordTooLarge
+	default:
+		return nil
+	}
 }
 
 // convertProvenance carries the store's own session verdict across the fence

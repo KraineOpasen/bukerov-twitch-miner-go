@@ -937,6 +937,12 @@ func TestThePersistedSessionReplaysThroughEveryStageWithTheIndependentComparison
 		// placement contradicts itself, and comparing only the reason code
 		// would count that as agreement.
 		"terminalPhase": false, "terminalDecision": false,
+		// Nor is the terminal ACTION its arguments. Phase and decision say how
+		// the attempt ended; these two say what it ended on, and they were
+		// projected and then read by nothing — a terminal fact naming another
+		// slot than its envelope and its placement call agreed with everything
+		// above it.
+		"terminalOutcomeSlot": false, "terminalStake": false,
 	}
 	for _, cmp := range sc.Comparisons {
 		if cmp.Verdict != predictioneval.VerdictAgree {

@@ -190,8 +190,18 @@ type RecordedResults struct {
 	TerminalDecision string `json:"terminalDecision,omitempty"`
 	TerminalReason   string `json:"terminalReason,omitempty"`
 	// TerminalOutcomeSlot is the slot the producer named on a placing
-	// decision.
+	// decision. The pinned producer writes it on the placing path ALONE, so
+	// its presence on a record that says SKIP is itself a disagreement.
 	TerminalOutcomeSlot *int `json:"terminalOutcomeSlot,omitempty"`
+	// TerminalStake is the stake counter the terminal fact carries.
+	//
+	// On the placing path the producer writes exactly the amount it is about
+	// to send, which is the post-clamp final. Every skip path writes a stake
+	// too, but which stage's amount it holds varies by exit — so this is
+	// projected for every ending and compared only where its meaning is
+	// pinned.
+	TerminalStake         int64 `json:"terminalStake,omitempty"`
+	TerminalStakeRecorded bool  `json:"terminalStakeRecorded"`
 
 	// Stage states, carried so a comparison can say which stages the producer
 	// claims to have run.
@@ -411,6 +421,9 @@ func projectRecorded(terminal SourceRecord, env *SourceDecisionEnvelope) Recorde
 	if terminal.Payload.OutcomeSlot != nil {
 		slot := *terminal.Payload.OutcomeSlot
 		r.TerminalOutcomeSlot = &slot
+	}
+	if v, ok := terminal.Payload.Counters[CounterStake]; ok {
+		r.TerminalStake, r.TerminalStakeRecorded = v, true
 	}
 	if env.ChoiceIndex != nil {
 		r.ChoiceIndex, r.ChoiceIndexRecorded = *env.ChoiceIndex, true

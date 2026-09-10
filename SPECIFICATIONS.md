@@ -2961,7 +2961,8 @@ so a result from a truncated, unwitnessed session is never mistaken for one from
 a fully verified run.
 
 **Bounded acquisition.** A load is bounded at four levels — the session row,
-the facts an epoch holds, the row count and the bytes — and every bound is
+the facts the witness sweep reads, the row count and the bytes — plus a
+preflight count that bounds the work of getting there. Every byte bound is
 enforced before the data it bounds is materialized.
 
 The SESSION ROW is measured first, because it is read first, and — like the
@@ -2977,25 +2978,34 @@ allocation of the whole load the only unbounded one (`MaxSessionMetaBytes`,
 64 KiB). One structural test covers every `SELECT`/width pair, so none can
 drift from the columns it is meant to measure.
 
-The EPOCH bound covers the read that hid behind the other three.
+The WITNESS SWEEP is the read that hid behind the other three.
 `ReadObservationSession` is not only a session-row read: inside the same
 transaction it recomputes the stored witness of a bounded prefix of the
 session's facts, and doing so scans `payload_json` and a dozen identifier
-columns of each row into memory one row at a time. Every other bound here is
+columns of each row into memory one row at a time. Every other byte bound is
 keyed on the SESSION ID, which the load learns *from that call* — so they all
 applied strictly after those rows had been materialized. Measured on a
 `payload_json` tampered to 4 MiB, four times `MaxRecordBytes`: the sweep
 scanned and hashed it in full, and the load then returned no facts and no
-error, having already paid for it. So the widest fact row is measured first,
-keyed on the `collector_epoch` — the only key available at that point, and a
-SUPERSET of the `(epoch, session id)` rows the sweep can touch. The measurement
-window is `limit+1` rows, and an epoch whose count reaches the window is
-REFUSED rather than read on: a truncated window describes a prefix, so trusting
-its widest-row figure would bound the load by rows nobody measured. The bounded
-window and that refusal are one mechanism — unbounded work without the window,
-an unsound bound without the refusal.
+error, having already paid for it. `MaxRecordBytes` is therefore applied to the
+sweep as well, inside the SAME TRANSACTION, measured over exactly the rows the
+sweep would touch — the same key, the same ordering, the same budget. A bound
+narrower than that leaves rows unmeasured; a wider one refuses loads for rows
+the sweep never reads.
 
-Three of these four bounds travel IN the statement that reads what they bound,
+The EPOCH bound is the fourth level and bounds WORK, not bytes. The session
+read classifies by aggregating over the session's facts before recomputing any
+witness, so a store that assigns millions of rows to one epoch spends unbounded
+database CPU and I/O inside that call before any row limit could refuse the
+load. Counting a bounded window of `limit+1` rows first makes the refusal cost
+the size of the answer, and a count that REACHES the window is itself the
+refusal: it was truncated, so it describes a prefix rather than the epoch. An
+earlier version measured the widest row here too; that was both over-broad (it
+covered rows the sweep never reads) and stale (a separate statement leaves a
+window a writer can commit into), and the width now travels with the sweep.
+
+Every byte bound travels IN the statement — or, for the witness sweep, the
+transaction — that reads what it bounds,
 and that co-location is the property rather than an optimization. A width
 measured by an earlier, separate query is a time-of-check/time-of-use gap:
 another connection commits into it, and the read then transfers the enlarged
@@ -3006,11 +3016,10 @@ unbounded re-read still reports that the store changed, by scanning the row it
 should have refused. Tests observe the bound travelling with each read rather
 than inferring it from the verdict, since the verdict is identical either way.
 
-The EPOCH bound is the exception and is stated as one: it is a probe taken
-before `ReadObservationSession`, which is code the replay consumes rather than
-modifies, so it is decisive against a static tampered or foreign file — the
-input it exists for — and advisory against a writer enlarging a fact row
-concurrently.
+The epoch COUNT is a preflight rather than a co-located bound, and it is stated
+as one: it bounds work, and a store that adds rows between that count and the
+read is caught by the coherence re-read rather than prevented. No byte bound
+rests on it.
 
 One residue is recorded rather than closed. Inside the classification,
 `ReadObservationSession` also counts facts that match exactly ONE half of the
