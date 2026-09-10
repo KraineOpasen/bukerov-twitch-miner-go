@@ -603,12 +603,26 @@ func bernoulliThreshold(p float64) (uint64, bool) {
 	return saturatingUint64(p * bernoulliScale), true
 }
 
-// pointsValue mirrors the donor's Points::value.
+// pointsValue mirrors the donor's Points::value: multiply in float64, TRUNCATE
+// to u32, and only then compare against the cap.
 //
-// Multiply in float64, TRUNCATE to u32, and only then cap. The order matters:
-// capping before the cast, or rounding instead of truncating, produces a
-// different stake for the same inputs. A max_value of zero means NO CAP — it
-// does not mean a stake of zero. See TestOrderedRulesPointsTruncateThenCap.
+// Two of those three choices change the answer, and one does not — worth saying
+// exactly, because an overstated claim here is the same error this package
+// exists to avoid.
+//
+// TRUNCATION rather than rounding changes it: ten percent of 999 is
+// 99.90000000000001 in binary64, so truncating gives 99 where rounding gives
+// 100. A cap of ZERO meaning "no cap" changes it: reading it as a limit would
+// turn every uncapped rule into a stake of nothing.
+//
+// The cast/cap ORDER does not. Over the reachable domain — a normalized
+// percentage in [0,1] and a balance in the u32 range, so no NaN, no negative
+// and no saturation — flooring before the cap and flooring after it agree for
+// every input, because the cap is an integer: floor(min(x,M)) equals
+// min(floor(x),M). This form is kept because it is the donor's own, not because
+// the alternative would compute something different, and
+// TestOrderedRulesPointsTruncateThenCap pins the two choices that do matter
+// rather than pretending to pin this one.
 func pointsValue(p normalizedPoints, balance uint32) uint32 {
 	value := saturatingUint32(p.percent * float64(balance))
 	if p.maxValue == 0 {

@@ -429,6 +429,28 @@ func TestOrderedRulesCandidatePolicyAndDrawBindingsCannotBeRecombined(t *testing
 		t.Fatal("a different entropy run must move both the entropy binding and the consumed-prefix binding")
 	}
 
+	// The case above varies only the run's NAME, which is hashed separately —
+	// so on its own it would still pass if the consumed-prefix digest ignored
+	// the word VALUES entirely. This one holds the run identity fixed and
+	// changes the one consumed word, which is the difference that actually
+	// decided the outcome: the same stream and config admit under one word and
+	// refuse under the other.
+	flipped := orDraws(orWordRefuse)
+	other := predictioneval.EvaluateOrderedRules(stream, cfg, flipped)
+	switch {
+	case base.Status != predictioneval.StatusWouldAttempt ||
+		other.Status != predictioneval.StatusNoAttemptInSuppliedPrefix:
+		t.Fatalf("this case needs the two words to decide differently: %q then %q",
+			base.Status, other.Status)
+	case base.RawWordsConsumed != 1 || other.RawWordsConsumed != 1:
+		t.Fatalf("both runs must consume exactly one word: %d and %d",
+			base.RawWordsConsumed, other.RawWordsConsumed)
+	case other.ConsumedInputDigest == base.ConsumedInputDigest:
+		t.Fatal("two runs whose single consumed word differed — one admitting, one refusing — carry the " +
+			"same consumed-prefix digest. A result could then be presented as having come from the " +
+			"entropy prefix that produced the opposite answer.")
+	}
+
 	// A stream mutated AFTER projection no longer matches its own selection
 	// digest and is refused rather than evaluated.
 	tampered := stream

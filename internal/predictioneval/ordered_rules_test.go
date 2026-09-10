@@ -298,12 +298,18 @@ func TestOrderedRulesDefaultBoundsVersusExplicitZero(t *testing.T) {
 	})
 }
 
-// TestOrderedRulesPointsTruncateThenCap pins the stake arithmetic's ORDER.
+// TestOrderedRulesPointsTruncateThenCap pins the two stake choices that change
+// the answer.
 //
 // The donor multiplies in float64, TRUNCATES to u32, and only then compares
-// against the cap. Rounding instead of truncating, or capping before the cast,
-// produces a different number for the same inputs — and a cap of zero means NO
-// cap rather than a stake of zero.
+// against the cap. Truncating rather than rounding changes the number, and a
+// cap of zero meaning NO cap changes it.
+//
+// The cast/cap ORDER does not, and this test deliberately does not claim to
+// pin it: over the reachable domain the cap is an integer and the value is
+// non-negative and unsaturated, so flooring before the cap and flooring after
+// it agree for every input. The form in the code is the donor's own; asserting
+// a behavioural difference that does not exist would be a false guarantee.
 func TestOrderedRulesPointsTruncateThenCap(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
@@ -316,7 +322,7 @@ func TestOrderedRulesPointsTruncateThenCap(t *testing.T) {
 		// rounding would give 100.
 		{"truncates rather than rounds", 999, 0, 10, 99},
 		{"a cap of zero is NO cap, not a stake of zero", 1000, 0, 50, 500},
-		{"the cap applies after the cast", 1000, 300, 50, 300},
+		{"a value above the cap yields the cap", 1000, 300, 50, 300},
 		{"an uncapped value below the cap survives", 1000, 500, 10, 100},
 		{"a value equal to the cap yields the cap", 1000, 100, 10, 100},
 	} {
