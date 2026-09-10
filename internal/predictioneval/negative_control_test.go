@@ -1660,3 +1660,64 @@ func TestOneQuantityIsNotCountedInTwoEvidenceBuckets(t *testing.T) {
 		})
 	}
 }
+
+// TestADrawDependentAbsenceIsNotIndependentEvidence pins the other half of that
+// invariant, and the reason the two branches of the same comparison differ.
+//
+// On the placing branch a VALUE is compared: the chosen index, computed with no
+// observed input, so agreement there is independent of the stealth draw. On the
+// skip branch nothing is computed at all — the claim is that a slot should be
+// ABSENT, and that follows from the PATH the replay took. A skip reached
+// through the stake gates is a path the conditioned stake chose, so a different
+// draw could have reached placement, where a slot belongs.
+//
+// Counting that contradiction as independent would present draw-dependent
+// evidence as independent of the draw, which is the same error as the one the
+// test above closes, pointing the other way.
+//
+// It costs no refusal either way: the settlement guard blocks on conditioned
+// and independent disagreements alike, so this is purely about what the
+// scorecard CLAIMS its evidence is.
+func TestADrawDependentAbsenceIsNotIndependentEvidence(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		stealth string
+		want    string
+	}{
+		{"with no stealth", predictioneval.StealthNotApplicable,
+			predictioneval.BasisIndependent},
+		{"conditioned on an observed realization",
+			predictioneval.StealthConditionedOnObservedRealization,
+			predictioneval.BasisConditioned},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c, ev := ncAgreeingCase()
+			ev.Stealth.Outcome = tc.stealth
+			// A skip reached THROUGH the stake gates: the exit the conditioned
+			// stake selects.
+			ev.Action = predictioneval.ActionBelowMinimum
+			c.Recorded.TerminalPhase, c.Recorded.TerminalDecision =
+				predictioneval.PhaseAutoSkipped, "SKIP"
+			c.Recorded.TerminalReason = "BELOW_MINIMUM_POINTS"
+			slot := 1
+			c.Recorded.TerminalOutcomeSlot = &slot
+
+			sc := predictioneval.Score(c, ev, predictioneval.SettlementFacts{})
+			got := findComparison(t, sc, "terminalOutcomeSlot")
+			if got.Verdict != predictioneval.VerdictDisagree {
+				t.Fatalf("terminalOutcomeSlot verdict = %q, want DISAGREE: the producer names "+
+					"no slot on a skip, so this record is one it cannot have written", got.Verdict)
+			}
+			if got.Basis != tc.want {
+				t.Errorf("terminalOutcomeSlot basis = %s, want %s. A skip reached through the "+
+					"stake gates is a path the conditioned stake chose, so the absence it "+
+					"implies is conditioned with it.", got.Basis, tc.want)
+			}
+			// Either way the disagreement has to block the settlement, so the
+			// basis is about what the scorecard claims, not about the verdict.
+			if sc.IndependentDisagree+sc.ConditionedDisagree == 0 {
+				t.Error("the disagreement was counted in neither bucket, so it blocks nothing")
+			}
+		})
+	}
+}

@@ -486,6 +486,10 @@ func Score(c DecisionCase, ev Evaluation, s SettlementFacts) Scorecard {
 			// choiceIndex INDEPENDENT put one quantity in two evidence
 			// buckets, which is the accounting this whole stage exists to
 			// keep straight.
+			//
+			// This holds because a VALUE is compared here. The skip branch
+			// below compares no value — it asserts an absence that follows
+			// from the path — so it does NOT inherit this basis.
 			add(compareInt("terminalOutcomeSlot", slot, ev.Choice.Index, slotHas,
 				BasisIndependent,
 				"the pinned producer names an outcome slot on every placing terminal fact"))
@@ -505,10 +509,26 @@ func Score(c DecisionCase, ev Evaluation, s SettlementFacts) Scorecard {
 			add(Comparison{
 				Field:   "terminalOutcomeSlot",
 				Verdict: VerdictDisagree,
-				// Independent for the same reason as above, and structurally
-				// so here: whether the producer writes a slot at all is a
-				// function of which path it took, not of any drawn value.
-				Basis:    BasisIndependent,
+				// DERIVED here, unlike the placing branch above, and the
+				// asymmetry is the point rather than an oversight.
+				//
+				// Above, the compared thing is a VALUE the model computed
+				// without any observed input — the chosen index. Here there is
+				// no computed value at all: the claim is that a slot should be
+				// ABSENT, and it follows from the path the replay took rather
+				// than from anything it derived. When that path is
+				// stake-dependent and the stake was conditioned on a stealth
+				// realization, the claim is conditioned with it: a different
+				// draw could have reached placement, where a slot belongs. So
+				// calling this contradiction INDEPENDENT would present
+				// draw-dependent evidence as independent of the draw.
+				//
+				// It is deliberately conservative. A health gate or a
+				// pre-decision exit is not stake-dependent, and under stealth
+				// this conditions those too. That under-claims rather than
+				// over-claims, and it costs no refusal: the settlement guard
+				// blocks on conditioned and independent disagreements alike.
+				Basis:    terminalBasis(ev, derived),
 				Recorded: itoa(int64(*rec.TerminalOutcomeSlot)),
 				Computed: "absent",
 				Note:     "the replay skips, and the pinned producer names an outcome slot only when it places",
