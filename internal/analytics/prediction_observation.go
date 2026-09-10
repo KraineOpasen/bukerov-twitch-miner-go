@@ -2288,10 +2288,11 @@ func (r *SQLiteRepository) ReadObservationSession(ctx context.Context, epoch int
 // maxRowBytes of 0 means no width predicate at all, which is what
 // ReadObservationSession has always done and continues to do byte for byte.
 // A positive value adds the predicate to the SELECT that materializes the row,
-// so an oversized session row produces no row rather than an oversized scan —
-// and it does so in the SAME statement, which is the only place a width bound
-// on this read can be enforced without a window another connection can commit
-// into.
+// so an oversized session row produces NO row: the engine still evaluates the
+// width, but no oversized value crosses the driver into a Go string, which is
+// the boundary the bound is about. And it does so in the SAME statement, which
+// is the only place a width bound on this read can be enforced without leaving
+// a window another connection can commit into.
 func (r *SQLiteRepository) readObservationSession(
 	ctx context.Context, epoch int64, maxRowBytes int64,
 ) (reading ObservationSessionReading, found, withinBudget bool, err error) {
