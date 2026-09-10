@@ -783,10 +783,28 @@ const RoundOriginActiveAtAdmission = "ACTIVE_AT_ADMISSION"
 // is an exported struct a caller can build, serialize, partially decode or
 // edit, and Score's other guards (digest, provenance) all pass for a value that
 // is internally inconsistent in this particular way.
+//
+// EVERY stage a placement runs is listed, not the ones whose absence happens to
+// be conspicuous. A first version checked only the choice, the filter and the
+// clamp, which left the STAKE GATE unvalidated — the risk-gate result that
+// determines the final stake. An evaluation could then claim a placement with
+// StakeGate NOT_REACHED, Score would skip the stakeAllowed / stakeReason /
+// stakeLimit comparisons entirely (skipped, not UNAVAILABLE), and an
+// affirmative settlement could follow without the gate ever being checked. The
+// health stage was missing for the same reason.
+//
+// TestTheRequiredPlacementShapeIsTheOneRealEvaluationsProduce derives the
+// expected shape from real evaluations rather than from this list, so the two
+// cannot drift apart again.
 func stagesMatchAction(ev Evaluation) bool {
 	return ev.Choice.State == StageStateExecuted &&
+		ev.BaseStake.State == StageStateExecuted &&
 		ev.Filter.State == StageStateExecuted &&
-		ev.Clamp.State == StageStateExecuted
+		ev.Health.State == StageStateWitnessed &&
+		ev.StakeGate.State == StageStateExecuted &&
+		ev.Clamp.State == StageStateExecuted &&
+		ev.Minimum.State == StageStateExecuted &&
+		ev.Clamp.HasFinal
 }
 
 // detachSettlementFacts deep-copies the reference fields of the settlement

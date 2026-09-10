@@ -3024,8 +3024,13 @@ carry the same pair by coincidence — matching arguments are evidence, not
 identity.
 
 A terminal action is also a claim about which stages ran, and the claim is
-checked: `WOULD_ATTEMPT_PLACEMENT` requires the choice, the filter and the clamp
-each to be `EXECUTED`. A partially decoded or caller-edited evaluation can carry
+checked in full: `WOULD_ATTEMPT_PLACEMENT` requires the choice, base stake,
+filter, stake gate, clamp and minimum stages each to be `EXECUTED`, the health
+gate to be `WITNESSED`, and a final amount to be present. Every stage, not the
+conspicuous ones — omitting the stake gate would leave the risk-gate result that
+determines the final stake uncompared. The required shape is derived from what
+real evaluations produce rather than restated, so the guard and the evaluator
+cannot drift apart. A partially decoded or caller-edited evaluation can carry
 that action with those stages blank, and the per-stage comparisons are then not
 `UNAVAILABLE` — they are **absent**, so the unavailable-evidence guard below
 sees nothing to object to.

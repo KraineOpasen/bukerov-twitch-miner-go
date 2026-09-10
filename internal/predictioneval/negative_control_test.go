@@ -1362,3 +1362,121 @@ func TestTheScorecardDoesNotAliasTheCallersSettlementFacts(t *testing.T) {
 			recordedAttempt, got)
 	}
 }
+
+// TestTheRequiredPlacementShapeIsTheOneRealEvaluationsProduce keeps
+// stagesMatchAction honest by deriving the expected shape from real
+// evaluations instead of from a hand-written list.
+//
+// A hand-written list is how the check got it wrong the first time: it named
+// the choice, the filter and the clamp, and omitted the stake gate — the
+// risk-gate result that determines the final stake — and the health stage. An
+// evaluation could then claim a placement with StakeGate NOT_REACHED, and Score
+// would skip the stakeAllowed / stakeReason / stakeLimit comparisons entirely
+// rather than marking them UNAVAILABLE.
+//
+// So this drives REAL placements through Evaluate and asserts that every stage
+// state they produce is one the guard requires. If a future change makes a
+// placement leave some stage in a different state, this fails rather than the
+// guard silently rejecting legitimate work — and if a stage is dropped from the
+// guard, the negative controls below fail.
+func TestTheRequiredPlacementShapeIsTheOneRealEvaluationsProduce(t *testing.T) {
+	_, ev := ncAgreeingCase()
+	if ev.Action != predictioneval.ActionWouldAttemptPlacement {
+		t.Fatalf("fixture action = %q, want WOULD_ATTEMPT_PLACEMENT", ev.Action)
+	}
+
+	// The shape a real placement actually produces, read off the evaluation.
+	for _, tc := range []struct {
+		stage string
+		got   string
+		want  string
+	}{
+		{"Choice", ev.Choice.State, predictioneval.StageStateExecuted},
+		{"BaseStake", ev.BaseStake.State, predictioneval.StageStateExecuted},
+		{"Filter", ev.Filter.State, predictioneval.StageStateExecuted},
+		{"Health", ev.Health.State, predictioneval.StageStateWitnessed},
+		{"StakeGate", ev.StakeGate.State, predictioneval.StageStateExecuted},
+		{"Clamp", ev.Clamp.State, predictioneval.StageStateExecuted},
+		{"Minimum", ev.Minimum.State, predictioneval.StageStateExecuted},
+	} {
+		if tc.got != tc.want {
+			t.Errorf("a real placement leaves %s in state %q, but the shape guard requires %q. "+
+				"Either the evaluator changed and the guard now rejects legitimate work, or "+
+				"this expectation is stale — both are bugs.", tc.stage, tc.got, tc.want)
+		}
+	}
+	if !ev.Clamp.HasFinal {
+		t.Error("a real placement produced no final amount, which the shape guard requires")
+	}
+}
+
+// TestEveryStageAPlacementRunsIsRequiredByTheShapeGuard is the negative control
+// for the shape guard: blanking ANY stage a placement runs must refuse it.
+//
+// Named separately from the shape test above because they fail for opposite
+// reasons — that one catches a guard that demands too much, this one a guard
+// that demands too little. The stake gate is the case that motivated it.
+func TestEveryStageAPlacementRunsIsRequiredByTheShapeGuard(t *testing.T) {
+	c, ev := ncAgreeingCase()
+	slot := ev.Choice.Index
+	stake := int64(ev.Clamp.FinalAmount)
+	facts := ncBoundFacts(c, predictioneval.SettlementFacts{
+		PlacementCallStarted: true, PlacementCallReturned: true, PlacementAccepted: true,
+		PlacementStake: &stake, PlacementSlot: &slot,
+	})
+	if base := predictioneval.Score(c, ev, facts); base.Settlement.Assessment !=
+		predictioneval.SettlementAppliesToReplay {
+		t.Fatalf("control settlement = %q, want APPLIES_TO_REPLAY", base.Settlement.Assessment)
+	}
+
+	for _, tc := range []struct {
+		name   string
+		break_ func(*predictioneval.Evaluation)
+	}{
+		{"the choice stage", func(e *predictioneval.Evaluation) {
+			e.Choice.State = predictioneval.StageStateNotReached
+		}},
+		{"the base stake stage", func(e *predictioneval.Evaluation) {
+			e.BaseStake.State = predictioneval.StageStateNotReached
+		}},
+		{"the filter stage", func(e *predictioneval.Evaluation) {
+			e.Filter.State = predictioneval.StageStateNotReached
+		}},
+		{"the witnessed health gate", func(e *predictioneval.Evaluation) {
+			e.Health.State = predictioneval.StageStateNotReached
+		}},
+		// The one the first version of the guard missed. Score skips the
+		// stakeAllowed / stakeReason / stakeLimit comparisons when this stage
+		// is not EXECUTED, so an affirmative settlement could follow without
+		// the risk gate that sets the final stake ever being compared.
+		{"the stake gate", func(e *predictioneval.Evaluation) {
+			e.StakeGate.State = predictioneval.StageStateNotReached
+		}},
+		{"the clamp stage", func(e *predictioneval.Evaluation) {
+			e.Clamp.State = predictioneval.StageStateNotReached
+		}},
+		{"the minimum-stake stage", func(e *predictioneval.Evaluation) {
+			e.Minimum.State = predictioneval.StageStateNotReached
+		}},
+		{"the final amount", func(e *predictioneval.Evaluation) {
+			e.Clamp.HasFinal = false
+		}},
+	} {
+		t.Run(tc.name+" is required", func(t *testing.T) {
+			mut := ev
+			tc.break_(&mut)
+
+			sc := predictioneval.Score(c, mut, facts)
+			if !containsString(sc.Limitations,
+				predictioneval.LimitationEvaluationShapeInconsistent) {
+				t.Errorf("blanking %s scored without the %q limitation: %v",
+					tc.name, predictioneval.LimitationEvaluationShapeInconsistent, sc.Limitations)
+			}
+			if sc.Settlement.Assessment != predictioneval.SettlementUnknown {
+				t.Fatalf("blanking %s produced settlement %q, want UNKNOWN. A stage the "+
+					"action claims but does not carry is a stage nothing compared.",
+					tc.name, sc.Settlement.Assessment)
+			}
+		})
+	}
+}
