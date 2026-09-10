@@ -2964,12 +2964,18 @@ a fully verified run.
 the row count and the bytes — and every bound is enforced before the data it
 bounds is materialized.
 
-The SESSION ROW is measured first, because it is read first.
-`prediction_observation_sessions` is not `STRICT` either and neither
-`collector_session_id` nor `producer_revision` carries a length constraint, so
-bounding the facts while scanning their session metadata unguarded would leave
-the earliest allocation of the whole load the only unbounded one
-(`MaxSessionMetaBytes`, 64 KiB).
+The SESSION ROW is measured first, because it is read first, and — like the
+fact row — **every** column it selects is measured.
+`prediction_observation_sessions` is not `STRICT` either, so its nine
+INTEGER-affinity columns hold arbitrarily large TEXT as readily as its three
+TEXT ones. The `CHECK (col >= 0)` constraints on five of them close nothing:
+SQLite ranks the TEXT storage class above INTEGER, so a TEXT value compared
+against the integer literal 0 with `>=` passes whatever it contains — measured,
+a 250 KB string inserts into such a column and reports `typeof() = "text"`.
+Bounding the facts while scanning this row unguarded would leave the earliest
+allocation of the whole load the only unbounded one (`MaxSessionMetaBytes`,
+64 KiB). One structural test covers both `SELECT`/width pairs, so neither can
+drift from the columns it is meant to measure.
 
 The byte aggregates run over a BOUNDED candidate set of `limit+1` rows, not the
 whole session. Measuring every row first would let a store holding millions of

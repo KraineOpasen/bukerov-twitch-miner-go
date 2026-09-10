@@ -141,21 +141,48 @@ func (r *SQLiteRepository) ObservationSessionSizeBySession(
 	return out, nil
 }
 
-// ObservationSessionMetaWidthBytes measures the variable-width columns of ONE
-// session row without materializing them.
+// observationSessionRowWidthBytes is the actual stored byte width of EVERY
+// column ReadObservationSession materializes.
 //
-// prediction_observation_sessions is not STRICT either, and neither
-// collector_session_id nor producer_revision carries a length constraint. So a
-// tampered store can put hundreds of megabytes in the session row — and that
-// row is read FIRST, before any observation-row bound applies. Bounding the
-// facts while scanning their session metadata unguarded would leave the
-// earliest allocation in the whole load the only unbounded one.
+// Every column again, and for the same reason as observationRowWidthBytes:
+// prediction_observation_sessions is not STRICT either, so a declared type is
+// an affinity and not a constraint. An earlier version of this expression
+// measured three columns — the ones that look like text — and left nine
+// INTEGER-affinity ones unmeasured, which is precisely the mistake the
+// observation-row expression already exists to document.
+//
+// The CHECK (col >= 0) constraints on five of those columns do NOT close it.
+// SQLite's storage-class ordering ranks TEXT above INTEGER, so comparing a TEXT
+// value against the integer literal 0 with >= is true whatever the text
+// contains. Measured directly against modernc.org/sqlite: inserting a 250 KB
+// string into an INTEGER NOT NULL CHECK (col >= 0) column succeeds, and the
+// column then reports typeof() = "text" with a stored width of 250 000 bytes.
+// Three of the columns carry no CHECK at all.
+const observationSessionRowWidthBytes = `(
+	COALESCE(LENGTH(CAST(collector_epoch AS BLOB)), 0) +
+	COALESCE(LENGTH(CAST(collector_session_id AS BLOB)), 0) +
+	COALESCE(LENGTH(CAST(producer_revision AS BLOB)), 0) +
+	COALESCE(LENGTH(CAST(started_at_ms AS BLOB)), 0) +
+	COALESCE(LENGTH(CAST(closed_at_ms AS BLOB)), 0) +
+	COALESCE(LENGTH(CAST(close_state AS BLOB)), 0) +
+	COALESCE(LENGTH(CAST(last_assigned_sequence AS BLOB)), 0) +
+	COALESCE(LENGTH(CAST(committed_count AS BLOB)), 0) +
+	COALESCE(LENGTH(CAST(dropped_count AS BLOB)), 0) +
+	COALESCE(LENGTH(CAST(unsettled_obligation_count AS BLOB)), 0) +
+	COALESCE(LENGTH(CAST(post_fence_producer_count AS BLOB)), 0) +
+	COALESCE(LENGTH(CAST(producer_shutdown_uncertain_count AS BLOB)), 0)
+)`
+
+// ObservationSessionMetaWidthBytes measures ONE session row without
+// materializing it.
+//
+// That row is read FIRST — before any observation-row bound applies — so
+// bounding the facts while scanning their session metadata unguarded would
+// leave the earliest allocation of the whole load the only unbounded one.
 func (r *SQLiteRepository) ObservationSessionMetaWidthBytes(ctx context.Context, epoch int64) (int64, error) {
 	var width int64
 	err := r.db.QueryRowContext(ctx, `
-		SELECT COALESCE(LENGTH(CAST(collector_session_id AS BLOB)), 0) +
-		       COALESCE(LENGTH(CAST(producer_revision AS BLOB)), 0) +
-		       COALESCE(LENGTH(CAST(close_state AS BLOB)), 0)
+		SELECT `+observationSessionRowWidthBytes+`
 		FROM prediction_observation_sessions WHERE collector_epoch = ?`, epoch).Scan(&width)
 	if err == sql.ErrNoRows {
 		// No session row is not an oversized one. The caller's own not-found

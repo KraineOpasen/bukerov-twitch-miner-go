@@ -2167,6 +2167,16 @@ func (r *SQLiteRepository) RecountObservationQuotas(ctx context.Context, l *obse
 // Repository: readers
 // ---------------------------------------------------------------------------
 
+// observationSessionSelectColumns is the column list ReadObservationSession
+// materializes. It is a named constant so the replay reader's session-row
+// width expression can be checked against it structurally, the same way
+// observationRowWidthBytes is checked against observationSelectColumns.
+const observationSessionSelectColumns = `
+	collector_epoch, collector_session_id, producer_revision, started_at_ms,
+	closed_at_ms, close_state, last_assigned_sequence, committed_count,
+	dropped_count, unsettled_obligation_count, post_fence_producer_count,
+	producer_shutdown_uncertain_count`
+
 const observationSelectColumns = `
 	id, observation_id, collector_session_id, collector_epoch, collector_sequence,
 	pool_instance_id, COALESCE(round_incarnation_id, ''),
@@ -2274,11 +2284,7 @@ func (r *SQLiteRepository) ReadObservationSession(ctx context.Context, epoch int
 	err := r.db.WithTx(ctx, func(tx *sql.Tx) error {
 		var s ObservationSessionRecord
 		var closedAt, lastSeq sql.NullInt64
-		e := tx.QueryRowContext(ctx, `
-			SELECT collector_epoch, collector_session_id, producer_revision, started_at_ms,
-			       closed_at_ms, close_state, last_assigned_sequence, committed_count,
-			       dropped_count, unsettled_obligation_count, post_fence_producer_count,
-			       producer_shutdown_uncertain_count
+		e := tx.QueryRowContext(ctx, `SELECT `+observationSessionSelectColumns+`
 			  FROM prediction_observation_sessions WHERE collector_epoch = ?`, epoch).
 			Scan(&s.CollectorEpoch, &s.CollectorSessionID, &s.ProducerRevision, &s.StartedAtMS,
 				&closedAt, &s.CloseState, &lastSeq, &s.CommittedCount,

@@ -23,11 +23,35 @@ import (
 // the exemption is also what makes this test simple to keep honest — there is
 // no judgement left in it.
 func TestTheWidthExpressionCoversEveryColumnTheReadSelects(t *testing.T) {
+	for _, pair := range []struct {
+		what    string
+		selects string
+		width   string
+		minCols int
+	}{
+		{"observation rows", observationSelectColumns, observationRowWidthBytes, 25},
+		// The session row needs the same treatment, and did not get it first
+		// time: its width expression measured three columns while
+		// ReadObservationSession scanned twelve. That row is read BEFORE any
+		// observation-row bound applies, so it was the earliest unbounded
+		// allocation in the load.
+		{"the session row", observationSessionSelectColumns, observationSessionRowWidthBytes, 12},
+	} {
+		t.Run(pair.what, func(t *testing.T) {
+			assertWidthCoversSelect(t, pair.selects, pair.width, pair.minCols)
+		})
+	}
+}
+
+// assertWidthCoversSelect compares a SELECT list against the width expression
+// meant to measure it, in both directions.
+func assertWidthCoversSelect(t *testing.T, selectList, widthExpr string, minCols int) {
+	t.Helper()
 	// The column names the read selects, taken from the SELECT list itself
 	// rather than restated: a restated list is one more thing that can drift.
 	ident := regexp.MustCompile(`[a-z][a-z0-9_]*`)
 	selected := map[string]bool{}
-	for _, part := range strings.Split(observationSelectColumns, ",") {
+	for _, part := range strings.Split(selectList, ",") {
 		part = strings.TrimSpace(part)
 		if part == "" {
 			continue
@@ -42,14 +66,14 @@ func TestTheWidthExpressionCoversEveryColumnTheReadSelects(t *testing.T) {
 			break
 		}
 	}
-	if len(selected) < 25 {
-		t.Fatalf("parsed only %d columns out of the select list, so this check is not "+
-			"actually inspecting it: %v", len(selected), selected)
+	if len(selected) < minCols {
+		t.Fatalf("parsed only %d columns out of the select list (want at least %d), so this "+
+			"check is not actually inspecting it: %v", len(selected), minCols, selected)
 	}
 
 	var unmeasured []string
 	for col := range selected {
-		if !strings.Contains(observationRowWidthBytes, col) {
+		if !strings.Contains(widthExpr, col) {
 			unmeasured = append(unmeasured, col)
 		}
 	}
@@ -64,7 +88,7 @@ func TestTheWidthExpressionCoversEveryColumnTheReadSelects(t *testing.T) {
 	// And the reverse: the width expression must not measure a column the read
 	// does not select, or the budget refuses loads on bytes nobody pays for.
 	var phantom []string
-	for _, tok := range ident.FindAllString(observationRowWidthBytes, -1) {
+	for _, tok := range ident.FindAllString(widthExpr, -1) {
 		switch strings.ToLower(tok) {
 		case "length", "cast", "as", "blob", "coalesce":
 			continue

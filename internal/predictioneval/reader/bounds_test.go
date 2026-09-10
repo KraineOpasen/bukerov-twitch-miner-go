@@ -585,3 +585,88 @@ func TestTheSizeProbeOnlyAggregatesABoundedCandidateSet(t *testing.T) {
 			"the point of asking for one")
 	}
 }
+
+// TestOversizedSessionMetadataIsCountedInEveryColumn closes the same
+// affinity hole on the SESSION row that the fact row already had.
+//
+// The first version of the session bound measured three columns —
+// collector_session_id, producer_revision and close_state, the ones that look
+// like text — while ReadObservationSession scans twelve. The other nine are
+// INTEGER-affinity, and prediction_observation_sessions is not STRICT either,
+// so they hold arbitrarily large TEXT.
+//
+// The CHECK (col >= 0) constraints on five of them do not help. SQLite ranks
+// the TEXT storage class above INTEGER, so comparing a TEXT value against the
+// integer literal 0 with >= is true whatever the text contains. Measured
+// directly: inserting a 250 KB string into an INTEGER NOT NULL CHECK (col >= 0)
+// column succeeds and reports typeof() = "text".
+func TestOversizedSessionMetadataIsCountedInEveryColumn(t *testing.T) {
+	ctx := context.Background()
+	repo := observationStore(t)
+
+	db, err := database.Open(observationTestDir)
+	if err != nil {
+		t.Fatalf("open database: %v", err)
+	}
+	fat := strings.Repeat("Z", 250_000)
+
+	for _, column := range []string{
+		// Carries CHECK (col >= 0) — which a TEXT value satisfies.
+		"committed_count",
+		"dropped_count",
+		"unsettled_obligation_count",
+		"post_fence_producer_count",
+		"producer_shutdown_uncertain_count",
+		// No CHECK at all.
+		"started_at_ms",
+		"closed_at_ms",
+		"last_assigned_sequence",
+	} {
+		t.Run(column, func(t *testing.T) {
+			f := baseFact(analytics.KindChannelEvent)
+			f.Payload = analytics.ObservationPayload{Phase: "ROUND_UPDATED", RoundState: "ACTIVE"}
+			epoch, _ := seedSession(t, repo, "meta-col-"+column,
+				[]analytics.PredictionObservation{f})
+
+			before, err := repo.ObservationSessionMetaWidthBytes(ctx, epoch)
+			if err != nil {
+				t.Fatalf("measure: %v", err)
+			}
+
+			if _, err := db.ExecContext(ctx,
+				`UPDATE prediction_observation_sessions SET `+column+
+					` = ? WHERE collector_epoch = ?`, fat, epoch); err != nil {
+				t.Skipf("this build refused a TEXT value in %s (%v); the scenario under "+
+					"test cannot occur here", column, err)
+			}
+
+			var storedType string
+			if err := db.QueryRowContext(ctx,
+				`SELECT typeof(`+column+`) FROM prediction_observation_sessions `+
+					`WHERE collector_epoch = ?`, epoch).Scan(&storedType); err != nil {
+				t.Fatalf("typeof: %v", err)
+			}
+			if storedType != "text" {
+				t.Fatalf("%s stored a %q rather than text; affinity appears to be enforced "+
+					"here and the scenario under test cannot occur", column, storedType)
+			}
+
+			after, err := repo.ObservationSessionMetaWidthBytes(ctx, epoch)
+			if err != nil {
+				t.Fatalf("measure after tamper: %v", err)
+			}
+			if grew := after - before; grew < 200_000 {
+				t.Fatalf("a %d-byte value hidden in %s moved the measured session width by "+
+					"only %d bytes (%d -> %d). ReadObservationSession scans that column, so "+
+					"a column left out of the width expression is a place for an oversized "+
+					"value to hide.", len(fat), column, grew, before, after)
+			}
+
+			ds, err := reader.LoadSession(ctx, repo, epoch, reader.DefaultMaxRecords)
+			if !errors.Is(err, reader.ErrSessionMetaTooLarge) {
+				t.Fatalf("LoadSession returned %d facts and err %v, want ErrSessionMetaTooLarge",
+					len(ds.Records), err)
+			}
+		})
+	}
+}
