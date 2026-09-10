@@ -1,6 +1,15 @@
 package analytics
 
-import "context"
+import (
+	"context"
+	"database/sql"
+	"errors"
+)
+
+// errNonPositiveCandidateBound refuses a measurement with no bound, which
+// would defeat the point of asking for one.
+var errNonPositiveCandidateBound = errors.New(
+	"analytics: observation session size needs a positive candidate-row bound")
 
 // This file adds read-only measurement and a bounded read used by the offline
 // replay reader. It performs no write, no migration and no schema change, and
@@ -97,21 +106,66 @@ type ObservationSessionSize struct {
 // driver boundary, so the cost of asking is bounded whatever the table holds —
 // which is the entire point of asking before the load rather than discovering
 // the size by allocating it.
-func (r *SQLiteRepository) ObservationSessionSizeBySession(ctx context.Context, sessionID string) (ObservationSessionSize, error) {
+func (r *SQLiteRepository) ObservationSessionSizeBySession(
+	ctx context.Context, sessionID string, candidateRows int,
+) (ObservationSessionSize, error) {
+	if candidateRows <= 0 {
+		return ObservationSessionSize{}, errNonPositiveCandidateBound
+	}
 	var out ObservationSessionSize
+	// The aggregate runs over a BOUNDED candidate set, not the whole session.
+	// Measuring every row first would let a store holding millions of small
+	// rows spend unbounded database CPU and I/O before the row-count limit was
+	// consulted — the returned allocation would be bounded and the work to
+	// reach it would not.
+	//
+	// The caller passes limit+1, so a session AT the limit and one OVER it stay
+	// distinguishable: COUNT reaching limit+1 is the refusal signal, and the
+	// byte aggregates describe exactly the rows a load would have returned.
+	//
 	// COALESCE because SUM and MAX over no rows are NULL, and a session with
 	// no facts is an ordinary answer rather than a scan error.
 	err := r.db.QueryRowContext(ctx, `
-		SELECT COUNT(*),
-		       COALESCE(SUM(`+observationRowWidthBytes+`), 0),
-		       COALESCE(MAX(`+observationRowWidthBytes+`), 0)
-		FROM prediction_observations
-		WHERE collector_session_id = ?`, sessionID).
+		SELECT COUNT(*), COALESCE(SUM(w), 0), COALESCE(MAX(w), 0)
+		FROM (
+			SELECT `+observationRowWidthBytes+` AS w
+			FROM prediction_observations
+			WHERE collector_session_id = ?
+			ORDER BY collector_sequence ASC
+			LIMIT ?
+		)`, sessionID, candidateRows).
 		Scan(&out.Rows, &out.TotalBytes, &out.WidestRowBytes)
 	if err != nil {
 		return ObservationSessionSize{}, err
 	}
 	return out, nil
+}
+
+// ObservationSessionMetaWidthBytes measures the variable-width columns of ONE
+// session row without materializing them.
+//
+// prediction_observation_sessions is not STRICT either, and neither
+// collector_session_id nor producer_revision carries a length constraint. So a
+// tampered store can put hundreds of megabytes in the session row — and that
+// row is read FIRST, before any observation-row bound applies. Bounding the
+// facts while scanning their session metadata unguarded would leave the
+// earliest allocation in the whole load the only unbounded one.
+func (r *SQLiteRepository) ObservationSessionMetaWidthBytes(ctx context.Context, epoch int64) (int64, error) {
+	var width int64
+	err := r.db.QueryRowContext(ctx, `
+		SELECT COALESCE(LENGTH(CAST(collector_session_id AS BLOB)), 0) +
+		       COALESCE(LENGTH(CAST(producer_revision AS BLOB)), 0) +
+		       COALESCE(LENGTH(CAST(close_state AS BLOB)), 0)
+		FROM prediction_observation_sessions WHERE collector_epoch = ?`, epoch).Scan(&width)
+	if err == sql.ErrNoRows {
+		// No session row is not an oversized one. The caller's own not-found
+		// path reports it.
+		return 0, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	return width, nil
 }
 
 // ObservationsBySessionWithinBudget reads a session's facts ONLY if they fit
@@ -142,12 +196,21 @@ func (r *SQLiteRepository) ObservationsBySessionWithinBudget(
 	query := `SELECT ` + observationSelectColumns + `
 		FROM prediction_observations
 		WHERE collector_session_id = ?
-		  AND (SELECT COALESCE(SUM(` + observationRowWidthBytes + `), 0)
-		       FROM prediction_observations WHERE collector_session_id = ?) <= ?
-		  AND (SELECT COALESCE(MAX(` + observationRowWidthBytes + `), 0)
-		       FROM prediction_observations WHERE collector_session_id = ?) <= ?
+		  AND (SELECT COALESCE(SUM(w), 0) FROM (
+		         SELECT ` + observationRowWidthBytes + ` AS w FROM prediction_observations
+		         WHERE collector_session_id = ? ORDER BY collector_sequence ASC LIMIT ?)) <= ?
+		  AND (SELECT COALESCE(MAX(w), 0) FROM (
+		         SELECT ` + observationRowWidthBytes + ` AS w FROM prediction_observations
+		         WHERE collector_session_id = ? ORDER BY collector_sequence ASC LIMIT ?)) <= ?
 		ORDER BY collector_sequence ASC`
-	args := []interface{}{sessionID, sessionID, maxTotalBytes, sessionID, maxRowBytes}
+	// The guard subqueries are bounded to the same candidate set the read
+	// returns, so an over-limit session is refused after bounded work rather
+	// than after aggregating every row a tampered store cares to insert.
+	args := []interface{}{
+		sessionID,
+		sessionID, limit, maxTotalBytes,
+		sessionID, limit, maxRowBytes,
+	}
 	if limit > 0 {
 		query += ` LIMIT ?`
 		args = append(args, limit)

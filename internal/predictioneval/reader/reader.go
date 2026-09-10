@@ -76,6 +76,15 @@ const MaxLoadLimit = 1 << 20
 const (
 	MaxSessionPayloadBytes = 128 << 20
 	MaxRecordBytes         = 1 << 20
+	// MaxSessionMetaBytes bounds the SESSION ROW itself.
+	//
+	// prediction_observation_sessions is not STRICT either, and neither
+	// collector_session_id nor producer_revision carries a length constraint.
+	// That row is read FIRST, so bounding the facts while scanning their
+	// session metadata unguarded would leave the earliest allocation of the
+	// whole load the only unbounded one. 64 KiB is orders of magnitude above a
+	// session id plus a revision string.
+	MaxSessionMetaBytes = 64 << 10
 )
 
 var (
@@ -104,6 +113,9 @@ var (
 	ErrPayloadBudgetExceeded = errors.New("predictioneval/reader: session payloads exceed the maximum this reader will load")
 	// ErrRecordTooLarge reports a single row wider than MaxRecordBytes.
 	ErrRecordTooLarge = errors.New("predictioneval/reader: a stored fact exceeds the maximum width this reader will load")
+	// ErrSessionMetaTooLarge reports a session row wider than
+	// MaxSessionMetaBytes — the load is refused before that row is scanned.
+	ErrSessionMetaTooLarge = errors.New("predictioneval/reader: session metadata exceeds the maximum width this reader will load")
 )
 
 // ObservationSource is the read surface this package needs. It is an interface
@@ -116,7 +128,12 @@ type ObservationSource interface {
 	// ObservationSessionSizeBySession measures what a load would cost without
 	// paying it. It is part of the read surface rather than an optimization:
 	// a byte bound cannot be enforced after the rows are in memory.
-	ObservationSessionSizeBySession(ctx context.Context, sessionID string) (analytics.ObservationSessionSize, error)
+	ObservationSessionSizeBySession(ctx context.Context, sessionID string,
+		candidateRows int) (analytics.ObservationSessionSize, error)
+	// ObservationSessionMetaWidthBytes measures the session row before it is
+	// read, because that read is the first allocation of the load and the
+	// sessions table constrains no column's length either.
+	ObservationSessionMetaWidthBytes(ctx context.Context, epoch int64) (int64, error)
 	// ObservationsBySessionWithinBudget reads the rows only if they fit, with
 	// the bounds evaluated in the SAME statement as the read. The measurement
 	// above cannot carry that job alone: between a separate measuring query
@@ -143,6 +160,18 @@ func LoadSession(ctx context.Context, src ObservationSource, epoch int64, limit 
 	}
 	if limit > MaxLoadLimit {
 		return predictioneval.SourceDataset{}, ErrLimitOutOfRange
+	}
+
+	// Measure the session row BEFORE reading it. ReadObservationSession scans
+	// collector_session_id and producer_revision into Go strings, and it runs
+	// before any observation-row bound applies — so without this, the earliest
+	// allocation of the whole load is the one nothing bounds.
+	metaWidth, err := src.ObservationSessionMetaWidthBytes(ctx, epoch)
+	if err != nil {
+		return predictioneval.SourceDataset{}, err
+	}
+	if metaWidth > MaxSessionMetaBytes {
+		return predictioneval.SourceDataset{}, ErrSessionMetaTooLarge
 	}
 
 	before, found, err := src.ReadObservationSession(ctx, epoch)
@@ -174,7 +203,9 @@ func LoadSession(ctx context.Context, src ObservationSource, epoch int64, limit 
 	// The measurement is an aggregate the database computes without handing
 	// any payload across the driver boundary, so asking is bounded whatever
 	// the table holds.
-	size, err := src.ObservationSessionSizeBySession(ctx, before.Session.CollectorSessionID)
+	// limit+1 candidate rows: enough to tell a session AT the bound from one
+	// over it, and bounded work either way.
+	size, err := src.ObservationSessionSizeBySession(ctx, before.Session.CollectorSessionID, limit+1)
 	if err != nil {
 		return predictioneval.SourceDataset{}, err
 	}

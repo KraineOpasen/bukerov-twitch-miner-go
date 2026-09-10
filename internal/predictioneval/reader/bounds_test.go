@@ -87,8 +87,13 @@ func (p *budgetProbe) ReadObservationSession(ctx context.Context, epoch int64) (
 	return p.real.ReadObservationSession(ctx, epoch)
 }
 
-func (p *budgetProbe) ObservationSessionSizeBySession(ctx context.Context, sessionID string) (analytics.ObservationSessionSize, error) {
+func (p *budgetProbe) ObservationSessionSizeBySession(ctx context.Context, sessionID string,
+	candidateRows int) (analytics.ObservationSessionSize, error) {
 	return p.size, nil
+}
+
+func (p *budgetProbe) ObservationSessionMetaWidthBytes(ctx context.Context, epoch int64) (int64, error) {
+	return p.real.ObservationSessionMetaWidthBytes(ctx, epoch)
 }
 
 func (p *budgetProbe) ObservationsBySessionWithinBudget(ctx context.Context, sessionID string,
@@ -167,8 +172,13 @@ func (p *passThrough) ReadObservationSession(ctx context.Context, epoch int64) (
 	return p.real.ReadObservationSession(ctx, epoch)
 }
 
-func (p *passThrough) ObservationSessionSizeBySession(ctx context.Context, sessionID string) (analytics.ObservationSessionSize, error) {
+func (p *passThrough) ObservationSessionSizeBySession(ctx context.Context, sessionID string,
+	candidateRows int) (analytics.ObservationSessionSize, error) {
 	return p.size, nil
+}
+
+func (p *passThrough) ObservationSessionMetaWidthBytes(ctx context.Context, epoch int64) (int64, error) {
+	return p.real.ObservationSessionMetaWidthBytes(ctx, epoch)
 }
 
 func (p *passThrough) ObservationsBySessionWithinBudget(ctx context.Context, sessionID string,
@@ -211,7 +221,7 @@ func TestTheMeasuredSizeIsBytesAndNotCharacters(t *testing.T) {
 			Phase: "ROUND_UPDATED", RoundState: "ACTIVE", ReasonCode: reason,
 		}
 		_, sessionID := seedSession(t, repo, label, []analytics.PredictionObservation{f})
-		size, err := repo.ObservationSessionSizeBySession(ctx, sessionID)
+		size, err := repo.ObservationSessionSizeBySession(ctx, sessionID, reader.DefaultMaxRecords)
 		if err != nil {
 			t.Fatalf("measure %s: %v", label, err)
 		}
@@ -259,7 +269,7 @@ func TestTheBudgetCountsEveryColumnTheReadMaterializes(t *testing.T) {
 		f.Payload = analytics.ObservationPayload{Phase: "ROUND_UPDATED", RoundState: "ACTIVE"}
 		mut(&f)
 		_, sessionID := seedSession(t, repo, label, []analytics.PredictionObservation{f})
-		size, err := repo.ObservationSessionSizeBySession(ctx, sessionID)
+		size, err := repo.ObservationSessionSizeBySession(ctx, sessionID, reader.DefaultMaxRecords)
 		if err != nil {
 			t.Fatalf("measure %s: %v", label, err)
 		}
@@ -326,7 +336,7 @@ func TestTheBoundTravelsWithTheReadNotWithAnEarlierMeasurement(t *testing.T) {
 	}
 	epoch, sessionID := seedSession(t, repo, "bound-travels", facts)
 
-	size, err := repo.ObservationSessionSizeBySession(ctx, sessionID)
+	size, err := repo.ObservationSessionSizeBySession(ctx, sessionID, reader.DefaultMaxRecords)
 	if err != nil {
 		t.Fatalf("measure: %v", err)
 	}
@@ -401,7 +411,7 @@ func TestAnOversizedValueInAnIntegerColumnIsCounted(t *testing.T) {
 	f.Payload = analytics.ObservationPayload{Phase: "ROUND_UPDATED", RoundState: "ACTIVE"}
 	_, sessionID := seedSession(t, repo, "integer-affinity", []analytics.PredictionObservation{f})
 
-	before, err := repo.ObservationSessionSizeBySession(ctx, sessionID)
+	before, err := repo.ObservationSessionSizeBySession(ctx, sessionID, reader.DefaultMaxRecords)
 	if err != nil {
 		t.Fatalf("measure: %v", err)
 	}
@@ -429,7 +439,7 @@ func TestAnOversizedValueInAnIntegerColumnIsCounted(t *testing.T) {
 			"appears to enforce affinity and the scenario under test cannot occur", storedType)
 	}
 
-	after, err := repo.ObservationSessionSizeBySession(ctx, sessionID)
+	after, err := repo.ObservationSessionSizeBySession(ctx, sessionID, reader.DefaultMaxRecords)
 	if err != nil {
 		t.Fatalf("measure after tamper: %v", err)
 	}
@@ -456,5 +466,122 @@ func TestAnOversizedValueInAnIntegerColumnIsCounted(t *testing.T) {
 	if within || len(rows) != 0 {
 		t.Fatalf("within=%v rows=%d; the per-row bound did not refuse a row whose oversized "+
 			"value sits in an INTEGER-affinity column", within, len(rows))
+	}
+}
+
+// TestOversizedSessionMetadataIsRefusedBeforeItIsScanned closes the earliest
+// unbounded allocation in the load.
+//
+// prediction_observation_sessions is not STRICT either, and neither
+// collector_session_id nor producer_revision carries a length constraint.
+// ReadObservationSession scans both into Go strings and it runs FIRST — before
+// any observation-row bound applies — so bounding the facts while reading their
+// session metadata unguarded left the first allocation the only unbounded one.
+func TestOversizedSessionMetadataIsRefusedBeforeItIsScanned(t *testing.T) {
+	ctx := context.Background()
+	repo := observationStore(t)
+
+	f := baseFact(analytics.KindChannelEvent)
+	f.Payload = analytics.ObservationPayload{Phase: "ROUND_UPDATED", RoundState: "ACTIVE"}
+	epoch, _ := seedSession(t, repo, "session-meta", []analytics.PredictionObservation{f})
+
+	// The clean session loads, so the refusal below is not refusing everything.
+	if _, err := reader.LoadSession(ctx, repo, epoch, reader.DefaultMaxRecords); err != nil {
+		t.Fatalf("the clean session failed to load: %v", err)
+	}
+
+	db, err := database.Open(observationTestDir)
+	if err != nil {
+		t.Fatalf("open database: %v", err)
+	}
+	fat := strings.Repeat("R", 200_000)
+	if _, err := db.ExecContext(ctx,
+		`UPDATE prediction_observation_sessions SET producer_revision = ? WHERE collector_epoch = ?`,
+		fat, epoch); err != nil {
+		t.Fatalf("tamper: %v", err)
+	}
+
+	width, err := repo.ObservationSessionMetaWidthBytes(ctx, epoch)
+	if err != nil {
+		t.Fatalf("measure session meta: %v", err)
+	}
+	if width < int64(len(fat)) {
+		t.Fatalf("the session row measured %d bytes while carrying a %d-byte revision",
+			width, len(fat))
+	}
+
+	ds, err := reader.LoadSession(ctx, repo, epoch, reader.DefaultMaxRecords)
+	if !errors.Is(err, reader.ErrSessionMetaTooLarge) {
+		t.Fatalf("LoadSession returned %d facts and err %v, want ErrSessionMetaTooLarge. "+
+			"The session row is read before any fact bound applies, so it needs a bound of "+
+			"its own", len(ds.Records), err)
+	}
+	if len(ds.Records) != 0 {
+		t.Fatalf("the refused load still handed back %d facts", len(ds.Records))
+	}
+}
+
+// TestTheSizeProbeOnlyAggregatesABoundedCandidateSet closes unbounded database
+// work behind a bounded allocation.
+//
+// The measurement used to aggregate every row of the session before LoadSession
+// compared the count with its limit. A store assigning millions of small rows
+// to one session therefore spent unbounded database CPU and I/O to produce a
+// number whose only use was to refuse the load: the returned allocation was
+// bounded and the work to reach it was not.
+func TestTheSizeProbeOnlyAggregatesABoundedCandidateSet(t *testing.T) {
+	ctx := context.Background()
+	repo := observationStore(t)
+
+	const facts = 12
+	seeded := make([]analytics.PredictionObservation, 0, facts)
+	for i := 0; i < facts; i++ {
+		f := baseFact(analytics.KindChannelEvent)
+		f.Payload = analytics.ObservationPayload{Phase: "ROUND_UPDATED", RoundState: "ACTIVE"}
+		seeded = append(seeded, f)
+	}
+	_, sessionID := seedSession(t, repo, "bounded-probe", seeded)
+
+	// Asked for the whole session, the probe sees all of it.
+	full, err := repo.ObservationSessionSizeBySession(ctx, sessionID, facts+1)
+	if err != nil {
+		t.Fatalf("measure: %v", err)
+	}
+	if full.Rows != facts {
+		t.Fatalf("measured %d rows, want %d", full.Rows, facts)
+	}
+
+	// Asked for a smaller candidate set, it stops there — which is what makes
+	// the work bounded rather than the answer complete.
+	const candidates = 5
+	bounded, err := repo.ObservationSessionSizeBySession(ctx, sessionID, candidates)
+	if err != nil {
+		t.Fatalf("measure bounded: %v", err)
+	}
+	if bounded.Rows != candidates {
+		t.Fatalf("a %d-row candidate bound measured %d rows; the aggregate is still running "+
+			"over the whole session, so a store with millions of rows would pay for all of "+
+			"them before the row limit was consulted", candidates, bounded.Rows)
+	}
+	if bounded.TotalBytes >= full.TotalBytes {
+		t.Fatalf("the bounded aggregate summed %d bytes and the full one %d; the bound is not "+
+			"restricting the rows the aggregate visits", bounded.TotalBytes, full.TotalBytes)
+	}
+
+	// A candidate bound of limit+1 still distinguishes AT the limit from OVER
+	// it, which is the property LoadSession relies on.
+	atLimit, err := repo.ObservationSessionSizeBySession(ctx, sessionID, facts-1+1)
+	if err != nil {
+		t.Fatalf("measure at limit: %v", err)
+	}
+	if atLimit.Rows != facts {
+		t.Fatalf("with limit %d the probe saw %d rows, want %d so that an over-limit session "+
+			"is still detectable", facts-1, atLimit.Rows, facts)
+	}
+
+	// A bound of zero or less is refused rather than silently unbounded.
+	if _, err := repo.ObservationSessionSizeBySession(ctx, sessionID, 0); err == nil {
+		t.Fatal("a candidate bound of 0 was accepted; a measurement with no bound defeats " +
+			"the point of asking for one")
 	}
 }

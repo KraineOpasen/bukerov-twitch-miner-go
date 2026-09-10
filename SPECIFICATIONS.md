@@ -2960,8 +2960,22 @@ names the session, the witness counts and the loss counters it was read under,
 so a result from a truncated, unwitnessed session is never mistaken for one from
 a fully verified run.
 
-**Bounded acquisition.** A load is bounded twice, and both bounds are enforced
-before the data they bound is materialized. The row count is capped
+**Bounded acquisition.** A load is bounded at three levels — the session row,
+the row count and the bytes — and every bound is enforced before the data it
+bounds is materialized.
+
+The SESSION ROW is measured first, because it is read first.
+`prediction_observation_sessions` is not `STRICT` either and neither
+`collector_session_id` nor `producer_revision` carries a length constraint, so
+bounding the facts while scanning their session metadata unguarded would leave
+the earliest allocation of the whole load the only unbounded one
+(`MaxSessionMetaBytes`, 64 KiB).
+
+The byte aggregates run over a BOUNDED candidate set of `limit+1` rows, not the
+whole session. Measuring every row first would let a store holding millions of
+small rows spend unbounded database CPU and I/O to produce a number whose only
+use was to refuse the load — a bounded allocation reached by unbounded work.
+`limit+1` keeps a session AT the bound distinguishable from one over it. The row count is capped
 (`DefaultMaxRecords` 20000, ceiling `MaxLoadLimit` 2^20 — a bound large enough
 to overflow the `limit+1` probe is not a bound and is refused), and the
 AGGREGATE width of the session is capped (`MaxSessionPayloadBytes`, 128 MiB)
