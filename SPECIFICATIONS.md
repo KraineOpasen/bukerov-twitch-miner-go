@@ -3021,15 +3021,24 @@ as one: it bounds work, and a store that adds rows between that count and the
 read is caught by the coherence re-read rather than prevented. No byte bound
 rests on it.
 
-One residue is recorded rather than closed. Inside the classification,
-`ReadObservationSession` also counts facts that match exactly ONE half of the
-`(epoch, session id)` pair. The epoch bound covers the disjunct keyed on the
-epoch; the disjunct keyed on the session id can scan rows the epoch bound never
-saw. It is a `COUNT` — O(1) memory, no value crossing the driver — so what is
-unbounded there is WORK, not allocation, and bounding it with a `LIMIT` would
-make "no orphan found within N rows" read as "no orphan", weakening an
-integrity check to buy a cost bound. The bound is therefore left off and the
-cost stated.
+The ORPHAN CHECK is the one scan no caller-side preflight can cover, and it is
+bounded by the SHAPE of its question rather than by a limit. Inside the
+classification, `ReadObservationSession` asks whether any fact matches exactly
+ONE half of the `(epoch, session id)` pair. The epoch count covers the disjunct
+keyed on the epoch; the disjunct keyed on the session id reaches rows under
+OTHER epochs, which that count never saw. Asked as `COUNT(*)` this walks every
+one of them to produce a number the classification does not read — measured at
+500,000 such rows: 5,000,029 VM steps against 24 for the preflight.
+
+Asked as `EXISTS` it stops at the first match, and that bounds both directions
+without weakening anything. Either a row matches, so the scan ends there, or
+none does — which means every row carrying this session id also carries this
+epoch, and the epoch count already refused the load if there were more of those
+than the limit. A `LIMIT N` would have been the wrong instrument for exactly the
+reason a limit is wrong here: "no orphan found within N rows" is not "no
+orphan", and buying a cost bound by weakening an integrity check is not a trade
+this reader makes. The bound is pinned structurally, because a count and a
+presence flag are indistinguishable in the result.
 
 The byte aggregates run over a BOUNDED candidate set of `limit+1` rows, not the
 whole session. Measuring every row first would let a store holding millions of

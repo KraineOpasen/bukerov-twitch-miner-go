@@ -2374,13 +2374,27 @@ func (r *SQLiteRepository) readObservationSession(
 		// a session that does not own it, or an epoch that does not. Either
 		// way the dataset is not internally consistent and no reading of this
 		// session can be trusted.
-		if e := tx.QueryRowContext(ctx, `
-			SELECT COUNT(*) FROM prediction_observations
-			 WHERE (collector_epoch =  ? AND collector_session_id <> ?)
-			    OR (collector_epoch <> ? AND collector_session_id =  ?)`,
-			epoch, s.CollectorSessionID, epoch, s.CollectorSessionID).Scan(&facts.HalfPair); e != nil {
+		//
+		// EXISTS rather than COUNT, and that is a bound rather than a
+		// micro-optimization. The classification only ever asks whether an
+		// orphan exists, so counting them is work done to produce a number
+		// nobody reads — and in the case the bound exists for, that number is
+		// expensive: a tampered store holding 500,000 rows under this session
+		// id and other epochs made the counting form walk all of them before
+		// refusing (measured at 5,000,029 VM steps against 24 for the caller's
+		// preflight).
+		//
+		// EXISTS stops at the first match, and that is enough to bound BOTH
+		// directions. Either a row matches — so the scan ends immediately — or
+		// no row matches, which means every row carrying this session id also
+		// carries this epoch, and the caller's epoch count already refused the
+		// load if there were more of those than its limit.
+		var orphan int64
+		if e := tx.QueryRowContext(ctx, observationOrphanExistsQuery,
+			epoch, s.CollectorSessionID, epoch, s.CollectorSessionID).Scan(&orphan); e != nil {
 			return e
 		}
+		facts.HalfPairPresent = orphan != 0
 		// Every surviving fact carries a digest of its own content, and until
 		// something RECOMPUTES it the column witnesses nothing: a row whose
 		// payload, identity or parent was edited in place after the write
@@ -2464,6 +2478,18 @@ func (r *SQLiteRepository) ReadObservationSessionWithinBudget(
 ) (ObservationSessionReading, bool, ObservationReadBudget, error) {
 	return r.readObservationSession(ctx, epoch, maxRowBytes, maxFactRowBytes)
 }
+
+// observationOrphanExistsQuery asks whether ANY fact matches exactly one half
+// of the (epoch, session id) pair.
+//
+// It is a named constant so its SHAPE can be pinned by a test: the bound this
+// query carries is the fact that it stops at the first match, and that lives in
+// the EXISTS rather than in anything observable from its result.
+const observationOrphanExistsQuery = `
+	SELECT EXISTS(
+		SELECT 1 FROM prediction_observations
+		 WHERE (collector_epoch =  ? AND collector_session_id <> ?)
+		    OR (collector_epoch <> ? AND collector_session_id =  ?))`
 
 // observationWitnessBudget bounds how many stored digests one reading
 // recomputes. A session may legitimately hold MaxSessionRows facts, and this
@@ -2590,8 +2616,12 @@ type observationSessionFacts struct {
 	MinSequence       int64
 	MaxSequence       int64
 	DistinctSequences int64
-	// HalfPair counts facts matching exactly one half of the pair.
-	HalfPair int64
+	// HalfPairPresent reports whether ANY fact matches exactly one half of the
+	// pair. It is a presence flag rather than a count because the
+	// classification only asks whether one exists, and asking that way is what
+	// lets the query stop at the first match instead of walking every orphan a
+	// tampered store cares to insert.
+	HalfPairPresent bool
 }
 
 // classifyObservationSession is the reader contract: it decides which of the
@@ -2623,7 +2653,7 @@ func classifyObservationSession(s ObservationSessionRecord, facts observationSes
 		return integrity("finalized session carries no close time")
 	case s.CommittedCount < 0 || s.DroppedCount < 0:
 		return integrity("negative session counter")
-	case facts.HalfPair > 0:
+	case facts.HalfPairPresent:
 		return integrity("facts exist that match only one half of this session's (epoch, session id) pair")
 	}
 

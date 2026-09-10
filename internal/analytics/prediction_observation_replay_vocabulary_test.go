@@ -1,6 +1,7 @@
 package analytics
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/predictioneval"
@@ -108,5 +109,66 @@ func TestTheProducerStillWritesTheDecisionKindsTheReplayGroups(t *testing.T) {
 			t.Errorf("%s: the replay groups on kind %q, which the producer's closed kind "+
 				"vocabulary does not contain", tc.what, tc.value)
 		}
+	}
+}
+
+// TestTheOrphanCheckStopsAtTheFirstMatch pins the bound on the one scan in the
+// session read that no caller-side preflight can cover.
+//
+// The classification asks a yes/no question — does any fact match exactly one
+// half of the (epoch, session id) pair? — and it used to ask it with COUNT(*).
+// Counting produces a number nobody reads, and in the case the bound exists for
+// that number is expensive: a tampered store holding many rows under this
+// session id but OTHER epochs makes the counting form walk all of them. The
+// caller's epoch preflight cannot cover those rows, because they are not in the
+// epoch it counted. Measured by review at 500,000 such rows: 5,000,029 VM steps
+// for the count against 24 for the preflight.
+//
+// EXISTS stops at the first match, and that bounds both directions. Either a
+// row matches and the scan ends there, or none does — which means every row
+// carrying this session id also carries this epoch, and the epoch preflight
+// already refused the load if there were too many of those.
+//
+// The check is STRUCTURAL, because the bound is not observable in the result:
+// a count and a presence flag are both "orphans exist" to every caller. A
+// wall-clock assertion would be flaky and would not say why it passed. So the
+// query's shape is pinned directly, and the classification's use of it is
+// pinned behaviourally beside it.
+func TestTheOrphanCheckStopsAtTheFirstMatch(t *testing.T) {
+	q := observationOrphanExistsQuery
+	if !strings.Contains(q, "EXISTS(") {
+		t.Errorf("the orphan query is not EXISTS-shaped, so it does not stop at the first "+
+			"match:\n%s", q)
+	}
+	if strings.Contains(strings.ToUpper(q), "COUNT(") {
+		t.Errorf("the orphan query counts. The classification only asks whether an orphan "+
+			"exists, so counting walks every orphan a tampered store inserts to produce a "+
+			"number nobody reads:\n%s", q)
+	}
+	// Both halves of the pair must still be asked about; a bound that dropped
+	// one would be cheap and wrong.
+	for _, half := range []string{"collector_epoch =  ?", "collector_epoch <> ?",
+		"collector_session_id <> ?", "collector_session_id =  ?"} {
+		if !strings.Contains(q, half) {
+			t.Errorf("the orphan query no longer tests %q, so it cannot detect that half of "+
+				"the pair:\n%s", half, q)
+		}
+	}
+
+	// And the classification treats the presence flag as the integrity failure
+	// it is — the property the query exists to serve.
+	base := ObservationSessionRecord{
+		CloseState: SessionComplete, ClosedAtKnown: true,
+		CommittedCount: 1, LastAssignedSequence: 1, LastAssignedSequenceKnown: true,
+	}
+	facts := observationSessionFacts{Present: 1, MinSequence: 1, MaxSequence: 1,
+		DistinctSequences: 1}
+	if got := classifyObservationSession(base, facts); got.Reading == ReadingIntegrityError {
+		t.Fatalf("a session with no orphans read as INTEGRITY_ERROR (%q); the positive case "+
+			"below would then prove nothing", got.Detail)
+	}
+	facts.HalfPairPresent = true
+	if got := classifyObservationSession(base, facts); got.Reading != ReadingIntegrityError {
+		t.Errorf("a session with an orphaned fact read as %q, want INTEGRITY_ERROR", got.Reading)
 	}
 }
