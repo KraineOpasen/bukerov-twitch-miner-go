@@ -2960,6 +2960,35 @@ names the session, the witness counts and the loss counters it was read under,
 so a result from a truncated, unwitnessed session is never mistaken for one from
 a fully verified run.
 
+**A dataset must describe itself.** `MaterializePairedKnowledge` takes a VALUE,
+so a caller can slice a dataset while keeping the classification that described
+the whole of it — and the classification is what every downstream stage trusts.
+Dropping one of two terminal facts is the sharp case: an attempt that must be
+excluded as `MULTIPLE_TERMINAL_FACTS` becomes an ordinary materializable case,
+and the scorecards drawn from it carry a clean `AS_FINALIZED` provenance
+describing facts the dataset does not contain. So the count of facts the session
+OWNS is compared with `FactsPresent`, and a mismatch yields no cases. It is
+counted over owned facts because a dataset may legitimately carry another
+session's rows, which were never part of that count. A real load always
+satisfies this: the reader refuses rather than truncating, and keeps an
+undecodable payload as a row rather than dropping it.
+
+**A placement fact's status is one fact, not two.** The producer computes a
+placement call's reason code and its error class from ONE error value: a nil
+error yields `OK` beside `NONE`, and a non-nil error yields a rejection beside a
+class naming it. Reading acceptance from the reason alone let a record claim
+both — accepted, and carrying a `TRANSPORT` or `INTERNAL` class — pass every
+attribution check and reach an affirmative settlement while its own facts
+reported the call had failed. The pairing is validated on both placement facts
+before the shape is called coherent.
+
+**A refusal is not a claim that nothing happened.** `NOT_APPLICABLE` asserts
+that the replayed decision reached no placement. `LEGACY_FAILURE`,
+`INDETERMINATE` and `UNSUPPORTED` establish no such thing — they say the model
+could not get far enough to know what the decision would have done. Those three
+yield `UNKNOWN`; only a determined skip, where the model followed the policy to
+an exit, yields `NOT_APPLICABLE`.
+
 **Bounded acquisition.** A load is bounded at four levels — the session row,
 the facts the witness sweep reads, the row count and the bytes — plus a
 preflight count that bounds the work of getting there. Every byte bound is

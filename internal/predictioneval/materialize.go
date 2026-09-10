@@ -35,6 +35,10 @@ const (
 	// ExclusionSessionIntegrityError — the store classified the whole session
 	// as corrupt. Individual facts are not rehabilitated by looking sound.
 	ExclusionSessionIntegrityError = "SESSION_INTEGRITY_ERROR"
+	// ExclusionRecordCountContradictsProvenance — the dataset does not hold
+	// the number of facts its own provenance says the session has. The two
+	// halves describe different sets, so neither qualifies the other.
+	ExclusionRecordCountContradictsProvenance = "RECORD_COUNT_CONTRADICTS_PROVENANCE"
 	// ExclusionUnsupportedProducerRevision — written under a contract this
 	// model does not replay.
 	ExclusionUnsupportedProducerRevision = "UNSUPPORTED_PRODUCER_REVISION"
@@ -227,6 +231,38 @@ func MaterializePairedKnowledge(ds SourceDataset) (PairedKnowledge, error) {
 		out.Excluded = append(out.Excluded, Exclusion{
 			Reason: ExclusionUnsupportedProducerRevision,
 			Detail: ds.Source.ProducerRevision,
+		})
+		return out, nil
+	}
+
+	// The dataset must hold the facts its own provenance says the session has.
+	//
+	// A load produced by the reader always does: it refuses rather than
+	// truncating, and it keeps an undecodable payload as a row rather than
+	// dropping it. But the seam takes a VALUE, so a caller can hand over a
+	// dataset it sliced while keeping the classification that described the
+	// whole of it — and the classification is the part downstream stages trust.
+	// Dropping one of two terminal facts is the sharp case: an attempt that
+	// should be excluded as MULTIPLE_TERMINAL_FACTS becomes an ordinary
+	// materializable case, and every scorecard drawn from it carries a clean
+	// AS_FINALIZED provenance that describes a set of facts this dataset does
+	// not contain.
+	//
+	// Counted over the facts this session OWNS, because a dataset may
+	// legitimately carry another session's rows — those are excluded below and
+	// were never part of this count.
+	owned := int64(0)
+	for _, r := range ds.Records {
+		if r.CollectorEpoch == ds.Source.CollectorEpoch &&
+			r.CollectorSessionID == ds.Source.CollectorSessionID {
+			owned++
+		}
+	}
+	if owned != ds.Source.FactsPresent {
+		out.Excluded = append(out.Excluded, Exclusion{
+			Reason: ExclusionRecordCountContradictsProvenance,
+			Detail: "provenance reports " + itoa(ds.Source.FactsPresent) +
+				" facts for this session and the dataset holds " + itoa(owned),
 		})
 		return out, nil
 	}

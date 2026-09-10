@@ -267,13 +267,10 @@ func peDataset(src predictioneval.SourceProvenance) predictioneval.SourceDataset
 	terminal.Payload.Counters[predictioneval.CounterStake] = 50
 	terminal.Payload.DecisionEnvelope = peMinimalEnvelope(7)
 
-	ds := predictioneval.SourceDataset{
-		Source: src,
-		Records: []predictioneval.SourceRecord{
-			peRecord(1, predictioneval.KindAutoDecision, predictioneval.PhaseAutoDue, 7),
-			terminal,
-		},
-	}
+	ds := peDatasetOf(src,
+		peRecord(1, predictioneval.KindAutoDecision, predictioneval.PhaseAutoDue, 7),
+		terminal,
+	)
 	for i := range ds.Records {
 		ds.Records[i].CollectorEpoch = src.CollectorEpoch
 		ds.Records[i].CollectorSessionID = src.CollectorSessionID

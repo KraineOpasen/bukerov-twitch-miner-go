@@ -162,6 +162,12 @@ type SettlementFacts struct {
 const (
 	// PlacementShapeCoherent is the one shape the pinned producer writes.
 	PlacementShapeCoherent = "COHERENT"
+
+	// PlacementReasonOK is the reason code the producer writes when the call
+	// carried no error, and PlacementErrorNone the class it writes beside it.
+	// Both come from the same error value, so they move together.
+	PlacementReasonOK  = "OK"
+	PlacementErrorNone = "NONE"
 	// PlacementShapeAbsent is an attempt with no placement facts at all — an
 	// ordinary state for every exit that did not reach a call.
 	PlacementShapeAbsent = "ABSENT"
@@ -245,7 +251,7 @@ func Score(c DecisionCase, ev Evaluation, s SettlementFacts) Scorecard {
 		Eligibility:        c.Eligibility,
 		ReplayedAction:     ev.Action,
 		RecordedTerminal:   c.Recorded.TerminalReason,
-		Evaluation:         ev,
+		Evaluation:         detachEvaluation(ev),
 		Limitations:        append([]string(nil), ev.Limitations...),
 	}
 	sc.Limitations = appendOnce(sc.Limitations, LimitationNoROIComputed)
@@ -634,13 +640,55 @@ func ProjectSettlementFacts(a AttemptKnowledge) SettlementFacts {
 		return out
 	}
 
+	// The reason code and the error class are DERIVED FROM THE SAME ERROR by
+	// the producer, so only two pairings exist for a returned call: OK beside
+	// NONE, or a rejection beside a real class. Reading acceptance from the
+	// reason alone let a record claim both — accepted, and carrying a
+	// TRANSPORT or INTERNAL class — pass every remaining attribution check and
+	// reach an affirmative settlement while its own facts reported an error.
+	//
+	// A started fact is always OK/NONE: the producer only downgrades the
+	// reason on the returned side.
+	if !placementStatusCoherent(started[0].Payload) ||
+		!placementStatusCoherent(returned[0].Payload) ||
+		started[0].Payload.ReasonCode != PlacementReasonOK {
+		out.PlacementCoherence = PlacementShapeIncoherent
+		return out
+	}
+
 	out.PlacementCoherence = PlacementShapeCoherent
 	stake, slot := sStake, *sSlot
 	out.PlacementStake = &stake
 	out.PlacementSlot = &slot
-	out.PlacementAccepted = returned[0].Payload.ReasonCode == "OK"
+	out.PlacementAccepted = returned[0].Payload.ReasonCode == PlacementReasonOK
 	out.PlacementErrorClass = returned[0].Payload.ErrorClass
 	return out
+}
+
+// detachEvaluation copies the reference fields of an evaluation so a scorecard
+// cannot be changed by whoever built it.
+//
+// The top-level Limitations were already copied; the nested ones were not, and
+// a struct assignment shares the backing array. A caller that appended to
+// ev.Limitations after Score returned therefore mutated the scorecard, and
+// could leave it carrying TWO different accounts of the same evaluation's
+// limitations — the copied list and the shared one — after it had been
+// validated. Same class as the settlement facts, one level further in.
+func detachEvaluation(ev Evaluation) Evaluation {
+	ev.Limitations = append([]string(nil), ev.Limitations...)
+	return ev
+}
+
+// placementStatusCoherent reports whether a placement fact's reason code and
+// error class agree about whether the call failed.
+//
+// The pinned producer computes both from one error value: a nil error yields
+// OK and NONE together, and a non-nil error yields a rejection beside a class
+// naming it. Neither half can move without the other, so a fact where they
+// disagree is one the producer cannot have written — including an empty error
+// class, which it never emits.
+func placementStatusCoherent(p SourcePayload) bool {
+	return (p.ReasonCode == PlacementReasonOK) == (p.ErrorClass == PlacementErrorNone)
 }
 
 // assessSettlement decides what the recorded settlement says about the
@@ -654,7 +702,21 @@ func assessSettlement(sc Scorecard, ev Evaluation, conditioned bool, s Settlemen
 		// The replay did not reproduce the recorded decision, so the recorded
 		// settlement is the settlement of a DIFFERENT decision.
 		out.Assessment = SettlementUnknown
+	case ev.Action == ActionLegacyFailure || ev.Action == ActionIndeterminate ||
+		ev.Action == ActionUnsupported:
+		// NOT_APPLICABLE is a CLAIM: that the replayed decision reached no
+		// placement, so there is nothing for a settlement to describe. These
+		// three actions establish no such thing. They say the model could not
+		// get far enough to know what the decision would have done — the
+		// pinned policy panicked, an input was unusable, or a stealth
+		// realization was reachable by no legal reduction. Answering
+		// "not applicable" there asserts the stronger of the two readings on
+		// the strength of the weaker one, and does it while the terminal
+		// comparisons that would have said so are UNAVAILABLE.
+		out.Assessment = SettlementUnknown
 	case ev.Action != ActionWouldAttemptPlacement:
+		// Every remaining non-placing action is a DETERMINED skip: the model
+		// followed the policy to an exit and knows no bet was reached.
 		out.Assessment = SettlementNotApplicable
 	case sc.UnavailablePairs > 0:
 		// An UNAVAILABLE comparison is not a disagreement, so the disagreement

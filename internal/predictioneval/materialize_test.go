@@ -232,7 +232,26 @@ func mzEnvelopeWithOutcomes(n int) *SourceDecisionEnvelope {
 }
 
 func mzDataset(records ...SourceRecord) SourceDataset {
-	return SourceDataset{Source: mzSource(), Records: records}
+	return mzDatasetOf(mzSource(), records...)
+}
+
+// mzDatasetOf builds a dataset whose provenance DESCRIBES the records it
+// carries.
+//
+// A real load guarantees this: the reader refuses rather than truncating, and
+// keeps an undecodable payload as a row rather than dropping it. A fixture that
+// states one fact count and carries another describes a dataset no load
+// produces, and materialization refuses it — so the count is derived here
+// rather than written down, which is the only way it cannot drift.
+func mzDatasetOf(src SourceProvenance, records ...SourceRecord) SourceDataset {
+	owned := int64(0)
+	for _, r := range records {
+		if r.CollectorEpoch == src.CollectorEpoch && r.CollectorSessionID == src.CollectorSessionID {
+			owned++
+		}
+	}
+	src.FactsPresent = owned
+	return SourceDataset{Source: src, Records: records}
 }
 
 // mzInPool restamps facts onto another pool instance / round admission.
@@ -459,9 +478,24 @@ func TestPlacementFactsShareTheAttemptIDButLandStrictlyAfterTheCausalCut(t *test
 
 // mzCommonHalf renders everything about an attempt EXCEPT its post-decision
 // facts, which are the one half later facts are allowed to reach.
+// mzCommonHalf renders everything about an attempt EXCEPT its post-decision
+// facts and the session provenance it was read under.
+//
+// PostDecision is dropped because it is the half that legitimately grows.
+// Source is dropped for a subtler reason: it describes the DATASET, not the
+// attempt. Two loads of the same session at different moments carry different
+// fact counts, and a fixture whose provenance says otherwise describes a load
+// nobody performs — which is exactly what this file's fixtures used to do, with
+// a hardcoded count that matched neither dataset and so happened to compare
+// equal.
+//
+// Callers that need the provenance compared assert on it directly, so that
+// "the attempt's inputs did not change" and "the session was described the same
+// way" stay two claims rather than one.
 func mzCommonHalf(t *testing.T, a AttemptKnowledge) string {
 	t.Helper()
 	a.PostDecision = nil
+	a.Source = SourceProvenance{}
 	b, err := json.Marshal(a)
 	if err != nil {
 		t.Fatalf("marshal attempt: %v", err)
@@ -526,6 +560,21 @@ func TestAppendingLaterFactsCannotChangeAnEarlierAttemptsInputsOrDigest(t *testi
 	}
 	if got, want := mzCommonHalf(t, after), mzCommonHalf(t, before); got != want {
 		t.Errorf("attempt 1 is not byte-identical across the growth:\n  before %s\n  after  %s", want, got)
+	}
+	// The provenance is compared separately, because the one field that MUST
+	// differ is the count of facts the dataset holds — the dataset grew. Every
+	// other field describes the session rather than its extent, and those must
+	// not move.
+	beforeSrc, afterSrc := before.Source, after.Source
+	if beforeSrc.FactsPresent == afterSrc.FactsPresent {
+		t.Errorf("the fact count did not change across the growth (%d both times); the "+
+			"fixture did not actually grow, or its provenance does not describe it",
+			beforeSrc.FactsPresent)
+	}
+	beforeSrc.FactsPresent, afterSrc.FactsPresent = 0, 0
+	if beforeSrc != afterSrc {
+		t.Errorf("the session provenance changed beyond its fact count:\n  before %+v\n  after  %+v",
+			beforeSrc, afterSrc)
 	}
 
 	// The later facts did not vanish — they went where only Score may read
@@ -761,7 +810,7 @@ func TestUnreplayableFactsAndAttemptsAreExcludedWithTheReasonThatNamesThem(t *te
 	for _, tc := range tests {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
-			pk := mzMaterialize(t, SourceDataset{Source: tc.source, Records: tc.records})
+			pk := mzMaterialize(t, mzDatasetOf(tc.source, tc.records...))
 
 			if len(pk.Attempts) != tc.wantAttempts {
 				t.Fatalf("attempts = %d, want %d (exclusions %v)", len(pk.Attempts), tc.wantAttempts, mzReasons(pk))
@@ -801,7 +850,7 @@ func TestASessionClassifiedCorruptIsRefusedEvenWhenItsFactsLookSound(t *testing.
 
 	src := mzSource()
 	src.SessionReading = readingIntegrityError
-	corrupt := mzMaterialize(t, SourceDataset{Source: src, Records: sound})
+	corrupt := mzMaterialize(t, mzDatasetOf(src, sound...))
 
 	if len(corrupt.Attempts) != 0 {
 		t.Errorf("attempts = %d, want 0 — a corrupt session yields no replayable case", len(corrupt.Attempts))

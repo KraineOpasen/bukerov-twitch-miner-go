@@ -21,6 +21,7 @@ package predictioneval_test
 
 import (
 	"math"
+	"reflect"
 	"testing"
 
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/models"
@@ -386,15 +387,12 @@ func TestARejectedPlacementIsReadAsRejected(t *testing.T) {
 			terminal.Payload.ReasonCode = "OK"
 			terminal.Payload.DecisionEnvelope = peMinimalEnvelope(7)
 
-			pk, err := predictioneval.MaterializePairedKnowledge(predictioneval.SourceDataset{
-				Source: peProvenance(),
-				Records: []predictioneval.SourceRecord{
-					peRecord(1, predictioneval.KindAutoDecision, predictioneval.PhaseAutoDue, 7),
-					terminal,
-					pePlacement(3, 7, predictioneval.PhaseCallStarted, 50, 0, "OK", "NONE"),
-					pePlacement(4, 7, predictioneval.PhaseCallReturned, 50, 0, tc.reason, tc.errorClass),
-				},
-			})
+			pk, err := predictioneval.MaterializePairedKnowledge(peDatasetOf(peProvenance(),
+				peRecord(1, predictioneval.KindAutoDecision, predictioneval.PhaseAutoDue, 7),
+				terminal,
+				pePlacement(3, 7, predictioneval.PhaseCallStarted, 50, 0, "OK", "NONE"),
+				pePlacement(4, 7, predictioneval.PhaseCallReturned, 50, 0, tc.reason, tc.errorClass),
+			))
 			if err != nil || len(pk.Attempts) != 1 {
 				t.Fatalf("materialize: %v (%d attempts)", err, len(pk.Attempts))
 			}
@@ -869,14 +867,11 @@ func TestTwoTerminalPhasesAreTwoEndingsEvenWhenOneCarriesNoEnvelope(t *testing.T
 	terminal.Payload.ReasonCode = "OK"
 	terminal.Payload.DecisionEnvelope = peMinimalEnvelope(7)
 
-	pk, err := predictioneval.MaterializePairedKnowledge(predictioneval.SourceDataset{
-		Source: peProvenance(),
-		Records: []predictioneval.SourceRecord{
-			peRecord(1, predictioneval.KindAutoDecision, predictioneval.PhaseAutoDue, 7),
-			envelopeless,
-			terminal,
-		},
-	})
+	pk, err := predictioneval.MaterializePairedKnowledge(peDatasetOf(peProvenance(),
+		peRecord(1, predictioneval.KindAutoDecision, predictioneval.PhaseAutoDue, 7),
+		envelopeless,
+		terminal,
+	))
 	if err != nil {
 		t.Fatalf("materialize: %v", err)
 	}
@@ -977,9 +972,7 @@ func TestPlacementFactsMustBeOneCoherentPair(t *testing.T) {
 			}
 			records = append(records, tc.post...)
 
-			pk, err := predictioneval.MaterializePairedKnowledge(predictioneval.SourceDataset{
-				Source: peProvenance(), Records: records,
-			})
+			pk, err := predictioneval.MaterializePairedKnowledge(peDatasetOf(peProvenance(), records...))
 			if err != nil || len(pk.Attempts) != 1 {
 				t.Fatalf("materialize: %v (%d attempts)", err, len(pk.Attempts))
 			}
@@ -1035,13 +1028,10 @@ func TestATerminalFactThatNamesNoActionIsRefused(t *testing.T) {
 	terminal.Payload.Decision = "" // the producer never writes this
 	terminal.Payload.DecisionEnvelope = peMinimalEnvelope(7)
 
-	pk, err := predictioneval.MaterializePairedKnowledge(predictioneval.SourceDataset{
-		Source: peProvenance(),
-		Records: []predictioneval.SourceRecord{
-			peRecord(1, predictioneval.KindAutoDecision, predictioneval.PhaseAutoDue, 7),
-			terminal,
-		},
-	})
+	pk, err := predictioneval.MaterializePairedKnowledge(peDatasetOf(peProvenance(),
+		peRecord(1, predictioneval.KindAutoDecision, predictioneval.PhaseAutoDue, 7),
+		terminal,
+	))
 	if err != nil || len(pk.Attempts) != 1 {
 		t.Fatalf("materialize: %v (%d attempts)", err, len(pk.Attempts))
 	}
@@ -1181,13 +1171,10 @@ func TestAPostDecisionFactFromAnotherAdmissionIsRefused(t *testing.T) {
 	// The call belongs to a different admission of the round.
 	returned.RoundIncarnationID = "round-2"
 
-	pk, err := predictioneval.MaterializePairedKnowledge(predictioneval.SourceDataset{
-		Source: peProvenance(),
-		Records: []predictioneval.SourceRecord{
-			peRecord(1, predictioneval.KindAutoDecision, predictioneval.PhaseAutoDue, attempt),
-			terminal, started, returned,
-		},
-	})
+	pk, err := predictioneval.MaterializePairedKnowledge(peDatasetOf(peProvenance(),
+		peRecord(1, predictioneval.KindAutoDecision, predictioneval.PhaseAutoDue, attempt),
+		terminal, started, returned,
+	))
 	if err != nil {
 		t.Fatalf("materialize: %v", err)
 	}
@@ -1210,13 +1197,10 @@ func TestAPostDecisionFactFromAnotherAdmissionIsRefused(t *testing.T) {
 	// The same shape with a consistent incarnation still materializes, so the
 	// check did not simply refuse every attempt carrying placement facts.
 	returned.RoundIncarnationID = started.RoundIncarnationID
-	ok, err := predictioneval.MaterializePairedKnowledge(predictioneval.SourceDataset{
-		Source: peProvenance(),
-		Records: []predictioneval.SourceRecord{
-			peRecord(1, predictioneval.KindAutoDecision, predictioneval.PhaseAutoDue, attempt),
-			terminal, started, returned,
-		},
-	})
+	ok, err := predictioneval.MaterializePairedKnowledge(peDatasetOf(peProvenance(),
+		peRecord(1, predictioneval.KindAutoDecision, predictioneval.PhaseAutoDue, attempt),
+		terminal, started, returned,
+	))
 	if err != nil || len(ok.Attempts) != 1 {
 		t.Fatalf("a consistent attempt failed to materialize: %v (%d attempts, excluded %+v)",
 			err, len(ok.Attempts), ok.Excluded)
@@ -1720,4 +1704,244 @@ func TestADrawDependentAbsenceIsNotIndependentEvidence(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestAPlacementWhoseReasonAndErrorClassDisagreeIsIncoherent closes an
+// affirmative settlement drawn from a record that reports its own failure.
+//
+// The pinned producer computes the reason code and the error class from ONE
+// error value: a nil error yields OK beside NONE, and a non-nil error yields a
+// rejection beside a class naming it. Neither half can move without the other.
+//
+// Acceptance was read from the reason alone, and the error class was carried
+// through beside it unexamined. So a record claiming both — accepted, and
+// carrying a TRANSPORT or INTERNAL class — passed every remaining attribution
+// check and could reach APPLIES_TO_REPLAY while its own facts said the call
+// failed.
+func TestAPlacementWhoseReasonAndErrorClassDisagreeIsIncoherent(t *testing.T) {
+	const attempt = 7
+	for _, tc := range []struct {
+		name                          string
+		startReason, startClass       string
+		returnReason, returnClass     string
+		wantCoherence, wantSettlement string
+		wantAccepted                  bool
+	}{
+		{"the pairing the producer writes on success", "OK", "NONE", "OK", "NONE",
+			predictioneval.PlacementShapeCoherent, predictioneval.SettlementAppliesToReplay, true},
+		{"the pairing it writes on a rejection", "OK", "NONE", "REJECTED", "ROUND_CLOSED",
+			predictioneval.PlacementShapeCoherent, predictioneval.SettlementUnknown, false},
+		{"accepted while naming a transport failure", "OK", "NONE", "OK", "TRANSPORT",
+			predictioneval.PlacementShapeIncoherent, predictioneval.SettlementUnknown, false},
+		{"rejected while naming no failure at all", "OK", "NONE", "REJECTED", "NONE",
+			predictioneval.PlacementShapeIncoherent, predictioneval.SettlementUnknown, false},
+		{"accepted with no error class at all", "OK", "NONE", "OK", "",
+			predictioneval.PlacementShapeIncoherent, predictioneval.SettlementUnknown, false},
+		{"a started fact that reports a failure", "REJECTED", "TRANSPORT", "OK", "NONE",
+			predictioneval.PlacementShapeIncoherent, predictioneval.SettlementUnknown, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			terminal := peRecord(2, predictioneval.KindAutoDecision,
+				predictioneval.PhaseAutoDecided, attempt)
+			terminal.Payload.ReasonCode = "OK"
+			terminal.Payload.Decision = "PLACE"
+			terminal.Payload.OutcomeSlot = func() *int { i := 0; return &i }()
+			terminal.Payload.Counters[predictioneval.CounterStake] = 50
+			terminal.Payload.DecisionEnvelope = peMinimalEnvelope(attempt)
+
+			pk, err := predictioneval.MaterializePairedKnowledge(peDatasetOf(peProvenance(),
+				peRecord(1, predictioneval.KindAutoDecision, predictioneval.PhaseAutoDue, attempt),
+				terminal,
+				pePlacement(3, attempt, predictioneval.PhaseCallStarted, 50, 0,
+					tc.startReason, tc.startClass),
+				pePlacement(4, attempt, predictioneval.PhaseCallReturned, 50, 0,
+					tc.returnReason, tc.returnClass),
+			))
+			if err != nil || len(pk.Attempts) != 1 {
+				t.Fatalf("materialize: %v (%d attempts)", err, len(pk.Attempts))
+			}
+			facts := predictioneval.ProjectSettlementFacts(pk.Attempts[0])
+			if facts.PlacementCoherence != tc.wantCoherence {
+				t.Errorf("placement coherence = %q, want %q", facts.PlacementCoherence, tc.wantCoherence)
+			}
+			if facts.PlacementAccepted != tc.wantAccepted {
+				t.Errorf("placement accepted = %v, want %v", facts.PlacementAccepted, tc.wantAccepted)
+			}
+
+			c, evErr := predictioneval.ProjectDecisionCase(pk.Attempts[0])
+			if evErr != nil {
+				t.Fatalf("project: %v", evErr)
+			}
+			sc := predictioneval.Score(c, predictioneval.Evaluate(c.Inputs, c.Observed), facts)
+			if sc.Settlement.Assessment != tc.wantSettlement {
+				t.Errorf("settlement = %q, want %q", sc.Settlement.Assessment, tc.wantSettlement)
+			}
+		})
+	}
+}
+
+// TestARefusalStateDoesNotClaimThereWasNoPlacement separates two different
+// answers that shared one code path.
+//
+// NOT_APPLICABLE is a CLAIM: the replayed decision reached no placement, so
+// there is nothing for a settlement to describe. It was returned for every
+// action that is not a placement — including the three that establish no such
+// thing. LEGACY_FAILURE, INDETERMINATE and UNSUPPORTED say the model could not
+// get far enough to know what the decision would have done, and answering
+// "not applicable" there asserts the stronger reading on the strength of the
+// weaker one, while the terminal comparisons that would have said so are
+// UNAVAILABLE.
+func TestARefusalStateDoesNotClaimThereWasNoPlacement(t *testing.T) {
+	for _, tc := range []struct {
+		action string
+		want   string
+	}{
+		// Determined skips: the model followed the policy to an exit and knows
+		// no bet was reached.
+		{predictioneval.ActionFilterRejected, predictioneval.SettlementNotApplicable},
+		{predictioneval.ActionBelowMinimum, predictioneval.SettlementNotApplicable},
+		{predictioneval.ActionReserveViolation, predictioneval.SettlementNotApplicable},
+		{predictioneval.ActionHealthGated, predictioneval.SettlementNotApplicable},
+		// Refusals: the model does not know what the decision would have done.
+		{predictioneval.ActionLegacyFailure, predictioneval.SettlementUnknown},
+		{predictioneval.ActionIndeterminate, predictioneval.SettlementUnknown},
+		{predictioneval.ActionUnsupported, predictioneval.SettlementUnknown},
+	} {
+		t.Run(tc.action, func(t *testing.T) {
+			c, ev := ncAgreeingCase()
+			ev.Action = tc.action
+			c.Recorded.TerminalPhase, c.Recorded.TerminalDecision =
+				predictioneval.PhaseAutoSkipped, "SKIP"
+			c.Recorded.TerminalOutcomeSlot = nil
+			// The recorded reason has to be the one the producer writes for
+			// this exit, or the case disagrees and the FIRST guard answers
+			// UNKNOWN for every row — which would make the refusal rows below
+			// pass while proving nothing. The refusal actions have no producer
+			// counterpart at all, so their comparison is UNAVAILABLE and the
+			// recorded reason is left as it stands.
+			if tc.want == predictioneval.SettlementNotApplicable {
+				c.Recorded.TerminalReason = tc.action
+			}
+
+			sc := predictioneval.Score(c, ev, predictioneval.SettlementFacts{})
+			if tc.want == predictioneval.SettlementNotApplicable &&
+				sc.IndependentDisagree+sc.ConditionedDisagree > 0 {
+				t.Fatalf("the fixture disagrees (%d independent, %d conditioned), so the "+
+					"disagreement guard answers before the one under test: %+v",
+					sc.IndependentDisagree, sc.ConditionedDisagree, sc.Comparisons)
+			}
+			if sc.Settlement.Assessment != tc.want {
+				t.Errorf("settlement for %s = %q, want %q. NOT_APPLICABLE asserts that no "+
+					"placement was reached; a refusal state establishes only that the model "+
+					"could not tell.", tc.action, sc.Settlement.Assessment, tc.want)
+			}
+		})
+	}
+}
+
+// TestTheScorecardDoesNotAliasTheCallersEvaluation is the settlement-facts
+// aliasing repair, one level further in.
+//
+// The scorecard's top-level Limitations were copied; the nested evaluation's
+// were not, and a struct assignment shares the backing array. A caller that
+// appended to ev.Limitations after Score returned therefore mutated a scorecard
+// that had already been validated — and could leave it carrying two different
+// accounts of the same evaluation's limitations.
+func TestTheScorecardDoesNotAliasTheCallersEvaluation(t *testing.T) {
+	c, ev := ncAgreeingCase()
+	ev.Limitations = append(ev.Limitations, "ORIGINAL_LIMITATION")
+
+	sc := predictioneval.Score(c, ev, predictioneval.SettlementFacts{})
+	before := append([]string(nil), sc.Evaluation.Limitations...)
+
+	// Mutate through the caller's own slice, in place and by appending.
+	if len(ev.Limitations) > 0 {
+		ev.Limitations[len(ev.Limitations)-1] = "TAMPERED"
+	}
+	ev.Limitations = append(ev.Limitations, "APPENDED_AFTER_SCORING")
+
+	if !reflect.DeepEqual(sc.Evaluation.Limitations, before) {
+		t.Errorf("the scorecard's evaluation limitations changed after Score returned:\n"+
+			"  before %v\n  after  %v\nA validated scorecard that its caller can still edit "+
+			"is not a record of anything.", before, sc.Evaluation.Limitations)
+	}
+	for _, got := range sc.Evaluation.Limitations {
+		if got == "TAMPERED" || got == "APPENDED_AFTER_SCORING" {
+			t.Errorf("the scorecard picked up %q from the caller's slice after scoring", got)
+		}
+	}
+}
+
+// TestADatasetThatContradictsItsOwnProvenanceIsRefused closes a silent change
+// of verdict.
+//
+// A real load never produces one: the reader refuses rather than truncating,
+// and keeps an undecodable payload as a row rather than dropping it. But the
+// seam takes a VALUE, so a caller can slice a dataset while keeping the
+// classification that described the whole of it — and the classification is
+// what downstream stages trust.
+//
+// Dropping one of two terminal facts is the sharp case: an attempt that must be
+// excluded as MULTIPLE_TERMINAL_FACTS becomes an ordinary materializable case,
+// and every scorecard drawn from it carries a clean AS_FINALIZED provenance
+// describing facts the dataset does not contain.
+func TestADatasetThatContradictsItsOwnProvenanceIsRefused(t *testing.T) {
+	const attempt = 7
+	terminal := func(seq int64) predictioneval.SourceRecord {
+		r := peRecord(seq, predictioneval.KindAutoDecision, predictioneval.PhaseAutoDecided, attempt)
+		r.Payload.ReasonCode = "OK"
+		r.Payload.Decision = "PLACE"
+		r.Payload.OutcomeSlot = func() *int { i := 0; return &i }()
+		r.Payload.Counters[predictioneval.CounterStake] = 50
+		r.Payload.DecisionEnvelope = peMinimalEnvelope(attempt)
+		return r
+	}
+	due := peRecord(1, predictioneval.KindAutoDecision, predictioneval.PhaseAutoDue, attempt)
+
+	// Two endings: the honest dataset is refused for the right reason.
+	both := peDatasetOf(peProvenance(), due, terminal(2), terminal(3))
+	pk, err := predictioneval.MaterializePairedKnowledge(both)
+	if err != nil {
+		t.Fatalf("materialize: %v", err)
+	}
+	if !ncHasExclusion(pk, predictioneval.ExclusionMultipleTerminalFacts) {
+		t.Fatalf("a dataset with two terminal facts was not excluded as MULTIPLE_TERMINAL_FACTS "+
+			"(exclusions %v)", ncReasons(pk))
+	}
+
+	// Now drop one ending while keeping the provenance that described both.
+	// Without the cardinality check this materializes as an ordinary case.
+	sliced := both
+	sliced.Records = []predictioneval.SourceRecord{due, terminal(2)}
+	pk, err = predictioneval.MaterializePairedKnowledge(sliced)
+	if err != nil {
+		t.Fatalf("materialize sliced: %v", err)
+	}
+	if len(pk.Attempts) != 0 {
+		t.Errorf("a dataset holding %d facts under a provenance reporting %d materialized "+
+			"%d attempts. The provenance describes a set this dataset does not contain, and "+
+			"every scorecard drawn from it would carry that clean classification.",
+			len(sliced.Records), sliced.Source.FactsPresent, len(pk.Attempts))
+	}
+	if !ncHasExclusion(pk, predictioneval.ExclusionRecordCountContradictsProvenance) {
+		t.Errorf("the sliced dataset was not excluded as RECORD_COUNT_CONTRADICTS_PROVENANCE "+
+			"(exclusions %v)", ncReasons(pk))
+	}
+}
+
+func ncHasExclusion(pk predictioneval.PairedKnowledge, reason string) bool {
+	for _, e := range pk.Excluded {
+		if e.Reason == reason {
+			return true
+		}
+	}
+	return false
+}
+
+func ncReasons(pk predictioneval.PairedKnowledge) []string {
+	out := make([]string, 0, len(pk.Excluded))
+	for _, e := range pk.Excluded {
+		out = append(out, e.Reason)
+	}
+	return out
 }

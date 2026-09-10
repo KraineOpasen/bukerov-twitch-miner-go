@@ -323,7 +323,15 @@ func fixtureAttemptFacts() []analytics.PredictionObservation {
 
 	callStarted := baseFact(analytics.KindPlacement)
 	callStarted.Payload = analytics.ObservationPayload{
-		Phase:       "CALL_STARTED",
+		Phase: "CALL_STARTED",
+		// The reason and the error class are on BOTH facts, for the same
+		// reason the slot and the stake are: observePlacementCallOf writes
+		// them unconditionally, and it computes them from ONE error value —
+		// so OK and NONE appear together or not at all. A started fact
+		// carrying neither described a call the producer does not make, and
+		// it took a check on that pairing to notice.
+		ReasonCode:  "OK",
+		ErrorClass:  "NONE",
 		OutcomeSlot: intOf(1),
 		Counters:    map[string]int64{"autoAttemptId": attempt, "stake": 800},
 	}

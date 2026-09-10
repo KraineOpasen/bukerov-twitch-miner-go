@@ -30,18 +30,15 @@ func TestTheRoundsVerdictIsNotAttributedToAnAttemptItCannotBeLinkedTo(t *testing
 	terminal.Payload.ReasonCode = "OK"
 	terminal.Payload.DecisionEnvelope = peMinimalEnvelope(7)
 
-	ds := predictioneval.SourceDataset{
-		Source: peProvenance(),
-		Records: []predictioneval.SourceRecord{
-			peRecord(1, predictioneval.KindAutoDecision, predictioneval.PhaseAutoDue, 7),
-			terminal,
-			pePlacement(4, 7, predictioneval.PhaseCallStarted, 50, 0, "OK", "NONE"),
-			pePlacement(5, 7, predictioneval.PhaseCallReturned, 50, 0, "OK", "NONE"),
-			// The round's verdict. It carries a payout and NO attempt id,
-			// exactly as the pinned producer writes it.
-			peSettlementRecord(6),
-		},
-	}
+	ds := peDatasetOf(peProvenance(),
+		peRecord(1, predictioneval.KindAutoDecision, predictioneval.PhaseAutoDue, 7),
+		terminal,
+		pePlacement(4, 7, predictioneval.PhaseCallStarted, 50, 0, "OK", "NONE"),
+		pePlacement(5, 7, predictioneval.PhaseCallReturned, 50, 0, "OK", "NONE"),
+		// The round's verdict. It carries a payout and NO attempt id,
+		// exactly as the pinned producer writes it.
+		peSettlementRecord(6),
+	)
 	// Keep the records in ascending causal order.
 	ds.Records[1].CollectorSequence = 3
 
@@ -106,10 +103,7 @@ func TestACausalPositionBelongsToOneCollectorRun(t *testing.T) {
 	// Ordered as the store returns them: ascending (epoch, sequence). The
 	// second run's facts therefore follow this run's, and its sequence 1
 	// collides with this run's sequence 1.
-	pk, err := predictioneval.MaterializePairedKnowledge(predictioneval.SourceDataset{
-		Source:  peProvenance(),
-		Records: []predictioneval.SourceRecord{own, terminal, foreign},
-	})
+	pk, err := predictioneval.MaterializePairedKnowledge(peDatasetOf(peProvenance(), own, terminal, foreign))
 	if err != nil {
 		t.Fatalf("materialize: %v", err)
 	}
@@ -140,10 +134,7 @@ func TestACausalPositionBelongsToOneCollectorRun(t *testing.T) {
 	// simply disable the check.
 	dup := peRecord(1, predictioneval.KindAutoDecision, predictioneval.PhaseAutoDue, 7)
 	dup.ObservationID = "dup-1"
-	pk2, err := predictioneval.MaterializePairedKnowledge(predictioneval.SourceDataset{
-		Source:  peProvenance(),
-		Records: []predictioneval.SourceRecord{own, dup, terminal},
-	})
+	pk2, err := predictioneval.MaterializePairedKnowledge(peDatasetOf(peProvenance(), own, dup, terminal))
 	if err != nil {
 		t.Fatalf("materialize duplicate: %v", err)
 	}
@@ -260,4 +251,27 @@ func peMinimalEnvelope(attemptID uint64) *predictioneval.SourceDecisionEnvelope 
 		StakeAllowed: &allowed, StakeLimit: &limit,
 		ClampApplied: &clamp, FinalAmount: &final,
 	}
+}
+
+// peDatasetOf builds a dataset whose provenance DESCRIBES the records it
+// carries.
+//
+// A real load guarantees this: the reader refuses rather than truncating, and
+// keeps an undecodable payload as a row rather than dropping it. A fixture that
+// states one fact count and carries another describes a dataset no load
+// produces, and materialization refuses it — so the count is derived here
+// rather than written down, which is the only way it cannot drift.
+//
+// Counted over the facts the session OWNS, because a dataset may legitimately
+// carry another session's rows and those were never part of that count.
+func peDatasetOf(src predictioneval.SourceProvenance,
+	records ...predictioneval.SourceRecord) predictioneval.SourceDataset {
+	owned := int64(0)
+	for _, r := range records {
+		if r.CollectorEpoch == src.CollectorEpoch && r.CollectorSessionID == src.CollectorSessionID {
+			owned++
+		}
+	}
+	src.FactsPresent = owned
+	return predictioneval.SourceDataset{Source: src, Records: records}
 }
