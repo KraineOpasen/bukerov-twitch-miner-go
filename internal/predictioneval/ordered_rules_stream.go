@@ -99,8 +99,24 @@ func ProjectOrderedRulesStream(source OrderedRulesSource, admission CommonAdmiss
 				" interventions exceed the bound of "+strconv.Itoa(MaxOrderedRulesInterventions)))
 	}
 
+	// Every caller-supplied string the projection RETAINS is counted, not just
+	// the identifiers: coverage detail, the admission manifest and each
+	// intervention's detail all survive into the stream, so a budget that
+	// skipped them would bound the wrong thing.
 	bytes := int64(len(source.Scope.Namespace) + len(source.Scope.EpisodeID) +
-		len(source.Scope.AccountContext) + len(source.Scope.AssociationEvidence))
+		len(source.Scope.AccountContext) + len(source.Scope.AssociationEvidence) +
+		len(source.Scope.CoverageDetail) + len(source.Scope.SourceContractVersion))
+	bytes += int64(len(admission.ManifestID) + len(admission.Population) + len(admission.OrderBasis))
+	for _, ref := range admission.SourceReferences {
+		bytes += int64(len(ref))
+	}
+	for i := range source.Interventions {
+		bytes += int64(len(source.Interventions[i].Identity) + len(source.Interventions[i].Detail))
+	}
+	if bytes > MaxOrderedRulesAggregateBytes {
+		return OrderedRulesStream{}, errors.Join(ErrOrderedRulesOverBound,
+			errors.New("predictioneval: supplied scope, admission and intervention bytes exceed the aggregate budget"))
+	}
 
 	seen := make(map[string]bool, len(source.Candidates))
 	var lastPosition int64

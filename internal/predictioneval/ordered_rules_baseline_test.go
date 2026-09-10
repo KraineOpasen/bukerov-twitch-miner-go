@@ -9,6 +9,7 @@ package predictioneval_test
 import (
 	"encoding/json"
 	"testing"
+	"unsafe"
 
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/predictioneval"
 )
@@ -132,6 +133,60 @@ func TestOrderedRulesWorkBudgetRefusesRatherThanTruncates(t *testing.T) {
 		orConfig(rules, 95, 100, 0, 10), orDraws())
 	if ok.Status != predictioneval.StatusNoAttemptInSuppliedPrefix {
 		t.Fatalf("the control run must complete: status %q reason %q", ok.Status, ok.Reason)
+	}
+}
+
+// TestOrderedRulesRetainedTraceStaysInsideTheAggregateByteBudget pins the bound
+// that actually costs memory.
+//
+// Every evaluated slot appends one trace entry, so the slot ceiling IS the
+// trace length. A ceiling chosen without that in mind lets an input sitting
+// inside every other declared bound — and consuming no entropy at all — retain
+// well over a hundred megabytes of trace from one call, which is precisely the
+// unbounded allocation the bounds exist to prevent.
+//
+// So the arithmetic is asserted here rather than left to a comment: the worst
+// case a traversal can retain must fit the declared aggregate budget with room
+// for the arrays append discards on the way there.
+func TestOrderedRulesRetainedTraceStaysInsideTheAggregateByteBudget(t *testing.T) {
+	entry := int64(unsafe.Sizeof(predictioneval.OrderedRulesTraceEntry{}))
+	worst := entry * int64(predictioneval.MaxOrderedRulesWork)
+	// Append grows by doubling, so the peak holds the new array plus the old
+	// one it is copying from: about 1.5x the final size, and 3x leaves margin.
+	if worst*3 > int64(predictioneval.MaxOrderedRulesAggregateBytes) {
+		t.Fatalf("a maximal traversal retains %d bytes of trace (%d entries x %d bytes); with append's "+
+			"doubling that is past the declared aggregate budget of %d. Narrow MaxOrderedRulesWork "+
+			"rather than leaving the budget overstated.",
+			worst, predictioneval.MaxOrderedRulesWork, entry,
+			predictioneval.MaxOrderedRulesAggregateBytes)
+	}
+	t.Logf("worst-case retained trace: %d entries x %d bytes = %.1f MiB, budget %.0f MiB",
+		predictioneval.MaxOrderedRulesWork, entry, float64(worst)/(1024*1024),
+		float64(predictioneval.MaxOrderedRulesAggregateBytes)/(1024*1024))
+
+	// And the bound is really enforced: the widest input the other limits allow
+	// is refused, and the trace it comes back with is bounded by the ceiling
+	// rather than by the input's size.
+	cs := make([]predictioneval.OrderedRulesCandidate, predictioneval.MaxOrderedRulesCandidates)
+	outs := make([]predictioneval.OrderedRulesOutcome, predictioneval.MaxOrderedRulesOutcomes)
+	for i := range outs {
+		outs[i] = orOutcome("o"+itoaTest(i), int64(i+1))
+	}
+	for i := range cs {
+		cs[i] = orCandidate("c"+itoaTest(i), int64(i+1), orKnownBalance(1000), outs...)
+	}
+	rules := make([]predictioneval.OrderedRule, predictioneval.MaxOrderedRulesRules)
+	for i := range rules {
+		rules[i] = orRule(predictioneval.ComparatorLe, 0, 100, 0, 10)
+	}
+	ev := predictioneval.EvaluateOrderedRules(orProject(t, cs, nil),
+		orConfig(rules, 95, 100, 0, 10), orDraws())
+	if ev.Status != predictioneval.StatusRefused {
+		t.Fatalf("status = %q, want REFUSED", ev.Status)
+	}
+	if len(ev.Trace) > predictioneval.MaxOrderedRulesWork {
+		t.Fatalf("the refused result carries %d trace entries, past the ceiling of %d",
+			len(ev.Trace), predictioneval.MaxOrderedRulesWork)
 	}
 }
 

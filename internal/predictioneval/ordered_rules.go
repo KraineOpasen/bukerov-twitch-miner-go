@@ -536,6 +536,17 @@ func rawPercentInDomain(v float64) bool { return v >= 0 && v <= 100 }
 // Every outcome's points must be KNOWN. A missing one is not a zero: the pool
 // total feeds every share in the vector, so one absent value makes the whole
 // candidate's arithmetic unknown rather than merely one outcome's.
+//
+// The sign and overflow guards are a DELIBERATE divergence from the donor, and
+// worth naming as one because everything else in this file is a faithful
+// transcription. The donor folds i64 points with a plain +, so a negative pool
+// entry yields a negative share it goes on to compare, and a sum past i64
+// wraps. Neither is a decision this model may reproduce: a wrapped total is
+// undefined behaviour to lean on, and a negative share is an input this model
+// cannot claim came from a real pool. Both are therefore reported as a typed
+// unknown rather than normalized to zero or evaluated as if they were sound —
+// the model refuses to guess rather than imitating a runtime that never had to
+// decide.
 func checkedPoolSum(outcomes []OrderedRulesOutcome) (int64, string) {
 	var total int64
 	for i := range outcomes {

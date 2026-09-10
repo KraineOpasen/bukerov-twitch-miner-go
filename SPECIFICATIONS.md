@@ -3275,10 +3275,13 @@ another candidate. `NO_ATTEMPT_IN_SUPPLIED_PREFIX` is a statement about the
 supplied prefix alone — not a full-round skip and not a financial zero.
 
 **Bounds and bindings.** Offline resource limits — 128 candidates, 64 outcomes,
-128 rules, 4 KiB per identifier, 2^20 draw words and 2^20 predicate slots — are
+128 rules, 4 KiB per identifier, 2^20 draw words and 2^18 predicate slots — are
 refusal boundaries, never truncation boundaries: an oversized input is rejected
 whole, because a silently shortened candidate list changes which opportunities
-exist. Four domain-separated digests bind a result to its inputs: the whole
+exist. The slot ceiling is the tightest of them for a reason: every evaluated
+slot also appends one trace entry, so the ceiling and the retained trace are the
+same quantity, and it is set where that trace still fits the declared 128 MiB
+aggregate budget rather than where a slot count alone would allow. Four domain-separated digests bind a result to its inputs: the whole
 stream, the raw config, the whole supplied entropy, and — separately — only the
 prefix actually consumed. That last one deliberately excludes metadata about the
 full supplied set, so that appending facts beyond the boundary provably cannot

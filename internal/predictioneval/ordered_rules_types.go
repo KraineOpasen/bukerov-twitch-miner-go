@@ -113,10 +113,23 @@ const (
 	// one traversal. The other bounds together permit more work than this, so
 	// this is a live counter rather than a precomputable product: a run that
 	// stops early is never charged for work it did not do.
-	MaxOrderedRulesWork = 1 << 20
+	//
+	// It is 2^18 rather than the 2^20 an offline slot ceiling alone would
+	// allow, and the difference is not arbitrary: EVERY evaluated slot also
+	// appends one [OrderedRulesTraceEntry], which is 120 bytes, so the slot
+	// ceiling and the trace length are the same quantity measured twice. At
+	// 2^20 a single call would retain 120 MiB of trace — plus the discarded
+	// arrays append leaves behind on the way there — from an input sitting
+	// inside every other declared bound and consuming no entropy at all. That
+	// is exactly the unbounded allocation these limits exist to prevent, so
+	// the ceiling is narrowed until the trace fits the budget below with room
+	// for append's doubling. Narrowing a bound is always allowed; widening one
+	// past what [MaxOrderedRulesAggregateBytes] permits is not.
+	MaxOrderedRulesWork = 1 << 18
 	// MaxOrderedRulesAggregateBytes bounds the supplied identifier bytes of one
 	// source, matching the reader's existing aggregate ceiling rather than
-	// inventing a looser one.
+	// inventing a looser one. It also fixes [MaxOrderedRulesWork], since the
+	// trace a traversal retains is one entry per evaluated slot.
 	MaxOrderedRulesAggregateBytes = 128 << 20
 )
 
@@ -570,7 +583,9 @@ const (
 	ReasonAttemptRateOutOfDomain   = "ATTEMPT_RATE_OUT_OF_BERNOULLI_DOMAIN"
 	ReasonRuleCountOverBound       = "RULE_COUNT_OVER_BOUND"
 	ReasonDrawWordsOverBound       = "DRAW_WORDS_OVER_BOUND"
-	ReasonWorkBudgetExceeded       = "WORK_BUDGET_EXCEEDED"
+	// ReasonWorkBudgetExceeded covers the evaluated-slot ceiling, which is also
+	// the retained-trace ceiling: see [MaxOrderedRulesWork].
+	ReasonWorkBudgetExceeded = "WORK_BUDGET_EXCEEDED"
 	// ReasonBalanceNotEvaluated is not a failure. It is what the model reports
 	// about a balance it never needed, because the traversal never admitted
 	// participation on that candidate. Reporting it as MISSING would confuse
@@ -683,9 +698,14 @@ type OrderedRulesEvaluation struct {
 	OutcomesConsidered   int `json:"outcomesConsidered"`
 	RulesConsidered      int `json:"rulesConsidered"`
 	BernoulliEvaluations int `json:"bernoulliEvaluations"`
-	// RawWordsConsumed counts words actually taken from the trace. It differs
-	// from BernoulliEvaluations whenever a rate of exactly zero or exactly one
-	// was evaluated.
+	// RawWordsConsumed counts words actually taken from the trace.
+	//
+	// It differs from BernoulliEvaluations only where a rate of exactly ONE was
+	// evaluated, because that is the single case that returns an answer without
+	// drawing. A rate of exactly zero advances BOTH counters — it builds a
+	// distribution with a threshold of zero, draws a word, and only then fails
+	// on the strict comparison — so the two staying equal is NOT evidence that
+	// no zero-rate rule was reached.
 	RawWordsConsumed int `json:"rawWordsConsumed"`
 
 	Trace []OrderedRulesTraceEntry `json:"trace,omitempty"`

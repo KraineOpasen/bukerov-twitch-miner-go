@@ -226,8 +226,14 @@ func TestOrderedRulesNormalizeExactlyOnce(t *testing.T) {
 
 	// The rand 0.8.5 threshold for one percent, computed from the pinned
 	// formula rather than from this package.
-	var scale float64 = 18446744073709551616.0
-	var rate float64 = 1.0 / 100.0
+	// A single constant each, so Go rounds once on assignment and these are the
+	// same doubles an explicit float64 declaration would produce. The typed
+	// declarations elsewhere in this file exist because their expressions have
+	// MORE THAN ONE operation, which Go would otherwise fold at arbitrary
+	// precision — see TestOrderedRulesReciprocalRatioGe90Boundary. Keep the
+	// multiplication below on variables for the same reason.
+	scale := 18446744073709551616.0
+	rate := 1.0 / 100.0
 	onePercent := uint64(rate * scale)
 
 	admitted := orEval(t, cs, cfg, onePercent-1)
