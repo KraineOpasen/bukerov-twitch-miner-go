@@ -58,8 +58,13 @@ func mzSource() SourceProvenance {
 		CloseState:         "CLOSED",
 		WitnessesVerified:  8,
 		WitnessesUnchecked: 0,
-		FactsPresent:       8,
-		CommittedCount:     8,
+		// FactsPresent is deliberately absent: mzDatasetOf DERIVES it from the
+		// records, because a fixture that writes a count down states one thing
+		// and carries another the moment the records change. A literal here
+		// would be dead and still read as meaningful, which is how the
+		// hardcoded 8 survived long enough to match no dataset it was used
+		// with.
+		CommittedCount: 8,
 	}
 }
 

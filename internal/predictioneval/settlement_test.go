@@ -158,9 +158,10 @@ func peProvenance() predictioneval.SourceProvenance {
 		ProducerRevision:   predictioneval.SupportedProducerRevision,
 		SessionReading:     "AS_FINALIZED",
 		CloseState:         "COMPLETE",
-		FactsPresent:       5,
-		CommittedCount:     5,
-		WitnessesVerified:  5,
+		// Derived by peDatasetOf from the records, for the same reason. See
+		// mzSource.
+		CommittedCount:    5,
+		WitnessesVerified: 5,
 	}
 }
 
