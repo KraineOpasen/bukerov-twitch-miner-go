@@ -32,6 +32,25 @@ import "math"
 //   - the pool share computed as a direct share instead of the reciprocal —
 //     TestOrderedRulesReciprocalRatioGe90Boundary.
 //
+// # Contract checks run over the WHOLE input, before the mechanism
+//
+// Worth stating plainly, because it looks at first like a hole in the
+// no-look-ahead guarantee. The contract and resource checks — identity, order,
+// declared interval, presence vocabulary, string and count ceilings — are
+// applied to everything the caller supplied, INCLUDING facts sitting past the
+// factual boundary. So appending a malformed post-boundary candidate can turn a
+// projection that previously succeeded into a refusal, and appending enough
+// entropy to pass the word ceiling can turn a decided run into one.
+//
+// That is deliberate and it is not the model reading post-treatment data. The
+// distinction is what the check is FOR: a size or contract check asks "will
+// this package evaluate this input at all", and its answer is REFUSED — a
+// status that is explicitly not a mechanism result. The mechanism itself never
+// sees a fact past the boundary, and no refusal can become an admission, a
+// stake, or a NO_ATTEMPT. What the no-look-ahead guarantee actually forbids is
+// a later fact changing a DECISION, and that is what
+// TestOrderedRulesAppendingPostCutoffFactsCannotChangeEvaluation pins.
+//
 // # Where this model STOPS, and why it is not zero
 //
 // The traversal ends at the EARLIEST of: the first admission with a computable
@@ -179,6 +198,7 @@ func EvaluateOrderedRules(stream OrderedRulesStream, rules OrderedRulesConfig, d
 		ModelVersion:            OrderedRulesModelVersion,
 		DonorRevision:           OrderedRulesDonorRevision,
 		EntropySemanticsVersion: OrderedRulesEntropySemanticsVersion,
+		Cutoff:                  stream.Cutoff,
 		Participation:           ParticipationNotAdmitted,
 		Stake:                   SuppliedUint32{Presence: SuppliedMissing, Reason: ReasonBalanceNotEvaluated},
 		StreamDigest:            orderedRulesStreamDigest(stream),
@@ -235,6 +255,20 @@ func EvaluateOrderedRules(stream OrderedRulesStream, rules OrderedRulesConfig, d
 		out.StoppedAtCandidate = c.Identity
 		out.StoppedAtPosition = c.Position
 		out.HasStopPosition = true
+
+		// A vector the caller could not recover is NOT the donor's decline, and
+		// the difference decides whether the traversal continues. This is
+		// checked FIRST, because a short vector is only a decline once the
+		// caller has said the vector is the whole of what was there.
+		if c.OutcomesPresence != SuppliedKnown {
+			visit.Verdict = CandidateUnknownInput
+			visit.RawWordsConsumedHere = cursor - wordsBefore
+			out.Visits = append(out.Visits, visit)
+			out.Status = StatusUnknownInput
+			out.Reason = ReasonOutcomeVectorNotKnown
+			out.ConsumedInputDigest = orderedRulesConsumedDigest(stream, rules, draws, ci+1, cursor)
+			return out
+		}
 
 		// The donor declines a pool it cannot compare. This is checked BEFORE
 		// the points are read, so a one-outcome pool with an unreadable total

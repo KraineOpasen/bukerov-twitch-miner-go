@@ -105,7 +105,11 @@ const (
 	MaxOrderedRulesRules = 128
 	// MaxOrderedRulesInterventions bounds the supplied factual boundary markers.
 	MaxOrderedRulesInterventions = 1024
-	// MaxOrderedRulesIdentifierBytes bounds one supplied identifier.
+	// MaxOrderedRulesIdentifierBytes bounds one supplied identifier, and every
+	// other free-text string the projection retains — a presence reason, a
+	// provenance note, a coverage detail. The caller chooses those freely, so
+	// leaving them unbounded would leave the aggregate budget below
+	// unenforceable in exactly the field most under a caller's control.
 	MaxOrderedRulesIdentifierBytes = 4096
 	// MaxOrderedRulesDrawWords bounds the supplied raw entropy trace.
 	MaxOrderedRulesDrawWords = 1 << 20
@@ -325,7 +329,25 @@ type OrderedRulesCandidate struct {
 	Position          int64                  `json:"position"`
 	SourceKind        OrderedRulesSourceKind `json:"sourceKind"`
 	EpisodeMembership OrderedRulesMembership `json:"episodeMembership"`
-	Outcomes          []OrderedRulesOutcome  `json:"outcomes"`
+	// OutcomesPresence declares whether the caller RECOVERED this candidate's
+	// ordered outcome vector whole.
+	//
+	// It exists because every scalar in this model carries a presence and the
+	// vector did not, which made two completely different things identical: a
+	// pool the donor genuinely declines because it holds fewer than two
+	// outcomes, and a pool whose vector the caller could not recover. The first
+	// is a decision and the traversal walks on; the second is an unknown, and
+	// walking past it hands every LATER candidate an attempt opportunity that
+	// exists only because this one was skipped.
+	//
+	// A short vector is only the donor's decline when this says KNOWN. Anything
+	// else stops the traversal. A partially recovered vector must be declared
+	// INVALID rather than passed off as complete: the pool total feeds every
+	// share, so a missing entry moves all of them.
+	OutcomesPresence SuppliedPresence `json:"outcomesPresence"`
+	// OutcomesReason is the caller's closed explanation of a non-KNOWN vector.
+	OutcomesReason string                `json:"outcomesReason,omitempty"`
+	Outcomes       []OrderedRulesOutcome `json:"outcomes"`
 	// Balance is the balance bound TO THIS CANDIDATE. A balance is never
 	// forward-filled from an earlier candidate, borrowed from a later one, or
 	// taken from a neighbouring record because the timestamps looked close.
@@ -573,6 +595,10 @@ const (
 	ReasonEntropyExhausted         = "ENTROPY_EXHAUSTED"
 	ReasonEntropySemanticsMismatch = "ENTROPY_SEMANTICS_MISMATCH"
 	ReasonStreamContractMismatch   = "STREAM_CONTRACT_MISMATCH"
+	// ReasonOutcomeVectorNotKnown is a candidate whose ordered outcome vector
+	// the caller could not recover whole. It is NOT the donor's fewer-than-two
+	// decline, and the traversal stops rather than walking past it.
+	ReasonOutcomeVectorNotKnown    = "OUTCOME_VECTOR_NOT_KNOWN"
 	ReasonOutcomePointsNotKnown    = "OUTCOME_POINTS_NOT_KNOWN"
 	ReasonOutcomePointsOutOfDomain = "OUTCOME_POINTS_OUT_OF_DOMAIN"
 	ReasonPoolSumOverflow          = "POOL_SUM_OVERFLOW"
@@ -707,6 +733,16 @@ type OrderedRulesEvaluation struct {
 	// on the strict comparison — so the two staying equal is NOT evidence that
 	// no zero-rate rule was reached.
 	RawWordsConsumed int `json:"rawWordsConsumed"`
+
+	// Cutoff is the boundary the stream was projected under, carried onto the
+	// result rather than left behind on the stream.
+	//
+	// Without it a NO_ATTEMPT_IN_SUPPLIED_PREFIX produced by a boundary that
+	// removed EVERY candidate is field-for-field identical to one over a source
+	// that never held any — same status, same counters, same consumed-prefix
+	// digest. Those are opposite pieces of evidence: one says a real placement
+	// call had already acted on the round, the other says nothing was there.
+	Cutoff OrderedRulesCutoff `json:"cutoff"`
 
 	Trace []OrderedRulesTraceEntry `json:"trace,omitempty"`
 	// Visits records what the traversal did at EACH candidate it reached, not

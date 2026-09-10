@@ -84,6 +84,8 @@ func digestCandidate(h hash.Hash, c *OrderedRulesCandidate) {
 	digestPart(h, string(c.SourceKind))
 	digestPart(h, string(c.EpisodeMembership))
 	digestPart(h, c.Provenance)
+	digestPart(h, string(c.OutcomesPresence))
+	digestPart(h, c.OutcomesReason)
 	digestInt(h, int64(len(c.Outcomes)))
 	for i := range c.Outcomes {
 		digestPart(h, c.Outcomes[i].Identity)
@@ -215,6 +217,11 @@ func orderedRulesConsumedDigest(s OrderedRulesStream, cfg OrderedRulesConfig, d 
 	digestPart(h, s.Scope.EpisodeID)
 	digestPart(h, s.Scope.AccountContext)
 	digestPart(h, s.Scope.SourceContractVersion)
+	// The declared coverage binds too. A prefix read from a source that admits
+	// it is missing its beginning is different evidence from the same prefix
+	// read from a source that claims to be complete — the second says no
+	// earlier intervention occurred, the first cannot.
+	digestPart(h, string(s.Scope.Coverage))
 	digestPart(h, s.Admission.ManifestID)
 	digestPart(h, string(s.Admission.ViewKind))
 

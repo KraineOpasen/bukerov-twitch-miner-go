@@ -3223,6 +3223,16 @@ evaluated over the declared common-admitted data, and nothing more. The
 admission manifest is DATA, not a callback: admission is fixed before evaluation
 and cannot be chosen for producing a better answer.
 
+The outcome VECTOR carries a presence of its own, not only its scalars. A pool
+holding fewer than two outcomes is a pool the donor declines and the traversal
+walks on; a pool whose vector the caller could not recover looks identical — a
+short slice — and is the opposite fact, because walking past it hands every
+later candidate an opportunity that exists only because this one was skipped. A
+short vector is the donor's decline only when the caller vouches for it as
+whole; anything else stops the traversal. A partially recovered vector must be
+declared invalid rather than passed off as complete, since the pool total feeds
+every share and one missing entry moves all of them.
+
 **The mechanism.** The outcome vector is the OUTER loop and the rule list the
 inner one. A pool share is `1/(total/points)` — two divisions, never collapsed
 into `points/total`, because in binary64 they differ: for the pool `[9,1]` the
@@ -3262,6 +3272,13 @@ coverage is refused, because it makes "no intervention was supplied"
 indistinguishable from "the intervention was never collected". A declared gap is
 evaluable and its qualification travels into every result.
 
+The boundary travels onto the result, not only the stream. Without it a
+traversal that found nothing because the boundary removed EVERY candidate would
+be field-for-field identical — counters and consumed-prefix digest included — to
+one over a source that never held any, and those are opposite pieces of
+evidence. A boundary that excluded supplied candidates is reported with its
+count.
+
 **Stops, and what they are not.** The traversal ends at the earliest of: the
 first admission with a computable stake; the first admission whose stake is not
 computable; the boundary; a required input it reached and could not read; or a
@@ -3275,7 +3292,9 @@ another candidate. `NO_ATTEMPT_IN_SUPPLIED_PREFIX` is a statement about the
 supplied prefix alone — not a full-round skip and not a financial zero.
 
 **Bounds and bindings.** Offline resource limits — 128 candidates, 64 outcomes,
-128 rules, 4 KiB per identifier, 2^20 draw words and 2^18 predicate slots — are
+128 rules, 4 KiB per identifier and per retained free-text string — a presence
+reason, a provenance note, a coverage detail — 2^20 draw words and 2^18
+predicate slots — are
 refusal boundaries, never truncation boundaries: an oversized input is rejected
 whole, because a silently shortened candidate list changes which opportunities
 exist. The slot ceiling is the tightest of them for a reason: every evaluated

@@ -562,6 +562,215 @@ func TestOrderedRulesOverBudgetInputIsRefusedWithoutTruncation(t *testing.T) {
 	})
 }
 
+// TestOrderedRulesUnrecoverableOutcomeVectorIsNotTheDonorsDecline pins the
+// distinction the vector's presence marker exists for.
+//
+// A pool holding fewer than two outcomes is a pool the donor declines: it walks
+// on to the next candidate, and so does this model. A pool whose vector the
+// caller COULD NOT RECOVER looks identical on the wire — a short slice — and is
+// the opposite fact. Walking past it hands every later candidate an opportunity
+// that exists only because this one was skipped, which is exactly what the
+// no-silent-filtering rule forbids.
+func TestOrderedRulesUnrecoverableOutcomeVectorIsNotTheDonorsDecline(t *testing.T) {
+	// Both runs are identical except for the presence marker on c1.
+	build := func(presence predictioneval.SuppliedPresence,
+		outs ...predictioneval.OrderedRulesOutcome) []predictioneval.OrderedRulesCandidate {
+		c1 := orCandidate("c1", 10, orKnownBalance(1000), outs...)
+		c1.OutcomesPresence = presence
+		if presence != predictioneval.SuppliedKnown {
+			c1.OutcomesReason = "the wire frame's outcome vector could not be recovered"
+		}
+		return []predictioneval.OrderedRulesCandidate{c1, orTwoOutcomePool("c2", 20)}
+	}
+
+	t.Run("an unrecoverable vector stops the traversal", func(t *testing.T) {
+		ev := predictioneval.EvaluateOrderedRules(
+			orProject(t, build(predictioneval.SuppliedMissing), nil), orAlwaysAdmitConfig(), orDraws())
+		switch {
+		case ev.Status != predictioneval.StatusUnknownInput:
+			t.Fatalf("status = %q, want UNKNOWN_INPUT", ev.Status)
+		case ev.Reason != predictioneval.ReasonOutcomeVectorNotKnown:
+			t.Fatalf("reason = %q, want OUTCOME_VECTOR_NOT_KNOWN", ev.Reason)
+		case ev.Selected != nil:
+			t.Fatalf("walking past the unknown candidate admitted %+v on the next one", ev.Selected)
+		case ev.CandidatesConsumed != 1:
+			t.Fatalf("consumed %d candidates, want 1", ev.CandidatesConsumed)
+		}
+	})
+
+	t.Run("a partially recovered vector is INVALID, not complete", func(t *testing.T) {
+		// A vector truncated from three outcomes to two changes EVERY share,
+		// because the pool total feeds all of them — so it may not be passed
+		// off as the whole of what was there.
+		ev := predictioneval.EvaluateOrderedRules(
+			orProject(t, build(predictioneval.SuppliedInvalid, orOutcome("A", 4), orOutcome("B", 6)), nil),
+			orAlwaysAdmitConfig(), orDraws())
+		if ev.Status != predictioneval.StatusUnknownInput ||
+			ev.Reason != predictioneval.ReasonOutcomeVectorNotKnown {
+			t.Fatalf("status %q reason %q, want UNKNOWN_INPUT / OUTCOME_VECTOR_NOT_KNOWN",
+				ev.Status, ev.Reason)
+		}
+	})
+
+	t.Run("a KNOWN short vector really is the donor's decline", func(t *testing.T) {
+		ev := predictioneval.EvaluateOrderedRules(
+			orProject(t, build(predictioneval.SuppliedKnown, orOutcome("A", 4)), nil),
+			orAlwaysAdmitConfig(), orDraws())
+		sel := orMustAdmit(t, ev)
+		if sel.CandidateIdentity != "c2" {
+			t.Fatalf("admitted on %q, want \"c2\": a vector the caller vouched for and that holds one "+
+				"outcome is the donor's own decline, and the scan continues", sel.CandidateIdentity)
+		}
+		if ev.Visits[0].Verdict != predictioneval.CandidateTooFewOutcomes {
+			t.Fatalf("c1 verdict = %q, want TOO_FEW_OUTCOMES", ev.Visits[0].Verdict)
+		}
+	})
+
+	// A candidate that declares no presence at all is refused at projection.
+	bare := orTwoOutcomePool("c1", 10)
+	bare.OutcomesPresence = ""
+	if _, err := predictioneval.ProjectOrderedRulesStream(
+		orSource([]predictioneval.OrderedRulesCandidate{bare}, nil), orAdmission()); !errorsIs(err,
+		predictioneval.ErrOrderedRulesVocabulary) {
+		t.Fatalf("got %v, want a vocabulary refusal for an undeclared outcome-vector presence", err)
+	}
+}
+
+// TestOrderedRulesAFullyCutStreamIsDistinguishableFromAnEmptySource pins that
+// the boundary reaches the result.
+//
+// Both runs below report NO_ATTEMPT_IN_SUPPLIED_PREFIX with the same counters.
+// One of them is a round a real placement call had already acted on, with every
+// supplied candidate removed by the boundary; the other is a source that held
+// nothing. Those are opposite pieces of evidence, and a reader must be able to
+// tell them apart from the result alone.
+func TestOrderedRulesAFullyCutStreamIsDistinguishableFromAnEmptySource(t *testing.T) {
+	early := []predictioneval.OrderedRulesIntervention{
+		orIntervention("call-1", 5, predictioneval.InterventionAutoCallStarted,
+			predictioneval.RelevanceProven, "a placement call had already acted on this round"),
+	}
+	cut := predictioneval.EvaluateOrderedRules(
+		orProject(t, []predictioneval.OrderedRulesCandidate{
+			orTwoOutcomePool("c1", 10), orTwoOutcomePool("c2", 20)}, early),
+		orAlwaysAdmitConfig(), orDraws())
+	empty := predictioneval.EvaluateOrderedRules(
+		orProject(t, nil, early), orAlwaysAdmitConfig(), orDraws())
+
+	if cut.Status != predictioneval.StatusNoAttemptInSuppliedPrefix ||
+		empty.Status != predictioneval.StatusNoAttemptInSuppliedPrefix {
+		t.Fatalf("both runs must reach NO_ATTEMPT: %q and %q", cut.Status, empty.Status)
+	}
+	if cut.Cutoff.DroppedAtOrAfter != 2 {
+		t.Fatalf("the cut result must report the candidates the boundary removed: %+v", cut.Cutoff)
+	}
+	if empty.Cutoff.DroppedAtOrAfter != 0 {
+		t.Fatalf("the empty source removed nothing: %+v", empty.Cutoff)
+	}
+	if !containsSubstring(cut.Qualifications, "BOUNDARY_REMOVED_CANDIDATES") {
+		t.Fatalf("a boundary that emptied the stream must be qualified on the result: %v",
+			cut.Qualifications)
+	}
+	if containsSubstring(empty.Qualifications, "BOUNDARY_REMOVED_CANDIDATES") {
+		t.Fatalf("nothing was removed from the empty source: %v", empty.Qualifications)
+	}
+	// And the boundary itself travels, so the result names the call.
+	if cut.Cutoff.Identity != "call-1" || !cut.Cutoff.Established {
+		t.Fatalf("the result must carry the boundary it was evaluated under: %+v", cut.Cutoff)
+	}
+}
+
+// TestOrderedRulesFreeTextIsBoundedLikeIdentifiers pins the budget over the
+// fields a caller controls most freely.
+//
+// A presence reason, a provenance note and a coverage detail are all retained
+// by the projection and hashed into its digest. Bounding only the identifiers
+// left the one string a caller can make arbitrarily long entirely unbounded,
+// which made the declared aggregate budget unenforceable.
+func TestOrderedRulesFreeTextIsBoundedLikeIdentifiers(t *testing.T) {
+	huge := make([]byte, predictioneval.MaxOrderedRulesIdentifierBytes+1)
+	for i := range huge {
+		huge[i] = 'x'
+	}
+	big := string(huge)
+
+	t.Run("a balance reason", func(t *testing.T) {
+		c := orTwoOutcomePool("c1", 10)
+		c.Balance = predictioneval.SuppliedInt64{Presence: predictioneval.SuppliedMissing, Reason: big}
+		_, err := predictioneval.ProjectOrderedRulesStream(
+			orSource([]predictioneval.OrderedRulesCandidate{c}, nil), orAdmission())
+		if !errorsIs(err, predictioneval.ErrOrderedRulesOverBound) {
+			t.Fatalf("got %v, want an over-bound refusal", err)
+		}
+	})
+
+	t.Run("an outcome points reason", func(t *testing.T) {
+		o := orMissingPoints("A")
+		o.Points.Reason = big
+		c := orCandidate("c1", 10, orKnownBalance(1000), o, orOutcome("B", 6))
+		_, err := predictioneval.ProjectOrderedRulesStream(
+			orSource([]predictioneval.OrderedRulesCandidate{c}, nil), orAdmission())
+		if !errorsIs(err, predictioneval.ErrOrderedRulesOverBound) {
+			t.Fatalf("got %v, want an over-bound refusal", err)
+		}
+	})
+
+	t.Run("a coverage detail", func(t *testing.T) {
+		src := orSource([]predictioneval.OrderedRulesCandidate{orTwoOutcomePool("c1", 10)}, nil)
+		src.Scope.CoverageDetail = big
+		if _, err := predictioneval.ProjectOrderedRulesStream(src, orAdmission()); !errorsIs(err,
+			predictioneval.ErrOrderedRulesOverBound) {
+			t.Fatalf("got %v, want an over-bound refusal", err)
+		}
+	})
+
+	t.Run("an intervention detail", func(t *testing.T) {
+		ins := []predictioneval.OrderedRulesIntervention{
+			orIntervention("call-1", 20, predictioneval.InterventionAutoCallStarted,
+				predictioneval.RelevanceProven, big),
+		}
+		_, err := predictioneval.ProjectOrderedRulesStream(
+			orSource([]predictioneval.OrderedRulesCandidate{orTwoOutcomePool("c1", 10)}, ins),
+			orAdmission())
+		if !errorsIs(err, predictioneval.ErrOrderedRulesOverBound) {
+			t.Fatalf("got %v, want an over-bound refusal", err)
+		}
+	})
+
+	// Non-vacuity: one byte shorter is accepted, so the bound is the bound.
+	c := orTwoOutcomePool("c1", 10)
+	c.Balance = predictioneval.SuppliedInt64{
+		Presence: predictioneval.SuppliedMissing, Reason: big[:len(big)-1]}
+	if _, err := predictioneval.ProjectOrderedRulesStream(
+		orSource([]predictioneval.OrderedRulesCandidate{c}, nil), orAdmission()); err != nil {
+		t.Fatalf("a reason at exactly the bound must be accepted: %v", err)
+	}
+}
+
+// TestOrderedRulesEqualPositionBoundaryDoesNotDependOnSupplyOrder pins the
+// boundary's identity as a function of the FACTS, not of the order they arrived.
+//
+// Two equally-strong interventions at the same position cut identically, so the
+// traversal cannot tell them apart — but the one named as the boundary is
+// hashed into the result. Picking whichever came first in the slice would make
+// the same set of facts produce different evidence on a reshuffle.
+func TestOrderedRulesEqualPositionBoundaryDoesNotDependOnSupplyOrder(t *testing.T) {
+	a := orIntervention("call-a", 20, predictioneval.InterventionAutoCallStarted,
+		predictioneval.RelevanceProven, "one")
+	b := orIntervention("call-b", 20, predictioneval.InterventionManualCallStarted,
+		predictioneval.RelevanceProven, "another")
+	cs := []predictioneval.OrderedRulesCandidate{orTwoOutcomePool("c1", 10)}
+
+	forward := orProject(t, cs, []predictioneval.OrderedRulesIntervention{a, b})
+	reverse := orProject(t, cs, []predictioneval.OrderedRulesIntervention{b, a})
+	if forward.Cutoff != reverse.Cutoff {
+		t.Fatalf("the boundary changed with supply order:\n forward = %+v\n reverse = %+v",
+			forward.Cutoff, reverse.Cutoff)
+	}
+	if forward.SelectionDigest != reverse.SelectionDigest {
+		t.Fatal("the same facts in a different order produced a different stream digest")
+	}
+}
+
 // TestOrderedRulesUnknownCoverageIsRefused pins that a source must say how
 // complete it is.
 //

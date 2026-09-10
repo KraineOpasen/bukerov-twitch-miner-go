@@ -69,6 +69,8 @@ const (
 	qualConservativeCutoff  = "CUTOFF_FROM_AMBIGUOUS_ASSOCIATION: the boundary was taken at an intervention whose association with this episode could not be established; the earlier, conservative boundary was chosen"
 	qualCalculateOnlyView   = "CALCULATE_ONLY_VIEW: these candidates are decision-time model snapshots, NOT a recovered wire create/update stream"
 	qualNoInterventionSeen  = "NO_INTERVENTION_IN_DECLARED_INTERVAL: no relevant placement call was supplied inside the declared interval"
+	// qualBoundaryRemovedCandidates is completed with the count.
+	qualBoundaryRemovedCandidates = "BOUNDARY_REMOVED_CANDIDATES: the factual boundary excluded supplied candidates, so any absence of an attempt describes only what preceded it; count="
 )
 
 // ProjectOrderedRulesStream projects a supplied source into the bounded,
@@ -106,11 +108,17 @@ func ProjectOrderedRulesStream(source OrderedRulesSource, admission CommonAdmiss
 	bytes := int64(len(source.Scope.Namespace) + len(source.Scope.EpisodeID) +
 		len(source.Scope.AccountContext) + len(source.Scope.AssociationEvidence) +
 		len(source.Scope.CoverageDetail) + len(source.Scope.SourceContractVersion))
+	if err := checkFreeText(source.Scope.CoverageDetail, "scope coverage detail"); err != nil {
+		return OrderedRulesStream{}, err
+	}
 	bytes += int64(len(admission.ManifestID) + len(admission.Population) + len(admission.OrderBasis))
 	for _, ref := range admission.SourceReferences {
 		bytes += int64(len(ref))
 	}
 	for i := range source.Interventions {
+		if err := checkFreeText(source.Interventions[i].Detail, "intervention "+strconv.Itoa(i)+" detail"); err != nil {
+			return OrderedRulesStream{}, err
+		}
 		bytes += int64(len(source.Interventions[i].Identity) + len(source.Interventions[i].Detail))
 	}
 	if bytes > MaxOrderedRulesAggregateBytes {
@@ -172,7 +180,22 @@ func ProjectOrderedRulesStream(source OrderedRulesSource, admission CommonAdmiss
 				errors.New("predictioneval: "+where+" carries "+strconv.Itoa(len(c.Outcomes))+
 					" outcomes, past the bound of "+strconv.Itoa(MaxOrderedRulesOutcomes)))
 		}
-		bytes += int64(len(c.Identity)) + int64(len(c.Provenance)) + int64(len(c.Balance.Provenance))
+		switch c.OutcomesPresence {
+		case SuppliedKnown, SuppliedMissing, SuppliedInvalid:
+		default:
+			return OrderedRulesStream{}, errors.Join(ErrOrderedRulesVocabulary,
+				errors.New("predictioneval: "+where+" declares outcome-vector presence "+
+					strconv.Quote(string(c.OutcomesPresence))+
+					"; a caller must say whether it recovered the ordered vector whole, because a short "+
+					"vector the donor declines and a vector nobody could recover are different facts"))
+		}
+		if err := checkFreeText(c.Provenance, where+" provenance"); err != nil {
+			return OrderedRulesStream{}, err
+		}
+		if err := checkFreeText(c.OutcomesReason, where+" outcomes reason"); err != nil {
+			return OrderedRulesStream{}, err
+		}
+		bytes += int64(len(c.Identity)) + int64(len(c.Provenance)) + int64(len(c.OutcomesReason))
 		for j := range c.Outcomes {
 			o := &c.Outcomes[j]
 			ow := where + " outcome " + strconv.Itoa(j)
@@ -182,11 +205,12 @@ func ProjectOrderedRulesStream(source OrderedRulesSource, admission CommonAdmiss
 			if err := checkPresence(o.Points, ow+" points", c.Position); err != nil {
 				return OrderedRulesStream{}, err
 			}
-			bytes += int64(len(o.Identity)) + int64(len(o.Points.Provenance))
+			bytes += int64(len(o.Identity)) + suppliedTextBytes(o.Points)
 		}
 		if err := checkPresence(c.Balance, where+" balance", c.Position); err != nil {
 			return OrderedRulesStream{}, err
 		}
+		bytes += suppliedTextBytes(c.Balance)
 		if bytes > MaxOrderedRulesAggregateBytes {
 			return OrderedRulesStream{}, errors.Join(ErrOrderedRulesOverBound,
 				errors.New("predictioneval: supplied identifier bytes exceed the aggregate budget"))
@@ -228,6 +252,13 @@ func ProjectOrderedRulesStream(source OrderedRulesSource, admission CommonAdmiss
 	}
 	if admission.ViewKind == ViewCalculateOnly {
 		stream.Qualifications = append(stream.Qualifications, qualCalculateOnlyView)
+	}
+	if stream.Cutoff.DroppedAtOrAfter > 0 {
+		// A traversal that finds nothing in what SURVIVED the boundary is a
+		// different piece of evidence from one over a source that held nothing.
+		// Saying so here is what stops the two from reading alike downstream.
+		stream.Qualifications = append(stream.Qualifications,
+			qualBoundaryRemovedCandidates+strconv.Itoa(stream.Cutoff.DroppedAtOrAfter))
 	}
 
 	stream.SelectionDigest = orderedRulesStreamDigest(stream)
@@ -290,6 +321,15 @@ func establishCutoff(source OrderedRulesSource) (OrderedRulesCutoff, error) {
 			// only the honesty of the label improves.
 			out = OrderedRulesCutoff{Established: true, Position: in.Position,
 				Kind: in.Kind, Identity: in.Identity, Basis: basis}
+		case in.Position == out.Position && basis == out.Basis && in.Identity < out.Identity:
+			// Two equally strong interventions at the same position cut
+			// identically, so the traversal cannot tell them apart — but the
+			// one NAMED as the boundary is hashed into the result. Picking the
+			// first in supply order would make the same set of facts produce
+			// different evidence depending on the order they were handed over,
+			// so the smaller identity wins and the choice is order-independent.
+			out = OrderedRulesCutoff{Established: true, Position: in.Position,
+				Kind: in.Kind, Identity: in.Identity, Basis: basis}
 		}
 	}
 	return out, nil
@@ -342,6 +382,22 @@ func validateAdmission(a CommonAdmission) error {
 	}
 }
 
+// checkFreeText bounds a caller-chosen string the projection retains. Empty is
+// allowed — these are optional — but unbounded is not.
+func checkFreeText(v, where string) error {
+	if len(v) > MaxOrderedRulesIdentifierBytes {
+		return errors.Join(ErrOrderedRulesOverBound,
+			errors.New("predictioneval: "+where+" is "+strconv.Itoa(len(v))+
+				" bytes, past the bound of "+strconv.Itoa(MaxOrderedRulesIdentifierBytes)))
+	}
+	return nil
+}
+
+// suppliedTextBytes is the free text one supplied value contributes.
+func suppliedTextBytes(v SuppliedInt64) int64 {
+	return int64(len(v.Provenance) + len(v.Reason))
+}
+
 func checkIdentifier(id, where string) error {
 	if id == "" {
 		return errors.Join(ErrOrderedRulesScopeIncomplete, errors.New("predictioneval: "+where+" is empty"))
@@ -362,6 +418,12 @@ func checkIdentifier(id, where string) error {
 // validation, a decision-time envelope — and reading one as if the candidate had
 // had it is how a replay silently acquires information the original never held.
 func checkPresence(v SuppliedInt64, where string, candidatePosition int64) error {
+	if err := checkFreeText(v.Provenance, where+" provenance"); err != nil {
+		return err
+	}
+	if err := checkFreeText(v.Reason, where+" reason"); err != nil {
+		return err
+	}
 	switch v.Presence {
 	case SuppliedMissing, SuppliedInvalid:
 		return nil
