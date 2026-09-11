@@ -132,21 +132,11 @@ func ProjectOrderedRulesStream(source OrderedRulesSource, admission CommonAdmiss
 		len(source.Scope.AccountContext) + len(source.Scope.AssociationEvidence) +
 		len(source.Scope.CoverageDetail) + len(source.Scope.SourceContractVersion) +
 		len(source.Scope.Coverage))
-	if err := checkFreeText(source.Scope.CoverageDetail, "scope coverage detail"); err != nil {
-		return OrderedRulesStream{}, err
-	}
 	bytes += chargedWidth(len(admission.ManifestID) + len(admission.Population) + len(admission.OrderBasis) +
 		len(admission.ViewKind))
-	if len(admission.SourceReferences) > MaxOrderedRulesSourceReferences {
-		return OrderedRulesStream{}, errors.Join(ErrOrderedRulesOverBound,
-			errors.New("predictioneval: "+strconv.Itoa(len(admission.SourceReferences))+
-				" admission source references exceed the bound of "+
-				strconv.Itoa(MaxOrderedRulesSourceReferences)))
-	}
-	for i, ref := range admission.SourceReferences {
-		if err := checkFreeText(ref, "admission source reference "+strconv.Itoa(i)); err != nil {
-			return OrderedRulesStream{}, err
-		}
+	// Validated in validateAdmission above, both for count and for each
+	// element; only the charge belongs here.
+	for _, ref := range admission.SourceReferences {
 		bytes += chargedWidth(len(ref))
 	}
 	for i := range source.Interventions {
@@ -420,6 +410,12 @@ func validateScope(s OrderedRulesScope) error {
 		{s.EpisodeID, "scope episode id"},
 		{s.AccountContext, "scope account context"},
 		{s.AssociationEvidence, "scope association evidence"},
+		// CoverageDetail belongs HERE, not at the projection's call site. The
+		// invariant pass re-establishes the projection's rules by calling these
+		// validators, so a retained string checked only inline in
+		// ProjectOrderedRulesStream is checked on one path — and a forged
+		// stream carrying one reached WOULD_ATTEMPT through the digest oracle.
+		{s.CoverageDetail, "scope coverage detail"},
 	} {
 		if err := checkFreeText(v[0], v[1]); err != nil {
 			return err
@@ -466,6 +462,23 @@ func validateAdmission(a CommonAdmission) error {
 		{a.OrderBasis, "admission order basis"},
 	} {
 		if err := checkFreeText(v[0], v[1]); err != nil {
+			return err
+		}
+	}
+	// The references are retained too, so they are validated HERE for the same
+	// reason the scope's coverage detail is: the invariant pass reaches them
+	// only through this function. The COUNT is bounded before the loop and not
+	// merely alongside it — moving the element check here without the count
+	// would put an unbounded loop ahead of the bound that makes it finite,
+	// which is the length-before-work rule this file applies everywhere else.
+	if len(a.SourceReferences) > MaxOrderedRulesSourceReferences {
+		return errors.Join(ErrOrderedRulesOverBound,
+			errors.New("predictioneval: "+strconv.Itoa(len(a.SourceReferences))+
+				" admission source references exceed the bound of "+
+				strconv.Itoa(MaxOrderedRulesSourceReferences)))
+	}
+	for i, ref := range a.SourceReferences {
+		if err := checkFreeText(ref, "admission source reference "+strconv.Itoa(i)); err != nil {
 			return err
 		}
 	}

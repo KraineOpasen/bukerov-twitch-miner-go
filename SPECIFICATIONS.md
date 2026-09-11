@@ -3560,9 +3560,21 @@ WOULD_ATTEMPT, and the same stream after a marshal and unmarshal evaluated to
 STREAM_SELECTION_DIGEST_MISMATCH). Such text is refused rather than
 canonicalized before hashing, because a digest taken over bytes the stream does
 not carry witnesses something the caller never supplied. The check lives in the
-two validators every retained string already passes through, so the projection
-and the ingest pass acquire it together rather than one path at a time, and it
-adds no import: ranging over a string is the language's own UTF-8 decode, and a
+two validators every retained string passes through, so the projection and the
+ingest pass acquire it together rather than one path at a time — but that claim
+was made before it was true, and the gap it left is worth recording because it
+is the fifth of its kind here and the first introduced by the repair for the
+fourth. `Scope.CoverageDetail` and each `Admission.SourceReferences` entry were
+validated at the projection's own call site and not inside `validateScope` or
+`validateAdmission`, which are the only validators the invariant pass calls, so
+a forged stream carrying an invalid byte in either reached WOULD_ATTEMPT through
+the two-call digest oracle. Both now live in those validators, with the
+reference COUNT bounded ahead of the element loop rather than beside it, so the
+loop cannot be unbounded on the path that reaches it first. The rule is no
+longer asserted to be complete: a reflection walk over the scope and admission
+structs requires every plain-string and string-slice field to be refused on
+ingest, so the next retained field added without validation fails without anyone
+remembering a list. The check adds no import: ranging over a string is the language's own UTF-8 decode, and a
 genuine U+FFFD — which remains admissible — is distinguished from an invalid
 byte by occupying the three bytes EF BF BD at that index. Like the
 baseline's, these are unkeyed hashes over supplied data: they prevent

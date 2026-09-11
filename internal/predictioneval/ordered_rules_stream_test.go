@@ -3168,3 +3168,98 @@ func TestOrderedRulesAWindowExhaustedToItsEndIsBoundToThatEnd(t *testing.T) {
 		}
 	})
 }
+
+// TestOrderedRulesEveryRetainedScopeAndAdmissionStringIsRevalidatedOnIngest
+// enumerates instead of listing, because listing is what kept failing.
+//
+// Five times in this pull request a rule has been enforced in the projection
+// and not re-established on ingest, and the fifth was introduced by the repair
+// for the fourth: the UTF-8 check went into checkFreeText and checkIdentifier
+// on the claim that every retained string passes through them, and two did not.
+// Scope.CoverageDetail and each Admission.SourceReferences entry were checked
+// only at the projection's own call site, so validateScope and validateAdmission
+// — the only validators the invariant pass calls — never revisited them, and a
+// forged stream carrying an invalid byte in either reached WOULD_ATTEMPT through
+// the two-call digest oracle.
+//
+// So this walks the two structs by reflection rather than naming their fields.
+// A plain string or []string is free text the caller chooses; a named string
+// type is a closed vocabulary refused by its own switch. Adding a retained
+// free-text field to either struct without validating it fails here without
+// anyone remembering to extend a list.
+func TestOrderedRulesEveryRetainedScopeAndAdmissionStringIsRevalidatedOnIngest(t *testing.T) {
+	cs := []predictioneval.OrderedRulesCandidate{
+		orCandidate("c1", 10, orKnownBalance(1000), orOutcome("A", 4), orOutcome("B", 6)),
+	}
+	cfg := orConfig([]predictioneval.OrderedRule{
+		orRule(predictioneval.ComparatorLe, 40, 100, 0, 10)}, 95, 100, 0, 10)
+
+	// The control: untouched, this stream evaluates. Every refusal below is
+	// therefore attributable to the byte the case introduced.
+	if got := predictioneval.EvaluateOrderedRules(orProject(t, cs, nil), cfg,
+		orDraws()); got.Status != predictioneval.StatusWouldAttempt {
+		t.Fatalf("premise: the intact fixture must evaluate; got %q", got.Status)
+	}
+
+	strType := reflect.TypeOf("")
+	visited := map[string]bool{}
+
+	// walk sets one invalid byte into each plain-string field it finds, runs the
+	// forged stream through the digest oracle, and requires a refusal.
+	walk := func(t *testing.T, owner string, pick func(*predictioneval.OrderedRulesStream) reflect.Value) {
+		probe := orProject(t, cs, nil)
+		rt := pick(&probe).Type()
+		for i := 0; i < rt.NumField(); i++ {
+			f := rt.Field(i)
+			if f.PkgPath != "" {
+				continue
+			}
+			switch {
+			case f.Type == strType, f.Type == reflect.SliceOf(strType):
+			default:
+				// A named string type is a closed vocabulary, refused by its
+				// own switch rather than by a text rule.
+				continue
+			}
+			name := owner + "." + f.Name
+			visited[name] = true
+			t.Run(name, func(t *testing.T) {
+				st := orProject(t, cs, nil)
+				fv := pick(&st).Field(i)
+				if f.Type == strType {
+					fv.SetString(fv.String() + "-\xff")
+				} else {
+					fv.Set(reflect.ValueOf([]string{"ref-\xff"}))
+				}
+				first := predictioneval.EvaluateOrderedRules(st, cfg, orDraws())
+				st.SelectionDigest = first.StreamDigest
+				second := predictioneval.EvaluateOrderedRules(st, cfg, orDraws())
+				if second.Status != predictioneval.StatusRefused {
+					t.Fatalf("a stream carrying an invalid byte in %s reached %q through the digest "+
+						"oracle. ProjectOrderedRulesStream refuses that exact source, so the rule is "+
+						"enforced on one path only and the oracle walks straight through it.",
+						name, second.Status)
+				}
+			})
+		}
+	}
+
+	walk(t, "Scope", func(s *predictioneval.OrderedRulesStream) reflect.Value {
+		return reflect.ValueOf(&s.Scope).Elem()
+	})
+	walk(t, "Admission", func(s *predictioneval.OrderedRulesStream) reflect.Value {
+		return reflect.ValueOf(&s.Admission).Elem()
+	})
+
+	// The walk must actually have reached the two fields that were missing, and
+	// enough others that an empty or collapsed traversal cannot pass quietly.
+	for _, want := range []string{
+		"Scope.CoverageDetail", "Admission.SourceReferences",
+		"Scope.Namespace", "Scope.AssociationEvidence", "Admission.Population",
+	} {
+		if !visited[want] {
+			t.Errorf("the reflection walk never reached %s, so this case is not covering what it "+
+				"claims; it visited %d fields", want, len(visited))
+		}
+	}
+}
