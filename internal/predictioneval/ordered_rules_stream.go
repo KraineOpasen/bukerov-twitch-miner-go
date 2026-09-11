@@ -206,10 +206,24 @@ func ProjectOrderedRulesStream(source OrderedRulesSource, admission CommonAdmiss
 		return OrderedRulesStream{}, err
 	}
 
-	// Every caller-supplied string the projection RETAINS is counted, not just
-	// the identifiers: coverage detail, the admission manifest and each
-	// intervention's detail all survive into the stream, so a budget that
-	// skipped them would bound the wrong thing.
+	// Every caller-supplied string the projection READS is counted, not just the
+	// identifiers it retains: the scope's free text, the admission's manifest,
+	// population and order basis, and each intervention's identity and detail.
+	//
+	// THE REASON IS NOT THAT THEY ALL SURVIVE INTO THE STREAM — this comment
+	// said that, and for the interventions it is false. OrderedRulesStream has
+	// no interventions field at all; the projection reads them to establish the
+	// boundary and keeps only the derived Cutoff. A reviewer checked the type
+	// rather than the sentence.
+	//
+	// They are charged anyway, deliberately, and the corrected rationale is the
+	// one that actually holds: this budget bounds what the PROJECTION may be
+	// made to read, not what the stream may be made to carry. Intervention text
+	// is attacker-supplied, it is scanned and quoted by establishCutoff and the
+	// validators, and a source could otherwise carry
+	// MaxOrderedRulesInterventions x 2 x MaxOrderedRulesIdentifierBytes of it
+	// free of charge because none of it is retained. Discarded input is still
+	// input; charging it at the source boundary is the point.
 	bytes := chargedWidth(len(source.Scope.Namespace) + len(source.Scope.EpisodeID) +
 		len(source.Scope.AccountContext) + len(source.Scope.AssociationEvidence) +
 		len(source.Scope.CoverageDetail) + len(source.Scope.SourceContractVersion) +

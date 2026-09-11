@@ -190,13 +190,24 @@ type normalizedConfig struct {
 	defPoints normalizedPoints
 }
 
-// orderedRulesInputShapeReason refuses an input whose shape already exceeds a
-// declared bound, using only counts and string lengths.
+// orderedRulesInputCountReason refuses an input whose COUNTS already exceed a
+// declared bound. It is the first half of the shape gate; the text budget is
+// orderedRulesInputTextReason below.
 //
 // Every check here is O(1) per element over a number of elements the preceding
 // checks have already bounded, so the work this function can be made to do is
-// itself bounded. That is the whole point: it is the only thing that runs
-// before the digests.
+// itself bounded.
+//
+// IT IS NOT "the only thing that runs before the digests", which is what this
+// comment said until a reviewer read the caller instead of the comment. By the
+// time orderedRulesStreamDigest runs, EvaluateOrderedRules has also performed
+// three bounded version comparisons, the text budget, config normalization, the
+// structural walk, the cutoff encodability scan, qualification derivation and
+// both identity passes. The ordering of those tiers is used as a security
+// property throughout this package, so a sentence that hides seven of them is
+// not a stale nicety — it misdescribes exactly the thing the reader came here
+// to check. The name in the first line was stale too: this function was split
+// in two and the doc kept the old one.
 //
 // The byte sum covers the text the three digests actually read. It uses
 // MaxOrderedRulesAggregateBytes rather than a new budget, because that is the
@@ -830,10 +841,27 @@ func orderedRulesStreamStructureBroken(s OrderedRulesStream) bool {
 // orderedRulesStreamInvariantsBroken reports a stream that could not have come
 // from [ProjectOrderedRulesStream], however well its digest verifies.
 //
-// It re-runs the projection's own checks over the retained stream rather than
-// reimplementing them, so the two cannot drift: a stream the projection would
-// have produced passes here by construction, and every rule it enforces is
-// enforced once, in one place.
+// It re-runs SOME of the projection's own checks over the retained stream —
+// checkIdentifier, checkPresence, checkFreeText, validateScope and
+// validateAdmission are the projection's functions, called here rather than
+// restated — so for those rules a stream the projection would have produced
+// passes here by construction.
+//
+// IT DOES NOT FOLLOW THAT THE TWO PATHS CANNOT DRIFT, and this comment claimed
+// exactly that until a reviewer pointed at the loop below. Candidate identity
+// UNIQUENESS, strict causal ordering, episode membership, source-kind/view
+// compatibility, outcome-vector presence and the boundary comparison are
+// reimplemented here as inline copies of rules the projection also has. Copies
+// drift. These ones already did: this pull request has found NINE separate
+// instances of a rule or a documented claim enforced at one of the two ingest
+// seams and absent at the other, every one of them found by a reviewer or by an
+// audit built specifically to look for them.
+//
+// So the invariant is a maintenance obligation, not a construction guarantee:
+// A CHANGE TO ProjectOrderedRulesStream'S RULES REQUIRES A MATCHING AUDIT OF
+// THIS FUNCTION, and vice versa. Stating it the other way round was actively
+// harmful — it told a future reader that the sibling path needed no checking,
+// which is the precise mistake that produced all nine.
 //
 // This runs after the shape gate, so every loop below is bounded.
 func orderedRulesStreamInvariantsBroken(s OrderedRulesStream) bool {

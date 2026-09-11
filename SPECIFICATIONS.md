@@ -3748,8 +3748,25 @@ evaluator re-establishes the projection's invariants over the stream it is
 handed before traversing it: scope and admission completeness, identity,
 uniqueness, strict causal order, the declared interval, proven membership,
 source/view compatibility, and the presence and availability of every supplied
-value. Those checks are the projection's own, called rather than restated, so
-the two cannot drift.
+value. SOME of those checks are the projection's own, called rather than
+restated — `checkIdentifier`, `checkPresence`, `checkFreeText`, `validateScope`
+and `validateAdmission` — and for those a stream the projection would have
+produced passes the ingest pass by construction.
+
+**It does not follow that the two paths cannot drift, and this paragraph said it
+did.** Candidate identity uniqueness, strict causal ordering, episode
+membership, source/view compatibility, outcome-vector presence and the boundary
+comparison are inline copies on the ingest side of rules the projection also
+has. Copies drift, and these already did: this work has found NINE separate
+instances of a rule or a documented claim enforced at one of the two seams and
+absent at the other. Every one was found by a reviewer or by an audit built to
+look for exactly that.
+
+The invariant is therefore a **maintenance obligation, not a construction
+guarantee**: a change to `ProjectOrderedRulesStream`'s rules requires a matching
+audit of `orderedRulesStreamInvariantsBroken`, and the reverse. Stating it the
+other way round was worse than imprecise — it told a reader the sibling path
+needed no checking, which is the precise mistake that produced all nine.
 
 The DERIVED fields need a different treatment, because the stream no longer
 carries what they were derived from. A boundary is computed from interventions
