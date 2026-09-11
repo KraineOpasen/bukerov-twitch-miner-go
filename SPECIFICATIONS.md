@@ -3574,7 +3574,16 @@ loop cannot be unbounded on the path that reaches it first. The rule is no
 longer asserted to be complete: a reflection walk over the scope and admission
 structs requires every plain-string and string-slice field to be refused on
 ingest, so the next retained field added without validation fails without anyone
-remembering a list. The check adds no import: ranging over a string is the language's own UTF-8 decode, and a
+remembering a list. The config identifier and the run identifier are the
+exception that proves where the rule lives: they are the only retained strings
+no validator ever reads, so the shape gate refuses them instead, below the two
+ceilings rather than above them — they may legitimately be enormous, and
+scanning a string already past its budget would do the work the bound exists to
+avoid. They carry no per-string LENGTH bound, and that stays true: inventing a
+limit no other rule applies would refuse input nothing else refuses.
+Encodability is a different axis, and without it the same logical run digested
+differently before and after its own round trip while both evaluations returned
+WOULD_ATTEMPT. The check adds no import: ranging over a string is the language's own UTF-8 decode, and a
 genuine U+FFFD — which remains admissible — is distinguished from an invalid
 byte by occupying the three bytes EF BF BD at that index. Like the
 baseline's, these are unkeyed hashes over supplied data: they prevent

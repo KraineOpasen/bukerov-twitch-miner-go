@@ -3263,3 +3263,114 @@ func TestOrderedRulesEveryRetainedScopeAndAdmissionStringIsRevalidatedOnIngest(t
 		}
 	}
 }
+
+// TestOrderedRulesTheConfigAndTraceIdentifiersMustAlsoBeEncodable extends the
+// round-trip rule to the two strings no validator reads.
+//
+// The config identifier and the run identifier ride a ceiling of their own and
+// deliberately carry no per-string bound — inventing a limit no other rule
+// applies would refuse input nothing else refuses. That reasoning is about
+// LENGTH and says nothing about encodability, and both types carry JSON tags.
+// Invalid UTF-8 in either was hashed as supplied and then replaced with U+FFFD
+// by the encoder, so the same logical run digested differently before and after
+// its own round trip: ConfigDigest e1a65694… became 5251cf94…, the consumed
+// digest moved with it, and both evaluations returned WOULD_ATTEMPT.
+//
+// These two are also the only retained strings the invariant pass never reads,
+// so the shape gate is the one place that can refuse them.
+//
+// NOT asserted here, stated rather than left as an apparent gap: that the scan
+// runs AFTER the two ceilings. It does — the case sits below them in the gate,
+// deliberately, so a string already past its budget is refused for size rather
+// than scanned — but demonstrating it needs an identifier past
+// MaxOrderedRulesAggregateBytes, and a 128 MiB fixture is two orders of
+// magnitude beyond anything else in this suite. The ordering is argued in the
+// source and unpinned by a test.
+func TestOrderedRulesTheConfigAndTraceIdentifiersMustAlsoBeEncodable(t *testing.T) {
+	cs := []predictioneval.OrderedRulesCandidate{
+		orCandidate("c1", 10, orKnownBalance(1000), orOutcome("A", 4), orOutcome("B", 6)),
+	}
+	rules := []predictioneval.OrderedRule{orRule(predictioneval.ComparatorLe, 40, 100, 0, 10)}
+	const bad = "id-\xff-tail"
+
+	base := predictioneval.EvaluateOrderedRules(orProject(t, cs, nil),
+		orConfig(rules, 95, 100, 0, 10), orDraws())
+	if base.Status != predictioneval.StatusWouldAttempt {
+		t.Fatalf("premise: the intact fixture must evaluate; got %q", base.Status)
+	}
+
+	for _, tc := range []struct {
+		name  string
+		apply func(*predictioneval.OrderedRulesConfig, *predictioneval.SuppliedDrawTrace, string)
+	}{
+		{"config identifier", func(c *predictioneval.OrderedRulesConfig,
+			_ *predictioneval.SuppliedDrawTrace, v string) {
+			c.ConfigID = v
+		}},
+		{"run identifier", func(_ *predictioneval.OrderedRulesConfig,
+			d *predictioneval.SuppliedDrawTrace, v string) {
+			d.RunID = v
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg, draws := orConfig(rules, 95, 100, 0, 10), orDraws()
+			tc.apply(&cfg, &draws, bad)
+			got := predictioneval.EvaluateOrderedRules(orProject(t, cs, nil), cfg, draws)
+			switch {
+			case got.Reason != predictioneval.ReasonSuppliedTextNotEncodable:
+				t.Fatalf("an unencodable %s was answered %q / %q; the same logical run would "+
+					"digest differently after its own JSON round trip", tc.name, got.Status, got.Reason)
+			// The strongest form of the refusal, and the reason it belongs in
+			// the gate: nothing was hashed at all before saying no.
+			case got.StreamDigest != "" || got.ConfigDigest != "" ||
+				got.EntropyDigest != "" || got.ConsumedInputDigest != "":
+				t.Fatal("the refusal carried digests; a value refused for being unencodable must be " +
+					"refused before anything is hashed, like the other unread refusals")
+			}
+		})
+
+		// The control, again: a genuine U+FFFD is valid UTF-8. Without it the
+		// rule could be "refuse the replacement character" and the case above
+		// would still pass.
+		t.Run(tc.name+" accepts a genuine replacement character", func(t *testing.T) {
+			cfg, draws := orConfig(rules, 95, 100, 0, 10), orDraws()
+			tc.apply(&cfg, &draws, "id-�-tail")
+			got := predictioneval.EvaluateOrderedRules(orProject(t, cs, nil), cfg, draws)
+			if got.Status != predictioneval.StatusWouldAttempt {
+				t.Fatalf("a genuine U+FFFD in the %s is valid UTF-8 and must be admitted; got %q / %q",
+					tc.name, got.Status, got.Reason)
+			}
+		})
+	}
+
+	// The positive half: with encodable identifiers, the config and the trace
+	// survive their own round trip with every digest intact.
+	t.Run("an admitted run digests identically across its own round trip", func(t *testing.T) {
+		cfg, draws := orConfig(rules, 95, 100, 0, 10), orDraws()
+		cfgBlob, err := json.Marshal(cfg)
+		if err != nil {
+			t.Fatalf("marshalling the config failed: %v", err)
+		}
+		drawsBlob, err := json.Marshal(draws)
+		if err != nil {
+			t.Fatalf("marshalling the trace failed: %v", err)
+		}
+		var cfgBack predictioneval.OrderedRulesConfig
+		var drawsBack predictioneval.SuppliedDrawTrace
+		if err := json.Unmarshal(cfgBlob, &cfgBack); err != nil {
+			t.Fatalf("unmarshalling the config failed: %v", err)
+		}
+		if err := json.Unmarshal(drawsBlob, &drawsBack); err != nil {
+			t.Fatalf("unmarshalling the trace failed: %v", err)
+		}
+		got := predictioneval.EvaluateOrderedRules(orProject(t, cs, nil), cfgBack, drawsBack)
+		switch {
+		case got.Status != base.Status:
+			t.Fatalf("a round-tripped run changed verdict: %q became %q", base.Status, got.Status)
+		case got.ConfigDigest != base.ConfigDigest || got.EntropyDigest != base.EntropyDigest ||
+			got.ConsumedInputDigest != base.ConsumedInputDigest:
+			t.Fatal("a round-tripped run moved a digest; the identifiers are encodable, so nothing " +
+				"in the encoding should have changed")
+		}
+	})
+}

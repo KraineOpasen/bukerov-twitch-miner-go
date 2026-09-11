@@ -96,6 +96,13 @@ const (
 // boundary was established.
 const ReasonStreamDigestMismatch = "STREAM_SELECTION_DIGEST_MISMATCH"
 
+// ReasonSuppliedTextNotEncodable is a supplied identifier that would not
+// survive its own JSON round trip. It names the config-and-trace side
+// specifically: the stream's own text is refused by the validators the
+// invariant pass calls, but ConfigID and RunID are read by no validator at all,
+// so this gate is the only place that can refuse them.
+const ReasonSuppliedTextNotEncodable = "SUPPLIED_TEXT_NOT_ENCODABLE"
+
 // OrderedRulesCandidateVerdict is what the traversal did with one candidate.
 type OrderedRulesCandidateVerdict string
 
@@ -235,6 +242,22 @@ func orderedRulesInputShapeReason(s OrderedRulesStream, cfg OrderedRulesConfig, 
 	case budget.bytes*orderedRulesMaxJSONExpansion > orderedRulesTextCeiling,
 		budget.other > MaxOrderedRulesAggregateBytes:
 		return ReasonStreamBytesOverBound
+	// The config identifier and the run identifier are the only retained
+	// strings no validator ever reads. They carry no per-string bound, for a
+	// reason that still holds — inventing a limit no other rule applies would
+	// refuse input nothing else refuses — but ENCODABILITY is a different axis
+	// from length, and both types carry JSON tags. Invalid UTF-8 in either is
+	// hashed as supplied and then replaced with U+FFFD by the encoder, so the
+	// same logical run digests differently before and after its own round trip:
+	// measured, ConfigDigest e1a65694… became 5251cf94… and the consumed digest
+	// moved with it, with both evaluations returning WOULD_ATTEMPT.
+	//
+	// Deliberately AFTER the two ceilings above. These two can be enormous by
+	// design, and scanning a string that is already past its budget would do
+	// the work the bound exists to avoid — the same length-before-meaning
+	// ordering the rest of this gate applies.
+	case invalidUTF8(cfg.ConfigID), invalidUTF8(d.RunID):
+		return ReasonSuppliedTextNotEncodable
 	}
 	return ""
 }
