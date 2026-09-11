@@ -185,10 +185,20 @@ func ProjectOrderedRulesStream(source OrderedRulesSource, admission CommonAdmiss
 	// asymptotic cost again. That is true and beside the point: this axis has
 	// never been about asymptotics. Every finding on it has been a constant
 	// factor between 100x and 20,000x, and the text tier below still holds a
-	// cost gradient — four short vocabulary words per candidate against 4 MiB
-	// of admission references against 8 MiB of intervention text against the
-	// outcome payload. Ordering within that gradient is what the tier below
-	// now does as far as it goes, and no claim is made that it goes far enough.
+	// cost gradient — the candidate vocabulary (four words per candidate PLUS
+	// one per outcome, so about 8,704 comparisons at the ceilings, not 512)
+	// against 4 MiB of admission references against 8 MiB of intervention text
+	// against the outcome payload. Ordering within that gradient is what the
+	// tier below now does as far as it goes, and no claim is made that it goes
+	// far enough.
+	//
+	// The parenthesis is there because the figure without it was wrong, and
+	// wrong in a way that mattered: stated as four words per candidate it made
+	// the candidate vocabulary look like the smallest tier in the gradient when
+	// it is in fact four times the intervention one. A reviewer used the
+	// corrected count to place the intervention vocabulary above it. This copy
+	// of the same claim survived that repair in another comment — the sibling
+	// again — and is corrected here for the same reason.
 	if err := validateScopeShape(source.Scope); err != nil {
 		return OrderedRulesStream{}, err
 	}
@@ -509,20 +519,32 @@ func ProjectOrderedRulesStream(source OrderedRulesSource, admission CommonAdmiss
 	// This is a reordering and not a free win, which is the same thing the
 	// Detail move below had to say about itself. Where the fault is in the
 	// ADMISSION and the candidates are well-formed, that refusal now runs after
-	// a full identity pass rather than before it — bounded by
-	// MaxOrderedRulesCandidates x MaxOrderedRulesIdentifierBytes, so 512 KiB at
-	// the ceiling and nothing at all for the short identities a real source
-	// carries. Measured on the identical input, 128 candidates each holding a
-	// near-ceiling identity beside an admission whose view kind is not in the
-	// vocabulary: 67.3 µs before, 675.213 µs here.
+	// a full identity pass rather than before it. Measured on the identical
+	// input, 128 candidates each holding a near-ceiling identity beside an
+	// admission whose view kind is not in the vocabulary: 67.3 µs before,
+	// 675.213 µs here.
 	//
-	// The trade is taken because the two envelopes are not the same size. What
-	// this pass can be made to read is capped at 512 KiB; what it now refuses
-	// to read first — the admission references, the cutoff's identities and the
-	// intervention details — is three separate MaxOrderedRulesInterventions x
-	// MaxOrderedRulesIdentifierBytes envelopes, 12 MiB between them. Paying a
-	// bounded half-megabyte to stop paying an unbounded-in-practice twelve is
-	// the same bargain every tier above this one makes.
+	// THE ENVELOPE STATED HERE WAS 512 KiB, AND THAT IS NO LONGER TRUE. It was
+	// MaxOrderedRulesCandidates x MaxOrderedRulesIdentifierBytes when this pass
+	// walked candidate identities alone. The outcome pass below multiplies it
+	// by MaxOrderedRulesOutcomes, and what actually caps the two together is
+	// the aggregate the charging tier above already enforced — about 21 MiB of
+	// raw text, not half a megabyte. A reviewer caught the stale figure, and
+	// caught it here after the identical stale figure had been corrected on the
+	// EVALUATOR side one commit earlier: the same claim, on the other path,
+	// left standing. That is the ninth instance on this PR of a rule or a
+	// statement fixed on one ingest path and not its sibling, and this time the
+	// sibling was a sentence I had just rewritten.
+	//
+	// The trade is still worth taking and the reason is unchanged in shape,
+	// only in size: what these two passes can be made to read is bounded by the
+	// text aggregate, and what they refuse to read first — the admission
+	// references, the cutoff's identities and the intervention details — is
+	// three separate MaxOrderedRulesInterventions x MaxOrderedRulesIdentifierBytes
+	// envelopes, 12 MiB between them, ON TOP OF that same aggregate. The
+	// bargain is paying a bounded pass to stop paying a bounded pass plus three
+	// more envelopes, which is still a bargain; it is not the fourteen-to-one
+	// ratio the old sentence implied.
 	//
 	// It does NOT move ahead of the vocabulary tier, and the case below pins
 	// that: a closed-set word is one comparison against a short string, so a

@@ -4112,6 +4112,47 @@ sixth found by a reviewer rather than here; more to the point it is the second
 time the same defect class was repaired on one level and left standing one level
 down. Fixing a path is not fixing the class.
 
+**A convergence audit, because the round of five was itself a symptom.** Nine of
+the last ten findings have been one shape: a rule or a CLAIM fixed at one seam
+and left standing at its sibling. So before calling the implementation finished,
+the two ingest paths were compared field by field rather than reviewer by
+reviewer.
+
+*Closed vocabularies* are aligned, and this was checked by enumerating the
+switches on both sides rather than by reading the comments that assert it:
+`Scope.Coverage`, `Admission.ViewKind`, `Candidate.SourceKind`,
+`Candidate.OutcomesPresence`, `SuppliedInt64.Presence` and
+`Candidate.EpisodeMembership` each have a comparison on both paths against the
+same members, and where the projection admits an extra case
+(`CoverageUnknown` and the empty string, refused with a specific error) the
+evaluator refuses it too by falling through. Narrower on the ingest side is the
+safe direction. `Intervention.Kind`/`Relevance` are projection-only because
+interventions are not retained in the stream, and `Cutoff.Kind`/`Basis` are
+evaluator-only because the projection derives them; both asymmetries are
+structural rather than gaps.
+
+*What the audit did find* was two more stale claims, both siblings of claims
+corrected one commit earlier at the other seam — which is the same defect the
+audit exists to catch, caught this time before a reviewer had to:
+
+- the projection's identity tier still stated an envelope of
+  `MaxOrderedRulesCandidates` x `MaxOrderedRulesIdentifierBytes`, half a
+  megabyte. The outcome pass added below it multiplies that by the outcome
+  ceiling, and what caps the two together is the text aggregate — about 21 MiB.
+  The identical stale figure had just been corrected on the evaluator side;
+- the cost-gradient paragraph above the shape tier described the candidate
+  vocabulary as "four short vocabulary words per candidate", the same undercount
+  that made the wrong tier order look right, in a second comment that survived
+  the repair of the first. It is about 8,704 comparisons at the ceilings, not
+  512, which makes that tier four times the intervention one rather than a
+  fraction of it.
+
+*What the audit did not find* is any rule enforced on one path and absent on the
+other. That is stated as the result of the enumeration above and not as a
+guarantee: the enumeration covers closed vocabularies, identity uniqueness,
+required-presence declarations and the per-string bounds, and nothing claims it
+is exhaustive over every future field.
+
 **A round of five, and the shape of them is the finding.** One reviewer pass
 produced five separate orderings on one head, and every one was the same
 question asked at a different seam: does a refusal whose truth depends on a
