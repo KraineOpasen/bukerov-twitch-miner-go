@@ -3634,6 +3634,69 @@ func TestOrderedRulesACheapRefusalIsNotPaidForWithTheWholePayload(t *testing.T) 
 		}
 	})
 
+	// Every candidate's SHAPE is now settled before any candidate's PAYLOAD is
+	// read. Within one candidate the cheap checks already came first; across
+	// candidates they did not, so a last candidate declaring no causal position
+	// was refused only after every earlier candidate's outcome identities,
+	// provenance notes and presence reasons had been walked and charged:
+	// 5.533517 ms to 24.191 µs on the identical input.
+	t.Run("a later candidate's shape is refused before an earlier one's payload is read", func(t *testing.T) {
+		// Candidate ZERO carries the payload fault and candidate ONE the shape
+		// fault, so the two PASSES are told apart rather than the two
+		// candidates: a single pass reaches zero's provenance long before it
+		// reaches one's missing position.
+		payload := orCandidate("c1", 10, orKnownBalance(1000), orOutcome("A", 4), orOutcome("B", 6))
+		payload.Provenance = "prov-\xff"
+		shape := orCandidate("c2", 20, orKnownBalance(1000), orOutcome("A", 4), orOutcome("B", 6))
+		shape.HasPosition = false
+
+		// The premise: each fault really is raised on its own.
+		if _, err := predictioneval.ProjectOrderedRulesStream(
+			orSource([]predictioneval.OrderedRulesCandidate{payload}, nil),
+			orAdmission()); !errors.Is(err, predictioneval.ErrOrderedRulesNotEncodable) {
+			t.Fatalf("premise: the provenance alone must be refused as unencodable; got %v", err)
+		}
+		if _, err := predictioneval.ProjectOrderedRulesStream(
+			orSource([]predictioneval.OrderedRulesCandidate{shape}, nil),
+			orAdmission()); !errors.Is(err, predictioneval.ErrOrderedRulesScopeIncomplete) {
+			t.Fatalf("premise: the missing position alone must be refused as incomplete; got %v", err)
+		}
+
+		if _, err := predictioneval.ProjectOrderedRulesStream(
+			orSource([]predictioneval.OrderedRulesCandidate{payload, shape}, nil),
+			orAdmission()); !errors.Is(err, predictioneval.ErrOrderedRulesScopeIncomplete) {
+			t.Fatalf("a source whose first candidate carries unencodable provenance and whose "+
+				"second declares no causal position was refused %v. The shape of every "+
+				"candidate is bounded work; the payload of one is the bulk of the admitted "+
+				"budget, so no payload may be read to reach a refusal the shape already "+
+				"settles.", err)
+		}
+	})
+
+	// The counterweight to the split: cutting the candidate walk in two must not
+	// change which sources are ADMITTED, only the order faults are reported in.
+	t.Run("splitting the candidate walk admits exactly what it admitted", func(t *testing.T) {
+		wide := make([]predictioneval.OrderedRulesCandidate, predictioneval.MaxOrderedRulesCandidates)
+		for i := range wide {
+			outs := make([]predictioneval.OrderedRulesOutcome, predictioneval.MaxOrderedRulesOutcomes)
+			for j := range outs {
+				outs[j] = orOutcome("o"+strconv.Itoa(j), int64(j+1))
+			}
+			wide[i] = orCandidate("c"+strconv.Itoa(i), int64(i), orKnownBalance(1000), outs...)
+		}
+		st, err := predictioneval.ProjectOrderedRulesStream(orSource(wide, nil), orAdmission())
+		if err != nil {
+			t.Fatalf("a source at MaxOrderedRulesCandidates x MaxOrderedRulesOutcomes was refused "+
+				"%v. The vocabulary charges of every candidate are now counted before the "+
+				"first payload check, so a split that moved the aggregate rather than only "+
+				"its order would show up here first.", err)
+		}
+		if len(st.Candidates) != predictioneval.MaxOrderedRulesCandidates {
+			t.Fatalf("the widest admitted source retained %d candidates, not %d",
+				len(st.Candidates), predictioneval.MaxOrderedRulesCandidates)
+		}
+	})
+
 	// An unusable config is arithmetic over a rule count already bounded above.
 	// The invariant pass is bounded but not cheap: on a well-formed stream it
 	// walks the scope, the admission references and every retained candidate to

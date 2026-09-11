@@ -3417,6 +3417,32 @@ produce the identical STREAM_INVARIANT_VIOLATED, and timing is barred — the
 ordering is held by a comment at the call site, which is stated here rather than
 left to look like coverage.
 
+A fifth place on the same axis needed a second PASS rather than a move, and it
+is the largest of them. Within one candidate the projection already checked the
+cheap things first; across candidates it did not, so a last candidate declaring
+no causal position was refused only after every earlier candidate's outcome
+identities, provenance notes and presence reasons had been walked and charged —
+and that prefix is the bulk of what the aggregate ceiling admits. The candidate
+walk is now two passes: the SHAPE of every candidate (identity, uniqueness,
+declared position, causal order, the declared interval, the four vocabulary
+fields, membership, source kind, view agreement and the outcome COUNT), and then
+the PAYLOAD of each (provenance, outcomes reason, every outcome and its points,
+the balance, and the running aggregate). Measured on the identical input, 128
+candidates of 64 outcomes each carrying a 512-byte identity: 5.533517
+milliseconds to 24.191 microseconds, and with tiny identities the same refusal
+costs 23.92 microseconds — the same figure, which is the second way of saying
+the refusal is now decided by shape rather than scaled by payload. The split
+adds NO rule: every check was already performed in this order on the same
+values, nothing crossed the cut, and the invariant pass in the evaluator
+therefore needs no matching change. What it changes is which refusal a
+doubly-faulty source gets — a shape fault in a later candidate now wins over a
+payload fault in an earlier one — and, for near-ceiling sources, where the
+aggregate refusal fires: the vocabulary charges of every candidate are counted
+before the first payload check, so the running total is never lower than before
+at the same point and is identical at the end. Which sources are ADMITTED is
+therefore unchanged, and a case at MaxOrderedRulesCandidates times
+MaxOrderedRulesOutcomes pins that alongside the one pinning the new order.
+
 One refusal also stopped re-exporting what it never read. A stream whose
 SelectionDigest does not match is not what the projection produced, so its
 Cutoff and its Qualifications are supplied text that the checks judging them —

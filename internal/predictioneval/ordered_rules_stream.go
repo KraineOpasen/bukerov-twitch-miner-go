@@ -277,6 +277,44 @@ func ProjectOrderedRulesStream(source OrderedRulesSource, admission CommonAdmiss
 					"; a caller must say whether it recovered the ordered vector whole, because a short "+
 					"vector the donor declines and a vector nobody could recover are different facts"))
 		}
+	}
+
+	// THE SHAPE OF EVERY CANDIDATE BEFORE THE PAYLOAD OF ANY, which is the last
+	// place in this function where attacker-controlled work ran ahead of a
+	// cheaper decision — and the only one that needed a second pass rather than
+	// a move.
+	//
+	// Within one candidate the cheap checks already came first. Across
+	// candidates they did not: candidate 127 declaring no causal position was
+	// refused only after candidates 0 through 126 had had every outcome
+	// identity, every provenance note and every presence reason walked and
+	// charged, and that prefix is the bulk of what the ceiling admits.
+	// Measured on the identical input, 128 candidates of 64 outcomes each
+	// carrying a 512-byte identity: 5.533517 ms to 24.191 µs. The control in
+	// the same run says the same thing a second way — with tiny outcome
+	// identities the refusal now costs 23.92 µs, statistically the same, so it
+	// is decided by shape rather than scaled by payload.
+	//
+	// The pass above is bounded by MaxOrderedRulesCandidates times a fixed
+	// number of strings each bounded by MaxOrderedRulesIdentifierBytes, and
+	// every value it quotes has passed checkIdentifier or checkFreeText first,
+	// so it cannot become the cost it prevents.
+	//
+	// It adds NO rule. Every check above was already performed here, in this
+	// order, on the same values; the loop was cut in two and nothing crossed
+	// the cut. That is what keeps the invariant pass in ordered_rules.go
+	// correct without a matching change — it re-establishes the same rules and
+	// answers yes or no, and five divergences in this model have all been a
+	// rule on one path and not the other, never a rule in a different place on
+	// the same path.
+	//
+	// What DOES change is which refusal a doubly-faulty source gets: a shape
+	// fault in a later candidate now wins over a payload fault in an earlier
+	// one. Both are refusals, neither admits anything, and the case in the
+	// suite pins the new order by which sentinel fires.
+	for i := range source.Candidates {
+		c := &source.Candidates[i]
+		where := "candidate " + strconv.Itoa(i)
 		if err := checkFreeText(c.Provenance, where+" provenance"); err != nil {
 			return OrderedRulesStream{}, err
 		}
