@@ -507,6 +507,66 @@ func orderedRulesQualificationsNotDerived(s OrderedRulesStream) bool {
 	return false
 }
 
+// orderedRulesStreamStructureBroken is the stream's zero-byte tier: emptiness
+// tests, integer comparisons and declared flags, over the scope, the admission
+// and every retained candidate and outcome.
+//
+// It is a function of its own because TWO callers need it at two different
+// points. EvaluateOrderedRules runs it before computing the stream digest, and
+// orderedRulesStreamInvariantsBroken runs it again ahead of its own text pass.
+// One definition, so the rules cannot drift between them.
+//
+// Every check here is one the invariant pass below already makes. Nothing is
+// added, and both callers answer yes or no.
+func orderedRulesStreamStructureBroken(s OrderedRulesStream) bool {
+	const where = "retained candidate"
+	if validateScopeShape(s.Scope) != nil || validateAdmissionShape(s.Admission) != nil {
+		return true
+	}
+	var structuralLast int64
+	for i := range s.Candidates {
+		c := &s.Candidates[i]
+		switch {
+		case checkIdentifierPresent(c.Identity, where) != nil,
+			!c.HasPosition,
+			i > 0 && c.Position <= structuralLast,
+			c.Position < s.Scope.IntervalFromPosition,
+			c.Position > s.Scope.IntervalToPosition,
+			c.EpisodeMembership != MembershipProven,
+			s.Cutoff.Established && c.Position >= s.Cutoff.Position,
+			checkPresenceShape(c.Balance, where, c.Position) != nil:
+			return true
+		}
+		switch c.SourceKind {
+		case SourceKindChannelUpdate:
+			if s.Admission.ViewKind == ViewCalculateOnly {
+				return true
+			}
+		case SourceKindCalculateSnapshot:
+			if s.Admission.ViewKind == ViewChannelCandidateStream {
+				return true
+			}
+		default:
+			return true
+		}
+		switch c.OutcomesPresence {
+		case SuppliedKnown, SuppliedMissing, SuppliedInvalid:
+		default:
+			return true
+		}
+		for j := range c.Outcomes {
+			o := &c.Outcomes[j]
+			if checkIdentifierPresent(o.Identity, where) != nil ||
+				checkPresenceShape(o.Points, where, c.Position) != nil {
+				return true
+			}
+		}
+		structuralLast = c.Position
+	}
+
+	return false
+}
+
 // orderedRulesStreamInvariantsBroken reports a stream that could not have come
 // from [ProjectOrderedRulesStream], however well its digest verifies.
 //
@@ -552,69 +612,9 @@ func orderedRulesStreamInvariantsBroken(s OrderedRulesStream) bool {
 	if orderedRulesCutoffImpossible(s) || orderedRulesQualificationsNotDerived(s) {
 		return true
 	}
-	// THE ZERO-BYTE TIER, mirroring the projection's, and its absence here was
-	// the same defect one path over.
-	//
-	// ProjectOrderedRulesStream was split so that nothing reading a supplied
-	// byte runs before every structural decision is made. This pass re-
-	// establishes the same RULES, so it was correct — and it walked candidates
-	// sequentially, scanning each one's provenance, reason and presence text
-	// before reaching the next one's flags. A forged stream whose LAST
-	// candidate omits the position its KNOWN balance became available at was
-	// therefore refused only after roughly 20 MB of earlier payload, reached
-	// over the documented two-call oracle at no cost to the caller.
-	//
-	// Six divergences in this model have now been a rule, or an ordering, on
-	// one path and not the other. The shape halves below are the same functions
-	// the projection calls, for the same reason: one definition, two callers.
-	//
-	// Nothing here is a new rule. Every check is one the sequential pass below
-	// already makes, and this function answers yes or no, so the order is
-	// invisible in the result and only its cost changes.
-	if validateScopeShape(s.Scope) != nil || validateAdmissionShape(s.Admission) != nil {
+	if orderedRulesStreamStructureBroken(s) {
 		return true
 	}
-	var structuralLast int64
-	for i := range s.Candidates {
-		c := &s.Candidates[i]
-		switch {
-		case checkIdentifierPresent(c.Identity, where) != nil,
-			!c.HasPosition,
-			i > 0 && c.Position <= structuralLast,
-			c.Position < s.Scope.IntervalFromPosition,
-			c.Position > s.Scope.IntervalToPosition,
-			c.EpisodeMembership != MembershipProven,
-			s.Cutoff.Established && c.Position >= s.Cutoff.Position,
-			checkPresenceShape(c.Balance, where, c.Position) != nil:
-			return true
-		}
-		switch c.SourceKind {
-		case SourceKindChannelUpdate:
-			if s.Admission.ViewKind == ViewCalculateOnly {
-				return true
-			}
-		case SourceKindCalculateSnapshot:
-			if s.Admission.ViewKind == ViewChannelCandidateStream {
-				return true
-			}
-		default:
-			return true
-		}
-		switch c.OutcomesPresence {
-		case SuppliedKnown, SuppliedMissing, SuppliedInvalid:
-		default:
-			return true
-		}
-		for j := range c.Outcomes {
-			o := &c.Outcomes[j]
-			if checkIdentifierPresent(o.Identity, where) != nil ||
-				checkPresenceShape(o.Points, where, c.Position) != nil {
-				return true
-			}
-		}
-		structuralLast = c.Position
-	}
-
 	if validateScope(s.Scope) != nil || validateAdmission(s.Admission) != nil {
 		return true
 	}
@@ -800,6 +800,34 @@ func EvaluateOrderedRules(stream OrderedRulesStream, rules OrderedRulesConfig, d
 	// comparison. Its cost is proportional to the stream being judged, which is
 	// the one input a mismatch refusal is about, and the gate above has already
 	// bounded it.
+	// THE DIGEST IS NOT DEFERRED BEHIND THE STREAM'S STRUCTURE, and the reason
+	// is a measured trade rather than an oversight. A previous revision of this
+	// comment said the digest was a floor no ordering could defer because it IS
+	// the comparison. The first half is true and the second does not follow: a
+	// stream that could not have been projected is refused whatever its digest
+	// says, so its digest need never be computed. Deferring it was implemented
+	// and measured — for a 128x64 stream with 2,500-byte provenance whose final
+	// KNOWN balance omits its availability declaration, the lane that found it
+	// measured 98.6 ms against 8.2 ms, and 122.4 against 7.2 once the two-call
+	// oracle is counted.
+	//
+	// It is not kept, because of what it costs on the other side.
+	// TestOrderedRulesSuppliedDigestBindsEveryFieldThatCouldChangeADecision
+	// walks SuppliedInt64 by reflection, strips one field at a time and
+	// requires the DIGEST to move; that walk is what caught
+	// HasAvailableAtPosition being unbound, a P1 in this PR. With the structure
+	// decided first, every structural field is refused before the digest is
+	// computed, so the walk can no longer tell "the digest binds this field"
+	// from "the structural tier refused it" — the test says so in its own
+	// words, failing with "the probe stream must be readable, or this test
+	// compares nothing". The same applies to the availability-binding case and
+	// to the nine forged streams that reach the invariant pass through the
+	// oracle.
+	//
+	// So the ordering stands: a proven guard against an unbound digest field,
+	// kept, against a constant-factor refusal cost on an API this repository
+	// has no runtime caller for. If that trade is ever wrong, what changes is
+	// the guard's design, not this line alone.
 	streamDigest := orderedRulesStreamDigest(stream)
 	if stream.SelectionDigest != streamDigest {
 		refused := orderedRulesUnreadRefusal(ReasonStreamDigestMismatch)

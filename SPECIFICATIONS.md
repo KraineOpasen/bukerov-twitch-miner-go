@@ -3607,6 +3607,35 @@ The ordering inside the text tier is therefore by how much text a tier reads,
 as far as that has been taken. It is not proven exhaustive and is not claimed
 to be.
 
+One further ordering on the same axis was implemented, measured and then
+**deliberately reverted**, and the trade is recorded because the reasoning is
+the useful part. The evaluator computes the whole-stream digest before
+re-establishing the stream's invariants, so a structurally impossible stream —
+a KNOWN balance omitting the position it became available at, say — is hashed in
+full before being refused. An earlier revision of this document said the digest
+was a floor that no ordering could defer, because it IS the comparison. The
+first half is true and the second does not follow: such a stream is refused
+whatever its digest says, so its digest never needs computing. The reviewing
+lane measured 98.6 milliseconds against 8.2 with one-byte provenance, and 122.4
+against 7.2 once the two-call oracle is counted.
+
+What deferring it costs is the reason it is not kept.
+`TestOrderedRulesSuppliedDigestBindsEveryFieldThatCouldChangeADecision` walks
+`SuppliedInt64` by reflection, strips one field at a time and requires the
+DIGEST to move — and that walk is what caught `HasAvailableAtPosition` being
+unbound, a P1 in this pull request. With the structure decided first, every
+structural field is refused before the digest is computed, so the walk can no
+longer distinguish "the digest binds this field" from "the structural tier
+refused it". Implemented, it fails with its own words: *the probe stream must be
+readable, or this test compares nothing.* Six test functions and roughly twenty
+cases degrade the same way, including the nine forged streams that reach the
+invariant pass through the oracle.
+
+So a proven guard against an unbound digest field is kept, against a
+constant-factor refusal cost on an API this repository has no runtime caller
+for. The ordering stands and the claim that it *could not* be otherwise does
+not.
+
 One refusal also stopped re-exporting what it never read. A stream whose
 SelectionDigest does not match is not what the projection produced, so its
 Cutoff and its Qualifications are supplied text that the checks judging them —
