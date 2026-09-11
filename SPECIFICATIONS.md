@@ -4112,6 +4112,27 @@ sixth found by a reviewer rather than here; more to the point it is the second
 time the same defect class was repaired on one level and left standing one level
 down. Fixing a path is not fixing the class.
 
+**The SEVENTH instance was the same word on the other path.** `ProjectOrderedRulesStream`
+bounded its `SourceContractVersion` at the top and compared it only in
+`validateScope`, which runs BELOW the candidate and intervention vocabulary
+tiers — so a four-byte unsupported contract paid for every candidate, outcome
+and intervention the caller chose to send, plus `validateScope`'s own five scope
+scans. The evaluator's tier had compared that same word since the commit before.
+Measured at the widest admitted counts, 128 candidates x 64 outcomes and 1024
+interventions: 1.024333 ms, against 479.662 µs with the comparison moved up
+beside its length bound, as `checkSourceContractVersion` — one definition, two
+callers, because a second copy is how a rule comes to stand on one path and not
+the other.
+
+That is TWO-FOLD, not fifty-fold, and the residual is named rather than rounded
+away: the ~480 µs that remains is the count-and-length budget tier at the top of
+the projection, which walks every candidate, outcome and intervention doing
+`len()` arithmetic. It is count-bounded by construction and has to run first —
+it is what refuses an over-ceiling source for its SIZE before anything is
+scanned — so it is the floor for an input of that shape rather than something
+the move could have avoided. What the move removes is the per-element vocabulary
+work and the per-byte scope scans, neither of which the refusal depends on.
+
 The outcome pass is a SECOND walk inside that tier rather than one loop doing
 both, and the split is measured rather than assumed: folded together, a repeated
 CANDIDATE identity pays for every preceding candidate's outcomes first —

@@ -294,6 +294,33 @@ func ProjectOrderedRulesStream(source OrderedRulesSource, admission CommonAdmiss
 	if err := checkFreeText(source.Scope.SourceContractVersion, "scope source contract version"); err != nil {
 		return OrderedRulesStream{}, err
 	}
+	// AND THE COMPARISON, here rather than in validateScope below.
+	//
+	// Bounding the word without settling it left the equality to validateScope,
+	// which runs under the candidate and intervention vocabulary tiers — so a
+	// four-byte unsupported contract paid for every candidate, outcome and
+	// intervention the caller chose to send, plus validateScope's own five
+	// scope scans of up to MaxOrderedRulesIdentifierBytes each. Measured at the
+	// widest admitted counts, 128 candidates x 64 outcomes and 1024
+	// interventions: 1.024333 ms, against 479.662 µs here.
+	//
+	// TWO-FOLD, NOT FIFTY-FOLD, and the residual is worth naming rather than
+	// rounding away: the ~480 µs that remains is the count-and-length budget
+	// tier at the top of this function, which walks every candidate, outcome
+	// and intervention doing len() arithmetic. That tier is count-bounded by
+	// construction and has to run first — it is what refuses an over-ceiling
+	// source for its SIZE before anything is scanned — so it is the floor for
+	// an input of this shape, not something this move could have avoided. What
+	// the move does remove is the per-element vocabulary work and the per-byte
+	// scope scans, neither of which the refusal depends on.
+	//
+	// The evaluator's own tier had compared this contract before its candidate
+	// loop since the previous commit; this side had not, which is the seventh
+	// time on this PR that a rule stood on one of the two ingest paths and not
+	// the other, and the seventh found by a reviewer rather than here.
+	if err := checkSourceContractVersion(source.Scope); err != nil {
+		return OrderedRulesStream{}, err
+	}
 	if err := checkFreeText(string(source.Scope.Coverage), "scope coverage"); err != nil {
 		return OrderedRulesStream{}, err
 	}
@@ -746,12 +773,31 @@ func validateScope(s OrderedRulesScope) error {
 	if err := validateScopeShape(s); err != nil {
 		return err
 	}
+	if err := checkSourceContractVersion(s); err != nil {
+		return err
+	}
+	return checkCoverageVocabulary(s)
+}
+
+// checkSourceContractVersion settles the scope's source contract against the one
+// constant this package projects.
+//
+// Extracted so ProjectOrderedRulesStream can settle it immediately after its
+// length bound instead of waiting for validateScope, which runs below the
+// candidate and intervention vocabulary tiers. One definition, two callers: the
+// alternative is a second copy, and a rule living on one path and not the other
+// is the defect this PR has now hit seven times.
+//
+// It quotes the supplied value, so it must stay BELOW the checkFreeText that
+// bounds it — that gate exists because a 64 MiB contract version once took a
+// second to refuse and built a 67 MB error message.
+func checkSourceContractVersion(s OrderedRulesScope) error {
 	if s.SourceContractVersion != OrderedRulesStreamContractVersion {
 		return errors.Join(ErrOrderedRulesScopeIncomplete,
 			errors.New("predictioneval: scope declares source contract "+strconv.Quote(s.SourceContractVersion)+
 				", not "+strconv.Quote(OrderedRulesStreamContractVersion)))
 	}
-	return checkCoverageVocabulary(s)
+	return nil
 }
 
 // checkCoverageVocabulary settles the scope's coverage against its closed set.

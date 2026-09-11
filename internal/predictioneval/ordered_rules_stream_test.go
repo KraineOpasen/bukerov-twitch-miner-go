@@ -3667,6 +3667,46 @@ func TestOrderedRulesACheapRefusalIsNotPaidForWithTheWholePayload(t *testing.T) 
 		}
 	})
 
+	// The SOURCE CONTRACT, moved ahead of that same vocabulary tier one commit
+	// after the two words above were. It was bounded at its length here and
+	// compared only in validateScope, which runs below the candidate and
+	// intervention vocabulary tiers — so a four-byte unsupported contract paid
+	// for every candidate, outcome and intervention the caller sent:
+	// 1.024333 ms at the widest admitted counts, 479.662 µs after. The
+	// evaluator's own tier had compared it since the commit before, and this
+	// side had not, which is the seventh rule on this PR found standing on one
+	// of the two ingest paths and not the other.
+	t.Run("an unsupported source contract is refused before the candidate vocabulary", func(t *testing.T) {
+		badKind := []predictioneval.OrderedRulesCandidate{
+			orCandidate("c1", 10, orKnownBalance(1000), orOutcome("A", 4), orOutcome("B", 6)),
+		}
+		badKind[0].SourceKind = "NOT-A-SOURCE-KIND"
+
+		// Each fault alone, under its OWN sentinel, so the pair below is told
+		// apart by which rule fired rather than by which message came back.
+		if _, err := predictioneval.ProjectOrderedRulesStream(orSource(badKind, nil),
+			orAdmission()); !errors.Is(err, predictioneval.ErrOrderedRulesVocabulary) {
+			t.Fatalf("premise: the candidate alone must be refused as a vocabulary fault; got %v", err)
+		}
+		clean := orSource(cs, nil)
+		clean.Scope.SourceContractVersion = "NOPE"
+		if _, err := predictioneval.ProjectOrderedRulesStream(clean,
+			orAdmission()); !errors.Is(err, predictioneval.ErrOrderedRulesScopeIncomplete) {
+			t.Fatalf("premise: the contract alone must be refused as an incomplete scope; got %v", err)
+		}
+
+		both := orSource(badKind, nil)
+		both.Scope.SourceContractVersion = "NOPE"
+		if _, err := predictioneval.ProjectOrderedRulesStream(both,
+			orAdmission()); !errors.Is(err, predictioneval.ErrOrderedRulesScopeIncomplete) {
+			t.Fatalf("a source declaring an unsupported contract AND carrying a candidate outside "+
+				"its source-kind vocabulary was refused %v. The contract is bounded two lines "+
+				"above its comparison, so settling it costs one comparison against a short "+
+				"constant; the vocabulary tier below walks every candidate, every outcome and "+
+				"every intervention. The cheap decision comes first.", err)
+		}
+	})
+
 	// The evaluator compares the stream against its own digest before reading
 	// the TRACE, and before scanning either retained identifier for encodability:
 	// 14.049 µs rather than 582.770 ms with a 64 MiB identifier beside a small
