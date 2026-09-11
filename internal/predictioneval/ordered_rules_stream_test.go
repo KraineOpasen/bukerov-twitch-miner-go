@@ -1291,14 +1291,27 @@ func TestOrderedRulesAMatchingDigestIsNotProofOfProjection(t *testing.T) {
 // Derived text is now bounded without being charged, and the config and trace
 // carry their own ceiling. Two inputs, two ceilings, and the derived fields on
 // neither.
+// WHAT THIS CASE STILL ESTABLISHES, AND WHAT IT NO LONGER CAN.
+//
+// It was written to probe the projection's exact AGGREGATE maximum, and it can
+// no longer reach one. Two later changes moved the boundary out from under it:
+// the scope's namespace acquired an individual 4 KiB limit, so the search below
+// now stops at that per-string bound; and the projection began charging every
+// byte at its worst-case encoded width while the evaluator's gate went on
+// charging raw length, so a projected stream can occupy at most a sixth of the
+// gate's ceiling no matter how it is shaped.
+//
+// So this is now the per-string-boundary case: a stream the projection admits
+// at a field's own limit is an ordinary stream to the evaluator. The invariant
+// about the AGGREGATE is stronger than ever — a six-fold margin rather than a
+// few hundred bytes — but it is no longer THIS case that pins it, and a probe
+// that cannot fail is worth nothing. The rule that derived text is never
+// charged is pinned at the gate's own boundary instead, by
+// TestOrderedRulesTheGateDoesNotChargeTextItDidNotReceive, which is reachable
+// only by a forged stream and asserts against the declared ceiling rather than
+// against a boundary it re-derives.
 func TestOrderedRulesAProjectedStreamIsAlwaysAdmissible(t *testing.T) {
-	// At the projection's EXACT maximum, not merely near it. A margin makes
-	// this case vacuous — the derived text is only a few hundred bytes, so any
-	// slack absorbs it and the case passes whether or not the bug is present.
-	// That is not hypothetical: the first version of this test left four
-	// kilobytes of slack and failed to notice the defect restored.
-	//
-	// One allocation, then slices of it: re-cutting a 128 MiB string per probe
+	// One allocation, then slices of it: re-cutting a large string per probe
 	// would cost more than the search is worth, and s[:n] shares the backing
 	// array.
 	big := strings.Repeat("x", predictioneval.MaxOrderedRulesAggregateBytes)
@@ -1318,8 +1331,14 @@ func TestOrderedRulesAProjectedStreamIsAlwaysAdmissible(t *testing.T) {
 			hi = mid - 1
 		}
 	}
-	t.Logf("the projection's exact maximum namespace here is %d bytes, %d below the aggregate",
+	t.Logf("the projection's maximum namespace here is %d bytes — the per-string bound, not the "+
+		"aggregate, which sits %d bytes further up",
 		lo, predictioneval.MaxOrderedRulesAggregateBytes-lo)
+	if lo != predictioneval.MaxOrderedRulesIdentifierBytes {
+		t.Fatalf("the search settled at %d, not the per-string bound of %d; if the bound moved, this "+
+			"case's description no longer matches what it probes",
+			lo, predictioneval.MaxOrderedRulesIdentifierBytes)
+	}
 	if _, err := predictioneval.ProjectOrderedRulesStream(source(lo+1), orAdmission()); err == nil {
 		t.Fatal("premise: one byte more must be refused, or this is not the projection's maximum")
 	}
@@ -2108,4 +2127,146 @@ func TestOrderedRulesEveryChargedStringIsAlsoBoundedIndividually(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestOrderedRulesTheGateDoesNotChargeTextItDidNotReceive pins the derived-text
+// rule where it can still fail.
+//
+// The rule is that the shape gate charges only text the PROJECTION charged:
+// what the projection derives — the qualifications it generates, the boundary
+// it computes, the stream's own contract version — is length-bounded but never
+// counted, because the projection never counted it either. Charging it let a
+// stream the projection admitted be refused here for bytes.
+//
+// That rule used to be pinned by probing the PROJECTION's exact maximum, and
+// that probe has since stopped being able to fail. Once the projection began
+// charging every byte at its worst-case encoded width while this gate went on
+// charging raw length, a projected stream could reach at most a sixth of the
+// gate's ceiling — so a few hundred kilobytes of derived text can no longer tip
+// it, and restoring the defect left the whole suite green. The invariant is
+// still true, and more comfortably than before; it was the TEST that stopped
+// testing it.
+//
+// So the probe moves to this gate's own boundary, which is reachable only by a
+// stream the projection would never produce. That is not a weakness of the
+// case: the gate runs BEFORE the digest and the invariant pass precisely so it
+// can judge a forgery cheaply, so a forged stream is exactly the input whose
+// byte accounting it has to get right.
+func TestOrderedRulesTheGateDoesNotChargeTextItDidNotReceive(t *testing.T) {
+	const (
+		nc  = predictioneval.MaxOrderedRulesCandidates
+		no  = predictioneval.MaxOrderedRulesOutcomes
+		max = predictioneval.MaxOrderedRulesIdentifierBytes
+	)
+	buf := strings.Repeat("x", max)
+
+	// Derived text at its own maxima. None of it may be charged, and together
+	// it is far larger than one step of the search below, so the case cannot
+	// pass by landing inside the search's granularity.
+	derived := make([]string, predictioneval.MaxOrderedRulesQualifications)
+	for i := range derived {
+		derived[i] = buf
+	}
+	derivedBytes := len(derived)*max + 3*max + max
+
+	stream := func(n int) predictioneval.OrderedRulesStream {
+		s := orProject(t, []predictioneval.OrderedRulesCandidate{
+			orCandidate("c1", 10, orKnownBalance(1000), orOutcome("A", 4), orOutcome("B", 6))}, nil)
+		s.ContractVersion = buf
+		s.Qualifications = derived
+		s.Cutoff = predictioneval.OrderedRulesCutoff{
+			Established: true, Position: 9,
+			Kind:     predictioneval.OrderedRulesInterventionKind(buf),
+			Basis:    predictioneval.OrderedRulesCutoffBasis(buf),
+			Identity: buf,
+		}
+		// The charged half: four bounded strings on each of 8,192 outcomes.
+		cs := make([]predictioneval.OrderedRulesCandidate, 0, nc)
+		for i := 0; i < nc; i++ {
+			outs := make([]predictioneval.OrderedRulesOutcome, 0, no)
+			for j := 0; j < no; j++ {
+				outs = append(outs, predictioneval.OrderedRulesOutcome{
+					Identity: buf[:n],
+					Points: predictioneval.SuppliedInt64{
+						Presence:   predictioneval.SuppliedPresence(buf[:n]),
+						Provenance: buf[:n],
+						Reason:     buf[:n],
+					},
+				})
+			}
+			cs = append(cs, predictioneval.OrderedRulesCandidate{
+				Identity: "c" + itoaTest(i), Position: int64(i + 1), HasPosition: true,
+				Outcomes: outs,
+			})
+		}
+		s.Candidates = cs
+		return s
+	}
+
+	overBound := func(n int) bool {
+		ev := predictioneval.EvaluateOrderedRules(stream(n), orAlwaysAdmitConfig(), orDraws())
+		return ev.Reason == predictioneval.ReasonStreamBytesOverBound
+	}
+
+	// The gate's exact maximum for the CHARGED text.
+	lo, hi := 0, max
+	if overBound(lo) {
+		t.Fatal("premise: an empty charged payload must not be over the byte bound")
+	}
+	for lo < hi {
+		mid := (lo + hi + 1) / 2
+		if overBound(mid) {
+			hi = mid - 1
+		} else {
+			lo = mid
+		}
+	}
+	charged := int64(nc) * int64(no) * 4 * int64(lo)
+	t.Logf("gate admits %d charged bytes (%d per outcome string); derived text withheld = %d bytes",
+		charged, lo, derivedBytes)
+
+	if lo < max && !overBound(lo+1) {
+		t.Fatalf("binary search did not find the boundary: %d is still admitted", lo+1)
+	}
+
+	// The assertion is against the DECLARED ceiling, not against the boundary
+	// the search just found, and that distinction is the whole case. A search
+	// re-derives the boundary under whatever the code currently does, so
+	// "evaluate at the boundary and expect no refusal" passes no matter how
+	// much extra text is being charged — the boundary simply moves down to
+	// accommodate it. The first version of this test did exactly that and let
+	// the defect through.
+	//
+	// What cannot move is the ceiling. If the charged text alone gets within
+	// less than the derived text's own size of it, then the derived text is not
+	// being charged; if it is being charged, the gap opens by at least that
+	// much and this fails.
+	step := int64(nc) * int64(no) * 4
+	gap := int64(predictioneval.MaxOrderedRulesAggregateBytes) - charged
+	t.Logf("gap below the declared ceiling = %d bytes (one search step = %d, derived = %d)",
+		gap, step, derivedBytes)
+	if int64(derivedBytes) < step {
+		t.Fatalf("this case is vacuous: one search step is %d bytes and the derived text is only "+
+			"%d, so charging it could hide inside the search's granularity", step, derivedBytes)
+	}
+	if gap >= int64(derivedBytes) {
+		t.Fatalf("charged text reached only %d of the %d-byte ceiling, a gap of %d. The derived "+
+			"text is %d bytes — %d qualifications, the boundary and the contract version — and a "+
+			"gap that size means it is being counted against the ceiling the projection charged.",
+			charged, predictioneval.MaxOrderedRulesAggregateBytes, gap, derivedBytes, len(derived))
+	}
+
+	// The config and the trace have no projection to mirror, so they carry a
+	// ceiling of their OWN. Charging them to the stream's would let an
+	// unrelated argument refuse a stream that is otherwise exactly at its
+	// limit, so the identifier below is far larger than one search step.
+	t.Run("an unrelated config identifier is not charged to the stream", func(t *testing.T) {
+		cfg := orAlwaysAdmitConfig()
+		cfg.ConfigID = strings.Repeat("i", 1<<20)
+		ev := predictioneval.EvaluateOrderedRules(stream(lo), cfg, orDraws())
+		if ev.Reason == predictioneval.ReasonStreamBytesOverBound {
+			t.Fatalf("a %d-byte config identifier pushed the STREAM over its byte ceiling; the "+
+				"projection never saw the config, so it must carry its own", len(cfg.ConfigID))
+		}
+	})
 }
