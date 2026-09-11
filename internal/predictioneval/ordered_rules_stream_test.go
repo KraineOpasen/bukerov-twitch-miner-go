@@ -839,42 +839,112 @@ func TestOrderedRulesOversizedInputIsRefusedBeforeItIsRead(t *testing.T) {
 		}
 	})
 
+	// The same length-before-meaning rule on the EVALUATOR side. The projection
+	// gates its vocabulary, but EvaluateOrderedRules can be handed a stream the
+	// projection never saw, and there the value is hashed by the digests and
+	// then quoted by the projection validators the invariant pass calls.
+	// Measured before this gate, a 64 MiB contract version cost about two
+	// seconds across the two calls a forgery needs, and was refused only at the
+	// end, for being impossible rather than for being enormous.
+	t.Run("vocabulary past the per-string limit", func(t *testing.T) {
+		big := strings.Repeat("x", predictioneval.MaxOrderedRulesIdentifierBytes+1)
+		for _, tc := range []struct {
+			name   string
+			break_ func(st *predictioneval.OrderedRulesStream)
+		}{
+			{"stream contract version", func(st *predictioneval.OrderedRulesStream) {
+				st.ContractVersion = big
+			}},
+			{"scope contract version", func(st *predictioneval.OrderedRulesStream) {
+				st.Scope.SourceContractVersion = big
+			}},
+			{"scope coverage", func(st *predictioneval.OrderedRulesStream) {
+				st.Scope.Coverage = predictioneval.OrderedRulesCoverage(big)
+			}},
+			{"admission view kind", func(st *predictioneval.OrderedRulesStream) {
+				st.Admission.ViewKind = predictioneval.OrderedRulesViewKind(big)
+			}},
+			{"cutoff kind", func(st *predictioneval.OrderedRulesStream) {
+				st.Cutoff.Kind = predictioneval.OrderedRulesInterventionKind(big)
+			}},
+			{"cutoff basis", func(st *predictioneval.OrderedRulesStream) {
+				st.Cutoff.Basis = predictioneval.OrderedRulesCutoffBasis(big)
+			}},
+			{"candidate source kind", func(st *predictioneval.OrderedRulesStream) {
+				st.Candidates[0].SourceKind = predictioneval.OrderedRulesSourceKind(big)
+			}},
+			{"candidate membership", func(st *predictioneval.OrderedRulesStream) {
+				st.Candidates[0].EpisodeMembership = predictioneval.OrderedRulesMembership(big)
+			}},
+			{"outcome-vector presence", func(st *predictioneval.OrderedRulesStream) {
+				st.Candidates[0].OutcomesPresence = predictioneval.SuppliedPresence(big)
+			}},
+			{"balance presence", func(st *predictioneval.OrderedRulesStream) {
+				st.Candidates[0].Balance.Presence = predictioneval.SuppliedPresence(big)
+			}},
+			{"outcome points presence", func(st *predictioneval.OrderedRulesStream) {
+				st.Candidates[0].Outcomes[0].Points.Presence = predictioneval.SuppliedPresence(big)
+			}},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				st := forged(1)
+				tc.break_(&st)
+				unread(t, predictioneval.EvaluateOrderedRules(st, cfg, orDraws()),
+					predictioneval.ReasonStreamTextOverBound)
+			})
+		}
+
+		t.Run("entropy semantics version", func(t *testing.T) {
+			d := orDraws()
+			d.EntropySemanticsVersion = big
+			unread(t, predictioneval.EvaluateOrderedRules(forged(1), cfg, d),
+				predictioneval.ReasonStreamTextOverBound)
+		})
+
+		t.Run("a rule comparator", func(t *testing.T) {
+			rules := []predictioneval.OrderedRule{orRule(predictioneval.ComparatorLe, 40, 100, 0, 10)}
+			rules[0].Comparator = predictioneval.OrderedRuleComparator(big)
+			unread(t, predictioneval.EvaluateOrderedRules(forged(1),
+				orConfig(rules, 95, 100, 0, 10), orDraws()),
+				predictioneval.ReasonStreamTextOverBound)
+		})
+	})
+
 	// The retained TEXT in aggregate. Every field below points at the SAME
 	// string, so the budget is exceeded by what would be retained while the
 	// test allocates one copy of it — the sum is over lengths, and Go strings
 	// do not copy on assignment.
 	//
-	// The fields chosen are the ones the projection bounds ONLY through the
-	// aggregate. That is forced rather than arbitrary: with the count bounds
-	// and the per-string limit both in force, every individually-bounded string
-	// in a stream can total at most about 102 MiB, which is under the budget.
-	// So the aggregate check is reachable only through the fields that carry no
-	// per-string limit — which is exactly the division the gate mirrors.
+	// The fields chosen are forced, not arbitrary: they are the only ones left
+	// that carry no per-string limit. Everything with a closed vocabulary or an
+	// identifier shape is now bounded individually, which is why this case
+	// drives all the remaining free-form singletons at once rather than a
+	// single field. If a later round bounds these too, the aggregate check
+	// becomes unreachable and this case should be removed rather than propped
+	// up — an assertion that cannot fail is worse than no assertion.
 	t.Run("retained text past the aggregate budget", func(t *testing.T) {
-		chunk := predictioneval.SuppliedPresence(
-			strings.Repeat("x", predictioneval.MaxOrderedRulesIdentifierBytes*4))
-		outs := make([]predictioneval.OrderedRulesOutcome, predictioneval.MaxOrderedRulesOutcomes)
-		for i := range outs {
-			outs[i] = predictioneval.OrderedRulesOutcome{
-				Points: predictioneval.SuppliedInt64{Presence: chunk},
-			}
-		}
-		st := forged(predictioneval.MaxOrderedRulesCandidates)
-		for i := range st.Candidates {
-			c := &st.Candidates[i]
-			c.Outcomes = outs
-			c.SourceKind = predictioneval.OrderedRulesSourceKind(chunk)
-			c.EpisodeMembership = predictioneval.OrderedRulesMembership(chunk)
-			c.OutcomesPresence = chunk
-			c.Balance = predictioneval.SuppliedInt64{Presence: chunk}
-		}
-		perCandidate := int64(4 + len(outs))
-		counted := int64(len(st.Candidates)) * perCandidate * int64(len(chunk))
+		const fields = 9
+		chunk := strings.Repeat("x",
+			predictioneval.MaxOrderedRulesAggregateBytes/fields+1)
+		st := forged(1)
+		st.Scope.Namespace = chunk
+		st.Scope.EpisodeID = chunk
+		st.Scope.AccountContext = chunk
+		st.Scope.AssociationEvidence = chunk
+		st.Admission.ManifestID = chunk
+		st.Admission.Population = chunk
+		st.Admission.OrderBasis = chunk
+		cfgBig := cfg
+		cfgBig.ConfigID = chunk
+		draws := orDraws()
+		draws.RunID = chunk
+
+		counted := int64(fields) * int64(len(chunk))
 		if counted <= predictioneval.MaxOrderedRulesAggregateBytes {
 			t.Fatalf("this case's premise is that the retained text exceeds the budget; it counts "+
 				"%d bytes against %d", counted, int64(predictioneval.MaxOrderedRulesAggregateBytes))
 		}
-		unread(t, predictioneval.EvaluateOrderedRules(st, cfg, orDraws()),
+		unread(t, predictioneval.EvaluateOrderedRules(st, cfgBig, draws),
 			predictioneval.ReasonStreamBytesOverBound)
 	})
 

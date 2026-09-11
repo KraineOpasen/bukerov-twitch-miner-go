@@ -268,32 +268,43 @@ func (b *orderedRulesTextBudget) bound(v ...string) {
 func orderedRulesInputBudget(s OrderedRulesStream, cfg OrderedRulesConfig,
 	d SuppliedDrawTrace) orderedRulesTextBudget {
 	var b orderedRulesTextBudget
-	b.charge(s.ContractVersion, s.Scope.Namespace, s.Scope.EpisodeID, s.Scope.AccountContext,
-		s.Scope.AssociationEvidence, s.Scope.SourceContractVersion, string(s.Scope.Coverage))
-	b.bound(s.Scope.CoverageDetail)
-	b.charge(s.Admission.ManifestID, string(s.Admission.ViewKind), s.Admission.Population,
-		s.Admission.OrderBasis)
+	// VOCABULARY IS BOUND, not merely charged. A closed set of short words has
+	// no large member, and an enormous one is an input whose only effect is the
+	// cost of handling it — which here is the digests that run next and the
+	// projection validators the invariant pass calls, one of which quotes what
+	// it rejects. Measured before this gate, a 64 MiB contract version cost
+	// about two seconds across the two calls a forgery needs.
+	//
+	// This mirrors the projection field for field, as the division always has.
+	// The projection gates its vocabulary now, so this side must too: leaving
+	// these on the aggregate would refuse nothing the projection refuses.
+	b.bound(s.ContractVersion, s.Scope.SourceContractVersion, string(s.Scope.Coverage))
+	b.charge(s.Scope.Namespace, s.Scope.EpisodeID, s.Scope.AccountContext,
+		s.Scope.AssociationEvidence)
+	b.bound(s.Scope.CoverageDetail, string(s.Admission.ViewKind))
+	b.charge(s.Admission.ManifestID, s.Admission.Population, s.Admission.OrderBasis)
 	b.bound(s.Admission.SourceReferences...)
-	b.charge(string(s.Cutoff.Kind), string(s.Cutoff.Basis))
-	b.bound(s.Cutoff.Identity)
+	b.bound(string(s.Cutoff.Kind), string(s.Cutoff.Basis), s.Cutoff.Identity)
 	b.bound(s.Qualifications...)
 	for i := range s.Candidates {
 		c := &s.Candidates[i]
-		b.bound(c.Identity, c.Provenance, c.OutcomesReason)
-		b.charge(string(c.SourceKind), string(c.EpisodeMembership), string(c.OutcomesPresence))
-		b.charge(string(c.Balance.Presence))
-		b.bound(c.Balance.Provenance, c.Balance.Reason)
+		b.bound(c.Identity, c.Provenance, c.OutcomesReason,
+			string(c.SourceKind), string(c.EpisodeMembership), string(c.OutcomesPresence),
+			string(c.Balance.Presence), c.Balance.Provenance, c.Balance.Reason)
 		for j := range c.Outcomes {
 			o := &c.Outcomes[j]
-			b.bound(o.Identity, o.Points.Provenance, o.Points.Reason)
-			b.charge(string(o.Points.Presence))
+			b.bound(o.Identity, o.Points.Provenance, o.Points.Reason, string(o.Points.Presence))
 		}
 	}
-	b.charge(cfg.ConfigID)
+	// The config and the trace have no projection to mirror, so only their
+	// closed vocabularies are bound; their free-form identifiers stay on the
+	// aggregate, because inventing a limit nothing else applies would refuse
+	// input no other rule refuses.
+	b.charge(cfg.ConfigID, d.RunID)
+	b.bound(d.EntropySemanticsVersion)
 	for i := range cfg.Detailed {
-		b.charge(string(cfg.Detailed[i].Comparator))
+		b.bound(string(cfg.Detailed[i].Comparator))
 	}
-	b.charge(d.EntropySemanticsVersion, d.RunID)
 	return b
 }
 
