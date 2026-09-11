@@ -682,8 +682,13 @@ func orderedRulesStreamStructureBroken(s OrderedRulesStream) bool {
 	// validateScopeShape and the projection says so. That reason does not reach
 	// here: this tier quotes nothing, so the comparison is against one short
 	// constant — read to that constant's length when a supplied value matches
-	// it, and no further. This one runs once per stream rather than per
-	// candidate, so neither its length nor its count is the caller's. Measured
+	// it, and no further. The supplied version's LENGTH is the caller's, like
+	// every other supplied string; what is not the caller's is the WORK, which
+	// this comment said wrongly on its first attempt and which is the same
+	// conflation the paragraph above exists to correct. A longer version fails
+	// on length, and this check runs once per stream rather than once per
+	// candidate, so neither the length nor the count can raise its cost.
+	// Measured
 	// against a four-byte unsupported version beside 128 candidates holding
 	// 4 KiB each: 2.314278 ms before and 4.457 µs now, against 7.219 µs for the
 	// identical fault on a two-candidate stream.
