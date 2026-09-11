@@ -128,7 +128,7 @@ func TestOrderedRulesInclusiveThresholdsAndDefaultBounds(t *testing.T) {
 			predictioneval.SelectionDetailedRule},
 		{"Ge at exact equality", orConfig([]predictioneval.OrderedRule{
 			orRule(predictioneval.ComparatorGe, 40, 100, 0, 10)}, 95, 100, 0, 10),
-			predictioneval.SelectionDefault},
+			predictioneval.SelectionDetailedRule},
 		{"default with both bounds at the share", orConfig(nil, 40, 40, 0, 10),
 			predictioneval.SelectionDefault},
 	} {
@@ -137,6 +137,20 @@ func TestOrderedRulesInclusiveThresholdsAndDefaultBounds(t *testing.T) {
 			if sel.OutcomeIdentity != "A" {
 				t.Fatalf("an inclusive comparison must admit at exact equality: got outcome %q, want \"A\"",
 					sel.OutcomeIdentity)
+			}
+			// Which HALF of the mechanism admitted. The table carried this
+			// column from the start and never compared it, and what it
+			// recorded for `Ge` was false: the rule matches at equality and
+			// admits, so the basis is the detailed rule, not the default —
+			// which cannot reach a 0.4 share through bounds of [0.95, 1.00].
+			//
+			// What this pins and what it does not: the labelling, which the
+			// missing-balance and entropy cases already bind at both values,
+			// so it buys no new kill power. It is here because a column
+			// stating something false about the mechanism is worse than no
+			// column, and an unread one cannot be caught rotting again.
+			if sel.Basis != tc.want {
+				t.Fatalf("admitted by %s, want %s", sel.Basis, tc.want)
 			}
 		})
 	}

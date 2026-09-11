@@ -146,6 +146,16 @@ func TestOrderedRulesDonorExampleConfigNormalizesAsRecorded(t *testing.T) {
 				wantBits(t, c.Expect.Default.MaxBits) {
 				t.Errorf("default max normalizes to %#016x, fixture records %s", got, c.Expect.Default.MaxBits)
 			}
+			// The default's STAKE percentage, not only its bounds. It was
+			// recorded for both cases and compared for neither, so a wrong
+			// value could sit in the fixture indefinitely — and this file is
+			// the only thing that says the recorded column is the correct
+			// single division.
+			if got := math.Float64bits(c.RawConfig.Default.Points.RawPercent / 100.0); got !=
+				wantBits(t, c.Expect.Default.PointsPercentBits) {
+				t.Errorf("default points percent normalizes to %#016x, fixture records %s",
+					got, c.Expect.Default.PointsPercentBits)
+			}
 		})
 	}
 }
@@ -243,15 +253,13 @@ func TestOrderedRulesDonorExampleConfigDrivesTheMechanism(t *testing.T) {
 // betting range its author never wrote.
 func TestOrderedRulesDonorPresetSmallKeepsItsExplicitZeros(t *testing.T) {
 	f := loadDonorFixture(t)
-	var cfg predictioneval.OrderedRulesConfig
-	for _, c := range f.Cases {
-		if c.Name == "preset_small" {
-			cfg = c.RawConfig
-		}
-	}
-	if cfg.ConfigID == "" {
-		t.Fatal("the fixture no longer carries the preset_small case")
-	}
+	// Through donorCase rather than a hand-rolled scan: the scan kept the LAST
+	// match rather than the first, and probed presence by an empty ConfigID, so
+	// a duplicated case would be silently resolved and a case present but blank
+	// would be reported as absent. The rule count asserted here is zero, which
+	// is the preset's own defining shape — it ships no detailed rules at all,
+	// which is half of why it admits only a zero-share outcome.
+	cfg := f.Cases[donorCase(t, f, "preset_small", 0)].RawConfig
 
 	ordinary := []predictioneval.OrderedRulesCandidate{
 		orCandidate("c1", 10, orKnownBalance(100000), orOutcome("A", 4), orOutcome("B", 6)),

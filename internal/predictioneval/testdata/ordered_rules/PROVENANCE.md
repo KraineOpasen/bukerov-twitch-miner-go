@@ -61,7 +61,7 @@ rule, so that a supplied trace is consumed deterministically.
 
 The semantics those two blobs establish, verbatim in behaviour:
 
-```
+```text
 Bernoulli::new(p):  !(0.0..1.0).contains(p) -> if p == 1.0 { ALWAYS_TRUE } else { Err }
                     otherwise                -> p_int = (p * 2^64) as u64
 sample():           p_int == ALWAYS_TRUE     -> true, consuming NO word
