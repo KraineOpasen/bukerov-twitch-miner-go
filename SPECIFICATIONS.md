@@ -4305,6 +4305,78 @@ change: they were moved to call `orderedRulesStreamDigest` directly in an
 earlier commit, precisely so no reordering could make them vacuous, and that
 still holds.
 
+**The equivalent-mutant pass, stated as which cases do NOT discriminate.** A
+falsifier that names a rule and is killed by a different one is the defect the
+two repairs above were instances of, so the reflection walk was classified
+mechanically rather than by reading: `invalidUTF8` was deleted from
+`checkFreeText` and the surviving cases counted.
+
+Nine of the twelve cases fail — `Scope.Namespace`, `Scope.EpisodeID`,
+`Scope.AccountContext`, `Scope.AssociationEvidence`, `Scope.CoverageDetail`,
+`Admission.ManifestID`, `Admission.Population`, `Admission.OrderBasis`,
+`Admission.SourceReferences`. Three pass. Two of those three are the closed
+vocabularies, probed with an out-of-set word by design and already declared as
+such. The third was not declared: `Scope.SourceContractVersion` is probed with
+an invalid byte, intending the encodability rule, and the **version comparison**
+kills it first — appending any byte makes the value unequal to the constant.
+
+That is not a hole. Equality against a fixed constant SUBSUMES encodability,
+because an invalid byte is a difference. It is recorded because the case would
+otherwise have been counted as encodability coverage it does not provide, which
+is the same bookkeeping error as the coverage case above. The exemption is now
+written down with its reason and CHECKED rather than trusted: a subtest changes
+the field to a DIFFERENT but perfectly encodable value and requires refusal.
+That guard is killed only by removing **all three** copies of the comparison —
+the pre-tier check in `EvaluateOrderedRules`, the structural tier's, and
+`checkSourceContractVersion` in `validateScope` — so any single-copy mutant is
+equivalent for it, and that is stated rather than left to be discovered.
+
+One equivalent-mutant class remains, unchanged and still without a test: the
+order of `orderedRulesCutoffImpossible` against `orderedRulesQualificationsNotDerived`
+inside the invariant pass. Both produce the identical `StatusRefused` /
+`ReasonStreamInvariantViolated`, so no observation distinguishes the two orders,
+and the repository's deterministic-test contract rules out pinning one by
+elapsed time. The comment holds that order, not the suite, and reversing the two
+blocks breaks nothing and loses the 3.09 ms the swap measured.
+
+**Serialization exactness, reverified on the final design — and the defect is
+wider than it was filed.** A reviewer's P2 on `364f009` said entropy words
+encoded as JSON numbers do not survive an IEEE-754 consumer. That finding was
+recorded as owner-gated and NOT implemented, because every correct repair
+changes the JSON representation of an exported type. It was re-checked here
+rather than carried forward on trust, and three things changed.
+
+First, the affected set is four fields, not one: `SuppliedDrawTrace.Words`
+(input), `OrderedRulesSelection.ShareBits`, `OrderedRulesTraceEntry.ShareBits`
+and `OrderedRulesTraceEntry.RawWordValue` (output).
+
+Second, the output side is unconditionally affected where the input side is
+conditional. A raw entropy word is at risk only above 2^53. `ShareBits` is
+`math.Float64bits` of a pool share, and the bit pattern of ANY normal double is
+above that line — 0.5 is 4602678819172646912, and even 1e-300 is
+118622047889322841. Reproduced: 0.5 and the next representable double above it
+have adjacent bit patterns and collapse to the same integer through a float64
+parser. So the field whose own documentation says it is *"recorded as bits so a
+report cannot round two distinguishable shares into one printed number"* is
+rounded by its own wire format, on every value it can hold.
+
+Third, the escape route that would have made this a narrow fix does not exist,
+and that was established mechanically rather than assumed. Go's `,string` tag
+option is **ignored on a `[]uint64` field**, so it cannot quote the elements of
+`Words`; and `,string` decoding is strict in both directions — a bare number
+into a `,string` field is an error, and a quoted value into a plain field is an
+error — so any change here is a hard wire break rather than a widening.
+
+What the change would cost today was also established rather than argued: there
+is **no non-test caller of this package anywhere in the repository**, and **no
+pinned JSON baseline under `testdata/ordered_rules/` contains any of the four
+fields**. So the compatibility cost of changing the encoding now is zero
+persisted artifacts, zero runtime callers and zero baselines to regenerate.
+
+It is still not implemented. The hazard is recorded at each of the four field
+sites, naming the contradiction with `hex64`'s own documentation, and the
+decision is carried to the owner.
+
 **A round of five, and the shape of them is the finding.** One reviewer pass
 produced five separate orderings on one head, and every one was the same
 question asked at a different seam: does a refusal whose truth depends on a

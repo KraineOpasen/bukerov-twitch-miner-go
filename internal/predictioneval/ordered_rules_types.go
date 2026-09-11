@@ -585,6 +585,28 @@ type SuppliedDrawTrace struct {
 	EntropySemanticsVersion string `json:"entropySemanticsVersion"`
 	// Words are consumed strictly in order, once each, across the whole run.
 	// The sequence does not restart on a new candidate.
+	//
+	// KNOWN DEFECT, RECORDED RATHER THAN REPAIRED, AND OPEN TO THE OWNER.
+	// A uint64 encoded as a JSON NUMBER does not survive an IEEE-754 consumer:
+	// above 2^53 the low bits are lost silently, and two adjacent words the
+	// strict Bernoulli comparison distinguishes can arrive equal. Reproduced:
+	// 9223372036854788153 and 9223372036854788154 both become
+	// 9223372036854788096 through a float64 parser. Go's own round trip is
+	// lossless, so the loss needs such a consumer in the path — which is
+	// exactly the relay this type exists to be handed across.
+	//
+	// This package states the hazard elsewhere and acts on it: hex64's doc
+	// says a raw word pushed through a double-precision JSON number loses its
+	// low bits, and the digests use fixed-width hex for that reason. The wire
+	// form of this field contradicts that, and the contradiction is not
+	// defended. See [OrderedRulesSelection.ShareBits], where it is worse.
+	//
+	// It is NOT repaired here because every correct repair changes the JSON
+	// representation of an exported type. Mechanically established, not
+	// assumed: the `,string` tag option is IGNORED on a []uint64 field, so it
+	// is not an escape; and `,string` decoding is strict in both directions, so
+	// any change here is a hard wire break rather than a widening. That makes
+	// it an owner decision, and it is carried as one.
 	Words []uint64 `json:"words"`
 }
 
@@ -770,6 +792,21 @@ type OrderedRulesSelection struct {
 	// ShareBits is math.Float64bits of the pool share the decision was made on,
 	// recorded as bits so a report cannot round two distinguishable shares into
 	// one printed number.
+	//
+	// AND THE JSON NUMBER IT IS ENCODED AS DOES EXACTLY THAT, which is the
+	// sharper half of the defect recorded on [SuppliedDrawTrace.Words] and is
+	// stated here rather than left for a reader to infer. A bit pattern is not
+	// a small integer: math.Float64bits of ANY normal double is above 2^53 —
+	// 0.5 is 4602678819172646912, and even 1e-300 is 118622047889322841 — so
+	// unlike a raw entropy word, which is only at risk above that line, every
+	// value of this field is. Reproduced: 0.5 and the next representable double
+	// above it have adjacent bit patterns and collapse to the same integer
+	// through an IEEE-754 consumer. The field added to stop a report rounding
+	// two distinguishable shares into one is rounded by its own wire format.
+	//
+	// Owner-gated for the same reason as Words, and repairable here by the
+	// `,string` tag alone — which still breaks the wire, since `,string`
+	// decoding refuses a bare number.
 	ShareBits uint64 `json:"shareBits"`
 }
 
@@ -819,7 +856,10 @@ type OrderedRulesTraceEntry struct {
 	// RawWordIndex is the index of the raw word consumed, or -1 when the step
 	// consumed none. A rate of exactly one consumes no word and still succeeds;
 	// a rate of exactly zero consumes one and still fails.
-	RawWordIndex int    `json:"rawWordIndex"`
+	RawWordIndex int `json:"rawWordIndex"`
+	// RawWordValue carries the same JSON-number precision defect as
+	// [SuppliedDrawTrace.Words]: it is the raw word, so it is at risk above
+	// 2^53. Owner-gated with the other three.
 	RawWordValue uint64 `json:"rawWordValue"`
 	// Admitted is whether this step admitted participation.
 	Admitted bool `json:"admitted"`

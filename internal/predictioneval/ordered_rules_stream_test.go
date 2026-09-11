@@ -3301,6 +3301,42 @@ func TestOrderedRulesEveryRetainedScopeAndAdmissionStringIsRevalidatedOnIngest(t
 		"Admission.ViewKind": true,
 	}
 
+	// pinnedToAConstant names a field whose probe is NOT killed by the UTF-8
+	// rule this case exists for, and is killed by something strictly stronger.
+	//
+	// Scope.SourceContractVersion is the only one. It is compared for EQUALITY
+	// against OrderedRulesStreamContractVersion, so appending an invalid byte
+	// makes it unequal and the version comparison refuses the probe before
+	// encodability is ever consulted. Established by mutation, not by reading:
+	// with invalidUTF8 deleted from checkFreeText, NINE of the twelve cases
+	// here fail and three pass — this one, and the two vocabularies that are
+	// probed with an out-of-set word by design.
+	//
+	// It is not a hole: equality against a fixed constant subsumes
+	// encodability, because any invalid byte is a difference. It is recorded
+	// because the case would otherwise be counted as UTF-8 coverage it does not
+	// provide, and a guard that quietly covers less than its name is the
+	// bookkeeping mistake this file has now made twice.
+	//
+	// And the subsumption is CHECKED rather than trusted, below.
+	pinnedToAConstant := map[string]bool{"Scope.SourceContractVersion": true}
+	for name := range pinnedToAConstant {
+		t.Run("subsumption: "+name+" refuses a difference that is valid UTF-8", func(t *testing.T) {
+			st := orProject(t, cs, nil)
+			st.Scope.SourceContractVersion = predictioneval.OrderedRulesStreamContractVersion + "2"
+			first := predictioneval.EvaluateOrderedRules(st, cfg, orDraws())
+			st.SelectionDigest = first.StreamDigest
+			if got := predictioneval.EvaluateOrderedRules(st, cfg, orDraws()); got.Status !=
+				predictioneval.StatusRefused {
+				t.Fatalf("%s was changed to a DIFFERENT but perfectly encodable value and the stream "+
+					"reached %q. This field claims an exemption from the encodability probe on the "+
+					"grounds that equality against a constant subsumes it; if a valid difference is "+
+					"admitted, that exemption is false and the field has no encodability cover at all.",
+					name, got.Status)
+			}
+		})
+	}
+
 	// baseFor is the projected stream a case forges FROM, and it is not always
 	// the same one.
 	//
