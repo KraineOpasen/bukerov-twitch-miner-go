@@ -4129,6 +4129,41 @@ sixth found by a reviewer rather than here; more to the point it is the second
 time the same defect class was repaired on one level and left standing one level
 down. Fixing a path is not fixing the class.
 
+**The direction none of the thirty-five findings argued is now a test.** Every
+refusal-ordering repair on this work was defended in one direction — a refusal
+got cheaper — and each was safe in the other by an argument rather than by a
+case. The other direction is the one that matters for correctness: hoisting a
+check above a ceiling, a budget or a hash must never make `EvaluateOrderedRules`
+refuse a stream `ProjectOrderedRulesStream` legitimately produced. Two moves in
+this work already inverted a pinned precedence and were caught only because some
+unrelated case happened to cover them.
+
+`TestOrderedRulesEverythingTheProjectionAdmitsTheEvaluatorAdmits` asserts the
+property those cases were instances of. It enumerates a space over the exact
+dimensions the reorderings touched — candidate and outcome counts, per-string
+lengths from empty to the bound, the three balance presence words, the three
+coverages, and whether a boundary exists — projects each source, and requires
+that a stream the projection ADMITTED never meets an **ingest-validation**
+refusal: contract or semantics mismatch, shape, bytes, text, invariant or digest
+mismatch. 162 sources project, 81 with a boundary, 108 with a non-KNOWN balance,
+54 carrying text at the per-string bound.
+
+Two things it deliberately does not claim. It is not a claim that the paths agree
+on everything — they do not, and the invariant pass now says so. And refusals
+about the MECHANISM are excluded by name rather than by omission: entropy
+exhaustion, an unsupplied balance, a pool that cannot be summed, a config outside
+its domain are ANSWERS a projected stream may legitimately receive, not
+rejections of the stream.
+
+The space is enumerated rather than randomised because a seeded generator whose
+failures cannot be replayed from the source alone would breach this repository's
+deterministic-test contract. Non-vacuity is asserted rather than assumed: the
+case fails if fewer than fifty sources project, or if no projected stream carried
+a boundary, a non-KNOWN balance, or text at the bound — the guard that three
+cases on this work turned out to need. Mutation-verified by making the evaluator
+reject `GAPS_PRESENT`, a coverage the projection admits: the case fails naming
+that dimension and the reason code.
+
 **A convergence audit, because the round of five was itself a symptom.** Nine of
 the last ten findings have been one shape: a rule or a CLAIM fixed at one seam
 and left standing at its sibling. So before calling the implementation finished,
