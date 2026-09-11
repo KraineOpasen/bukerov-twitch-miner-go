@@ -169,12 +169,16 @@ const (
 	// projection now charges every supplied byte at its worst-case encoded
 	// width, so a source it admits cannot break the ceiling when encoded.
 	//
-	// The evaluator's shape gate still charges RAW length, and that asymmetry
-	// is safe in exactly one direction: the charged width is never less than
-	// the raw length, so a source the projection admitted is charged no more by
-	// the gate than by the projection, and the "projection-admitted is never
-	// refused for bytes" invariant survives. It also keeps the gate reading
-	// lengths rather than content, which is what makes it cheap on a forgery.
+	// The evaluator's shape gate applies the SAME charge and the same reserve.
+	// It compared RAW length for a while, and the asymmetry was argued to be
+	// safe in one direction — charged width is never below raw length, so a
+	// projection-admitted source is charged no more by the gate. That
+	// implication is true and it was not the whole question: it says nothing
+	// about what the gate ADMITS that the projection refuses, and a forged
+	// stream carrying 32 MiB of valid provenance passed the gate and every
+	// semantic invariant while the projection rejected the same source. Both
+	// sides now evaluate one condition, so the invariant holds by construction
+	// rather than by a margin.
 	MaxOrderedRulesAggregateBytes = 128 << 20
 )
 
