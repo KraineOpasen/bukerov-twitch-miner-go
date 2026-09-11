@@ -216,6 +216,13 @@ func orderedRulesEntropyDigest(d SuppliedDrawTrace) string {
 // about the consumed prefix are different things, and if this digest moved when
 // a post-boundary fact was appended, then "later facts cannot change an earlier
 // result" would be unprovable — the digest itself would be the counterexample.
+//
+// The declared INTERVAL is excluded for that reason and is the only mandatory
+// declaration that is: it is the source's extent, and appending a fact past the
+// boundary can legitimately widen it, so binding it would break the stability
+// above for precisely the appends the stability is about. The scope's coverage
+// detail and the admission's source references are optional elaborations rather
+// than declarations, and stay out with the rest of the optional text.
 // Compare [OrderedRulesStream.SelectionDigest] and
 // [OrderedRulesEvaluation.EntropyDigest], which DO cover the whole of their
 // subjects and are reported separately for exactly that contrast. See
@@ -231,6 +238,15 @@ func orderedRulesConsumedDigest(s OrderedRulesStream, cfg OrderedRulesConfig, d 
 	digestPart(h, s.Scope.Namespace)
 	digestPart(h, s.Scope.EpisodeID)
 	digestPart(h, s.Scope.AccountContext)
+	// The WARRANT as well as the claim it supports. AccountContext is the
+	// caller's assertion that the candidates and the calls came from one
+	// account; AssociationEvidence is what validateScope demands before that
+	// assertion is admitted at all — "a pool or session id does not prove an
+	// account". Binding the claim and not its warrant let two prefixes
+	// established under different evidence, one solid and one barely
+	// admissible, carry the SAME consumed-prefix binding, which is exactly the
+	// recombination these four digests exist to prevent.
+	digestPart(h, s.Scope.AssociationEvidence)
 	digestPart(h, s.Scope.SourceContractVersion)
 	// The declared coverage binds too. A prefix read from a source that admits
 	// it is missing its beginning is different evidence from the same prefix
@@ -239,6 +255,13 @@ func orderedRulesConsumedDigest(s OrderedRulesStream, cfg OrderedRulesConfig, d 
 	digestPart(h, string(s.Scope.Coverage))
 	digestPart(h, s.Admission.ManifestID)
 	digestPart(h, string(s.Admission.ViewKind))
+	// Population and order basis by the same rule as the warrant above: both
+	// are mandatory — validateAdmission refuses an admission that names
+	// neither — and both say what the prefix IS, not how much of it there was.
+	// The same rows drawn from a different population, or ordered on a
+	// different basis, are a different prefix wearing the same contents.
+	digestPart(h, s.Admission.Population)
+	digestPart(h, s.Admission.OrderBasis)
 
 	// The boundary bounded what could be read, so it is an input to the result.
 	// Its DroppedAtOrAfter count is not: that is a fact about candidates the

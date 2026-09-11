@@ -536,6 +536,32 @@ const orderedRulesTextCeiling = MaxOrderedRulesAggregateBytes - orderedRulesStru
 // whose encoded form breaks the declared ceiling.
 func chargedWidth(n int) int64 { return int64(n) * orderedRulesMaxJSONExpansion }
 
+// orderedRulesDroppedCandidateMinimumBytes is the least SOURCE text one removed
+// candidate can have cost the projection.
+//
+// A stream declaring DroppedAtOrAfter > 0 asserts that a source existed with
+// that many more candidates in it, and the projection charged every one of
+// them: the loop that validates and charges candidates runs BEFORE the cut, so
+// a candidate the boundary removes costs exactly what one it keeps costs. The
+// shape gate never sees that text — but it does not have to, because the
+// vocabulary the projection forces puts a floor under it.
+//
+// The floor, field by field, for the cheapest candidate ProjectOrderedRulesStream
+// will admit: source kind CHANNEL_UPDATE (14), since CALCULATE_SNAPSHOT is
+// longer; membership PROVEN (6), the only accepted value; outcome-vector
+// presence KNOWN (5), since MISSING and INVALID are 7; a balance declared
+// KNOWN (5) plus the single provenance byte checkPresence then demands (1),
+// which is cheaper than the 7-byte MISSING or INVALID that need none; and a
+// non-empty identity (1). Outcomes, candidate provenance and the outcomes
+// reason may all be absent. That is 32 bytes, charged at the usual width to
+// 192.
+//
+// It is a LOWER bound by construction, which is the direction that matters: a
+// gate charging less than the projection charged can only admit streams the
+// projection would also have admitted. See
+// TestOrderedRulesAClaimedRemovalIsChargedForTheSourceItImplies.
+const orderedRulesDroppedCandidateMinimumBytes = 32
+
 // suppliedTextBytes is the free text one supplied value contributes.
 func suppliedTextBytes(v SuppliedInt64) int64 {
 	return chargedWidth(len(v.Provenance) + len(v.Reason))

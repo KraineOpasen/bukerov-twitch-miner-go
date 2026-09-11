@@ -2543,3 +2543,323 @@ func TestOrderedRulesDuplicateOutcomeIdentityIsRejected(t *testing.T) {
 		t.Fatalf("two outcomes with equal points and distinct identities must project: %v", err)
 	}
 }
+
+// TestOrderedRulesTheConsumedPrefixBindsEveryMandatoryDeclaration closes the
+// source-identity block of the consumed-prefix digest.
+//
+// That block bound WHICH source the prefix came from, and it did so field by
+// field — which meant every mandatory declaration it happened to omit was a
+// difference the digest could not see. Three were omitted: the scope's
+// association evidence, and the admission's population and order basis. Two
+// sources declaring different accounts-are-the-same evidence, one solid and one
+// only just admissible, produced the same consumed-prefix binding, so a result
+// computed under one could be presented as a result computed under the other.
+// That is the recombination the four separate digests exist to prevent.
+//
+// Each case varies ONE declaration in the SOURCE and re-projects, rather than
+// editing a projected stream: a stripped field is refused by the invariant
+// pass, and a refusal carries no consumed digest at all, so "the digest moved"
+// would be satisfied by the empty string. The premise assertions below are what
+// keep that from happening silently.
+func TestOrderedRulesTheConsumedPrefixBindsEveryMandatoryDeclaration(t *testing.T) {
+	cs := []predictioneval.OrderedRulesCandidate{
+		orCandidate("c1", 10, orKnownBalance(1000), orOutcome("A", 4), orOutcome("B", 6)),
+	}
+	cfg := orConfig([]predictioneval.OrderedRule{
+		orRule(predictioneval.ComparatorLe, 40, 100, 0, 10)}, 95, 100, 0, 10)
+
+	base := predictioneval.EvaluateOrderedRules(orProject(t, cs, nil), cfg, orDraws())
+	if base.Status != predictioneval.StatusWouldAttempt || base.ConsumedInputDigest == "" {
+		t.Fatalf("premise: the intact input must evaluate and carry a consumed digest; got %q / %q",
+			base.Status, base.ConsumedInputDigest)
+	}
+
+	// Every mandatory scope and admission declaration that can be varied on its
+	// own. Three are deliberately absent, and each for a stated reason rather
+	// than because it was awkward:
+	//
+	//   - the scope's source contract version is pinned to
+	//     OrderedRulesStreamContractVersion, so no other value projects;
+	//   - the admission's view kind cannot move without also moving every
+	//     candidate's source kind, which the projection couples to it — it is
+	//     bound, and TestOrderedRulesDigestsBindTheMandatoryFieldDeclarations'
+	//     neighbours cover the coupling;
+	//   - the declared interval is bound in the whole-stream digest and
+	//     deliberately NOT here, because appending a fact past the boundary can
+	//     legitimately widen it and this digest must survive that append.
+	cases := []struct {
+		name  string
+		apply func(*predictioneval.OrderedRulesSource, *predictioneval.CommonAdmission)
+	}{
+		{"scope namespace", func(s *predictioneval.OrderedRulesSource, _ *predictioneval.CommonAdmission) {
+			s.Scope.Namespace = "a-different-namespace"
+		}},
+		{"scope episode id", func(s *predictioneval.OrderedRulesSource, _ *predictioneval.CommonAdmission) {
+			s.Scope.EpisodeID = "episode-2"
+		}},
+		{"scope account context", func(s *predictioneval.OrderedRulesSource, _ *predictioneval.CommonAdmission) {
+			s.Scope.AccountContext = "a-different-account-context"
+		}},
+		{"scope association evidence", func(s *predictioneval.OrderedRulesSource, _ *predictioneval.CommonAdmission) {
+			s.Scope.AssociationEvidence = "the pool id matched, which proves nothing about an account"
+		}},
+		{"scope coverage", func(s *predictioneval.OrderedRulesSource, _ *predictioneval.CommonAdmission) {
+			s.Scope.Coverage = predictioneval.CoverageTruncatedPrefix
+		}},
+		{"admission manifest id", func(_ *predictioneval.OrderedRulesSource, a *predictioneval.CommonAdmission) {
+			a.ManifestID = "acceptance-manifest-2"
+		}},
+		{"admission population", func(_ *predictioneval.OrderedRulesSource, a *predictioneval.CommonAdmission) {
+			a.Population = "every channel candidate, including the ones the fixture excluded"
+		}},
+		{"admission order basis", func(_ *predictioneval.OrderedRulesSource, a *predictioneval.CommonAdmission) {
+			a.OrderBasis = "arrival order at the collector, ascending"
+		}},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			src, adm := orSource(cs, nil), orAdmission()
+			tc.apply(&src, &adm)
+			stream, err := predictioneval.ProjectOrderedRulesStream(src, adm)
+			if err != nil {
+				t.Fatalf("the varied source must still project, or this case proves nothing: %v", err)
+			}
+			got := predictioneval.EvaluateOrderedRules(stream, cfg, orDraws())
+			// The premise, spelled out: this must be a real evaluation of a
+			// real prefix. Without it the comparison below passes on the empty
+			// digest a refusal leaves behind.
+			if got.Status != predictioneval.StatusWouldAttempt || got.ConsumedInputDigest == "" {
+				t.Fatalf("premise: the varied input must evaluate the same prefix; got %q / %q",
+					got.Status, got.ConsumedInputDigest)
+			}
+			if got.ConsumedInputDigest == base.ConsumedInputDigest {
+				t.Fatalf("changing the %s left the consumed-prefix digest unchanged, so a result "+
+					"computed over one source can be presented as a result computed over the other. "+
+					"The prefix is identical in both; the declaration under which it was read is not.",
+					tc.name)
+			}
+		})
+	}
+}
+
+// TestOrderedRulesAClaimedRemovalIsChargedForTheSourceItImplies pins the byte
+// mirror for the one thing the stream asserts but does not carry.
+//
+// A stream declaring DroppedAtOrAfter > 0 asserts a SOURCE with that many more
+// candidates in it, and the projection charged every one of them — its
+// validate-and-charge loop runs before the cut, so a removed candidate costs
+// exactly what a retained one costs. The gate charged the retained text and the
+// cutoff identity and then stopped, so a forgery could sit within 192 charged
+// bytes per claimed removal of the ceiling and pass a gate whose whole purpose
+// is to refuse what the projection refuses.
+//
+// The measurement is differential, and deliberately so. Searching for the
+// gate's boundary and then asserting at the boundary found proves nothing: the
+// search re-derives the boundary under whatever the code does. Two measurements
+// of the same code, differing only in the claimed removal count, cannot be
+// satisfied that way — if the claim is free, the boundary does not move at all.
+func TestOrderedRulesAClaimedRemovalIsChargedForTheSourceItImplies(t *testing.T) {
+	const (
+		nc      = predictioneval.MaxOrderedRulesCandidates / 2
+		no      = predictioneval.MaxOrderedRulesOutcomes
+		max     = predictioneval.MaxOrderedRulesIdentifierBytes
+		dropped = predictioneval.MaxOrderedRulesCandidates - nc
+		// The floor the gate must reserve per claimed removal, restated here
+		// from the projection's own vocabulary rather than imported: identity 1
+		// + CHANNEL_UPDATE 14 + PROVEN 6 + KNOWN 5 + a KNOWN balance's 5 + its
+		// one mandatory provenance byte. A test that read the constant it is
+		// checking would agree with any value the constant took.
+		floor = 1 + 14 + 6 + 5 + 5 + 1
+	)
+	buf := strings.Repeat("x", max)
+
+	// fill spreads exactly n raw bytes across the outcome text slots, so the
+	// search granularity is ONE byte — four thousand times finer than the
+	// reserve being measured, which is what keeps the reserve from hiding
+	// inside a rounding step.
+	fill := func(n int) []predictioneval.OrderedRulesCandidate {
+		take := func() string {
+			switch {
+			case n <= 0:
+				return ""
+			case n >= max:
+				n -= max
+				return buf
+			}
+			s := buf[:n]
+			n = 0
+			return s
+		}
+		cs := make([]predictioneval.OrderedRulesCandidate, 0, nc)
+		for i := 0; i < nc; i++ {
+			outs := make([]predictioneval.OrderedRulesOutcome, 0, no)
+			for j := 0; j < no; j++ {
+				outs = append(outs, predictioneval.OrderedRulesOutcome{
+					// Unique within the candidate by LENGTH, so the fixture
+					// spends no readable text on identities.
+					Identity: buf[:j+1],
+					Points: predictioneval.SuppliedInt64{
+						Presence:   predictioneval.SuppliedMissing,
+						Provenance: take(),
+						Reason:     take(),
+					},
+				})
+			}
+			cs = append(cs, predictioneval.OrderedRulesCandidate{
+				Identity: "c" + itoaTest(i), Position: int64(i + 1), HasPosition: true,
+				SourceKind:        predictioneval.SourceKindChannelUpdate,
+				EpisodeMembership: predictioneval.MembershipProven,
+				OutcomesPresence:  predictioneval.SuppliedKnown,
+				Outcomes:          outs,
+				Balance:           predictioneval.SuppliedInt64{Presence: predictioneval.SuppliedMissing},
+			})
+		}
+		return cs
+	}
+
+	// One genuinely projected stream supplies the boundary, so the forgery
+	// below differs from a real stream in exactly one field: the claimed count.
+	forged := orProject(t, []predictioneval.OrderedRulesCandidate{
+		orCandidate("keep", 1, orMissingBalance())},
+		[]predictioneval.OrderedRulesIntervention{
+			orIntervention("call-1", 5000, predictioneval.InterventionAutoCallStarted,
+				predictioneval.RelevanceProven, "boundary"),
+		})
+	if !forged.Cutoff.Established {
+		t.Fatalf("premise: the fixture must establish a boundary to claim removals against")
+	}
+
+	gateMax := func(claimed int) int {
+		t.Helper()
+		over := func(n int) bool {
+			st := forged
+			st.Candidates = fill(n)
+			st.Cutoff.DroppedAtOrAfter = claimed
+			return predictioneval.EvaluateOrderedRules(st, orAlwaysAdmitConfig(), orDraws()).Reason ==
+				predictioneval.ReasonStreamBytesOverBound
+		}
+		lo, hi := 0, nc*no*2*max
+		if over(lo) {
+			t.Fatalf("premise: an empty charged payload must not be over the byte bound")
+		}
+		if !over(hi) {
+			t.Fatalf("premise: %d bytes must be over the byte bound, or the search has no boundary", hi)
+		}
+		for lo < hi {
+			mid := (lo + hi + 1) / 2
+			if over(mid) {
+				hi = mid - 1
+			} else {
+				lo = mid
+			}
+		}
+		return lo
+	}
+
+	free, claimed := gateMax(0), gateMax(dropped)
+	t.Logf("gate admits %d raw bytes claiming no removals, %d claiming %d (difference %d, floor %d)",
+		free, claimed, dropped, free-claimed, dropped*floor)
+	if claimed <= 0 {
+		t.Fatalf("premise: the measurement bottomed out at %d, so the difference is clipped", claimed)
+	}
+	if free-claimed < dropped*floor {
+		t.Fatalf("claiming %d removals moved the gate's limit by %d bytes, not the %d those removals "+
+			"must have cost the projection. A stream can assert a source the projection would have "+
+			"refused for bytes and still be read: the claim is free.",
+			dropped, free-claimed, dropped*floor)
+	}
+
+	// The reserve is arithmetic on a number the caller wrote, and it is applied
+	// BEFORE the invariant pass that bounds that number — so the two values
+	// that would turn the reserve into a discount have to be refused here, not
+	// there. A negative count subtracts outright; a count near the integer
+	// maximum overflows the multiplication into a negative one.
+	t.Run("an impossible removal count never buys budget", func(t *testing.T) {
+		const maxInt = int(^uint(0) >> 1)
+		over := func(claimed int) bool {
+			st := forged
+			st.Candidates = fill(free + 1)
+			st.Cutoff.DroppedAtOrAfter = claimed
+			return predictioneval.EvaluateOrderedRules(st, orAlwaysAdmitConfig(), orDraws()).Reason ==
+				predictioneval.ReasonStreamBytesOverBound
+		}
+		if !over(0) {
+			t.Fatalf("premise: %d bytes must be over the byte bound with nothing claimed", free+1)
+		}
+		for _, claimed := range []int{-1, -1 << 40, maxInt, maxInt - 1, maxInt/floor + 1} {
+			if !over(claimed) {
+				t.Fatalf("a stream claiming %d removals was admitted at %d bytes, which the same "+
+					"stream claiming none is refused for. The claim bought budget instead of "+
+					"spending it.", claimed, free+1)
+			}
+		}
+	})
+
+	// The other direction, which is the one an over-large reserve breaks: the
+	// gate must never refuse a stream the projection ADMITTED. The removals
+	// here are real and are built at exactly the floor, so a reserve one byte
+	// too high refuses the projection's own maximum.
+	t.Run("a stream the projection admitted is never refused for the removals it really made", func(t *testing.T) {
+		const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+		ins := []predictioneval.OrderedRulesIntervention{
+			orIntervention("call-1", 5000, predictioneval.InterventionAutoCallStarted,
+				predictioneval.RelevanceProven, "boundary"),
+		}
+		// The cheapest candidate the projection will admit, repeated: a
+		// one-byte identity, the shorter source kind, the only membership, the
+		// shortest outcome-vector presence, and a KNOWN balance with the single
+		// provenance byte checkPresence demands. No outcomes, no provenance, no
+		// outcomes reason.
+		build := func(n int) (predictioneval.OrderedRulesStream, error) {
+			cs := fill(n)
+			for i := 0; i < dropped; i++ {
+				cs = append(cs, predictioneval.OrderedRulesCandidate{
+					Identity: alphabet[i : i+1], Position: int64(5001 + i), HasPosition: true,
+					SourceKind:        predictioneval.SourceKindChannelUpdate,
+					EpisodeMembership: predictioneval.MembershipProven,
+					OutcomesPresence:  predictioneval.SuppliedKnown,
+					Balance: predictioneval.SuppliedInt64{
+						Presence: predictioneval.SuppliedKnown, Value: 1,
+						Provenance: "p", HasAvailableAtPosition: true,
+					},
+				})
+			}
+			return predictioneval.ProjectOrderedRulesStream(orSource(cs, ins), orAdmission())
+		}
+
+		lo, hi := 0, nc*no*2*max
+		if _, err := build(lo); err != nil {
+			t.Fatalf("premise: the smallest source must project: %v", err)
+		}
+		if _, err := build(hi); err == nil {
+			t.Fatalf("premise: %d bytes must be past the projection's budget", hi)
+		}
+		for lo < hi {
+			mid := (lo + hi + 1) / 2
+			if _, err := build(mid); err != nil {
+				hi = mid - 1
+			} else {
+				lo = mid
+			}
+		}
+		stream, err := build(lo)
+		if err != nil {
+			t.Fatalf("the widest admitted source must project: %v", err)
+		}
+		if stream.Cutoff.DroppedAtOrAfter != dropped {
+			t.Fatalf("premise: the boundary must really remove %d candidates; it removed %d",
+				dropped, stream.Cutoff.DroppedAtOrAfter)
+		}
+		t.Logf("projection admits %d raw bytes of retained text alongside %d real removals",
+			lo, stream.Cutoff.DroppedAtOrAfter)
+
+		if ev := predictioneval.EvaluateOrderedRules(stream, orAlwaysAdmitConfig(),
+			orDraws()); ev.Reason == predictioneval.ReasonStreamBytesOverBound {
+			t.Fatalf("the gate refused a stream ProjectOrderedRulesStream ADMITTED, at that "+
+				"projection's own maximum. The reserve per removal is larger than the %d bytes the "+
+				"cheapest admissible candidate actually costs, which is the invariant backwards.",
+				floor)
+		}
+	})
+}

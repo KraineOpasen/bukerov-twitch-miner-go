@@ -351,6 +351,26 @@ func orderedRulesInputBudget(s OrderedRulesStream, cfg OrderedRulesConfig,
 	// identity it carries, and the projection charged every intervention.
 	b.boundOnly(string(s.Cutoff.Kind), string(s.Cutoff.Basis))
 	b.bound(s.Cutoff.Identity)
+	// The REMOVALS are charged at their floor, for the same reason the cutoff
+	// identity above is charged: the stream asserts a source, and the
+	// projection charged that source in full. Every removed candidate cost it
+	// at least orderedRulesDroppedCandidateMinimumBytes, so leaving the claim
+	// free let a forgery sit within 192 charged bytes per claimed removal of
+	// the ceiling and pass a gate whose entire purpose is to refuse what the
+	// projection refuses.
+	//
+	// Clamped, and read only when positive, because this runs BEFORE
+	// orderedRulesCutoffImpossible: at this point the count is whatever the
+	// caller wrote. A negative one would otherwise BUY budget, and a count near
+	// the integer maximum would overflow the multiplication into one. Clamping
+	// only ever lowers the charge, and a stream claiming more removals than the
+	// candidate ceiling is refused by the invariant pass regardless.
+	if dropped := s.Cutoff.DroppedAtOrAfter; dropped > 0 {
+		if dropped > MaxOrderedRulesCandidates {
+			dropped = MaxOrderedRulesCandidates
+		}
+		b.bytes += int64(dropped) * orderedRulesDroppedCandidateMinimumBytes
+	}
 	b.boundOnly(s.Qualifications...)
 	for i := range s.Candidates {
 		c := &s.Candidates[i]

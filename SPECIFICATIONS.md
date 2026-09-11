@@ -3334,6 +3334,26 @@ had at least the one intervention whose identity it names. Charging it stays
 inside the projection's own total, since the projection charged every
 intervention, so the mirror tightens without the invariant moving.
 
+The boundary's REMOVAL COUNT is the same argument one step further. A stream
+declaring that the boundary removed candidates asserts a source holding that
+many more of them, and the projection charged every one: its validate-and-charge
+loop runs before the cut, so a removed candidate cost it exactly what a retained
+one cost. The ingest gate cannot see that text, but it does not need to, because
+the vocabulary the projection forces puts a floor under it — the cheapest
+candidate it will admit spends 32 bytes on a one-byte identity, the shorter
+source kind, the only accepted membership, the shortest outcome-vector presence
+and a KNOWN balance with the single provenance byte that then becomes mandatory,
+which is 192 charged. Leaving the claim free let a forgery sit within that much
+per claimed removal of the ceiling and pass a gate whose whole purpose is to
+refuse what the projection refuses. The floor is a LOWER bound by construction,
+which is the direction that keeps the mirror one-sided: charging less than the
+projection charged can only admit streams it would also have admitted. The count
+is read only when positive and is clamped to the candidate ceiling before the
+multiplication, because this gate runs ahead of the invariant pass that bounds
+it — unclamped, a negative count would subtract from the budget and a count near
+the integer maximum would overflow into one, so the reserve would become a
+discount.
+
 Two version comparisons — the stream's contract version and the entropy
 semantics version — are decided BEFORE the whole-input digests, for the reason
 the gate exists at all. Each is one string against a constant and each settles
@@ -3486,8 +3506,19 @@ the caller's identifier lengths at all. Four domain-separated digests bind a res
 stream, the raw config, the whole supplied entropy, and — separately — only the
 prefix actually consumed. That last one deliberately excludes metadata about the
 full supplied set, so that appending facts beyond the boundary provably cannot
-move it. Like the baseline's, these are unkeyed hashes over supplied data: they
-prevent recombination and authenticate nothing.
+move it. What it must NOT exclude is any mandatory declaration the source could
+not exist without, and for a while it excluded three of them: the scope's
+association evidence and the admission's population and order basis. Binding the
+account context without the association evidence bound the claim and not its
+warrant, so two prefixes read under different evidence — one solid, one only
+just admissible — carried the same consumed-prefix binding, and a result
+computed under either could be presented as a result computed under the other.
+That is the recombination these four exist to prevent. The declared INTERVAL is
+the one mandatory declaration still excluded, and deliberately: it is the
+source's extent, and appending a fact past the boundary can legitimately widen
+it, so binding it would break the stability the digest is for. Like the
+baseline's, these are unkeyed hashes over supplied data: they prevent
+recombination and authenticate nothing.
 
 **What this is not.** It is NOT a faithful replay of the donor's full runtime
 policy, and no result may be described as one. The donor branches on lock/end
