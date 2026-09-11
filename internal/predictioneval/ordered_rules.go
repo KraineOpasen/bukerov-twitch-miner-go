@@ -339,8 +339,25 @@ func orderedRulesCutoffImpossible(s OrderedRulesStream) bool {
 	// The projection takes the boundary FROM an intervention, and refuses an
 	// intervention outside the declared interval, so a boundary outside it
 	// could not have come from one.
-	return checkIdentifier(c.Identity, "cutoff identity") != nil ||
-		c.Position < s.Scope.IntervalFromPosition || c.Position > s.Scope.IntervalToPosition
+	if checkIdentifier(c.Identity, "cutoff identity") != nil ||
+		c.Position < s.Scope.IntervalFromPosition || c.Position > s.Scope.IntervalToPosition {
+		return true
+	}
+	// Removals are also bounded by the positions that EXIST at or after the
+	// boundary. Causal positions are strictly increasing integers inside an
+	// inclusive interval, so a boundary sitting on the interval's last position
+	// leaves exactly one removable position however many candidates the source
+	// held — and a claim of two describes a source that cannot exist.
+	//
+	// The span is computed unsigned. Position <= IntervalToPosition is settled
+	// above, and for int64 a <= b the unsigned difference is exactly b-a even
+	// where b-a overflows a signed int64, so an interval spanning the whole
+	// range cannot wrap this into a spurious refusal.
+	if c.DroppedAtOrAfter > 0 {
+		span := uint64(s.Scope.IntervalToPosition) - uint64(c.Position)
+		return span < uint64(c.DroppedAtOrAfter-1)
+	}
+	return false
 }
 
 // orderedRulesQualificationsNotDerived reports qualifications that are not

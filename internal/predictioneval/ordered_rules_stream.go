@@ -84,6 +84,23 @@ const (
 // inputs and have no field here: a call that FAILED is still a boundary,
 // because the world it acted on is the one that continued.
 func ProjectOrderedRulesStream(source OrderedRulesSource, admission CommonAdmission) (OrderedRulesStream, error) {
+	// LENGTH BEFORE MEANING, for every value that can reach an error formatter.
+	//
+	// The validators below quote the value they reject, and strconv.Quote scans
+	// the whole string and allocates an expanded copy. A vocabulary field is a
+	// closed set of short words, so an enormous one is not a near-miss: it is
+	// an input whose only effect is the cost of refusing it. Measured before
+	// this gate, a 64 MiB contract version took a second to refuse and built a
+	// 67 MB error message — the refusal was the denial of service.
+	if err := checkFreeText(source.Scope.SourceContractVersion, "scope source contract version"); err != nil {
+		return OrderedRulesStream{}, err
+	}
+	if err := checkFreeText(string(source.Scope.Coverage), "scope coverage"); err != nil {
+		return OrderedRulesStream{}, err
+	}
+	if err := checkFreeText(string(admission.ViewKind), "admission view kind"); err != nil {
+		return OrderedRulesStream{}, err
+	}
 	if err := validateScope(source.Scope); err != nil {
 		return OrderedRulesStream{}, err
 	}
@@ -107,11 +124,13 @@ func ProjectOrderedRulesStream(source OrderedRulesSource, admission CommonAdmiss
 	// skipped them would bound the wrong thing.
 	bytes := int64(len(source.Scope.Namespace) + len(source.Scope.EpisodeID) +
 		len(source.Scope.AccountContext) + len(source.Scope.AssociationEvidence) +
-		len(source.Scope.CoverageDetail) + len(source.Scope.SourceContractVersion))
+		len(source.Scope.CoverageDetail) + len(source.Scope.SourceContractVersion) +
+		len(source.Scope.Coverage))
 	if err := checkFreeText(source.Scope.CoverageDetail, "scope coverage detail"); err != nil {
 		return OrderedRulesStream{}, err
 	}
-	bytes += int64(len(admission.ManifestID) + len(admission.Population) + len(admission.OrderBasis))
+	bytes += int64(len(admission.ManifestID) + len(admission.Population) + len(admission.OrderBasis) +
+		len(admission.ViewKind))
 	if len(admission.SourceReferences) > MaxOrderedRulesSourceReferences {
 		return OrderedRulesStream{}, errors.Join(ErrOrderedRulesOverBound,
 			errors.New("predictioneval: "+strconv.Itoa(len(admission.SourceReferences))+
@@ -163,6 +182,14 @@ func ProjectOrderedRulesStream(source OrderedRulesSource, admission CommonAdmiss
 				errors.New("predictioneval: "+where+" at position "+strconv.FormatInt(c.Position, 10)+
 					" lies outside the declared interval"))
 		}
+		// Same rule as above, for the fields the checks below quote.
+		for _, v := range [...]string{string(c.SourceKind), string(c.EpisodeMembership),
+			string(c.OutcomesPresence), string(c.Balance.Presence)} {
+			if err := checkFreeText(v, where+" vocabulary"); err != nil {
+				return OrderedRulesStream{}, err
+			}
+			bytes += int64(len(v))
+		}
 		if c.EpisodeMembership != MembershipProven {
 			return OrderedRulesStream{}, errors.Join(ErrOrderedRulesMembershipUnproven,
 				errors.New("predictioneval: "+where+" declares membership "+strconv.Quote(string(c.EpisodeMembership))+
@@ -211,10 +238,13 @@ func ProjectOrderedRulesStream(source OrderedRulesSource, admission CommonAdmiss
 			if err := checkIdentifier(o.Identity, ow+" identity"); err != nil {
 				return OrderedRulesStream{}, err
 			}
+			if err := checkFreeText(string(o.Points.Presence), ow+" points vocabulary"); err != nil {
+				return OrderedRulesStream{}, err
+			}
 			if err := checkPresence(o.Points, ow+" points", c.Position); err != nil {
 				return OrderedRulesStream{}, err
 			}
-			bytes += int64(len(o.Identity)) + suppliedTextBytes(o.Points)
+			bytes += int64(len(o.Identity)+len(o.Points.Presence)) + suppliedTextBytes(o.Points)
 		}
 		if err := checkPresence(c.Balance, where+" balance", c.Position); err != nil {
 			return OrderedRulesStream{}, err
@@ -294,6 +324,11 @@ func establishCutoff(source OrderedRulesSource) (OrderedRulesCutoff, error) {
 				errors.New("predictioneval: "+where+" repeats identity "+strconv.Quote(in.Identity)))
 		}
 		seen[in.Identity] = true
+		for _, v := range [...]string{string(in.Kind), string(in.Relevance)} {
+			if err := checkFreeText(v, where+" vocabulary"); err != nil {
+				return OrderedRulesCutoff{}, err
+			}
+		}
 		switch in.Kind {
 		case InterventionAutoCallStarted, InterventionManualCallStarted:
 		default:

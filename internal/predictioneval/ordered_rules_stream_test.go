@@ -1066,6 +1066,22 @@ func TestOrderedRulesAMatchingDigestIsNotProofOfProjection(t *testing.T) {
 			st.Cutoff.DroppedAtOrAfter = -1
 			return st
 		}},
+		{"more removed than positions exist at or after the boundary", func(t *testing.T) predictioneval.OrderedRulesStream {
+			// The boundary sits on the interval's LAST position, so exactly one
+			// position is removable however large the source was. Both other
+			// removal bounds pass here: two is far under the candidate ceiling.
+			st := orProject(t, []predictioneval.OrderedRulesCandidate{
+				orCandidate("c1", 10, orKnownBalance(1000), orOutcome("A", 4), orOutcome("B", 6)),
+				orCandidate("c2", 10000, orKnownBalance(1000), orOutcome("A", 4), orOutcome("B", 6)),
+			}, []predictioneval.OrderedRulesIntervention{
+				orIntervention("call-1", 10000, predictioneval.InterventionAutoCallStarted,
+					predictioneval.RelevanceProven, "a real call")})
+			if st.Cutoff.Position != st.Scope.IntervalToPosition {
+				t.Fatalf("premise: the boundary must sit on the last position; %d vs %d",
+					st.Cutoff.Position, st.Scope.IntervalToPosition)
+			}
+			return orRewriteRemovalCount(t, st, 2)
+		}},
 		{"more removed than any admissible source could hold", func(t *testing.T) predictioneval.OrderedRulesStream {
 			return orRewriteRemovalCount(t, cut(t), predictioneval.MaxOrderedRulesCandidates+1)
 		}},
@@ -1143,6 +1159,80 @@ func TestOrderedRulesAMatchingDigestIsNotProofOfProjection(t *testing.T) {
 				ev.Status, ev.Reason)
 		}
 	})
+}
+
+// TestOrderedRulesVocabularyIsBoundedBeforeItIsQuoted pins length before
+// meaning on every value that can reach an error formatter.
+//
+// The vocabulary checks reject by QUOTING the value they refuse, and
+// strconv.Quote scans the whole string and allocates an expanded copy. A
+// vocabulary field is a closed set of short words, so an enormous one is not a
+// near-miss — it is an input whose only effect is the cost of refusing it.
+// Measured before the gate, a 64 MiB contract version took a second to refuse
+// and produced a 67 MB error message: the refusal was the denial of service.
+//
+// The assertion is that the message does not grow with the input, which is the
+// property that matters and is deterministic. It needs no large allocation to
+// hold: a value one byte past the per-string bound already distinguishes a
+// gate from a quote.
+func TestOrderedRulesVocabularyIsBoundedBeforeItIsQuoted(t *testing.T) {
+	big := strings.Repeat("x", predictioneval.MaxOrderedRulesIdentifierBytes+1)
+
+	for _, tc := range []struct {
+		name   string
+		break_ func(src *predictioneval.OrderedRulesSource, adm *predictioneval.CommonAdmission)
+	}{
+		{"scope contract version", func(src *predictioneval.OrderedRulesSource, _ *predictioneval.CommonAdmission) {
+			src.Scope.SourceContractVersion = big
+		}},
+		{"scope coverage", func(src *predictioneval.OrderedRulesSource, _ *predictioneval.CommonAdmission) {
+			src.Scope.Coverage = predictioneval.OrderedRulesCoverage(big)
+		}},
+		{"admission view kind", func(_ *predictioneval.OrderedRulesSource, adm *predictioneval.CommonAdmission) {
+			adm.ViewKind = predictioneval.OrderedRulesViewKind(big)
+		}},
+		{"candidate source kind", func(src *predictioneval.OrderedRulesSource, _ *predictioneval.CommonAdmission) {
+			src.Candidates[0].SourceKind = predictioneval.OrderedRulesSourceKind(big)
+		}},
+		{"candidate membership", func(src *predictioneval.OrderedRulesSource, _ *predictioneval.CommonAdmission) {
+			src.Candidates[0].EpisodeMembership = predictioneval.OrderedRulesMembership(big)
+		}},
+		{"candidate outcome-vector presence", func(src *predictioneval.OrderedRulesSource, _ *predictioneval.CommonAdmission) {
+			src.Candidates[0].OutcomesPresence = predictioneval.SuppliedPresence(big)
+		}},
+		{"balance presence", func(src *predictioneval.OrderedRulesSource, _ *predictioneval.CommonAdmission) {
+			src.Candidates[0].Balance.Presence = predictioneval.SuppliedPresence(big)
+		}},
+		{"outcome points presence", func(src *predictioneval.OrderedRulesSource, _ *predictioneval.CommonAdmission) {
+			src.Candidates[0].Outcomes[0].Points.Presence = predictioneval.SuppliedPresence(big)
+		}},
+		{"intervention kind", func(src *predictioneval.OrderedRulesSource, _ *predictioneval.CommonAdmission) {
+			src.Interventions = []predictioneval.OrderedRulesIntervention{
+				orIntervention("call-1", 20, predictioneval.OrderedRulesInterventionKind(big),
+					predictioneval.RelevanceProven, "a real call")}
+		}},
+		{"intervention relevance", func(src *predictioneval.OrderedRulesSource, _ *predictioneval.CommonAdmission) {
+			src.Interventions = []predictioneval.OrderedRulesIntervention{
+				orIntervention("call-1", 20, predictioneval.InterventionAutoCallStarted,
+					predictioneval.OrderedRulesRelevance(big), "a real call")}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			src := orSource([]predictioneval.OrderedRulesCandidate{
+				orCandidate("c1", 10, orKnownBalance(1000), orOutcome("A", 4), orOutcome("B", 6))}, nil)
+			adm := orAdmission()
+			tc.break_(&src, &adm)
+
+			_, err := predictioneval.ProjectOrderedRulesStream(src, adm)
+			if !errors.Is(err, predictioneval.ErrOrderedRulesOverBound) {
+				t.Fatalf("got %v, want an over-bound refusal before anything quotes the value", err)
+			}
+			if len(err.Error()) >= len(big) {
+				t.Fatalf("the refusal message is %d bytes for a %d-byte input, so it grew WITH the "+
+					"input — the value reached a formatter", len(err.Error()), len(big))
+			}
+		})
+	}
 }
 
 // TestOrderedRulesUnrecoverableOutcomeVectorIsNotTheDonorsDecline pins the
