@@ -541,12 +541,23 @@ func EvaluateOrderedRules(stream OrderedRulesStream, rules OrderedRulesConfig, d
 	// codes below take precedence over the contract and digest mismatches — an
 	// input too large to read cannot be checked for anything else.
 	if reason := orderedRulesInputShapeReason(stream, rules, draws); reason != "" {
+		// The Cutoff is deliberately ABSENT here, and its absence is the same
+		// guarantee as the missing digest rather than a separate one: a refusal
+		// that declined to read the input re-exports none of it.
+		//
+		// It is also the difference between refusing cheaply and only APPEARING
+		// to. The gate stops at the FIRST condition that trips, and most of
+		// them never look at the cutoff — so its three text fields can reach
+		// this point having passed no per-string bound at all. Carrying them
+		// out would move the cost from the gate to whoever encodes the result,
+		// which the JSON tags say is the intended use: a refusal decided in
+		// O(1) would still write a gigabyte of supplied text, six-fold once
+		// JSON escaping is counted.
 		return OrderedRulesEvaluation{
 			EvidenceLabel:           OrderedRulesEvidenceLabel,
 			ModelVersion:            OrderedRulesModelVersion,
 			DonorRevision:           OrderedRulesDonorRevision,
 			EntropySemanticsVersion: OrderedRulesEntropySemanticsVersion,
-			Cutoff:                  stream.Cutoff,
 			Participation:           ParticipationNotAdmitted,
 			Stake:                   SuppliedUint32{Presence: SuppliedMissing, Reason: ReasonBalanceNotEvaluated},
 			Status:                  StatusRefused,
@@ -692,8 +703,7 @@ func EvaluateOrderedRules(stream OrderedRulesStream, rules OrderedRulesConfig, d
 					// A comparator that did not match costs NO entropy. The
 					// donor's `does_match && rng.gen_bool(..)` short-circuits,
 					// so the draw is never reached.
-					out.Trace = append(out.Trace, traceEntry(TraceStepRuleComparator, ci, c, oi,
-						c.Outcomes[oi].Identity, shareBits, ri, false, false, false, -1, 0, false))
+					out.Trace = append(out.Trace, traceEntry(TraceStepRuleComparator, ci, c, oi, shareBits, ri, false, false, false, -1, 0, false))
 					continue
 				}
 
@@ -722,8 +732,7 @@ func EvaluateOrderedRules(stream OrderedRulesStream, rules OrderedRulesConfig, d
 						// The draw was REQUIRED and the trace is spent. This is
 						// an explicit unknown, never a default draw and never a
 						// skip: guessing here would fabricate an opportunity.
-						out.Trace = append(out.Trace, traceEntry(TraceStepRuleDraw, ci, c, oi,
-							c.Outcomes[oi].Identity, shareBits, ri, true, false, false, -1, 0, false))
+						out.Trace = append(out.Trace, traceEntry(TraceStepRuleDraw, ci, c, oi, shareBits, ri, true, false, false, -1, 0, false))
 						visit.Verdict = CandidateUnknownInput
 						visit.RawWordsConsumedHere = cursor - wordsBefore
 						out.Visits = append(out.Visits, visit)
@@ -742,8 +751,7 @@ func EvaluateOrderedRules(stream OrderedRulesStream, rules OrderedRulesConfig, d
 				}
 				out.BernoulliEvaluations++
 				out.RawWordsConsumed = cursor
-				out.Trace = append(out.Trace, traceEntry(TraceStepRuleDraw, ci, c, oi,
-					c.Outcomes[oi].Identity, shareBits, ri, true, true, success, rawIndex, rawValue, success))
+				out.Trace = append(out.Trace, traceEntry(TraceStepRuleDraw, ci, c, oi, shareBits, ri, true, true, success, rawIndex, rawValue, success))
 				if success {
 					admittedRule = ri
 					break
@@ -772,8 +780,7 @@ func EvaluateOrderedRules(stream OrderedRulesStream, rules OrderedRulesConfig, d
 			}
 			// Inclusive on both ends, and never reordered when min > max.
 			inDefault := share >= cfg.defMin && share <= cfg.defMax
-			out.Trace = append(out.Trace, traceEntry(TraceStepDefaultBounds, ci, c, oi,
-				c.Outcomes[oi].Identity, shareBits, -1, inDefault, false, false, -1, 0, inDefault))
+			out.Trace = append(out.Trace, traceEntry(TraceStepDefaultBounds, ci, c, oi, shareBits, -1, inDefault, false, false, -1, 0, inDefault))
 			if inDefault {
 				// The default consumes NO new draw. Words already spent by
 				// failed detailed rules on this outcome stay spent.
@@ -861,17 +868,23 @@ func balanceReason(b SuppliedInt64, fallback string) string {
 	return fallback
 }
 
+// traceEntry records one evaluated slot.
+//
+// It takes no identifier: ci and oi address stream.Candidates[ci].Outcomes[oi]
+// in the very stream this traversal was handed, and StreamDigest binds which
+// stream that is, so repeating two 4 KiB strings on each of up to
+// MaxOrderedRulesWork entries would add nothing an index does not already say
+// while making the encoded trace scale with the caller's identifier lengths.
+// See TestOrderedRulesRetainedTraceStaysInsideTheBudgetWhenSerialized.
 func traceEntry(step OrderedRulesTraceStep, ci int, c *OrderedRulesCandidate, oi int,
-	outcomeID string, shareBits uint64, ruleIndex int,
+	shareBits uint64, ruleIndex int,
 	comparatorMatched, bernoulliEvaluated, bernoulliResult bool,
 	rawIndex int, rawValue uint64, admitted bool) OrderedRulesTraceEntry {
 	return OrderedRulesTraceEntry{
 		Step:               step,
 		CandidateIndex:     ci,
-		CandidateIdentity:  c.Identity,
 		CandidatePosition:  c.Position,
 		OutcomeIndex:       oi,
-		OutcomeIdentity:    outcomeID,
 		ShareBits:          shareBits,
 		RuleIndex:          ruleIndex,
 		ComparatorMatched:  comparatorMatched,

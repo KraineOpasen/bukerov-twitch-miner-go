@@ -137,15 +137,24 @@ const (
 	//
 	// It is 2^18 rather than the 2^20 an offline slot ceiling alone would
 	// allow, and the difference is not arbitrary: EVERY evaluated slot also
-	// appends one [OrderedRulesTraceEntry], which is 120 bytes, so the slot
-	// ceiling and the trace length are the same quantity measured twice. At
-	// 2^20 a single call would retain 120 MiB of trace — plus the discarded
-	// arrays append leaves behind on the way there — from an input sitting
-	// inside every other declared bound and consuming no entropy at all. That
-	// is exactly the unbounded allocation these limits exist to prevent, so
-	// the ceiling is narrowed until the trace fits the budget below with room
-	// for append's doubling. Narrowing a bound is always allowed; widening one
-	// past what [MaxOrderedRulesAggregateBytes] permits is not.
+	// appends one [OrderedRulesTraceEntry], so the slot ceiling and the trace
+	// length are the same quantity measured twice — and the trace has to fit
+	// the budget below under BOTH measures, because the type carries JSON tags
+	// and is meant to be serialized.
+	//
+	// In memory an entry is 88 bytes, so 2^18 retains 22 MiB; append grows by
+	// doubling, so the peak holds the new array beside the old one it is
+	// copying from. Encoded it is about 260 bytes — a figure that does NOT
+	// move with the caller's identifier lengths, because the entry addresses
+	// its candidate and outcome by index instead of repeating their names —
+	// so 2^18 encodes to 65 MiB. At 2^20 the same two measures give 88 MiB
+	// retained, past the budget once append's margin is counted, and 260 MiB
+	// encoded, past it outright: all from an input sitting inside every other
+	// declared bound and consuming no entropy at all. That is exactly the
+	// unbounded allocation these limits exist to prevent.
+	//
+	// Narrowing a bound is always allowed; widening one past what
+	// [MaxOrderedRulesAggregateBytes] permits is not.
 	MaxOrderedRulesWork = 1 << 18
 	// MaxOrderedRulesAggregateBytes bounds the supplied identifier bytes of one
 	// source, matching the reader's existing aggregate ceiling rather than
@@ -732,12 +741,18 @@ const (
 // footprint is the indices plus one header per entry — the aggregate identifier
 // bytes are counted once, at projection, and not again per rule.
 type OrderedRulesTraceEntry struct {
-	Step              OrderedRulesTraceStep `json:"step"`
-	CandidateIndex    int                   `json:"candidateIndex"`
-	CandidateIdentity string                `json:"candidateIdentity"`
-	CandidatePosition int64                 `json:"candidatePosition"`
-	OutcomeIndex      int                   `json:"outcomeIndex"`
-	OutcomeIdentity   string                `json:"outcomeIdentity"`
+	Step OrderedRulesTraceStep `json:"step"`
+	// CandidateIndex and OutcomeIndex ADDRESS the evaluated slot rather than
+	// naming it: they index stream.Candidates[ci].Outcomes[oi] in the stream
+	// this result was computed from, which [OrderedRulesEvaluation.StreamDigest]
+	// binds. The identities are therefore recoverable without being repeated,
+	// and repeating them is not free — a maximal traversal retains
+	// [MaxOrderedRulesWork] entries, so two 4 KiB identifiers per entry encode
+	// to 2 GiB of JSON from an input inside every other declared bound, before
+	// escaping. An index costs the same however long the identifier is.
+	CandidateIndex    int   `json:"candidateIndex"`
+	CandidatePosition int64 `json:"candidatePosition"`
+	OutcomeIndex      int   `json:"outcomeIndex"`
 	// ShareBits is math.Float64bits of the pool share, for the same reason as
 	// [OrderedRulesSelection.ShareBits].
 	ShareBits uint64 `json:"shareBits"`

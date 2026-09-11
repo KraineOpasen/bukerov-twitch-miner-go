@@ -3274,7 +3274,15 @@ well inside a 128 MiB budget while being a value the projection refuses outright
 A refusal from that gate carries no whole-input digest: the model declined to
 read the input, so it attests to nothing about it, and for the same reason the
 gate outranks the contract and digest mismatches — an input too large to read
-cannot be checked for anything else.
+cannot be checked for anything else. It re-exports none of the supplied TEXT
+either, and that is the same rule rather than a second one. The gate stops at
+the FIRST condition that trips and most of them never look at the boundary, so
+the cutoff's three text fields can reach the refusal having passed no per-string
+bound at all; carrying them back out would move the cost from the gate to
+whoever encodes the result — which the JSON tags say is the intended use — and a
+refusal decided in constant time would still write a gigabyte of supplied text,
+six-fold once JSON escaping is counted. Refusing cheaply and RETURNING cheaply
+are one guarantee, not two.
 
 The selection digest detects CHANGE, never ORIGIN, and the difference decides
 what has to happen on ingest. The digest is unkeyed, deterministic and computed
@@ -3374,7 +3382,15 @@ whole, because a silently shortened candidate list changes which opportunities
 exist. The slot ceiling is the tightest of them for a reason: every evaluated
 slot also appends one trace entry, so the ceiling and the retained trace are the
 same quantity, and it is set where that trace still fits the declared 128 MiB
-aggregate budget rather than where a slot count alone would allow. Four domain-separated digests bind a result to its inputs: the whole
+aggregate budget rather than where a slot count alone would allow. That budget
+binds under BOTH measures, because the result carries JSON tags: in memory two
+identifiers are two headers pointing at bytes the stream already owns, but
+encoded, every entry writes them out in full — so repeating a candidate and an
+outcome identity on each slot turns a 22 MiB retained trace into 2 GiB of JSON,
+before escaping, from an input inside every other declared bound. A trace entry
+therefore ADDRESSES its slot rather than naming it, by the candidate and outcome
+indices the stream digest already binds, and its encoded size does not move with
+the caller's identifier lengths at all. Four domain-separated digests bind a result to its inputs: the whole
 stream, the raw config, the whole supplied entropy, and — separately — only the
 prefix actually consumed. That last one deliberately excludes metadata about the
 full supplied set, so that appending facts beyond the boundary provably cannot

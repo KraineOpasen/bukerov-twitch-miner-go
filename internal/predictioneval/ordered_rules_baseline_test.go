@@ -8,6 +8,7 @@ package predictioneval_test
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 	"unsafe"
 
@@ -251,3 +252,68 @@ func TestOrderedRulesAdditionLeavesCurrentConfiguredBaselineByteIdentical(t *tes
 // baselineEvaluationGolden is the serialized baseline evaluation captured at
 // this branch's base commit, before any ordered-rules file existed.
 const baselineEvaluationGolden = `{"model":{"modelVersion":"predictioneval/v1","policyRevision":"policy-378d05d6ccc7d2a914730a1e1d023ff754bcf873","supportedProducerRevision":"obs-v2|policy-378d05d6ccc7d2a914730a1e1d023ff754bcf873","platformIntBits":64},"commonInputDigest":"pinned-baseline-digest","choice":{"state":"EXECUTED","index":0,"selected":true,"outcomeId":"outcome-a"},"baseStake":{"state":"EXECUTED","amount":50,"capped":false},"stealth":{"state":"EXECUTED","outcome":"NOT_APPLICABLE","applies":false,"realized":50,"reductionDerived":false,"realizationSound":true},"filter":{"state":"EXECUTED","skip":false,"compared":0,"applied":false},"health":{"state":"WITNESSED","verdict":"NO_GATE"},"stakeGate":{"state":"UNSUPPORTED","proposed":0,"allowed":0,"reason":"","limit":0},"clamp":{"state":"NOT_REACHED","applied":false,"finalAmount":0,"hasFinal":false},"minimum":{"state":"NOT_REACHED","threshold":10,"below":false},"policyAmount":50,"policyAmountKnown":true,"action":"UNSUPPORTED","limitations":["HEALTH_VERDICT_IS_WITNESSED_NOT_RECONSTRUCTED"]}`
+
+// TestOrderedRulesRetainedTraceStaysInsideTheBudgetWhenSerialized pins the half
+// of the same budget that unsafe.Sizeof cannot see.
+//
+// The sibling test above measures the trace as it sits in memory, where two Go
+// strings are two 16-byte headers pointing at bytes the stream already owns.
+// Serialized they are not headers: every entry writes its identifiers out in
+// full. Carrying a candidate and an outcome identity on each of
+// MaxOrderedRulesWork entries turned a 31 MiB retained trace into 2.07 GiB of
+// JSON — sixteen times the budget this package declares — from an input inside
+// every other bound. JSON escaping multiplies that again.
+//
+// Both identifiers were already recoverable without being repeated:
+// CandidateIndex and OutcomeIndex address stream.Candidates[ci].Outcomes[oi]
+// directly, and StreamDigest binds which stream that is. So the entry carries
+// the indices and the bounded scalars, and the assertion below is that its
+// encoded size does not depend on the caller's identifier lengths at all.
+func TestOrderedRulesRetainedTraceStaysInsideTheBudgetWhenSerialized(t *testing.T) {
+	// A rule that can never match a share in [0,1] and a default admitting
+	// nothing: every slot is evaluated, every slot appends, none stops early.
+	cfg := orConfig([]predictioneval.OrderedRule{
+		orRule(predictioneval.ComparatorGe, 100, 100, 0, 10),
+	}, 100, 100, 0, 10)
+
+	entryBytes := func(idLen int) int {
+		t.Helper()
+		pad := func(s string) string {
+			return s + strings.Repeat("x", idLen-len(s))
+		}
+		ev := predictioneval.EvaluateOrderedRules(orProject(t,
+			[]predictioneval.OrderedRulesCandidate{
+				orCandidate(pad("c0"), 10, orKnownBalance(100),
+					orOutcome(pad("o0"), 1), orOutcome(pad("o1"), 2)),
+			}, nil), cfg, orDraws())
+		if len(ev.Trace) == 0 {
+			t.Fatalf("the fixture recorded no trace entries: status %q reason %q", ev.Status, ev.Reason)
+		}
+		b, err := json.Marshal(ev.Trace[0])
+		if err != nil {
+			t.Fatalf("marshalling a trace entry failed: %v", err)
+		}
+		return len(b)
+	}
+
+	short := entryBytes(8)
+	widest := entryBytes(predictioneval.MaxOrderedRulesIdentifierBytes)
+	if short != widest {
+		t.Fatalf("one trace entry encodes to %d bytes with 8-byte identifiers and %d bytes with "+
+			"%d-byte ones, so the retained trace scales with text the entry does not need: the "+
+			"candidate and outcome are already addressed by their indices.",
+			short, widest, predictioneval.MaxOrderedRulesIdentifierBytes)
+	}
+
+	worst := int64(widest) * int64(predictioneval.MaxOrderedRulesWork)
+	if worst > int64(predictioneval.MaxOrderedRulesAggregateBytes) {
+		t.Fatalf("a maximal traversal encodes to %d bytes of trace (%d entries x %d bytes), past the "+
+			"declared aggregate budget of %d. The type carries JSON tags, so this is a reachable "+
+			"cost, not a hypothetical one.",
+			worst, predictioneval.MaxOrderedRulesWork, widest,
+			predictioneval.MaxOrderedRulesAggregateBytes)
+	}
+	t.Logf("worst-case serialized trace: %d entries x %d bytes = %.1f MiB, budget %.0f MiB",
+		predictioneval.MaxOrderedRulesWork, widest, float64(worst)/(1024*1024),
+		float64(predictioneval.MaxOrderedRulesAggregateBytes)/(1024*1024))
+}

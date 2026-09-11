@@ -1695,3 +1695,121 @@ func containsSubstring(list []string, want string) bool {
 	}
 	return false
 }
+
+// TestOrderedRulesAShapeRefusalReExportsNoneOfTheInput pins the second half of
+// what the shape gate is for.
+//
+// Deciding the refusal in O(1) is only half the guarantee. If the refusal then
+// carries a caller-controlled string back out, the cost simply moves from the
+// gate to whoever serializes the result — and the type carries JSON tags
+// precisely because serializing it is the intended use. A gigabyte of cutoff
+// identity costs nothing to refuse and several gigabytes to encode, JSON
+// escaping included.
+//
+// The cutoff is the only caller-controlled text the refusal literal could
+// carry, and at that point it has NOT passed the per-string bound: the gate
+// refuses on the FIRST condition that trips, and most of them never look at the
+// cutoff at all. So the refusal re-exports none of it, for the same reason it
+// carries no digest — the function declined to read the input, so it can attest
+// to nothing about it.
+func TestOrderedRulesAShapeRefusalReExportsNoneOfTheInput(t *testing.T) {
+	// Large enough that carrying it is unmistakable in the encoded size, small
+	// enough to stay cheap: the defect is a ratio, not a threshold.
+	const cutoffBytes = 1 << 20
+
+	base := orProject(t, []predictioneval.OrderedRulesCandidate{
+		orCandidate("c1", 10, orKnownBalance(100), orOutcome("A", 4), orOutcome("B", 6)),
+	}, nil)
+
+	forge := func() predictioneval.OrderedRulesStream {
+		st := base
+		st.Candidates = append([]predictioneval.OrderedRulesCandidate(nil), base.Candidates...)
+		st.Cutoff = predictioneval.OrderedRulesCutoff{
+			Established: true,
+			Position:    9,
+			Kind:        predictioneval.OrderedRulesInterventionKind(strings.Repeat("k", cutoffBytes)),
+			Identity:    strings.Repeat("i", cutoffBytes),
+			Basis:       predictioneval.OrderedRulesCutoffBasis(strings.Repeat("b", cutoffBytes)),
+		}
+		return st
+	}
+
+	tooManyCandidates := forge()
+	tooManyCandidates.Candidates = make([]predictioneval.OrderedRulesCandidate,
+		predictioneval.MaxOrderedRulesCandidates+1)
+
+	tooManyRules := make([]predictioneval.OrderedRule, predictioneval.MaxOrderedRulesRules+1)
+	for i := range tooManyRules {
+		tooManyRules[i] = orRule(predictioneval.ComparatorLe, 50, 100, 0, 10)
+	}
+
+	cases := []struct {
+		name   string
+		stream predictioneval.OrderedRulesStream
+		cfg    predictioneval.OrderedRulesConfig
+		draws  predictioneval.SuppliedDrawTrace
+		reason string
+	}{{
+		// The first three never examine the cutoff at all, which is the point:
+		// the re-export is unconditional, not a side effect of bounding text.
+		name:   "draw words over bound",
+		stream: forge(),
+		cfg:    orAlwaysAdmitConfig(),
+		draws: predictioneval.SuppliedDrawTrace{
+			RunID:                   "r",
+			EntropySemanticsVersion: predictioneval.OrderedRulesEntropySemanticsVersion,
+			Words:                   make([]uint64, predictioneval.MaxOrderedRulesDrawWords+1),
+		},
+		reason: predictioneval.ReasonDrawWordsOverBound,
+	}, {
+		name:   "rule count over bound",
+		stream: forge(),
+		cfg:    orConfig(tooManyRules, 95, 100, 0, 10),
+		draws:  orDraws(),
+		reason: predictioneval.ReasonRuleCountOverBound,
+	}, {
+		name:   "stream shape over bound",
+		stream: tooManyCandidates,
+		cfg:    orAlwaysAdmitConfig(),
+		draws:  orDraws(),
+		reason: predictioneval.ReasonStreamShapeOverBound,
+	}, {
+		name:   "the cutoff text is itself what trips the gate",
+		stream: forge(),
+		cfg:    orAlwaysAdmitConfig(),
+		draws:  orDraws(),
+		reason: predictioneval.ReasonStreamTextOverBound,
+	}}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ev := predictioneval.EvaluateOrderedRules(tc.stream, tc.cfg, tc.draws)
+
+			switch {
+			case ev.Status != predictioneval.StatusRefused:
+				t.Fatalf("status = %q, want REFUSED", ev.Status)
+			case ev.Reason != tc.reason:
+				t.Fatalf("reason = %q, want %q", ev.Reason, tc.reason)
+			}
+
+			if ev.Cutoff != (predictioneval.OrderedRulesCutoff{}) {
+				t.Fatalf("a shape refusal carried the supplied cutoff back out:\n"+
+					"  kind %d bytes, identity %d bytes, basis %d bytes\n"+
+					"The gate declined to read this input, so the result may attest to nothing "+
+					"about it — least of all by re-exporting text it never bounded.",
+					len(ev.Cutoff.Kind), len(ev.Cutoff.Identity), len(ev.Cutoff.Basis))
+			}
+
+			// The consequence, stated as the property it actually is: refusing
+			// must not cost more to encode than it cost to decide.
+			b, err := json.Marshal(ev)
+			if err != nil {
+				t.Fatalf("marshalling the refusal failed: %v", err)
+			}
+			if len(b) > 4096 {
+				t.Fatalf("the refusal encodes to %d bytes from a %d-byte cutoff; a refusal decided "+
+					"without reading the input must not grow with it", len(b), cutoffBytes)
+			}
+		})
+	}
+}
