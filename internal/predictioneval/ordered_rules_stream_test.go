@@ -4370,6 +4370,23 @@ func TestOrderedRulesARefusalDecidedBeforeTheTraversalAttestsToNothing(t *testin
 		st.SelectionDigest = predictioneval.EvaluateOrderedRules(st, cfg, orDraws()).StreamDigest
 		return st
 	}
+	// Like shortFault, but the fixture ESTABLISHES a boundary, because a cutoff
+	// that is not established must carry no identity at all — mutating one on a
+	// stream without an intervention trips the structural rule instead and pins
+	// nothing about the scan. The first draft of the encodability row below did
+	// exactly that and failed.
+	boundedFault := func(t *testing.T, mutate func(*predictioneval.OrderedRulesStream)) predictioneval.OrderedRulesStream {
+		t.Helper()
+		st := orProject(t, cs, []predictioneval.OrderedRulesIntervention{
+			orIntervention("call-1", 20, predictioneval.InterventionAutoCallStarted,
+				predictioneval.RelevanceProven, "boundary")})
+		if !st.Cutoff.Established {
+			t.Fatal("premise: this fixture must establish a boundary")
+		}
+		mutate(&st)
+		st.SelectionDigest = predictioneval.EvaluateOrderedRules(st, cfg, orDraws()).StreamDigest
+		return st
+	}
 	badPresence := func(t *testing.T) predictioneval.OrderedRulesStream {
 		t.Helper()
 		return shortFault(t, func(st *predictioneval.OrderedRulesStream) {
@@ -4425,6 +4442,17 @@ func TestOrderedRulesARefusalDecidedBeforeTheTraversalAttestsToNothing(t *testin
 		{"stream declares a cutoff basis outside the closed set", shortFault(t,
 			func(st *predictioneval.OrderedRulesStream) { st.Cutoff.Basis = "NOT-A-BASIS" }),
 			cfg, 0, predictioneval.ReasonStreamInvariantViolated, false},
+		// And the one part of the boundary invariant that is NOT in the
+		// zero-byte tier, pinned as digest=true for exactly that reason. The
+		// cutoff identity's emptiness and its length are settled before the
+		// hash; its UTF-8 VALIDITY is a scan of a string the caller chose, so
+		// it stays in the invariant pass. An earlier version of this package
+		// hoisted the whole predicate and claimed it read no supplied text —
+		// it did, here. If this scan is ever moved back into the structural
+		// tier, this row stops finding a digest and fails.
+		{"stream carries a cutoff identity that is not encodable", boundedFault(t,
+			func(st *predictioneval.OrderedRulesStream) { st.Cutoff.Identity = "call-\xff-1" }),
+			cfg, 0, predictioneval.ReasonStreamInvariantViolated, true},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			got := predictioneval.EvaluateOrderedRules(c.stream, c.cfg,

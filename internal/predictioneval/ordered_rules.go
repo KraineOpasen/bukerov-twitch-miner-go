@@ -414,7 +414,47 @@ func orderedRulesInputBudget(s OrderedRulesStream, cfg OrderedRulesConfig,
 // to check is that the assertion is internally possible. An unestablished
 // boundary that names an intervention, or an established one with no identity,
 // is a claim about evidence that is not there.
+// orderedRulesCutoffImpossible is the whole boundary invariant: the zero-byte
+// half below, plus the one part of it that reads supplied bytes.
+//
+// The split exists because the structural tier calls the half and the invariant
+// pass calls this. An earlier version hoisted the WHOLE predicate into the
+// structural tier on the claim that it "compares only counts and constants and
+// reads no supplied text at any length". That claim was false — the line below
+// scans the cutoff identity for UTF-8 validity — and it was published in this
+// file and in the specification on the strength of reading the predicate's
+// first dozen lines rather than all of it. A reviewer found it by following
+// checkIdentifier to invalidUTF8.
+//
+// The bound made it a small error and not a large one: the scan is one
+// identifier capped at MaxOrderedRulesIdentifierBytes, so it could never
+// recreate an aggregate-scale traversal. It still broke the tier's contract,
+// and a tier whose contract holds "except for one field" is a tier that will
+// acquire a second exception.
+//
+// Splitting was the objection I raised against doing this in the first place —
+// that a subset becomes a second place to keep in step with the first. That
+// objection is answered by the shape here being ONE definition with TWO
+// callers, which is exactly how validateScopeShape, validateAdmissionShape and
+// checkPresenceShape already relate to their full validators.
 func orderedRulesCutoffImpossible(s OrderedRulesStream) bool {
+	if orderedRulesCutoffShapeImpossible(s) {
+		return true
+	}
+	// The SCAN, and the only part of this invariant that reads supplied bytes.
+	// It stays out of the structural tier for that reason alone: an established
+	// boundary whose identity is not encodable is still a stream the projection
+	// could not have produced, so this is a deferral of cost and not of rigour.
+	return s.Cutoff.Established && invalidUTF8(s.Cutoff.Identity)
+}
+
+// orderedRulesCutoffShapeImpossible is the zero-byte half of the boundary
+// invariant, and it is what the structural tier runs before the digest.
+//
+// Every test here is a comparison against a constant, an integer comparison, or
+// a length — including the identity's emptiness and its bound, both of which
+// are O(1) and neither of which reads a byte of a string the caller chose.
+func orderedRulesCutoffShapeImpossible(s OrderedRulesStream) bool {
 	c := s.Cutoff
 	// The removal count is bounded by arithmetic, not by taste. The projection
 	// refuses a source past MaxOrderedRulesCandidates, and inside it every
@@ -448,7 +488,8 @@ func orderedRulesCutoffImpossible(s OrderedRulesStream) bool {
 	// The projection takes the boundary FROM an intervention, and refuses an
 	// intervention outside the declared interval, so a boundary outside it
 	// could not have come from one.
-	if checkIdentifier(c.Identity, "cutoff identity") != nil ||
+	if checkIdentifierPresent(c.Identity, "cutoff identity") != nil ||
+		len(c.Identity) > MaxOrderedRulesIdentifierBytes ||
 		c.Position < s.Scope.IntervalFromPosition || c.Position > s.Scope.IntervalToPosition {
 		return true
 	}
@@ -579,15 +620,16 @@ func orderedRulesStreamStructureBroken(s OrderedRulesStream) bool {
 	default:
 		return true
 	}
-	// And the DERIVED boundary, hoisted whole rather than picked apart.
-	// orderedRulesCutoffImpossible compares counts and constants and nothing
-	// else — it reads no supplied text at any length — so running it here costs
-	// what it costs in the invariant pass and saves the hash when it answers
-	// yes. Hoisting the whole predicate rather than only its two vocabularies
-	// is deliberate: a subset would be a second place to keep in step with the
-	// first, which is how the three vocabularies above came to be missing here
-	// in the first place.
-	if orderedRulesCutoffImpossible(s) {
+	// And the DERIVED boundary — its zero-byte half, which is the whole of that
+	// invariant except one UTF-8 scan of the cutoff identity.
+	//
+	// The first version of this called orderedRulesCutoffImpossible whole, on
+	// the claim that the predicate reads no supplied text. It does: see the
+	// note on that function. Taking the half is not a subset maintained
+	// separately — it is one definition with two callers, the same relation
+	// validateScopeShape and checkPresenceShape already have to their full
+	// validators, and the full predicate still runs in the invariant pass.
+	if orderedRulesCutoffShapeImpossible(s) {
 		return true
 	}
 	var structuralLast int64

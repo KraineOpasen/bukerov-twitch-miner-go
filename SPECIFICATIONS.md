@@ -3984,10 +3984,24 @@ validators: the error messages in the invariant pass QUOTE the offending value
 and so must bound it first, and that scan is proportional to a string the caller
 chose, while the structural tier answers only yes or no and a comparison against
 `KNOWN` fails on length before reading a byte. The refusal costs 649 ns and
-7.092 µs on those same two inputs. The derived cutoff is hoisted as the WHOLE
-`orderedRulesCutoffImpossible` predicate rather than its two vocabularies,
-because a subset would be a second place to keep in step with the first — which
-is exactly how these four came to be missing. One thing a caller sees changes:
+7.092 µs on those same two inputs. The derived cutoff contributes its ZERO-BYTE HALF,
+`orderedRulesCutoffShapeImpossible`, and the first version of this got that
+wrong: it hoisted the whole `orderedRulesCutoffImpossible` predicate and claimed
+here and in the source that the predicate compares only counts and constants and
+reads no supplied text at any length. It does not. An established boundary runs
+`checkIdentifier` on its identity, and that reaches `invalidUTF8`, which scans.
+The claim was published on the strength of reading the predicate's first dozen
+lines instead of all of it, and a reviewer found it by following the call. The
+per-string bound kept it small — one identifier capped at
+`MaxOrderedRulesIdentifierBytes`, never an aggregate-scale traversal — but a
+tier whose contract holds "except for one field" will acquire a second
+exception. So the identity's emptiness and its length stay in the tier, both
+O(1), while the UTF-8 scan stays in the invariant pass; a case pins that by
+requiring an unencodable cutoff identity to be refused WITH a stream digest,
+which is only possible after the hash. The objection originally raised against
+splitting — that a subset becomes a second place to keep in step with the first
+— is answered by the shape being one definition with two callers, exactly as
+`validateScopeShape` and `checkPresenceShape` already relate to theirs. One thing a caller sees changes:
 these refusals no longer carry the recomputed stream digest, so the two-call
 oracle does not function for them. That is the same narrowing the structural
 tier already made, and narrower is the safe direction.
