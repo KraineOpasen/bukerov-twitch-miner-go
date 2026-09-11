@@ -318,10 +318,32 @@ func TestOrderedRulesEverythingTheProjectionAdmitsTheEvaluatorAdmits(t *testing.
 							if bal.Presence != predictioneval.SuppliedKnown {
 								nonKnownSeen++
 							}
+							anyAtBound := false
 							for _, class := range boundFields {
-								if class != "none" && atBoundIn(stream, class) {
-									atBound[class]++
+								if class == "none" {
+									continue
 								}
+								if atBoundIn(stream, class) {
+									atBound[class]++
+									anyAtBound = true
+								}
+							}
+							// "none" IS A VALUE OF THIS DIMENSION, and counting
+							// it was the gap in the round that added these
+							// counters. It is the only value that exercises an
+							// ordinary stream — nothing at the per-string limit
+							// — and it had no counter at all, so a projection
+							// change rejecting every "none" case would have left
+							// all five bound counters and every other dimension
+							// counter nonzero and lost the ordinary path in
+							// silence.
+							//
+							// Derived from the stream like the others: the case
+							// counts only when NO tracked class is at the bound,
+							// so it cannot be satisfied by a case that is
+							// secretly carrying one.
+							if bf == "none" && !anyAtBound {
+								atBound["none"]++
 							}
 
 							got := predictioneval.EvaluateOrderedRules(stream,
@@ -439,16 +461,27 @@ func TestOrderedRulesEverythingTheProjectionAdmitsTheEvaluatorAdmits(t *testing.
 	//     evaluator-only length bound to diverge, because both paths call the
 	//     same helper. The counters are what covers those two classes; the
 	//     property covers the fields that are checked twice.
+	//
+	// AND "none" IS GUARDED TOO, which it was not when these counters were
+	// added. A reviewer pointed out that the claim made for them — every
+	// dimension value has a guard, no value is dead — was false for exactly one
+	// value, and that value is the ordinary path: a stream with nothing at the
+	// per-string limit. Its absence would have been invisible, since the other
+	// five classes and every other dimension keep projecting.
 	for _, bf := range boundFields {
-		if bf == "none" {
+		if atBound[bf] != 0 {
 			continue
 		}
-		if atBound[bf] == 0 {
-			t.Fatalf("no projected stream carried %s at MaxOrderedRulesIdentifierBytes, so the "+
-				"length and identity tiers were never exercised at their edge for that field. "+
-				"This counter exists because its predecessor counted only free text and was "+
-				"green while exactly these fields went untested.", bf)
+		if bf == "none" {
+			t.Fatal("no projected stream carried NOTHING at MaxOrderedRulesIdentifierBytes, so " +
+				"the ordinary path — a stream with no bound-length field at all — was never " +
+				"evaluated. Every other counter here stays green when that happens, which is " +
+				"why this value needs a guard of its own rather than an exemption.")
 		}
+		t.Fatalf("no projected stream carried %s at MaxOrderedRulesIdentifierBytes, so the "+
+			"length and identity tiers were never exercised at their edge for that field. "+
+			"This counter exists because its predecessor counted only free text and was "+
+			"green while exactly these fields went untested.", bf)
 	}
 	t.Logf("%d projected streams evaluated; %d with a boundary, %d with a non-KNOWN balance; "+
 		"at the per-string bound: %v; per view: %v; per free-text length: %v; "+

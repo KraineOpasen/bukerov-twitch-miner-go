@@ -4501,10 +4501,34 @@ counter and a guard, and a value that stops projecting fails by name.
 
 Measured when those were added, and the space is exactly balanced — 432
 projections for each candidate/outcome shape, each balance presence word and
-each coverage; 648 with and 648 without a boundary; 216 per bound field; 648 per
-view and per free-text length. **No remaining value is dead.** Mutation-verified
-on the coverage dimension by making the projection refuse `TRUNCATED_PREFIX`:
-the guard fires naming that coverage.
+each coverage; 648 with and 648 without a boundary; 216 per bound field
+including `none`; 648 per view and per free-text length. **No remaining value is
+dead.** Mutation-verified on the coverage dimension by making the projection
+refuse `TRUNCATED_PREFIX`: the guard fires naming that coverage.
+
+**That claim was too broad when it was first written, and a reviewer said so in
+the same breath as the gap.** *"The current claims that every dimension value has
+a guard and that no value is dead are otherwise too broad."* They were: one value
+of one dimension still had no counter — `boundFields`'s `none`, which is the
+ORDINARY path, a stream with nothing at the per-string limit. It had been
+excluded from the accounting and again from the guard, on the reasoning that
+there was no bound to count.
+
+The consequence is the one that makes it worth a finding rather than a tidy-up:
+a projection change rejecting every `none` case leaves all five bound counters
+nonzero, and every shape, balance, coverage, cutoff, view and free-text counter
+nonzero too, because the other five values keep projecting. The ordinary path
+disappears in silence. `none` now has a counter derived from the stream like the
+others — it counts only when NO tracked class is at the bound, so a case
+secretly carrying one cannot satisfy it — and a guard of its own.
+Mutation-verified with the exact scenario filed: making the projection reject
+every `none` case fails the guard, naming it.
+
+This is the thirteenth claim on this work falsified after being written, and the
+first where the reviewer falsified the CLAIM and the GAP together. The lesson is
+recorded rather than smoothed over: an exemption inside a guard is a hole in the
+guard, and "every value is covered" is exactly the sentence to distrust when one
+value is sitting under an `if ... continue`.
 
 One honest qualification on that balance. The evaluator's STATUS distribution is
 identical across all three coverages — 288 stake-unknown and 144 would-attempt
