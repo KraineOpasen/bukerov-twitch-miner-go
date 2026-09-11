@@ -2634,8 +2634,8 @@ func TestOrderedRulesTheConsumedPrefixBindsEveryMandatoryDeclaration(t *testing.
 	//     OrderedRulesStreamContractVersion, so no other value projects;
 	//   - the admission's view kind cannot move without also moving every
 	//     candidate's source kind, which the projection couples to it — it is
-	//     bound, and TestOrderedRulesDigestsBindTheMandatoryFieldDeclarations'
-	//     neighbours cover the coupling;
+	//     bound, and TestDigestsBindTheMandatoryFieldDeclarations' neighbours
+	//     cover the coupling;
 	//   - the declared interval's UPPER endpoint is bound in the whole-stream
 	//     digest and deliberately NOT in the consumed one, because appending a
 	//     fact past the boundary can legitimately widen it and this digest must

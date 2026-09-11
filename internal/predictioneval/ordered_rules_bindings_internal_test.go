@@ -82,6 +82,34 @@ func TestSuppliedDigestBindsEveryFieldThatCouldChangeADecision(t *testing.T) {
 	for i := 0; i < typ.NumField(); i++ {
 		f := typ.Field(i)
 		t.Run(f.Name, func(t *testing.T) {
+			// PRESENCE is probed differently, and the reason is the defect
+			// this case had on the head before. digestSupplied hashes the
+			// presence word and then BRANCHES on it: a KNOWN value binds the
+			// value, provenance and availability, and a non-KNOWN one binds
+			// the reason instead. Appending to "KNOWN" produces a word that is
+			// not KNOWN, so it crosses that branch and the digest moves
+			// because a different set of fields is hashed — which it does even
+			// with the presence binding deleted. Verified: removing
+			// digestPart(h, string(v.Presence)) left this whole walk green.
+			//
+			// MISSING against INVALID stays on one side of the branch, with
+			// the reason held equal, so the only thing that can move the
+			// digest is the word itself. The two are a real distinction: they
+			// produce different balance results downstream.
+			if f.Name == "Presence" {
+				same := "the same explanation either way"
+				missing := SuppliedInt64{Presence: SuppliedMissing, Reason: same}
+				invalid := SuppliedInt64{Presence: SuppliedInvalid, Reason: same}
+				if orderedRulesStreamDigest(internalProbeStream(missing)) ==
+					orderedRulesStreamDigest(internalProbeStream(invalid)) {
+					t.Fatal("MISSING and INVALID digest identically with the same reason, so the " +
+						"presence word itself is not bound. The two are different evidence — a " +
+						"value nobody supplied against one that arrived unusable — and a stream " +
+						"can be moved between them without its digest noticing.")
+				}
+				return
+			}
+
 			mutated := base
 			v := reflect.ValueOf(&mutated).Elem().Field(i)
 			switch v.Kind() {
@@ -132,4 +160,67 @@ func TestDigestBindsTheAvailabilityDeclaration(t *testing.T) {
 			"projected stream can be stripped of it and still verify — which is the causal " +
 			"guard undone at the one seam it was supposed to survive")
 	}
+}
+
+// TestDigestsBindTheMandatoryFieldDeclarations covers the three declarations
+// that make a previously unconditional field refusable: a candidate's
+// HasPosition, a scope's HasInterval and a config's HasDefault.
+//
+// It is INTERNAL for the same reason the walk above is, and the external
+// version it replaces is why the reason matters. That one asserted through
+// EvaluateOrderedRules and compared the StreamDigest it returned — sound while
+// the digest was computed before the invariants, and vacuous the moment the
+// structural tier moved ahead of it, because a stripped declaration is then
+// refused with an EMPTY digest and "" differs from the baseline no matter what
+// the digest binds. Verified: with all three bindings deleted, every case of
+// the external version passed.
+//
+// Calling the digest helpers directly removes the dependency. Nothing about
+// these three properties ever needed an evaluation.
+func TestDigestsBindTheMandatoryFieldDeclarations(t *testing.T) {
+	scoped := func(s OrderedRulesStream) OrderedRulesStream {
+		s.Scope = OrderedRulesScope{
+			Namespace:             "binding probe",
+			EpisodeID:             "episode-1",
+			AccountContext:        "account",
+			AssociationEvidence:   "evidence",
+			SourceContractVersion: OrderedRulesStreamContractVersion,
+			Coverage:              CoverageCompleteDeclared,
+			IntervalFromPosition:  0,
+			IntervalToPosition:    100,
+			HasInterval:           true,
+		}
+		return s
+	}
+
+	t.Run("candidate position declaration", func(t *testing.T) {
+		declared := scoped(internalProbeStream(internalProbeBalance(1000)))
+		stripped := scoped(internalProbeStream(internalProbeBalance(1000)))
+		stripped.Candidates[0].HasPosition = false
+		if orderedRulesStreamDigest(declared) == orderedRulesStreamDigest(stripped) {
+			t.Fatal("stripping HasPosition left the stream digest unchanged, so a projected " +
+				"stream can lose its position declaration and still verify")
+		}
+	})
+
+	t.Run("scope interval declaration", func(t *testing.T) {
+		declared := scoped(internalProbeStream(internalProbeBalance(1000)))
+		stripped := scoped(internalProbeStream(internalProbeBalance(1000)))
+		stripped.Scope.HasInterval = false
+		if orderedRulesStreamDigest(declared) == orderedRulesStreamDigest(stripped) {
+			t.Fatal("stripping HasInterval left the stream digest unchanged, so a projected " +
+				"stream can lose its interval declaration and still verify")
+		}
+	})
+
+	t.Run("config default declaration", func(t *testing.T) {
+		declared := OrderedRulesConfig{ConfigID: "binding probe", HasDefault: true,
+			Default: OrderedRulesDefault{RawMinPercent: 95, RawMaxPercent: 100}}
+		stripped := declared
+		stripped.HasDefault = false
+		if orderedRulesConfigDigest(declared) == orderedRulesConfigDigest(stripped) {
+			t.Fatal("stripping HasDefault left the config digest unchanged, so a config can lose " +
+				"the declaration that its default exists and still verify")
+		}
+	})
 }
