@@ -206,16 +206,41 @@ func ProjectOrderedRulesStream(source OrderedRulesSource, admission CommonAdmiss
 		len(source.Scope.Coverage))
 	bytes += chargedWidth(len(admission.ManifestID) + len(admission.Population) + len(admission.OrderBasis) +
 		len(admission.ViewKind))
-	// Count bounded by validateAdmissionShape above; each ELEMENT is validated
-	// by validateAdmission in the text tier below. Only the charge belongs
-	// here, and it is length arithmetic.
-	for _, ref := range admission.SourceReferences {
+	// Count bounded by validateAdmissionShape above; the UTF-8 SCAN of each
+	// element stays in validateAdmission in the text tier below. What does NOT
+	// stay there, any more, is the per-string LENGTH.
+	//
+	// This loop already reads every len() it needs, and the comment above it
+	// used to say only the charge belonged here — leaving a 4,097-byte
+	// reference to be refused by validateAdmission, which runs after the
+	// candidate structural walk, both vocabulary tiers and both identity
+	// passes. The justification for deferring was the multi-megabyte reference
+	// SCAN, and a reviewer pointed out it does not apply: checkFreeText's
+	// over-bound branch returns before scanning anything. So the length costs
+	// one comparison here and saves all of that. Measured on 128 candidates x
+	// 64 outcomes with 2,400-byte provenance: 1.338851 ms, and 191 ns here,
+	// against a 150 ns floor.
+	for i, ref := range admission.SourceReferences {
+		if err := checkTextLength(ref, "admission source reference "+strconv.Itoa(i)); err != nil {
+			return OrderedRulesStream{}, err
+		}
 		bytes += chargedWidth(len(ref))
 	}
-	// The interventions' charge is length arithmetic and belongs here; only the
-	// Detail SCAN is deferred to the text tier below.
+	// The interventions are the SAME defect, and the reviewer did not name this
+	// one — it was found by asking whether the sibling loop had it, which is
+	// the check eight paired-path findings on this PR have taught. An
+	// over-bound intervention identity or detail was reached only in the text
+	// tier: 1.226244 ms on that same source, 236 ns now.
 	for i := range source.Interventions {
-		bytes += chargedWidth(len(source.Interventions[i].Identity) + len(source.Interventions[i].Detail))
+		in := &source.Interventions[i]
+		where := "intervention " + strconv.Itoa(i)
+		if err := checkTextLength(in.Identity, where+" identity"); err != nil {
+			return OrderedRulesStream{}, err
+		}
+		if err := checkTextLength(in.Detail, where+" detail"); err != nil {
+			return OrderedRulesStream{}, err
+		}
+		bytes += chargedWidth(len(in.Identity) + len(in.Detail))
 	}
 	if err := checkInterventionStructure(source); err != nil {
 		return OrderedRulesStream{}, err
@@ -353,20 +378,54 @@ func ProjectOrderedRulesStream(source OrderedRulesSource, admission CommonAdmiss
 	if err := checkViewKindVocabulary(admission); err != nil {
 		return OrderedRulesStream{}, err
 	}
+	// THE INTERVENTION VOCABULARY NEXT, and it goes AHEAD of the candidates.
+	//
+	// Two closed-set fields per intervention against MaxOrderedRulesInterventions,
+	// so at most 2,048 comparisons. The candidate tier below is the larger of
+	// the two by a factor of four, so an invalid first intervention paying for
+	// every candidate is the wrong way round. Measured on 128 candidates x 64
+	// outcomes with 2,400-byte provenance, a short invalid intervention Kind:
+	// 783.914 µs, and 429.638 µs here.
+	//
+	// NOT to the 150 ns floor, and the residual is named rather than rounded
+	// away: the count-and-length budget tier at the top of this function still
+	// runs first, and on a 128 x 64 source that walk is ~430 µs by itself. It
+	// has to run — it is what refuses an over-ceiling source for its size — so
+	// what this move buys is the candidate vocabulary walk and nothing more.
+	// The first draft of this comment claimed 96.902 µs, a figure that was
+	// never measured; it is replaced here rather than quietly corrected,
+	// because inventing a post-repair number is the specific mistake reviewers
+	// have now caught three times on this PR.
+	if err := checkInterventionVocabulary(source); err != nil {
+		return OrderedRulesStream{}, err
+	}
+
 	// THE CANDIDATE VOCABULARY NEXT.
 	//
-	// Four closed-set fields per candidate. Each is length-bounded first —
-	// their refusals quote the value, which is why they cannot join the
-	// constant-bounded tier — and then compared against a short constant, so the tier
-	// reads at most MaxOrderedRulesCandidates x 4 x MaxOrderedRulesIdentifierBytes
-	// and in practice a few words per candidate.
+	// Four closed-set fields per candidate — AND the nested presence word of
+	// every outcome, which the first version of this sentence left out. That
+	// omission mattered: at MaxOrderedRulesCandidates x MaxOrderedRulesOutcomes
+	// the nested loop alone is 8,192 comparisons, so this tier runs about 8,704
+	// where the sentence implied 512. A reviewer used the corrected figure to
+	// show the interventions belonged above it, which is the move directly
+	// above. A cost claim that undercounts by a factor of seventeen is not a
+	// small inaccuracy; it is what made the wrong order look right.
+	//
+	// Each field is length-bounded first — their refusals quote the value,
+	// which is why they cannot join the constant-bounded tier — and then
+	// compared against a short constant, so the tier reads at most
+	// (MaxOrderedRulesCandidates x 4 + MaxOrderedRulesCandidates x
+	// MaxOrderedRulesOutcomes) x MaxOrderedRulesIdentifierBytes, and in
+	// practice a few words per candidate and per outcome.
 	//
 	// It runs before validateScope and validateAdmission, before the
-	// interventions, and before any identity, because those carry the large
-	// text and a candidate whose source kind is outside its vocabulary depends
-	// on none of them: such a candidate used to be reached only after roughly
-	// 12 MB of unrelated text — the intervention detail scan and the candidate
-	// identity and payload passes further down.
+	// intervention DETAIL scan, and before any identity, because those carry
+	// the large text and a candidate whose source kind is outside its
+	// vocabulary depends on none of them: such a candidate used to be reached
+	// only after roughly 12 MB of unrelated text — the intervention detail scan
+	// and the candidate identity and payload passes further down. It no longer
+	// runs before the intervention VOCABULARY, which is the smaller tier and
+	// now sits above it.
 	//
 	// It does NOT run before the three vocabulary checks immediately above, and
 	// an earlier version of this comment said it did. Those three are each
@@ -430,10 +489,6 @@ func ProjectOrderedRulesStream(source OrderedRulesSource, admission CommonAdmiss
 				return OrderedRulesStream{}, err
 			}
 		}
-	}
-
-	if err := checkInterventionVocabulary(source); err != nil {
-		return OrderedRulesStream{}, err
 	}
 
 	if err := validateScope(source.Scope); err != nil {
@@ -942,11 +997,28 @@ func invalidUTF8(v string) bool {
 
 // checkFreeText bounds a caller-chosen string the projection retains. Empty is
 // allowed — these are optional — but unbounded is not.
-func checkFreeText(v, where string) error {
+// checkTextLength is checkFreeText's LENGTH half on its own.
+//
+// It exists so the charging loops, which already read every len() they need,
+// can refuse an over-bound string where they see it instead of leaving it to a
+// validator several tiers down. Splitting it out rather than calling
+// checkFreeText there is the whole point: checkFreeText would also SCAN an
+// admissible string for UTF-8, and that scan is deferred deliberately.
+//
+// One definition, two callers. A second copy of this message is how the two
+// paths drift.
+func checkTextLength(v, where string) error {
 	if len(v) > MaxOrderedRulesIdentifierBytes {
 		return errors.Join(ErrOrderedRulesOverBound,
 			errors.New("predictioneval: "+where+" is "+strconv.Itoa(len(v))+
 				" bytes, past the bound of "+strconv.Itoa(MaxOrderedRulesIdentifierBytes)))
+	}
+	return nil
+}
+
+func checkFreeText(v, where string) error {
+	if err := checkTextLength(v, where); err != nil {
+		return err
 	}
 	// Length first, then encoding: this runs after the bound above so an
 	// enormous string is refused for its size without being scanned.

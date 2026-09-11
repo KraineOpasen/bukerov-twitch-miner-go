@@ -203,7 +203,7 @@ type normalizedConfig struct {
 // figure the projection already charges — an input the projection would have
 // admitted must not be refused here, and one it would have refused must not be
 // hashed here.
-func orderedRulesInputShapeReason(s OrderedRulesStream, cfg OrderedRulesConfig, d SuppliedDrawTrace) string {
+func orderedRulesInputCountReason(s OrderedRulesStream, cfg OrderedRulesConfig, d SuppliedDrawTrace) string {
 	switch {
 	case len(d.Words) > MaxOrderedRulesDrawWords:
 		return ReasonDrawWordsOverBound
@@ -219,6 +219,21 @@ func orderedRulesInputShapeReason(s OrderedRulesStream, cfg OrderedRulesConfig, 
 			return ReasonStreamShapeOverBound
 		}
 	}
+	return ""
+}
+
+// orderedRulesInputTextReason is the gate's SECOND half: the text budget.
+//
+// It was one function with the counts above until a reviewer pointed out what
+// that cost. The budget walks every candidate, every outcome and every
+// intervention to total their lengths — count-bounded work, but work the caller
+// chooses the size of — and it ran BEFORE the three comparisons against
+// constants that decide an input is not evaluable at all. So an unsupported
+// contract version paid for the whole walk to be told a nine-byte constant did
+// not match. The split exists so those comparisons can sit between the counts
+// and this, which is the same arrangement ProjectOrderedRulesStream reached one
+// commit earlier for the same field, found by the same reviewer.
+func orderedRulesInputTextReason(s OrderedRulesStream, cfg OrderedRulesConfig, d SuppliedDrawTrace) string {
 	// One walk, two limits. Both are the projection's own: a single string past
 	// MaxOrderedRulesIdentifierBytes, and the retained total past
 	// MaxOrderedRulesAggregateBytes. The per-string one is not implied by the
@@ -964,7 +979,7 @@ func EvaluateOrderedRules(stream OrderedRulesStream, rules OrderedRulesConfig, d
 	// guarantee this refusal exists to avoid. For the same reason the reason
 	// codes below take precedence over the contract and digest mismatches — an
 	// input too large to read cannot be checked for anything else.
-	if reason := orderedRulesInputShapeReason(stream, rules, draws); reason != "" {
+	if reason := orderedRulesInputCountReason(stream, rules, draws); reason != "" {
 		// The Cutoff is deliberately ABSENT here, and its absence is the same
 		// guarantee as the missing digest rather than a separate one: a refusal
 		// that declined to read the input re-exports none of it.
@@ -993,11 +1008,54 @@ func EvaluateOrderedRules(stream OrderedRulesStream, rules OrderedRulesConfig, d
 	// version is simply wrong, this refusal took 1.23 seconds and allocated
 	// 251,662,352 bytes — to compare two short strings and find them different.
 	// It is 3.8 microseconds and nothing now.
+	// LENGTH BEFORE MEANING, for these three and only these three, and it is
+	// three len() comparisons rather than the whole budget walk.
+	//
+	// The comparisons below must sit above that walk — that is the point of
+	// splitting the gate — but the package's rule is that an over-long value is
+	// refused for its SIZE, and a case pins it for exactly these fields. Both
+	// hold together only if the fields being compared are bounded first. So
+	// they are, individually, at the same MaxOrderedRulesIdentifierBytes the
+	// budget would have applied, and the full walk stays below.
+	//
+	// The first attempt at this hoist skipped these three lines and inverted
+	// that precedence: an over-long contract version came back a MISMATCH
+	// rather than OVER_BOUND. The suite caught it. Cost and precedence are
+	// different questions, and moving a check for the first has now silently
+	// answered the second twice on this PR.
+	switch {
+	case len(stream.ContractVersion) > MaxOrderedRulesIdentifierBytes,
+		len(stream.Scope.SourceContractVersion) > MaxOrderedRulesIdentifierBytes,
+		len(draws.EntropySemanticsVersion) > MaxOrderedRulesIdentifierBytes:
+		return orderedRulesUnreadRefusal(ReasonStreamTextOverBound)
+	}
+
 	switch {
 	case stream.ContractVersion != OrderedRulesStreamContractVersion:
 		return orderedRulesUnreadRefusal(ReasonStreamContractMismatch)
 	case draws.EntropySemanticsVersion != OrderedRulesEntropySemanticsVersion:
 		return orderedRulesUnreadRefusal(ReasonEntropySemanticsMismatch)
+	// The SCOPE's source contract joins them, and the gate was split so it
+	// could. It is the same shape of decision — one supplied string against one
+	// constant of this package, quoting nothing — and orderedRulesStreamStructureBroken
+	// settles it too, far below. Reaching it only there meant the whole text
+	// budget was totalled first: measured on 128 candidates x 64 outcomes with
+	// 2,400-byte provenance, 58.568 µs. It is 104 ns here, against a 78 ns
+	// floor — the cost of a refusal the count checks alone decide. Which is to
+	// say it is now the comparison and nothing else.
+	//
+	// ProjectOrderedRulesStream reached this arrangement for the same field one
+	// commit earlier, and a reviewer had to point out that the evaluator had
+	// not — which makes it the ninth rule on this PR standing on one of the two
+	// ingest paths and not the other.
+	case stream.Scope.SourceContractVersion != OrderedRulesStreamContractVersion:
+		return orderedRulesUnreadRefusal(ReasonStreamInvariantViolated)
+	}
+
+	// AND THE TEXT BUDGET, below the three comparisons above rather than above
+	// them. See orderedRulesInputTextReason for why the gate is two functions.
+	if reason := orderedRulesInputTextReason(stream, rules, draws); reason != "" {
+		return orderedRulesUnreadRefusal(reason)
 	}
 
 	// ENCODABILITY, last of the cheap refusals and deliberately after the two
@@ -1088,13 +1146,61 @@ func EvaluateOrderedRules(stream OrderedRulesStream, rules OrderedRulesConfig, d
 	// strictly narrower: two classes of forgery lose a published route. The
 	// oracle still works for everything these two tiers admit, which is what
 	// the cases exercising it depend on.
+	// THE CONFIG FIRST, above the structural tier and not below it.
+	//
+	// It was below until a reviewer asked why. normalizeOrderedRulesConfig is
+	// arithmetic over a rule count the count gate has already bounded, and an
+	// unusable config — one declaring no default at all — is refused whatever
+	// stream arrived with it. So walking every candidate and outcome first was
+	// caller-selected cardinality paid for a decision that reads one flag:
+	// measured on 128 candidates x 64 outcomes with 2,400-byte provenance,
+	// 115.046 µs, and 69.14 µs here.
+	//
+	// NOT to the 78 ns floor, and the remainder is named rather than rounded
+	// away: the text budget above still totals every supplied string before
+	// this is reached. That walk is the gate's own and has to run — it is what
+	// refuses an over-ceiling stream for its size — so it is a real floor for
+	// this input where the ~115 µs was not. Moving the config above the text
+	// gate as well would invert a precedence the package pins, since an
+	// over-long string must be refused for its SIZE.
+	//
+	// This STRENGTHENS a precedence this model had already established and
+	// pinned — an unusable config is refused before the stream invariants are
+	// re-walked — rather than inverting one, which is why it is safe where the
+	// qualification check was not. That check was cheap enough to hoist too and
+	// could not be, because hoisting it put a STREAM fault above the config.
+	cfg, configReason := normalizeOrderedRulesConfig(rules)
+	if configReason != "" {
+		return orderedRulesUnreadRefusal(configReason)
+	}
+
 	if orderedRulesStreamStructureBroken(stream) {
 		return orderedRulesUnreadRefusal(ReasonStreamInvariantViolated)
 	}
 
-	cfg, configReason := normalizeOrderedRulesConfig(rules)
-	if configReason != "" {
-		return orderedRulesUnreadRefusal(configReason)
+	// THE BOUNDARY'S ENCODABILITY, in a bounded-text tier of its own.
+	//
+	// This is the one part of the cutoff invariant that is not constant-bounded:
+	// a UTF-8 scan of an identifier whose length the caller chose. It stayed in
+	// the invariant pass for that reason, which was the right reason for the
+	// wrong tier — below the identity walk and below the whole-stream hash. So
+	// one invalid byte in a boundary identifier cost a near-ceiling stream its
+	// entire traversal: 22.932501 ms on 128 candidates x 64 outcomes with
+	// 2,400-byte provenance, and the refusal handed back the digest it had
+	// computed, so the two-call oracle made that price repeatable. It is
+	// 115.041 µs now and carries nothing — the text budget above, not this
+	// scan.
+	//
+	// The scan is bounded because the text gate above has already refused any
+	// single string past MaxOrderedRulesIdentifierBytes, so this reads at most
+	// 4 KiB — a bounded-text tier, distinct from the constant-bounded one above
+	// it and from the identity tier below, and it belongs in none of them.
+	//
+	// It keeps its position ABOVE the qualifications, mirroring the invariant
+	// pass, where orderedRulesCutoffImpossible is evaluated before
+	// orderedRulesQualificationsNotDerived.
+	if stream.Cutoff.Established && invalidUTF8(stream.Cutoff.Identity) {
+		return orderedRulesUnreadRefusal(ReasonStreamInvariantViolated)
 	}
 
 	// THE DERIVED QUALIFICATIONS, above the digest and below the config.

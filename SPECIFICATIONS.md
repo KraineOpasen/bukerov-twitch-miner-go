@@ -4112,6 +4112,66 @@ sixth found by a reviewer rather than here; more to the point it is the second
 time the same defect class was repaired on one level and left standing one level
 down. Fixing a path is not fixing the class.
 
+**A round of five, and the shape of them is the finding.** One reviewer pass
+produced five separate orderings on one head, and every one was the same
+question asked at a different seam: does a refusal whose truth depends on a
+count, a flag or one short word wait behind work the caller sized? Taken
+together rather than one at a time:
+
+| refusal | before | after | floor |
+| --- | ---: | ---: | ---: |
+| evaluator: unsupported `Scope.SourceContractVersion` | 58.568 µs | 104 ns | 78 ns |
+| evaluator: config declaring no default | 115.046 µs | 69.14 µs | 78 ns |
+| evaluator: unencodable cutoff identity | 22.223546 ms | 115.041 µs | 78 ns |
+| projection: over-bound admission source reference | 1.338851 ms | 191 ns | 150 ns |
+| projection: over-bound intervention identity or detail | 1.226244 ms | 236 ns | 150 ns |
+| projection: invalid intervention `Kind` | 783.914 µs | 429.638 µs | 150 ns |
+
+Three of them reach their floor and three do not, and the three that do not are
+stated rather than rounded: the config and the cutoff scan sit below the
+evaluator's text budget, and the intervention vocabulary sits below the
+projection's count-and-length budget. Those walks have to run — they are what
+refuse an over-ceiling input for its SIZE — so they are real floors where the
+original figures were not.
+
+Four structural changes carry it. The evaluator's shape gate is **split in two**,
+counts and text, so the three comparisons against package constants can sit
+between them; the three fields those comparisons read are length-bounded first,
+individually, because the package's rule is that an over-long value is refused
+for its size and a case pins it — the first attempt at this hoist skipped that
+and inverted the precedence. `normalizeOrderedRulesConfig` moves **above** the
+structural tier, which strengthens the config-beats-stream precedence already
+pinned rather than inverting one. The cutoff's UTF-8 scan becomes a
+**bounded-text tier of its own** above the identity walk and the hash, which is
+where a ≤4 KiB scan belongs; it had been left in the invariant pass on the
+correct observation that it reads caller-chosen text and the incorrect
+conclusion that this put it below a whole-stream hash. And the projection's
+charging loops now enforce the per-string **length** they already read, for
+references and interventions alike — the deferral had been justified by a scan
+that `checkFreeText` never reaches for an over-bound value.
+
+**Three consequences that were not asked for and are recorded because they are
+the interesting part.**
+
+The cutoff row in `TestOrderedRulesARefusalDecidedBeforeTheTraversalAttestsToNothing`
+was the table's ONLY post-digest case and is now `digest=false`. A table that
+only ever expects an empty digest cannot fail in the other direction, so a
+candidate's PROVENANCE — genuinely below the hash, one per candidate, so
+hoisting its scan would cost the whole retained ceiling rather than 4 KiB —
+takes that row instead.
+
+Two identity-ordering cases used an over-bound admission reference as the
+expensive companion fault. The length repair moved that refusal ABOVE the
+identity passes, so those cases stopped pinning what they claim. They now use an
+unencodable reference of admissible length, which is what `validateAdmission`
+still owns below the identities.
+
+And `forged()`, the builder behind the whole oversized-input suite, left `Scope`
+entirely zero — so every case in it carried a second, unintended fault that
+merely never got the chance to fire. The cases passed for a reason none of them
+names. A fixture must carry exactly the fault under test; that one did not, and
+only a reordering exposed it.
+
 **The EIGHTH was the outcome identities, on the projection side, and it is the
 third time this same defect class has been repaired one level at a time.**
 `ProjectOrderedRulesStream` had its candidate-uniqueness pass hoisted above the
@@ -4208,9 +4268,15 @@ the candidate pass keeps that bound, while the outcome pass is
 `MaxOrderedRulesIdentifierBytes`, 32 MiB nominally. What actually caps it is the
 shape gate above, which already charges every supplied stream string against
 `orderedRulesTextCeiling` at its worst-case encoded width — about 21 MiB of raw
-text for the whole stream, and the same text the digest below would have read
-anyway. That is the honest bound, stated in place of the half-megabyte figure
-the tier inherited.
+text for the whole stream. That is the honest bound, stated in place of the
+half-megabyte figure the tier inherited.
+
+This paragraph originally ended by adding that it was "the same text the digest
+below would have read anyway", and that clause is **false** — see the retraction
+below, which a reviewer had to make twice because the first retraction corrected
+the source comment and left this copy standing. Fixing one instance of a claim is
+not fixing the claim, which is the same lesson this package keeps relearning
+about rules on paired paths.
 
 **Two published claims about the evaluator's order were false, and both are
 retracted here.** The first said the stream digest "is not deferred and cannot

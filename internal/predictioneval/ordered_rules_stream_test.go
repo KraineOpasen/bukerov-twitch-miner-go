@@ -741,6 +741,14 @@ func TestOrderedRulesOversizedInputIsRefusedBeforeItIsRead(t *testing.T) {
 		}
 		return predictioneval.OrderedRulesStream{
 			ContractVersion: predictioneval.OrderedRulesStreamContractVersion,
+			// The SCOPE's contract version too, and it was missing until the
+			// evaluator began settling it above the text budget. This fixture
+			// left Scope entirely zero, so every case below carried a second,
+			// unintended fault — an unsupported source contract — that simply
+			// never got the chance to fire. The cases still passed, for a
+			// reason none of them names. A fixture must carry exactly the fault
+			// under test, and this one did not.
+			Scope:           predictioneval.OrderedRulesScope{SourceContractVersion: predictioneval.OrderedRulesStreamContractVersion},
 			Candidates:      cs,
 			SelectionDigest: "a digest this stream does not have",
 		}
@@ -2223,13 +2231,21 @@ func TestOrderedRulesTheGateDoesNotChargeTextItDidNotReceive(t *testing.T) {
 	for i := range derived {
 		derived[i] = buf
 	}
-	derivedBytes := len(derived)*max + 3*max + max
+	// The stream's own ContractVersion is NOT among the derived text charged
+	// here, and that is a change forced by the evaluator settling the version
+	// comparisons above the text budget. Setting it to a 4 KiB filler made the
+	// stream refusable as a CONTRACT MISMATCH, which now decides before the
+	// byte gate — so the search below would have measured that refusal instead
+	// of the one it names. The qualifications and the boundary are 274,432
+	// bytes between them, an order of magnitude past one search step, so the
+	// case keeps its power; the vacuity guard below re-checks that rather than
+	// trusting this comment.
+	derivedBytes := len(derived)*max + 3*max
 
 	stream := func(n int, withDerived bool) predictioneval.OrderedRulesStream {
 		s := orProject(t, []predictioneval.OrderedRulesCandidate{
 			orCandidate("c1", 10, orKnownBalance(1000), orOutcome("A", 4), orOutcome("B", 6))}, nil)
 		if withDerived {
-			s.ContractVersion = buf
 			s.Qualifications = derived
 			s.Cutoff = predictioneval.OrderedRulesCutoff{
 				Established: true, Position: 9,
@@ -2307,8 +2323,8 @@ func TestOrderedRulesTheGateDoesNotChargeTextItDidNotReceive(t *testing.T) {
 	}
 	if withDerived != without {
 		t.Fatalf("adding %d bytes of DERIVED text moved the gate's limit from %d to %d bytes per "+
-			"outcome string. Text the projection generates — %d qualifications, the boundary and the "+
-			"stream's contract version — is being charged against the ceiling the projection charged.",
+			"outcome string. Text the projection generates — %d qualifications and the boundary — "+
+			"is being charged against the ceiling the projection charged.",
 			derivedBytes, without, withDerived, len(derived))
 	}
 
@@ -3561,16 +3577,20 @@ func TestOrderedRulesACheapRefusalIsNotPaidForWithTheWholePayload(t *testing.T) 
 			orCandidate("same", 20, orKnownBalance(1000), orOutcome("A", 4), orOutcome("B", 6)),
 		}
 		// An ADMISSION fault with its own sentinel, so the two are told apart
-		// by which rule fired rather than by wording. A source reference one
-		// byte past the per-string bound is refused by validateAdmission, which
-		// is the first of the three scans this pass now precedes.
+		// by which rule fired rather than by wording. It is an UNENCODABLE
+		// reference of admissible length, not an over-bound one: the over-bound
+		// case moved ABOVE this pass when the charging loop began enforcing the
+		// per-string length it already reads, so it no longer names an expense
+		// this pass precedes. What validateAdmission still owns, below the
+		// identities, is the UTF-8 SCAN — which is the scan this ordering is
+		// about.
 		overBound := orAdmission()
-		overBound.SourceReferences = []string{strings.Repeat("x", predictioneval.MaxOrderedRulesIdentifierBytes+1)}
+		overBound.SourceReferences = []string{"ref-\xff-tail"}
 
 		// The premise: each fault really is raised on its own.
 		if _, err := predictioneval.ProjectOrderedRulesStream(orSource(cs, nil),
-			overBound); !errors.Is(err, predictioneval.ErrOrderedRulesOverBound) {
-			t.Fatalf("premise: the admission alone must be refused as over-bound; got %v", err)
+			overBound); !errors.Is(err, predictioneval.ErrOrderedRulesNotEncodable) {
+			t.Fatalf("premise: the admission alone must be refused as unencodable; got %v", err)
 		}
 		if _, err := predictioneval.ProjectOrderedRulesStream(orSource(duplicated, nil),
 			orAdmission()); !errors.Is(err, predictioneval.ErrOrderedRulesDuplicateIdentity) {
@@ -3579,7 +3599,7 @@ func TestOrderedRulesACheapRefusalIsNotPaidForWithTheWholePayload(t *testing.T) 
 
 		_, err := predictioneval.ProjectOrderedRulesStream(orSource(duplicated, nil), overBound)
 		if !errors.Is(err, predictioneval.ErrOrderedRulesDuplicateIdentity) {
-			t.Fatalf("a source repeating a candidate identity beside an over-bound admission "+
+			t.Fatalf("a source repeating a candidate identity beside an unencodable admission "+
 				"reference was refused %v. Uniqueness reads nothing but the identities and is "+
 				"capped at MaxOrderedRulesCandidates x MaxOrderedRulesIdentifierBytes; the three "+
 				"scans it precedes are three times that envelope, and none of them is consulted "+
@@ -3602,13 +3622,15 @@ func TestOrderedRulesACheapRefusalIsNotPaidForWithTheWholePayload(t *testing.T) 
 			orCandidate("c1", 10, orKnownBalance(1000), orOutcome("A", 4), orOutcome("B", 6)),
 			orCandidate("c2", 20, orKnownBalance(1000), orOutcome("A", 4), orOutcome("A", 6)),
 		}
+		// Unencodable rather than over-bound, for the reason given on the
+		// candidate case above: the length refusal now precedes this pass.
 		overBound := orAdmission()
-		overBound.SourceReferences = []string{strings.Repeat("x", predictioneval.MaxOrderedRulesIdentifierBytes+1)}
+		overBound.SourceReferences = []string{"ref-\xff-tail"}
 
 		// Each fault alone, under its own sentinel.
 		if _, err := predictioneval.ProjectOrderedRulesStream(orSource(cs, nil),
-			overBound); !errors.Is(err, predictioneval.ErrOrderedRulesOverBound) {
-			t.Fatalf("premise: the admission alone must be refused as over-bound; got %v", err)
+			overBound); !errors.Is(err, predictioneval.ErrOrderedRulesNotEncodable) {
+			t.Fatalf("premise: the admission alone must be refused as unencodable; got %v", err)
 		}
 		if _, err := predictioneval.ProjectOrderedRulesStream(orSource(duplicated, nil),
 			orAdmission()); !errors.Is(err, predictioneval.ErrOrderedRulesDuplicateIdentity) {
@@ -3630,7 +3652,7 @@ func TestOrderedRulesACheapRefusalIsNotPaidForWithTheWholePayload(t *testing.T) 
 		_, err := predictioneval.ProjectOrderedRulesStream(orSource(duplicated, nil), overBound)
 		if !errors.Is(err, predictioneval.ErrOrderedRulesDuplicateIdentity) {
 			t.Fatalf("a source repeating an outcome identity inside one candidate beside an "+
-				"over-bound admission reference was refused %v. The outcome identities are a "+
+				"unencodable admission reference was refused %v. The outcome identities are a "+
 				"bounded pass reading nothing but those identities; the scans it now precedes "+
 				"are not consulted to decide that one pool names the same outcome twice.", err)
 		}
@@ -4672,16 +4694,36 @@ func TestOrderedRulesARefusalDecidedBeforeTheTraversalAttestsToNothing(t *testin
 		// class's other half.
 		{"stream repeats an outcome identity inside one candidate", duplicateOutcomeIdentity(t),
 			cfg, 0, predictioneval.ReasonStreamInvariantViolated, false},
-		// And the one part of the boundary invariant that is NOT in the
-		// constant-bounded tier, pinned as digest=true for exactly that reason. The
-		// cutoff identity's emptiness and its length are settled before the
-		// hash; its UTF-8 VALIDITY is a scan of a string the caller chose, so
-		// it stays in the invariant pass. An earlier version of this package
-		// hoisted the whole predicate and claimed it read no supplied text —
-		// it did, here. If this scan is ever moved back into the structural
-		// tier, this row stops finding a digest and fails.
+		// The boundary's encodability, and this row USED TO BE digest=true —
+		// the table's only post-digest case, with a comment explaining that the
+		// cutoff identity's UTF-8 validity is a scan of caller-chosen text and
+		// therefore belongs in the invariant pass. The reasoning was right
+		// about the scan and wrong about the tier: bounded to
+		// MaxOrderedRulesIdentifierBytes by the text gate, it is at most 4 KiB,
+		// which is a bounded-text tier of its own rather than grounds to sit
+		// below a whole-stream hash. A reviewer measured what that cost —
+		// 22.223546 ms on 128 candidates x 64 outcomes with 2,400-byte
+		// provenance, with the digest handed back so the oracle made it
+		// repeatable — and it is 115.041 µs carrying nothing now.
 		{"stream carries a cutoff identity that is not encodable", boundedFault(t,
 			func(st *predictioneval.OrderedRulesStream) { st.Cutoff.Identity = "call-\xff-1" }),
+			cfg, 0, predictioneval.ReasonStreamInvariantViolated, false},
+		// WHICH LEFT THE TABLE WITH NO POST-DIGEST ROW AT ALL, and a table that
+		// only ever expects digest="" cannot fail in the other direction: the
+		// `c.digest && got.StreamDigest == ""` branch would never run, and a
+		// change that stopped EVERY refusal carrying a digest would pass.
+		//
+		// A candidate's PROVENANCE is genuinely settled below the hash, and not
+		// by oversight. The text gate bounds its length and nothing above the
+		// digest scans it; checkFreeText inside the invariant pass does. Unlike
+		// the boundary identifier there is one per candidate, so hoisting the
+		// scan would move up to the whole retained ceiling of UTF-8 scanning,
+		// not 4 KiB — the asymmetry that makes one of these a tier and the
+		// other a traversal.
+		{"stream carries a candidate provenance that is not encodable", shortFault(t,
+			func(st *predictioneval.OrderedRulesStream) {
+				st.Candidates[len(st.Candidates)-1].Provenance = "note-\xff-tail"
+			}),
 			cfg, 0, predictioneval.ReasonStreamInvariantViolated, true},
 	} {
 		t.Run(c.name, func(t *testing.T) {
