@@ -73,7 +73,19 @@ func digestSupplied(h hash.Hash, v SuppliedInt64) {
 		digestInt(h, v.Value)
 		digestPart(h, v.Provenance)
 		digestInt(h, v.AvailableAtPosition)
+		// The DECLARATION as well as the position. Inside a projected stream
+		// the flag is always set, since the projection refuses a KNOWN value
+		// without it — which is exactly why leaving it unhashed looked like
+		// decoration and was not. EvaluateOrderedRules takes the stream by
+		// value, so the digest is what stands between it and a stream the
+		// projection never produced; a flag the digest ignores can be stripped
+		// from a projected stream, and the evaluator would then read a balance
+		// whose availability was never declared while the digest still matched.
+		digestBool(h, v.HasAvailableAtPosition)
 	} else {
+		// A non-KNOWN value's position and declaration are not hashed for the
+		// same reason its value is not: there is no value whose timing could
+		// matter, so a leftover zero must not make two absences differ.
 		digestPart(h, v.Reason)
 	}
 }

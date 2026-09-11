@@ -14,6 +14,7 @@ package predictioneval_test
 import (
 	"errors"
 	"math"
+	"reflect"
 	"testing"
 
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/predictioneval"
@@ -153,6 +154,121 @@ func TestOrderedRulesStreamDigestBindsTheSourcesOwnQualifications(t *testing.T) 
 // carried on this frame, one lost to a decoding failure — are different
 // evidence about whether the gap is fixable. A binding that hashed only the
 // presence would make them interchangeable.
+// TestOrderedRulesDigestBindsTheAvailabilityDeclaration pins the declaration
+// against tampering, not merely against the projection.
+//
+// Inside a projected stream the flag is always set, because the projection
+// refuses a KNOWN value without it. That is precisely what made leaving it
+// unhashed look like decoration — and it was not. EvaluateOrderedRules takes
+// the stream BY VALUE, so the digest is the only thing standing between it and
+// a stream the projection never produced. A flag the digest ignores can be
+// stripped from a projected stream, after which the evaluator reads a balance
+// whose availability was never declared while the digest still matches, undoing
+// the causal guard at the one seam it was supposed to survive.
+func TestOrderedRulesDigestBindsTheAvailabilityDeclaration(t *testing.T) {
+	cs := []predictioneval.OrderedRulesCandidate{
+		orCandidate("c1", 10, orKnownBalance(1000), orOutcome("A", 4), orOutcome("B", 6)),
+	}
+	stream := orProject(t, cs, nil)
+	cfg := orConfig([]predictioneval.OrderedRule{
+		orRule(predictioneval.ComparatorLe, 40, 100, 0, 10)}, 95, 100, 0, 10)
+
+	if before := predictioneval.EvaluateOrderedRules(stream, cfg, orDraws()); before.Status !=
+		predictioneval.StatusWouldAttempt {
+		t.Fatalf("this case's premise is that the intact stream evaluates; got %q", before.Status)
+	}
+
+	// The projection refuses this exact input, so the evaluator must too.
+	tampered := cs[0]
+	tampered.Balance.HasAvailableAtPosition = false
+	if _, err := predictioneval.ProjectOrderedRulesStream(
+		orSource([]predictioneval.OrderedRulesCandidate{tampered}, nil), orAdmission()); err == nil {
+		t.Fatal("premise broken: the projection accepted an undeclared availability")
+	}
+
+	stream.Candidates[0].Balance.HasAvailableAtPosition = false
+	after := predictioneval.EvaluateOrderedRules(stream, cfg, orDraws())
+	if after.Status != predictioneval.StatusRefused ||
+		after.Reason != predictioneval.ReasonStreamDigestMismatch {
+		t.Fatalf("status %q reason %q, want REFUSED / %s: stripping the declaration must move the "+
+			"digest, or the evaluator accepts a stream the projection refuses",
+			after.Status, after.Reason, predictioneval.ReasonStreamDigestMismatch)
+	}
+}
+
+// TestOrderedRulesSuppliedDigestBindsEveryFieldThatCouldChangeADecision walks
+// SuppliedInt64 by reflection so a field added later cannot go unbound quietly.
+//
+// This exists because that is exactly what happened: HasAvailableAtPosition was
+// added to the type and not to the digest, and every hand-written binding test
+// kept passing because none of them knew the field existed. A field-by-field
+// walk does not depend on anyone remembering.
+//
+// Exemptions are listed with the reason they are exempt, and the reason is
+// always the same question: can the field change what the model is allowed to
+// do? A leftover Reason on a KNOWN value cannot — it is the explanation slot
+// for an absence that did not happen — so two streams differing only there
+// carry the same evidence. The availability declaration CAN, which is why it is
+// not on this list.
+func TestOrderedRulesSuppliedDigestBindsEveryFieldThatCouldChangeADecision(t *testing.T) {
+	exempt := map[string]string{
+		"Reason": "a KNOWN value's Reason explains an absence that did not happen; it cannot " +
+			"change what the model may do, and the MISSING branch binds it where it can",
+	}
+
+	cfg := orConfig([]predictioneval.OrderedRule{
+		orRule(predictioneval.ComparatorLe, 40, 100, 0, 10)}, 95, 100, 0, 10)
+	digestOf := func(t *testing.T, balance predictioneval.SuppliedInt64) string {
+		t.Helper()
+		st := predictioneval.OrderedRulesStream{
+			ContractVersion: predictioneval.OrderedRulesStreamContractVersion,
+			Candidates: []predictioneval.OrderedRulesCandidate{
+				orCandidate("c1", 10, balance, orOutcome("A", 4), orOutcome("B", 6))},
+		}
+		d := predictioneval.EvaluateOrderedRules(st, cfg, orDraws()).StreamDigest
+		if d == "" {
+			t.Fatal("the probe stream must be readable, or this test compares nothing")
+		}
+		return d
+	}
+
+	base := orKnownBalance(1000)
+	base.Reason = "a leftover explanation"
+	baseline := digestOf(t, base)
+
+	typ := reflect.TypeOf(base)
+	for i := 0; i < typ.NumField(); i++ {
+		f := typ.Field(i)
+		t.Run(f.Name, func(t *testing.T) {
+			mutated := base
+			v := reflect.ValueOf(&mutated).Elem().Field(i)
+			switch v.Kind() {
+			case reflect.String:
+				v.SetString(v.String() + "-changed")
+			case reflect.Int64:
+				v.SetInt(v.Int() + 1)
+			case reflect.Bool:
+				v.SetBool(!v.Bool())
+			default:
+				t.Fatalf("field %s has kind %s, which this walk does not know how to change; "+
+					"teach it rather than leaving the field unchecked", f.Name, v.Kind())
+			}
+
+			moved := digestOf(t, mutated) != baseline
+			why, isExempt := exempt[f.Name]
+			switch {
+			case moved && isExempt:
+				t.Fatalf("%s is listed as exempt (%s) but the digest DOES bind it; remove the "+
+					"exemption rather than leaving a false one", f.Name, why)
+			case !moved && !isExempt:
+				t.Fatalf("changing %s left the stream digest identical, so nothing binds it. Either "+
+					"hash it, or add it to the exemption list with the reason it cannot change a "+
+					"decision.", f.Name)
+			}
+		})
+	}
+}
+
 func TestOrderedRulesDigestBindsTheReasonBehindAnAbsentValue(t *testing.T) {
 	withReason := func(reason string) string {
 		c := orCandidate("c1", 10,
