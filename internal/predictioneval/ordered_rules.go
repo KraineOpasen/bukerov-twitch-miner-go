@@ -685,6 +685,44 @@ func EvaluateOrderedRules(stream OrderedRulesStream, rules OrderedRulesConfig, d
 	// Here, the version mismatch still costs two string comparisons and the
 	// scan never runs. The ceilings still come first, in the gate, so a string
 	// already past its budget is refused for size rather than read.
+	// THE STREAM'S OWN COMPARISON NEXT, before anything unrelated to it is read.
+	//
+	// A caller handing in a stream whose SelectionDigest does not match is
+	// refused on the strength of that stream alone. The config and the trace
+	// are not consulted, not traversed and not attested to — a mismatch means
+	// nothing was consumed, so a digest over either would witness something
+	// this call never read, which is the same reason the two version refusals
+	// above carry no digests at all.
+	//
+	// Cost, which is why the position matters rather than only the principle.
+	// The identifier scan and the config, entropy and consumed-prefix digests
+	// each traverse ConfigID or RunID, and those two may legitimately approach
+	// their own 128 MiB ceiling. Measured with a small stream and a 64 MiB
+	// identifier: 582.770 ms to report a digest mismatch, against 14.049 µs for
+	// the identical refusal with a short one — four traversals of text the
+	// refusal does not depend on.
+	//
+	// The stream digest itself is not deferred and cannot be: it IS the
+	// comparison. Its cost is proportional to the stream being judged, which is
+	// the one input a mismatch refusal is about, and the gate above has already
+	// bounded it.
+	streamDigest := orderedRulesStreamDigest(stream)
+	if stream.SelectionDigest != streamDigest {
+		refused := orderedRulesUnreadRefusal(ReasonStreamDigestMismatch)
+		refused.Cutoff = stream.Cutoff
+		// The recomputed digest still travels back, deliberately. It is the
+		// documented two-call oracle, and hiding it would raise a forgery's
+		// cost from one extra call to reading this repository, which is not a
+		// boundary. The invariant pass below is what actually stands in the
+		// way.
+		refused.StreamDigest = streamDigest
+		if len(stream.Qualifications) > 0 {
+			refused.Qualifications = make([]string, len(stream.Qualifications))
+			copy(refused.Qualifications, stream.Qualifications)
+		}
+		return refused
+	}
+
 	if invalidUTF8(rules.ConfigID) || invalidUTF8(draws.RunID) {
 		return orderedRulesUnreadRefusal(ReasonSuppliedTextNotEncodable)
 	}
@@ -697,7 +735,7 @@ func EvaluateOrderedRules(stream OrderedRulesStream, rules OrderedRulesConfig, d
 		Cutoff:                  stream.Cutoff,
 		Participation:           ParticipationNotAdmitted,
 		Stake:                   SuppliedUint32{Presence: SuppliedMissing, Reason: ReasonBalanceNotEvaluated},
-		StreamDigest:            orderedRulesStreamDigest(stream),
+		StreamDigest:            streamDigest,
 		ConfigDigest:            orderedRulesConfigDigest(rules),
 		EntropyDigest:           orderedRulesEntropyDigest(draws),
 	}
@@ -718,8 +756,6 @@ func EvaluateOrderedRules(stream OrderedRulesStream, rules OrderedRulesConfig, d
 	}
 
 	switch {
-	case stream.SelectionDigest != out.StreamDigest:
-		return refuse(ReasonStreamDigestMismatch, 0, 0)
 	case len(draws.Words) > MaxOrderedRulesDrawWords:
 		return refuse(ReasonDrawWordsOverBound, 0, 0)
 	case len(rules.Detailed) > MaxOrderedRulesRules:

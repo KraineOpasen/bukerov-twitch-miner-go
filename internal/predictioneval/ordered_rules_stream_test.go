@@ -3417,3 +3417,109 @@ func TestOrderedRulesTheConfigAndTraceIdentifiersMustAlsoBeEncodable(t *testing.
 		}
 	})
 }
+
+// TestOrderedRulesACheapRefusalIsNotPaidForWithTheWholePayload pins two
+// orderings whose only symptom is cost.
+//
+// Both are the same rule the rest of this package applies — bound the work a
+// refusal can be made to do — and both were violated by checks that were
+// correct in every other respect. Neither admits anything it should not; they
+// were simply reachable at a price the caller chose.
+//
+// Cost cannot be asserted here: this repository's deterministic-test contract
+// bars timing. So each is pinned by the ORDER it implies, which is observable
+// and exact. The measurements that motivated them are recorded in the source
+// comments beside each fix.
+func TestOrderedRulesACheapRefusalIsNotPaidForWithTheWholePayload(t *testing.T) {
+	cs := []predictioneval.OrderedRulesCandidate{
+		orCandidate("c1", 10, orKnownBalance(1000), orOutcome("A", 4), orOutcome("B", 6)),
+	}
+	cfg := orConfig([]predictioneval.OrderedRule{
+		orRule(predictioneval.ComparatorLe, 40, 100, 0, 10)}, 95, 100, 0, 10)
+
+	// The projection establishes the boundary from the interventions, which are
+	// already bounded in count and text, BEFORE walking the candidates, which
+	// are the bulk of the admitted budget. An intervention rejectable on its
+	// shape alone must therefore win against a rejectable candidate: 44 µs
+	// rather than 5.0 ms on a fixture far short of the ceiling.
+	t.Run("a malformed intervention is refused before the candidates are walked", func(t *testing.T) {
+		broken := []predictioneval.OrderedRulesIntervention{
+			orIntervention("call-1", 5000, predictioneval.InterventionAutoCallStarted,
+				predictioneval.RelevanceProven, "boundary"),
+		}
+		broken[0].HasPosition = false
+
+		// A candidate fault the walk would raise, with its own sentinel, so the
+		// two are told apart by which rule fired rather than by wording.
+		duplicated := []predictioneval.OrderedRulesCandidate{
+			orCandidate("same", 10, orKnownBalance(1000), orOutcome("A", 4), orOutcome("B", 6)),
+			orCandidate("same", 20, orKnownBalance(1000), orOutcome("A", 4), orOutcome("B", 6)),
+		}
+		// The premise: each fault really is raised on its own.
+		if _, err := predictioneval.ProjectOrderedRulesStream(orSource(cs, broken),
+			orAdmission()); !errors.Is(err, predictioneval.ErrOrderedRulesScopeIncomplete) {
+			t.Fatalf("premise: the intervention alone must be refused as incomplete; got %v", err)
+		}
+		if _, err := predictioneval.ProjectOrderedRulesStream(orSource(duplicated, nil),
+			orAdmission()); !errors.Is(err, predictioneval.ErrOrderedRulesDuplicateIdentity) {
+			t.Fatalf("premise: the candidates alone must be refused as duplicated; got %v", err)
+		}
+
+		_, err := predictioneval.ProjectOrderedRulesStream(orSource(duplicated, broken), orAdmission())
+		if !errors.Is(err, predictioneval.ErrOrderedRulesScopeIncomplete) {
+			t.Fatalf("a source with both a malformed intervention and a duplicated candidate was "+
+				"refused %v. The boundary comes from interventions that are already bounded in "+
+				"count and text; the candidate walk is the bulk of the budget and must not run "+
+				"first.", err)
+		}
+	})
+
+	// The evaluator compares the stream against its own digest before reading
+	// anything else. The config and the trace are not consulted, not traversed
+	// and not attested to: 14.049 µs rather than 582.770 ms with a 64 MiB
+	// identifier beside a small stream.
+	t.Run("a digest mismatch is decided without reading the config or the trace", func(t *testing.T) {
+		st := orProject(t, cs, nil)
+		st.SelectionDigest = strings.Repeat("0", 64)
+
+		// Both identifiers unencodable, so if either were scanned first this
+		// would be refused for encodability instead.
+		poisoned := orConfig([]predictioneval.OrderedRule{
+			orRule(predictioneval.ComparatorLe, 40, 100, 0, 10)}, 95, 100, 0, 10)
+		poisoned.ConfigID = "id-\xff-tail"
+		draws := orDraws()
+		draws.RunID = "id-\xff-tail"
+
+		got := predictioneval.EvaluateOrderedRules(st, poisoned, draws)
+		switch {
+		case got.Reason != predictioneval.ReasonStreamDigestMismatch:
+			t.Fatalf("a stream whose digest does not match, beside unencodable identifiers, was "+
+				"refused %q. The mismatch is settled by the stream alone; the identifiers must "+
+				"not be read to reach it.", got.Reason)
+		// The recomputed digest still travels back: it is the documented
+		// two-call oracle, and the other cases in this file depend on it.
+		case got.StreamDigest == "":
+			t.Fatal("the mismatch refusal stopped carrying the recomputed stream digest, which " +
+				"the documented oracle and several cases in this file depend on")
+		// And the three that would each traverse the identifiers do not.
+		case got.ConfigDigest != "" || got.EntropyDigest != "" || got.ConsumedInputDigest != "":
+			t.Fatal("the mismatch refusal carried a config, entropy or consumed-prefix digest. " +
+				"Nothing was consumed, so each of those witnesses an input this call never read " +
+				"— and computing them traverses identifiers the refusal does not depend on")
+		}
+	})
+
+	// The counterweight: an evaluation that is NOT refused early still reports
+	// all four digests. Without this, deferring them could degenerate into
+	// never producing them and every case above would still pass.
+	t.Run("an admitted run still reports every digest", func(t *testing.T) {
+		got := predictioneval.EvaluateOrderedRules(orProject(t, cs, nil), cfg, orDraws())
+		switch {
+		case got.Status != predictioneval.StatusWouldAttempt:
+			t.Fatalf("premise: the intact fixture must evaluate; got %q", got.Status)
+		case got.StreamDigest == "" || got.ConfigDigest == "" ||
+			got.EntropyDigest == "" || got.ConsumedInputDigest == "":
+			t.Fatal("an admitted run must still carry all four digests")
+		}
+	})
+}
