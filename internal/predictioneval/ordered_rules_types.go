@@ -584,6 +584,17 @@ type OrderedRulesStream struct {
 	// SelectionDigest binds the selection — scope, admission, boundary and every
 	// detached candidate value — so a result cannot be re-attached to a
 	// different stream.
+	//
+	// It detects CHANGE, not origin. The digest is unkeyed, deterministic and
+	// computed over exported fields, so any caller able to construct this
+	// struct can compute the matching value; a stream that never came from
+	// [ProjectOrderedRulesStream] can carry a digest that verifies perfectly.
+	// That is not a weakness to be patched by hiding the algorithm — the type
+	// carries JSON tags because a projected stream is meant to be serialized
+	// and read back, and a check a legitimate reader can repeat is a check an
+	// illegitimate one can repeat. So [EvaluateOrderedRules] revalidates the
+	// projection's invariants over the stream it is handed rather than
+	// treating a matching digest as provenance.
 	SelectionDigest string `json:"selectionDigest"`
 }
 
@@ -645,6 +656,17 @@ const (
 	// exceeds [MaxOrderedRulesAggregateBytes], the same budget the projection
 	// charges.
 	ReasonStreamBytesOverBound = "STREAM_BYTES_OVER_BOUND"
+	// ReasonStreamInvariantViolated is a stream that is internally consistent —
+	// its digest matches its contents — and still could not have come from
+	// [ProjectOrderedRulesStream], because it breaks an invariant the
+	// projection enforces.
+	//
+	// The digest cannot separate those two cases and was never able to: it is
+	// unkeyed, deterministic, and computed over exported fields, so anyone able
+	// to build the struct can compute the matching value. Reading it back as
+	// proof of origin was the mistake; it proves only that the stream has not
+	// CHANGED since the digest was taken.
+	ReasonStreamInvariantViolated = "STREAM_INVARIANT_VIOLATED"
 	// ReasonStreamTextOverBound is a single supplied string past
 	// [MaxOrderedRulesIdentifierBytes] in a field the projection bounds
 	// individually. The aggregate budget alone does not catch it: one 64 MiB

@@ -898,6 +898,125 @@ func TestOrderedRulesOversizedInputIsRefusedBeforeItIsRead(t *testing.T) {
 	})
 }
 
+// TestOrderedRulesAMatchingDigestIsNotProofOfProjection pins the evaluator
+// against a stream that is internally consistent and still impossible.
+//
+// The digest was being read as provenance, and it cannot be. It is unkeyed,
+// deterministic and computed over exported fields, so any caller able to build
+// the struct can compute the matching value — and it is worse than that in
+// practice: a refusal RETURNS the recomputed digest in StreamDigest, so the
+// attack is two calls and no cryptography. Copy the value the first call hands
+// back into SelectionDigest and the second call verifies.
+//
+// Hiding the digest from refusals would not fix it. The algorithm is in this
+// repository, and the type carries JSON tags precisely so a projected stream
+// can be serialized and read back — a check a legitimate reader can repeat is
+// one an illegitimate reader can repeat. What makes a stream safe to traverse
+// is checking it, so the projection's invariants are re-established on ingest.
+func TestOrderedRulesAMatchingDigestIsNotProofOfProjection(t *testing.T) {
+	cfg := orConfig([]predictioneval.OrderedRule{
+		orRule(predictioneval.ComparatorLe, 40, 100, 0, 10)}, 95, 100, 0, 10)
+
+	// selfConsistent runs the oracle: take the digest the evaluator publishes
+	// on refusal, put it back, and hand the same stream in again.
+	selfConsistent := func(t *testing.T, st predictioneval.OrderedRulesStream) predictioneval.OrderedRulesEvaluation {
+		t.Helper()
+		first := predictioneval.EvaluateOrderedRules(st, cfg, orDraws())
+		if first.StreamDigest == "" {
+			t.Fatal("the probe must reach the digest, or the oracle is not being exercised")
+		}
+		st.SelectionDigest = first.StreamDigest
+		return predictioneval.EvaluateOrderedRules(st, cfg, orDraws())
+	}
+
+	// forge builds a stream that is well formed in every way the projection
+	// checks, then lets the caller break exactly one thing.
+	forge := func(break_ func(*predictioneval.OrderedRulesStream)) predictioneval.OrderedRulesStream {
+		st := predictioneval.OrderedRulesStream{
+			ContractVersion: predictioneval.OrderedRulesStreamContractVersion,
+			Scope:           orScope(),
+			Admission:       orAdmission(),
+			Candidates: []predictioneval.OrderedRulesCandidate{
+				orCandidate("c1", 10, orKnownBalance(1000), orOutcome("A", 4), orOutcome("B", 6))},
+		}
+		break_(&st)
+		return st
+	}
+
+	for _, tc := range []struct {
+		name   string
+		break_ func(*predictioneval.OrderedRulesStream)
+	}{
+		{"a KNOWN balance that never declared its availability", func(st *predictioneval.OrderedRulesStream) {
+			st.Candidates[0].Balance.HasAvailableAtPosition = false
+		}},
+		{"a balance available only AFTER the candidate", func(st *predictioneval.OrderedRulesStream) {
+			st.Candidates[0].Balance.AvailableAtPosition = 25
+		}},
+		{"outcome points that never declared availability", func(st *predictioneval.OrderedRulesStream) {
+			st.Candidates[0].Outcomes[0].Points.HasAvailableAtPosition = false
+		}},
+		{"membership that was never proven", func(st *predictioneval.OrderedRulesStream) {
+			st.Candidates[0].EpisodeMembership = predictioneval.MembershipUnknown
+		}},
+		{"a candidate retained at the boundary that should have cut it", func(st *predictioneval.OrderedRulesStream) {
+			st.Cutoff = predictioneval.OrderedRulesCutoff{
+				Established: true, Position: 5, Kind: predictioneval.InterventionAutoCallStarted,
+				Identity: "call-1", Basis: predictioneval.CutoffFactualIntervention}
+		}},
+		{"two candidates the causal order cannot separate", func(st *predictioneval.OrderedRulesStream) {
+			st.Candidates = append(st.Candidates,
+				orCandidate("c2", 10, orKnownBalance(1000), orOutcome("A", 4), orOutcome("B", 6)))
+		}},
+		{"a repeated identity", func(st *predictioneval.OrderedRulesStream) {
+			st.Candidates = append(st.Candidates,
+				orCandidate("c1", 20, orKnownBalance(1000), orOutcome("A", 4), orOutcome("B", 6)))
+		}},
+		{"a scope missing its association evidence", func(st *predictioneval.OrderedRulesStream) {
+			st.Scope.AssociationEvidence = ""
+		}},
+		{"a snapshot inside a channel-candidate view", func(st *predictioneval.OrderedRulesStream) {
+			st.Candidates[0].SourceKind = predictioneval.SourceKindCalculateSnapshot
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ev := selfConsistent(t, forge(tc.break_))
+			if ev.Status != predictioneval.StatusRefused ||
+				ev.Reason != predictioneval.ReasonStreamInvariantViolated {
+				t.Fatalf("status %q reason %q, want REFUSED / %s: the digest verified, so only a "+
+					"revalidation of the projection's invariants can stop this",
+					ev.Status, ev.Reason, predictioneval.ReasonStreamInvariantViolated)
+			}
+			if ev.Selected != nil {
+				t.Fatal("a refused evaluation must decide nothing")
+			}
+		})
+	}
+
+	// Non-vacuity in two directions. A stream that really did come from the
+	// projection still evaluates — so the new pass refuses the impossible
+	// rather than everything — and the SAME forging attempt, left unbroken,
+	// gets through the oracle, which proves the oracle itself works and that
+	// the refusals above come from the invariants and not from a stuck digest.
+	t.Run("a projected stream still evaluates", func(t *testing.T) {
+		stream := orProject(t, []predictioneval.OrderedRulesCandidate{
+			orCandidate("c1", 10, orKnownBalance(1000), orOutcome("A", 4), orOutcome("B", 6))}, nil)
+		if ev := predictioneval.EvaluateOrderedRules(stream, cfg, orDraws()); ev.Status !=
+			predictioneval.StatusWouldAttempt {
+			t.Fatalf("status %q reason %q, want WOULD_ATTEMPT", ev.Status, ev.Reason)
+		}
+	})
+
+	t.Run("the oracle itself works on a well-formed forgery", func(t *testing.T) {
+		if ev := selfConsistent(t, forge(func(*predictioneval.OrderedRulesStream) {})); ev.Status !=
+			predictioneval.StatusWouldAttempt {
+			t.Fatalf("status %q reason %q, want WOULD_ATTEMPT: a hand-built stream that breaks no "+
+				"invariant must still pass, or the cases above prove nothing about WHICH check "+
+				"refused them", ev.Status, ev.Reason)
+		}
+	})
+}
+
 // TestOrderedRulesUnrecoverableOutcomeVectorIsNotTheDonorsDecline pins the
 // distinction the vector's presence marker exists for.
 //

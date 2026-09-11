@@ -3268,6 +3268,22 @@ read the input, so it attests to nothing about it, and for the same reason the
 gate outranks the contract and digest mismatches — an input too large to read
 cannot be checked for anything else.
 
+The selection digest detects CHANGE, never ORIGIN, and the difference decides
+what has to happen on ingest. The digest is unkeyed, deterministic and computed
+over exported fields, so any caller able to construct the stream can compute the
+matching value; worse, a refusal returns the recomputed digest, so copying it
+back takes one extra call and no cryptography. None of that is fixed by hiding
+the value or the algorithm — the stream carries JSON tags because a projected
+one is MEANT to be serialized and read back, and a check a legitimate reader can
+repeat is a check anyone can repeat. So a matching digest is read as what it is,
+evidence that the stream has not changed since the digest was taken, and the
+evaluator re-establishes the projection's invariants over the stream it is
+handed before traversing it: scope and admission completeness, identity,
+uniqueness, strict causal order, the declared interval, proven membership,
+source/view compatibility, the presence and availability of every supplied
+value, and a boundary that really did remove what it claims. Those checks are
+the projection's own, called rather than restated, so the two cannot drift.
+
 **The mechanism.** The outcome vector is the OUTER loop and the rule list the
 inner one. A pool share is `1/(total/points)` — two divisions, never collapsed
 into `points/total`, because in binary64 they differ: for the pool `[9,1]` the

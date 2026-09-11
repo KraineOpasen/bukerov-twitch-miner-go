@@ -294,6 +294,74 @@ func orderedRulesInputBudget(s OrderedRulesStream, cfg OrderedRulesConfig,
 	return b
 }
 
+// orderedRulesStreamInvariantsBroken reports a stream that could not have come
+// from [ProjectOrderedRulesStream], however well its digest verifies.
+//
+// It re-runs the projection's own checks over the retained stream rather than
+// reimplementing them, so the two cannot drift: a stream the projection would
+// have produced passes here by construction, and every rule it enforces is
+// enforced once, in one place.
+//
+// This runs after the shape gate, so every loop below is bounded.
+func orderedRulesStreamInvariantsBroken(s OrderedRulesStream) bool {
+	const where = "retained candidate"
+	if validateScope(s.Scope) != nil || validateAdmission(s.Admission) != nil {
+		return true
+	}
+	seen := make(map[string]bool, len(s.Candidates))
+	var lastPosition int64
+	for i := range s.Candidates {
+		c := &s.Candidates[i]
+		// The message argument is discarded: this pass answers yes or no, and
+		// the typed status carries no free text. A caller wanting the specific
+		// violation has the projection itself, which names it.
+		switch {
+		case checkIdentifier(c.Identity, where) != nil,
+			seen[c.Identity],
+			i > 0 && c.Position <= lastPosition,
+			c.Position < s.Scope.IntervalFromPosition,
+			c.Position > s.Scope.IntervalToPosition,
+			c.EpisodeMembership != MembershipProven,
+			checkFreeText(c.Provenance, where) != nil,
+			checkFreeText(c.OutcomesReason, where) != nil,
+			checkPresence(c.Balance, where, c.Position) != nil:
+			return true
+		}
+		switch c.SourceKind {
+		case SourceKindChannelUpdate:
+			if s.Admission.ViewKind == ViewCalculateOnly {
+				return true
+			}
+		case SourceKindCalculateSnapshot:
+			if s.Admission.ViewKind == ViewChannelCandidateStream {
+				return true
+			}
+		default:
+			return true
+		}
+		switch c.OutcomesPresence {
+		case SuppliedKnown, SuppliedMissing, SuppliedInvalid:
+		default:
+			return true
+		}
+		for j := range c.Outcomes {
+			o := &c.Outcomes[j]
+			if checkIdentifier(o.Identity, where) != nil ||
+				checkPresence(o.Points, where, c.Position) != nil {
+				return true
+			}
+		}
+		// The boundary is EXCLUSIVE, and a stream retaining a candidate at or
+		// after it is one the projection would have cut.
+		if s.Cutoff.Established && c.Position >= s.Cutoff.Position {
+			return true
+		}
+		seen[c.Identity] = true
+		lastPosition = c.Position
+	}
+	return false
+}
+
 // EvaluateOrderedRules re-derives the donor mechanism over a projected stream.
 //
 // It returns no error: every refusal and every unknown is a TYPED STATUS on the
@@ -380,6 +448,16 @@ func EvaluateOrderedRules(stream OrderedRulesStream, rules OrderedRulesConfig, d
 		return refuse(ReasonDrawWordsOverBound, 0, 0)
 	case len(rules.Detailed) > MaxOrderedRulesRules:
 		return refuse(ReasonRuleCountOverBound, 0, 0)
+	case orderedRulesStreamInvariantsBroken(stream):
+		// A matching digest says the stream has not CHANGED. It does not say
+		// where it came from, and it never could: the digest is unkeyed and
+		// computed over exported fields, so a caller who can build the struct
+		// can compute the value — and a refusal above even hands one back in
+		// StreamDigest. Hiding that would be theatre, since the algorithm is
+		// readable. What actually makes a stream safe to traverse is checking
+		// it, so the projection's invariants are re-established here over the
+		// stream as handed in.
+		return refuse(ReasonStreamInvariantViolated, 0, 0)
 	}
 	cfg, configReason := normalizeOrderedRulesConfig(rules)
 	if configReason != "" {
