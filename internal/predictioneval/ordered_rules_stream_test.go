@@ -2387,8 +2387,14 @@ func TestOrderedRulesTheGateRefusesBytesTheProjectionWouldHaveRefused(t *testing
 		t.Fatal("premise: the projection must refuse this source, or there is nothing to mirror")
 	}
 
-	// Forge it into a stream and run the oracle: a refusal publishes the digest
-	// it wanted, so copying that back is two calls and no cryptography.
+	// Forge it into a stream. The oracle does NOT run here, and saying that it
+	// did was wrong: STREAM_BYTES_OVER_BOUND is an unread refusal, so it
+	// carries no digest at all and there is nothing to copy back. An audit
+	// checked the claim instead of reading it — first.StreamDigest is "".
+	//
+	// The property is stronger than the one the old sentence described, so it
+	// is asserted as what it is below: this refusal closes the oracle rather
+	// than surviving it.
 	st := orProject(t, []predictioneval.OrderedRulesCandidate{
 		orCandidate("c1", 10, orKnownBalance(100), orOutcome("A", 4), orOutcome("B", 6))}, nil)
 	st.Candidates = cs
@@ -2399,13 +2405,27 @@ func TestOrderedRulesTheGateRefusesBytesTheProjectionWouldHaveRefused(t *testing
 			"The projection charges these at %d, past its own ceiling.",
 			raw, first.Reason, raw*6)
 	}
-	// And it stays refused once the digest is made to agree, which is the only
-	// route by which a forged stream gets a second look.
-	st.SelectionDigest = first.StreamDigest
-	if second := predictioneval.EvaluateOrderedRules(st, orAlwaysAdmitConfig(), orDraws()); second.Reason !=
-		predictioneval.ReasonStreamBytesOverBound {
-		t.Fatalf("with a matching digest the same stream was answered %q / %q; the byte rule must not "+
-			"depend on the digest, which proves change and not origin", second.Status, second.Reason)
+	// THE ORACLE IS CLOSED ON THIS PATH, and that is the first half of the
+	// property. A refusal decided above the hash attests to nothing, so it
+	// publishes nothing for a forger to copy back.
+	if first.StreamDigest != "" {
+		t.Fatalf("a STREAM_BYTES_OVER_BOUND refusal handed back the digest %q. This refusal is "+
+			"decided before the stream is hashed, so a digest here witnesses an input this call "+
+			"never read — and it reopens the two-call oracle on the one gate whose whole purpose "+
+			"is to refuse before doing the work", first.StreamDigest)
+	}
+	// And the second half: the byte rule does not depend on the digest at all.
+	// Whatever the caller writes into SelectionDigest — the empty string a
+	// refusal now returns, or a value invented outright — the same stream is
+	// refused for the same reason.
+	for _, forged := range []string{first.StreamDigest, "a digest the caller invented"} {
+		st.SelectionDigest = forged
+		if second := predictioneval.EvaluateOrderedRules(st, orAlwaysAdmitConfig(), orDraws()); second.Reason !=
+			predictioneval.ReasonStreamBytesOverBound {
+			t.Fatalf("with SelectionDigest %q the same stream was answered %q / %q; the byte rule must "+
+				"not depend on the digest, which proves change and not origin",
+				forged, second.Status, second.Reason)
+		}
 	}
 }
 
@@ -3281,6 +3301,60 @@ func TestOrderedRulesEveryRetainedScopeAndAdmissionStringIsRevalidatedOnIngest(t
 		"Admission.ViewKind": true,
 	}
 
+	// baseFor is the projected stream a case forges FROM, and it is not always
+	// the same one.
+	//
+	// Scope.Coverage needs its own, and the reason is a defect this case had
+	// until an audit deleted the rule under test from BOTH ingest paths and
+	// watched the case stay green. On a COMPLETE_DECLARED base, substituting
+	// ANY other coverage — a word outside the vocabulary or a perfectly valid
+	// GAPS_PRESENT — makes qualCoverageNotComplete required where the stream
+	// carries none, so orderedRulesQualificationsNotDerived refuses it. That is
+	// a different rule, it fires first, and it made this case unable to observe
+	// the vocabulary rule at all. Verified in both directions: with the
+	// coverage vocabulary removed from the structural tier AND validateScope
+	// the case still passed, and a VALID GAPS_PRESENT substituted into a
+	// COMPLETE_DECLARED stream was refused identically.
+	//
+	// A GAPS_PRESENT base removes the interference: every value this case can
+	// substitute is also not COMPLETE_DECLARED, so the derived qualification
+	// list is unchanged and the vocabulary rule is the only one left that can
+	// refuse. The sibling entry Admission.ViewKind needs no such base — the
+	// same both-paths deletion fails there, naming it — which is why this is
+	// one case's fixture and not a change to the walk.
+	baseFor := func(t *testing.T, name string) predictioneval.OrderedRulesStream {
+		t.Helper()
+		if name != "Scope.Coverage" {
+			return orProject(t, cs, nil)
+		}
+		src := orSource(cs, nil)
+		src.Scope.Coverage = predictioneval.CoverageGapsPresent
+		st, err := predictioneval.ProjectOrderedRulesStream(src, orAdmission())
+		if err != nil {
+			t.Fatalf("projecting the GAPS_PRESENT base failed: %v", err)
+		}
+		return st
+	}
+
+	// And the premise that base rests on, asserted rather than argued: on it, a
+	// coverage substitution that is VALID must NOT be refused. If this ever
+	// starts failing, the qualification rule is back in front of the vocabulary
+	// rule and the Scope.Coverage case below has stopped testing what it names.
+	t.Run("premise: the GAPS_PRESENT base lets a coverage substitution through", func(t *testing.T) {
+		st := baseFor(t, "Scope.Coverage")
+		st.Scope.Coverage = predictioneval.CoverageTruncatedPrefix
+		first := predictioneval.EvaluateOrderedRules(st, cfg, orDraws())
+		st.SelectionDigest = first.StreamDigest
+		if got := predictioneval.EvaluateOrderedRules(st, cfg, orDraws()); got.Status !=
+			predictioneval.StatusWouldAttempt {
+			t.Fatalf("substituting a VALID coverage into the base was answered %q / %q. Both values "+
+				"are non-complete, so the derived qualifications are identical and nothing but the "+
+				"vocabulary rule should have an opinion — if something else refuses here, the "+
+				"Scope.Coverage case below passes for that reason instead of the one it names.",
+				got.Status, got.Reason)
+		}
+	})
+
 	// walk probes every string-BACKED field it finds — plain, named, or a slice
 	// of either — and requires the forged stream to be refused through the
 	// digest oracle. Vocabulary fields are probed with a word outside their set;
@@ -3301,7 +3375,7 @@ func TestOrderedRulesEveryRetainedScopeAndAdmissionStringIsRevalidatedOnIngest(t
 			visited[name] = true
 			vocabulary := vocabularies[name]
 			t.Run(name, func(t *testing.T) {
-				st := orProject(t, cs, nil)
+				st := baseFor(t, name)
 				fv := pick(&st).Field(i)
 				switch {
 				case vocabulary:

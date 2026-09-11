@@ -4244,6 +4244,67 @@ guarantee: the enumeration covers closed vocabularies, identity uniqueness,
 required-presence declarations and the per-string bounds, and nothing claims it
 is exhaustive over every future field.
 
+**The completed symmetry pass, and why its silence is weaker evidence than a
+reviewer's finding.** The enumeration was finished afterwards over all three
+copies of the ingest rules — the projection's structural, vocabulary, identity
+and payload passes; the evaluator's constant-bounded structural tier; and the
+evaluator's invariant pass — as a table of thirty-five rules. Every rule the
+projection applies to RETAINED state has a counterpart on the evaluator side,
+including the ones no reviewer has raised: the declared-position flags, strict
+causal ordering, the declared interval, episode membership, source-kind/view
+compatibility, the nested presence words and the back-dating comparison. The
+ceilings were checked by arithmetic rather than by reading: `chargedWidth` is
+`n * orderedRulesMaxJSONExpansion` with no constant term, so the projection's
+grouped charge and the evaluator's per-string charge are equal sums, and both
+sides compare strictly past `orderedRulesTextCeiling`. Where the evaluator
+charges less — a derived cutoff identity, the removed-candidate floor — it is
+bounded above by what the projection charged for the same source, which is the
+safe direction. No gap was found, and that sentence is worth exactly what an
+audit designed by the person who wrote the code is worth.
+
+**The attestation audit found one, and it is the same shape as the ten.** The
+reordering work moved refusals above the stream hash, which changes what a
+refusal can attest to — so the tests that assert through the two-call digest
+oracle were re-checked for vacuity rather than assumed still sound.
+
+`TestOrderedRulesEveryRetainedScopeAndAdmissionStringIsRevalidatedOnIngest`
+walks every retained string in the scope and the admission by reflection and
+requires a forged one to be refused. Its `Scope.Coverage` case could not observe
+the rule it names. On a `COMPLETE_DECLARED` base, substituting any other
+coverage makes `qualCoverageNotComplete` required where the stream carries none,
+so `orderedRulesQualificationsNotDerived` refuses it — a different rule, which
+fires first. Proven twice rather than argued: with the coverage vocabulary
+deleted from BOTH the structural tier and `validateScope` the case still passed,
+and a perfectly VALID `GAPS_PRESENT` substituted into a `COMPLETE_DECLARED`
+stream was refused identically. The sibling entry `Admission.ViewKind` does
+discriminate — the same both-paths deletion fails there, naming it — which is
+why this is one case's fixture and not a fault in the walk.
+
+The case now forges from a `GAPS_PRESENT` base, so every value it can substitute
+is also not complete, the derived qualification list is unchanged, and the
+vocabulary rule is the only one left with an opinion. A premise subtest asserts
+that directly: on that base a substitution of a VALID `TRUNCATED_PREFIX` must
+reach `WOULD_ATTEMPT`. After the repair the both-paths deletion FAILS naming
+`Scope.Coverage`, and deleting only the structural-tier copy still passes —
+through `validateScope` below the hash, which is the oracle mechanism the case
+names.
+
+The same audit falsified a second claim, this one in a comment.
+`TestOrderedRulesTheGateRefusesBytesTheProjectionWouldHaveRefused` described
+itself as running the oracle — *"a refusal publishes the digest it wanted, so
+copying that back is two calls and no cryptography"*. `STREAM_BYTES_OVER_BOUND`
+is an unread refusal and carries no digest at all, so `first.StreamDigest` is
+`""` and the assignment is a no-op. The true property is stronger than the
+described one and is now asserted as itself: the refusal must carry NO digest,
+and the byte rule must hold for any `SelectionDigest` the caller writes,
+including one invented outright. Mutation-verified by making the unread refusal
+hand back a digest — the new guard fails, quoting it.
+
+Both repairs are test-only. The reflection-based digest-binding guards needed no
+change: they were moved to call `orderedRulesStreamDigest` directly in an
+earlier commit, precisely so no reordering could make them vacuous, and that
+still holds.
+
 **A round of five, and the shape of them is the finding.** One reviewer pass
 produced five separate orderings on one head, and every one was the same
 question asked at a different seam: does a refusal whose truth depends on a
