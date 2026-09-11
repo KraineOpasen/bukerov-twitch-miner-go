@@ -35,6 +35,11 @@ func orOutcome(id string, points int64) predictioneval.OrderedRulesOutcome {
 			Presence:   predictioneval.SuppliedKnown,
 			Value:      points,
 			Provenance: "acceptance fixture",
+			// Declared, not left to the zero value: the fixture interval starts
+			// at position 0, so these really are available from the start — but
+			// the model may not infer that from an unset field, and every
+			// fixture here says so explicitly for that reason.
+			HasAvailableAtPosition: true,
 		},
 	}
 }
@@ -61,9 +66,10 @@ func orMissingBalance() predictioneval.SuppliedInt64 {
 
 func orKnownBalance(v int64) predictioneval.SuppliedInt64 {
 	return predictioneval.SuppliedInt64{
-		Presence:   predictioneval.SuppliedKnown,
-		Value:      v,
-		Provenance: "acceptance fixture",
+		Presence:               predictioneval.SuppliedKnown,
+		Value:                  v,
+		Provenance:             "acceptance fixture",
+		HasAvailableAtPosition: true,
 	}
 }
 

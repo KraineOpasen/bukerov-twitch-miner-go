@@ -3233,6 +3233,24 @@ whole; anything else stops the traversal. A partially recovered vector must be
 declared invalid rather than passed off as complete, since the pool total feeds
 every share and one missing entry moves all of them.
 
+The same rule reaches the AVAILABILITY of a supplied value. A KNOWN value
+carries the causal position at which it became knowable, so that back-dating is
+checkable rather than trusted — a value that only became available AFTER the
+candidate it is attached to is refused outright, since a note would not stop the
+arithmetic from using it. That position is an integer whose zero is a legitimate
+position, so it is accompanied by its own declaration flag: an omitted position
+decoded as a zero would otherwise clear the check for every candidate at
+position zero or later, which is the whole interval of any stream starting at
+zero, and the guard would read as enforced while enforcing nothing. A KNOWN
+value that does not declare its availability is refused, exactly as one carrying
+no provenance is.
+
+Supplied COLLECTIONS are bounded by count before their bytes are charged —
+candidates, outcomes, interventions, rules, entropy words and the admission
+manifest's source references alike. The aggregate byte budget charges payload,
+and payload is not a bound on cardinality: elements with no payload cost nothing
+to admit and still have to be retained, copied and digested.
+
 **The mechanism.** The outcome vector is the OUTER loop and the rule list the
 inner one. A pool share is `1/(total/points)` — two divisions, never collapsed
 into `points/total`, because in binary64 they differ: for the pool `[9,1]` the

@@ -9,6 +9,7 @@ package predictioneval_test
 // it was not computed from.
 
 import (
+	"encoding/json"
 	"errors"
 	"reflect"
 	"strings"
@@ -211,10 +212,11 @@ func TestOrderedRulesAmbiguousInterventionTakesTheEarlierConservativeBoundary(t 
 // note does not stop the arithmetic from using it.
 func TestOrderedRulesLaterBalanceCannotRepairEarlierCandidate(t *testing.T) {
 	borrowed := predictioneval.SuppliedInt64{
-		Presence:            predictioneval.SuppliedKnown,
-		Value:               5000,
-		Provenance:          "a later schedule read on the same channel",
-		AvailableAtPosition: 25,
+		Presence:               predictioneval.SuppliedKnown,
+		Value:                  5000,
+		Provenance:             "a later schedule read on the same channel",
+		AvailableAtPosition:    25,
+		HasAvailableAtPosition: true,
 	}
 	c := orCandidate("c1", 10, borrowed, orOutcome("A", 4), orOutcome("B", 6))
 	_, err := predictioneval.ProjectOrderedRulesStream(
@@ -231,6 +233,76 @@ func TestOrderedRulesLaterBalanceCannotRepairEarlierCandidate(t *testing.T) {
 		orSource([]predictioneval.OrderedRulesCandidate{c}, nil), orAdmission()); err != nil {
 		t.Fatalf("a value available at the candidate's own position must be accepted: %v", err)
 	}
+}
+
+// TestOrderedRulesKnownValueMustDeclareItsAvailability pins the presence of the
+// availability position, not merely its value.
+//
+// The back-dating rule above is only as strong as the position it compares
+// against, and that position is an int64 whose zero is a LEGITIMATE causal
+// position. So a value that never declared one — a payload that simply omits
+// the field, decoded into a zero — used to clear the comparison for every
+// candidate at position zero or later, which is the whole interval of any
+// stream starting at zero. The guard read as enforced and was not.
+//
+// This is the same failure SuppliedPresence exists to prevent, one level down:
+// a number whose zero means two different things cannot carry the distinction.
+func TestOrderedRulesKnownValueMustDeclareItsAvailability(t *testing.T) {
+	// The exact shape a wire projection leaves behind: the field is absent.
+	var decoded predictioneval.SuppliedInt64
+	if err := json.Unmarshal([]byte(
+		`{"presence":"KNOWN","value":1000,"provenance":"wire row"}`), &decoded); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if decoded.HasAvailableAtPosition || decoded.AvailableAtPosition != 0 {
+		t.Fatalf("this case's premise is that the omitted field decodes to an undeclared zero; got "+
+			"%d declared=%v", decoded.AvailableAtPosition, decoded.HasAvailableAtPosition)
+	}
+
+	t.Run("an undeclared balance", func(t *testing.T) {
+		c := orCandidate("c1", 500, decoded, orOutcome("A", 4), orOutcome("B", 6))
+		_, err := predictioneval.ProjectOrderedRulesStream(
+			orSource([]predictioneval.OrderedRulesCandidate{c}, nil), orAdmission())
+		if !errors.Is(err, predictioneval.ErrOrderedRulesScopeIncomplete) {
+			t.Fatalf("got %v, want an incomplete-scope refusal: a KNOWN value that never said when it "+
+				"became available cannot be checked against the candidate that would read it", err)
+		}
+	})
+
+	t.Run("undeclared outcome points", func(t *testing.T) {
+		o := orOutcome("A", 4)
+		o.Points.HasAvailableAtPosition = false
+		c := orCandidate("c1", 500, orKnownBalance(1000), o, orOutcome("B", 6))
+		_, err := predictioneval.ProjectOrderedRulesStream(
+			orSource([]predictioneval.OrderedRulesCandidate{c}, nil), orAdmission())
+		if !errors.Is(err, predictioneval.ErrOrderedRulesScopeIncomplete) {
+			t.Fatalf("got %v, want an incomplete-scope refusal; the rule is on every supplied field, "+
+				"not only the balance", err)
+		}
+	})
+
+	// A non-KNOWN value declares nothing and is not asked to: there is no value
+	// whose availability could matter.
+	t.Run("a MISSING value needs no availability", func(t *testing.T) {
+		c := orCandidate("c1", 500, orMissingBalance(), orOutcome("A", 4), orOutcome("B", 6))
+		if _, err := predictioneval.ProjectOrderedRulesStream(
+			orSource([]predictioneval.OrderedRulesCandidate{c}, nil), orAdmission()); err != nil {
+			t.Fatalf("a MISSING balance carries no value to back-date: %v", err)
+		}
+	})
+
+	// Non-vacuity, and the point of the flag: the SAME zero, once DECLARED, is
+	// accepted — so the refusal is about the declaration and not about the
+	// number. Position zero stays a usable position.
+	t.Run("a declared zero is accepted", func(t *testing.T) {
+		declared := decoded
+		declared.HasAvailableAtPosition = true
+		c := orCandidate("c1", 0, declared, orOutcome("A", 4), orOutcome("B", 6))
+		if _, err := predictioneval.ProjectOrderedRulesStream(
+			orSource([]predictioneval.OrderedRulesCandidate{c}, nil), orAdmission()); err != nil {
+			t.Fatalf("a value declared available from position zero must be accepted: %v", err)
+		}
+	})
 }
 
 // TestOrderedRulesRoundAndSourceEpisodeCannotBeJoinedByEventIDAlone pins that
@@ -596,6 +668,34 @@ func TestOrderedRulesOverBudgetInputIsRefusedWithoutTruncation(t *testing.T) {
 		}
 	})
 
+	// The admission manifest's source list. Every other supplied collection is
+	// bounded by COUNT before its bytes are charged; this one was bounded only
+	// by the aggregate byte budget, which charges payload — so any number of
+	// EMPTY references passed for free while each still had to be retained,
+	// copied and digested.
+	t.Run("too many admission source references", func(t *testing.T) {
+		adm := orAdmission()
+		adm.SourceReferences = make([]string, predictioneval.MaxOrderedRulesSourceReferences+1)
+		stream, err := predictioneval.ProjectOrderedRulesStream(
+			orSource([]predictioneval.OrderedRulesCandidate{orTwoOutcomePool("c1", 10)}, nil), adm)
+		if !errors.Is(err, predictioneval.ErrOrderedRulesOverBound) {
+			t.Fatalf("got %v, want an over-bound refusal; empty strings carry no payload bytes, so a "+
+				"byte budget alone never reaches them", err)
+		}
+		if len(stream.Admission.SourceReferences) != 0 {
+			t.Fatalf("a refused projection must retain nothing, not %d references",
+				len(stream.Admission.SourceReferences))
+		}
+
+		// Non-vacuity: exactly at the bound is accepted, so this is the bound.
+		adm.SourceReferences = make([]string, predictioneval.MaxOrderedRulesSourceReferences)
+		if _, err := predictioneval.ProjectOrderedRulesStream(
+			orSource([]predictioneval.OrderedRulesCandidate{orTwoOutcomePool("c1", 10)}, nil),
+			adm); err != nil {
+			t.Fatalf("a list exactly at the bound must be accepted: %v", err)
+		}
+	})
+
 	t.Run("an outcome vector past the bound", func(t *testing.T) {
 		outs := make([]predictioneval.OrderedRulesOutcome, predictioneval.MaxOrderedRulesOutcomes+1)
 		for i := range outs {
@@ -768,6 +868,17 @@ func TestOrderedRulesFreeTextIsBoundedLikeIdentifiers(t *testing.T) {
 		if _, err := predictioneval.ProjectOrderedRulesStream(src, orAdmission()); !errors.Is(err,
 			predictioneval.ErrOrderedRulesOverBound) {
 			t.Fatalf("got %v, want an over-bound refusal", err)
+		}
+	})
+
+	t.Run("an admission source reference", func(t *testing.T) {
+		adm := orAdmission()
+		adm.SourceReferences = []string{big}
+		_, err := predictioneval.ProjectOrderedRulesStream(
+			orSource([]predictioneval.OrderedRulesCandidate{orTwoOutcomePool("c1", 10)}, nil), adm)
+		if !errors.Is(err, predictioneval.ErrOrderedRulesOverBound) {
+			t.Fatalf("got %v, want an over-bound refusal; a retained reference is free text like any "+
+				"other and was the one the loop charged without checking", err)
 		}
 	})
 

@@ -105,6 +105,17 @@ const (
 	MaxOrderedRulesRules = 128
 	// MaxOrderedRulesInterventions bounds the supplied factual boundary markers.
 	MaxOrderedRulesInterventions = 1024
+	// MaxOrderedRulesSourceReferences bounds the admission manifest's source
+	// list, which the projection retains and copies.
+	//
+	// Every other supplied collection is bounded by COUNT before its bytes are
+	// charged; this one was bounded only by the aggregate byte budget, and that
+	// budget charges payload. Empty strings have no payload, so any number of
+	// them passed — while each still costs a string header to retain, copy and
+	// digest. The bound restores the file's own rule rather than adding a new
+	// one, and with a count this small the uncharged header cost is a few tens
+	// of kilobytes against [MaxOrderedRulesAggregateBytes].
+	MaxOrderedRulesSourceReferences = 1024
 	// MaxOrderedRulesIdentifierBytes bounds one supplied identifier, and every
 	// other free-text string the projection retains — a presence reason, a
 	// provenance note, a coverage detail. The caller chooses those freely, so
@@ -175,8 +186,19 @@ type SuppliedInt64 struct {
 	Reason string `json:"reason,omitempty"`
 	// Provenance is where a KNOWN value came from, in the caller's own terms.
 	Provenance string `json:"provenance,omitempty"`
-	// AvailableAtPosition is required for a KNOWN value.
-	AvailableAtPosition int64 `json:"availableAtPosition"`
+	// AvailableAtPosition is required for a KNOWN value, and
+	// HasAvailableAtPosition is how the caller says it supplied one.
+	//
+	// The flag is not ceremony. Position zero is a legitimate causal position,
+	// so a bare int64 cannot separate "available from the very start" from
+	// "never supplied" — and an omitted field decoded as zero would pass the
+	// back-dating check for every candidate at position zero or later, which
+	// is the whole interval in any stream that starts at zero. That is exactly
+	// the fabricated-input failure [SuppliedPresence] exists to prevent, one
+	// level down. A KNOWN value that does not set the flag is refused, the same
+	// way a KNOWN value carrying no provenance is.
+	AvailableAtPosition    int64 `json:"availableAtPosition"`
+	HasAvailableAtPosition bool  `json:"hasAvailableAtPosition"`
 }
 
 // SuppliedUint32 is a stake-shaped result value with its own presence.

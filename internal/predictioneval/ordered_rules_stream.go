@@ -112,7 +112,16 @@ func ProjectOrderedRulesStream(source OrderedRulesSource, admission CommonAdmiss
 		return OrderedRulesStream{}, err
 	}
 	bytes += int64(len(admission.ManifestID) + len(admission.Population) + len(admission.OrderBasis))
-	for _, ref := range admission.SourceReferences {
+	if len(admission.SourceReferences) > MaxOrderedRulesSourceReferences {
+		return OrderedRulesStream{}, errors.Join(ErrOrderedRulesOverBound,
+			errors.New("predictioneval: "+strconv.Itoa(len(admission.SourceReferences))+
+				" admission source references exceed the bound of "+
+				strconv.Itoa(MaxOrderedRulesSourceReferences)))
+	}
+	for i, ref := range admission.SourceReferences {
+		if err := checkFreeText(ref, "admission source reference "+strconv.Itoa(i)); err != nil {
+			return OrderedRulesStream{}, err
+		}
 		bytes += int64(len(ref))
 	}
 	for i := range source.Interventions {
@@ -435,6 +444,15 @@ func checkPresence(v SuppliedInt64, where string, candidatePosition int64) error
 	if v.Provenance == "" {
 		return errors.Join(ErrOrderedRulesScopeIncomplete,
 			errors.New("predictioneval: "+where+" is KNOWN but carries no provenance"))
+	}
+	// Availability must be SUPPLIED, not inferred from the zero value. Without
+	// this the back-dating check below compares against a position the caller
+	// never declared, and a value decoded from a payload that simply omits the
+	// field would clear it for every candidate at position zero or later.
+	if !v.HasAvailableAtPosition {
+		return errors.Join(ErrOrderedRulesScopeIncomplete,
+			errors.New("predictioneval: "+where+" is KNOWN but does not declare the position it became "+
+				"available at; position zero is a real position, so an omitted one cannot be read as it"))
 	}
 	if v.AvailableAtPosition > candidatePosition {
 		return errors.Join(ErrOrderedRulesBackdatedValue,
