@@ -3340,10 +3340,17 @@ many more of them, and the projection charged every one: its validate-and-charge
 loop runs before the cut, so a removed candidate cost it exactly what a retained
 one cost. The ingest gate cannot see that text, but it does not need to, because
 the vocabulary the projection forces puts a floor under it — the cheapest
-candidate it will admit spends 32 bytes on a one-byte identity, the shorter
-source kind, the only accepted membership, the shortest outcome-vector presence
-and a KNOWN balance with the single provenance byte that then becomes mandatory,
-which is 192 charged. Leaving the claim free let a forgery sit within that much
+candidate it will admit spends a one-byte identity, the only accepted
+membership, the shortest outcome-vector presence and a KNOWN balance with the
+single provenance byte that then becomes mandatory, plus the source kind. That
+last part is per VIEW rather than per model, and treating it as though it were
+not undercharged one of the two: the projection couples view and source kind
+strictly, so a CALCULATE_ONLY stream's cheapest candidate is 36 bytes
+(CALCULATE_SNAPSHOT) and a CHANNEL_CANDIDATE_STREAM's is 32 (CHANNEL_UPDATE),
+216 and 192 charged. Because the coupling is strict, each is the EXACT cost in
+its view and not merely a bound; charging the cheaper of the two everywhere let
+a forged calculate-only stream sit 24 charged bytes a removal past what any
+source could have projected. Leaving the claim free let a forgery sit within that much
 per claimed removal of the ceiling and pass a gate whose whole purpose is to
 refuse what the projection refuses. The floor is a LOWER bound by construction,
 which is the direction that keeps the mirror one-sided: charging less than the

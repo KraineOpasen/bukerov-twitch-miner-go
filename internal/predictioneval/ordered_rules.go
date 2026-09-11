@@ -351,8 +351,8 @@ func orderedRulesInputBudget(s OrderedRulesStream, cfg OrderedRulesConfig,
 	// identity it carries, and the projection charged every intervention.
 	b.boundOnly(string(s.Cutoff.Kind), string(s.Cutoff.Basis))
 	b.bound(s.Cutoff.Identity)
-	// The REMOVALS are charged at their floor, for the same reason the cutoff
-	// identity above is charged: the stream asserts a source, and the
+	// The REMOVALS are charged at their floor for the declared view, for the
+	// same reason the cutoff identity above is charged: the stream asserts a source, and the
 	// projection charged that source in full. Every removed candidate cost it
 	// at least orderedRulesDroppedCandidateMinimumBytes, so leaving the claim
 	// free let a forgery sit within 192 charged bytes per claimed removal of
@@ -369,7 +369,7 @@ func orderedRulesInputBudget(s OrderedRulesStream, cfg OrderedRulesConfig,
 		if dropped > MaxOrderedRulesCandidates {
 			dropped = MaxOrderedRulesCandidates
 		}
-		b.bytes += int64(dropped) * orderedRulesDroppedCandidateMinimumBytes
+		b.bytes += int64(dropped) * orderedRulesDroppedCandidateMinimumBytes(s.Admission.ViewKind)
 	}
 	b.boundOnly(s.Qualifications...)
 	for i := range s.Candidates {

@@ -537,7 +537,7 @@ const orderedRulesTextCeiling = MaxOrderedRulesAggregateBytes - orderedRulesStru
 func chargedWidth(n int) int64 { return int64(n) * orderedRulesMaxJSONExpansion }
 
 // orderedRulesDroppedCandidateMinimumBytes is the least SOURCE text one removed
-// candidate can have cost the projection.
+// candidate can have cost the projection, in the view the stream declares.
 //
 // A stream declaring DroppedAtOrAfter > 0 asserts that a source existed with
 // that many more candidates in it, and the projection charged every one of
@@ -546,21 +546,37 @@ func chargedWidth(n int) int64 { return int64(n) * orderedRulesMaxJSONExpansion 
 // shape gate never sees that text — but it does not have to, because the
 // vocabulary the projection forces puts a floor under it.
 //
-// The floor, field by field, for the cheapest candidate ProjectOrderedRulesStream
-// will admit: source kind CHANNEL_UPDATE (14), since CALCULATE_SNAPSHOT is
-// longer; membership PROVEN (6), the only accepted value; outcome-vector
+// The view-independent part, for the cheapest candidate ProjectOrderedRulesStream
+// will admit: membership PROVEN (6), the only accepted value; outcome-vector
 // presence KNOWN (5), since MISSING and INVALID are 7; a balance declared
 // KNOWN (5) plus the single provenance byte checkPresence then demands (1),
 // which is cheaper than the 7-byte MISSING or INVALID that need none; and a
 // non-empty identity (1). Outcomes, candidate provenance and the outcomes
-// reason may all be absent. That is 32 bytes, charged at the usual width to
-// 192.
+// reason may all be absent.
 //
-// It is a LOWER bound by construction, which is the direction that matters: a
-// gate charging less than the projection charged can only admit streams the
-// projection would also have admitted. See
-// TestOrderedRulesAClaimedRemovalIsChargedForTheSourceItImplies.
-const orderedRulesDroppedCandidateMinimumBytes = 32
+// The source kind is NOT view-independent, and treating it as though it were
+// undercharged a calculate-only stream by four bytes a removal. The projection
+// couples the two strictly: inside a CALCULATE_ONLY view every candidate must
+// be a CALCULATE_SNAPSHOT, and inside a CHANNEL_CANDIDATE_STREAM view every
+// candidate must be a CHANNEL_UPDATE. So the floor is not merely a bound in
+// either view — it is the exact cost, and taking the cheaper of the two for
+// both let a forged calculate-only stream sit 24 charged bytes a removal past
+// what any source could have projected.
+//
+// The lengths are read from the constants rather than written out, so renaming
+// a vocabulary word cannot leave this silently wrong. An unrecognized view gets
+// the smaller floor: validateAdmission refuses such a stream in the invariant
+// pass regardless, and undercharging never refuses input the projection
+// admitted, which is the direction that must not break.
+//
+// See TestOrderedRulesAClaimedRemovalIsChargedForTheSourceItImplies.
+func orderedRulesDroppedCandidateMinimumBytes(view OrderedRulesViewKind) int64 {
+	const withoutSourceKind = 1 + len(MembershipProven) + len(SuppliedKnown) + len(SuppliedKnown) + 1
+	if view == ViewCalculateOnly {
+		return int64(withoutSourceKind + len(SourceKindCalculateSnapshot))
+	}
+	return int64(withoutSourceKind + len(SourceKindChannelUpdate))
+}
 
 // suppliedTextBytes is the free text one supplied value contributes.
 func suppliedTextBytes(v SuppliedInt64) int64 {

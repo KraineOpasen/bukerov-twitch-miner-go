@@ -2702,6 +2702,15 @@ func TestOrderedRulesTheConsumedPrefixBindsEveryMandatoryDeclaration(t *testing.
 // bytes per claimed removal of the ceiling and pass a gate whose whole purpose
 // is to refuse what the projection refuses.
 //
+// The floor is per VIEW, not per model, and an earlier version of this case did
+// not know that. The projection couples the view to the source kind strictly —
+// CALCULATE_ONLY admits only CALCULATE_SNAPSHOT (18 bytes), CHANNEL_CANDIDATE_STREAM
+// only CHANNEL_UPDATE (14) — so the floor is the EXACT cost in each view, and
+// charging the cheaper of the two everywhere undercharged a calculate-only
+// stream by 24 encoded bytes a removal. Both views are measured below, each
+// against its own floor; a view-independent reserve fails the calculate-only
+// one.
+//
 // The measurement is differential, and deliberately so. Searching for the
 // gate's boundary and then asserting at the boundary found proves nothing: the
 // search re-derives the boundary under whatever the code does. Two measurements
@@ -2713,20 +2722,33 @@ func TestOrderedRulesAClaimedRemovalIsChargedForTheSourceItImplies(t *testing.T)
 		no      = predictioneval.MaxOrderedRulesOutcomes
 		max     = predictioneval.MaxOrderedRulesIdentifierBytes
 		dropped = predictioneval.MaxOrderedRulesCandidates - nc
-		// The floor the gate must reserve per claimed removal, restated here
-		// from the projection's own vocabulary rather than imported: identity 1
-		// + CHANNEL_UPDATE 14 + PROVEN 6 + KNOWN 5 + a KNOWN balance's 5 + its
-		// one mandatory provenance byte. A test that read the constant it is
-		// checking would agree with any value the constant took.
-		floor = 1 + 14 + 6 + 5 + 5 + 1
+		// The part of the floor no view changes, restated here from the
+		// projection's vocabulary rather than imported: identity 1 + PROVEN 6 +
+		// KNOWN 5 + a KNOWN balance's 5 + its one mandatory provenance byte. A
+		// test that read the constant it is checking would agree with any value
+		// that constant took, so the source-kind lengths below are spelled out
+		// as literals too.
+		common = 1 + 6 + 5 + 5 + 1
 	)
 	buf := strings.Repeat("x", max)
+
+	views := []struct {
+		name  string
+		view  predictioneval.OrderedRulesViewKind
+		kind  predictioneval.OrderedRulesSourceKind
+		floor int
+	}{
+		{"channel candidate stream", predictioneval.ViewChannelCandidateStream,
+			predictioneval.SourceKindChannelUpdate, common + 14},
+		{"calculate only", predictioneval.ViewCalculateOnly,
+			predictioneval.SourceKindCalculateSnapshot, common + 18},
+	}
 
 	// fill spreads exactly n raw bytes across the outcome text slots, so the
 	// search granularity is ONE byte — four thousand times finer than the
 	// reserve being measured, which is what keeps the reserve from hiding
 	// inside a rounding step.
-	fill := func(n int) []predictioneval.OrderedRulesCandidate {
+	fill := func(n int, kind predictioneval.OrderedRulesSourceKind) []predictioneval.OrderedRulesCandidate {
 		take := func() string {
 			switch {
 			case n <= 0:
@@ -2756,7 +2778,7 @@ func TestOrderedRulesAClaimedRemovalIsChargedForTheSourceItImplies(t *testing.T)
 			}
 			cs = append(cs, predictioneval.OrderedRulesCandidate{
 				Identity: "c" + itoaTest(i), Position: int64(i + 1), HasPosition: true,
-				SourceKind:        predictioneval.SourceKindChannelUpdate,
+				SourceKind:        kind,
 				EpisodeMembership: predictioneval.MembershipProven,
 				OutcomesPresence:  predictioneval.SuppliedKnown,
 				Outcomes:          outs,
@@ -2766,148 +2788,161 @@ func TestOrderedRulesAClaimedRemovalIsChargedForTheSourceItImplies(t *testing.T)
 		return cs
 	}
 
-	// One genuinely projected stream supplies the boundary, so the forgery
-	// below differs from a real stream in exactly one field: the claimed count.
-	forged := orProject(t, []predictioneval.OrderedRulesCandidate{
-		orCandidate("keep", 1, orMissingBalance())},
-		[]predictioneval.OrderedRulesIntervention{
-			orIntervention("call-1", 5000, predictioneval.InterventionAutoCallStarted,
-				predictioneval.RelevanceProven, "boundary"),
+	boundary := []predictioneval.OrderedRulesIntervention{
+		orIntervention("call-1", 5000, predictioneval.InterventionAutoCallStarted,
+			predictioneval.RelevanceProven, "boundary"),
+	}
+
+	for _, v := range views {
+		t.Run(v.name, func(t *testing.T) {
+			adm := orAdmission()
+			adm.ViewKind = v.view
+
+			// One genuinely projected stream supplies the boundary, so the
+			// forgery below differs from a real stream in exactly one field:
+			// the claimed count.
+			keep := orCandidate("keep", 1, orMissingBalance())
+			keep.SourceKind = v.kind
+			forged, err := predictioneval.ProjectOrderedRulesStream(
+				orSource([]predictioneval.OrderedRulesCandidate{keep}, boundary), adm)
+			if err != nil {
+				t.Fatalf("premise: the boundary fixture must project in this view: %v", err)
+			}
+			if !forged.Cutoff.Established {
+				t.Fatal("premise: the fixture must establish a boundary to claim removals against")
+			}
+
+			gateMax := func(claimed int) int {
+				t.Helper()
+				over := func(n int) bool {
+					st := forged
+					st.Candidates = fill(n, v.kind)
+					st.Cutoff.DroppedAtOrAfter = claimed
+					return predictioneval.EvaluateOrderedRules(st, orAlwaysAdmitConfig(), orDraws()).Reason ==
+						predictioneval.ReasonStreamBytesOverBound
+				}
+				lo, hi := 0, nc*no*2*max
+				if over(lo) {
+					t.Fatal("premise: an empty charged payload must not be over the byte bound")
+				}
+				if !over(hi) {
+					t.Fatalf("premise: %d bytes must be over the byte bound, or the search has no boundary", hi)
+				}
+				for lo < hi {
+					mid := (lo + hi + 1) / 2
+					if over(mid) {
+						hi = mid - 1
+					} else {
+						lo = mid
+					}
+				}
+				return lo
+			}
+
+			free, claimed := gateMax(0), gateMax(dropped)
+			t.Logf("gate admits %d raw bytes claiming no removals, %d claiming %d (difference %d, floor %d)",
+				free, claimed, dropped, free-claimed, dropped*v.floor)
+			if claimed <= 0 {
+				t.Fatalf("premise: the measurement bottomed out at %d, so the difference is clipped", claimed)
+			}
+			if free-claimed < dropped*v.floor {
+				t.Fatalf("claiming %d removals moved the gate's limit by %d bytes, not the %d those "+
+					"removals must have cost the projection in a %s view. A stream can assert a "+
+					"source the projection would have refused for bytes and still be read.",
+					dropped, free-claimed, dropped*v.floor, v.view)
+			}
+
+			// The reserve is arithmetic on a number the caller wrote, and it is
+			// applied BEFORE the invariant pass that bounds that number — so
+			// the two values that would turn the reserve into a discount have
+			// to be refused here, not there. A negative count subtracts
+			// outright; a count near the integer maximum overflows the
+			// multiplication into a negative one.
+			t.Run("an impossible removal count never buys budget", func(t *testing.T) {
+				const maxInt = int(^uint(0) >> 1)
+				over := func(claimed int) bool {
+					st := forged
+					st.Candidates = fill(free+1, v.kind)
+					st.Cutoff.DroppedAtOrAfter = claimed
+					return predictioneval.EvaluateOrderedRules(st, orAlwaysAdmitConfig(), orDraws()).Reason ==
+						predictioneval.ReasonStreamBytesOverBound
+				}
+				if !over(0) {
+					t.Fatalf("premise: %d bytes must be over the byte bound with nothing claimed", free+1)
+				}
+				for _, claimed := range []int{-1, -1 << 40, maxInt, maxInt - 1, maxInt/v.floor + 1} {
+					if !over(claimed) {
+						t.Fatalf("a stream claiming %d removals was admitted at %d bytes, which the "+
+							"same stream claiming none is refused for. The claim bought budget "+
+							"instead of spending it.", claimed, free+1)
+					}
+				}
+			})
+
+			// The other direction, which is the one an over-large reserve
+			// breaks: the gate must never refuse a stream the projection
+			// ADMITTED. The removals here are real and are built at exactly the
+			// floor for this view, so a reserve one byte too high refuses the
+			// projection's own maximum.
+			t.Run("a stream the projection admitted is never refused for the removals it really made", func(t *testing.T) {
+				const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+				// The cheapest candidate the projection will admit in this
+				// view: a one-byte identity, the source kind the view forces,
+				// the only membership, the shortest outcome-vector presence,
+				// and a KNOWN balance with the single provenance byte
+				// checkPresence demands. No outcomes, no provenance, no
+				// outcomes reason.
+				build := func(n int) (predictioneval.OrderedRulesStream, error) {
+					cs := fill(n, v.kind)
+					for i := 0; i < dropped; i++ {
+						cs = append(cs, predictioneval.OrderedRulesCandidate{
+							Identity: alphabet[i : i+1], Position: int64(5001 + i), HasPosition: true,
+							SourceKind:        v.kind,
+							EpisodeMembership: predictioneval.MembershipProven,
+							OutcomesPresence:  predictioneval.SuppliedKnown,
+							Balance: predictioneval.SuppliedInt64{
+								Presence: predictioneval.SuppliedKnown, Value: 1,
+								Provenance: "p", HasAvailableAtPosition: true,
+							},
+						})
+					}
+					return predictioneval.ProjectOrderedRulesStream(orSource(cs, boundary), adm)
+				}
+
+				lo, hi := 0, nc*no*2*max
+				if _, err := build(lo); err != nil {
+					t.Fatalf("premise: the smallest source must project: %v", err)
+				}
+				if _, err := build(hi); err == nil {
+					t.Fatalf("premise: %d bytes must be past the projection's budget", hi)
+				}
+				for lo < hi {
+					mid := (lo + hi + 1) / 2
+					if _, err := build(mid); err != nil {
+						hi = mid - 1
+					} else {
+						lo = mid
+					}
+				}
+				stream, err := build(lo)
+				if err != nil {
+					t.Fatalf("the widest admitted source must project: %v", err)
+				}
+				if stream.Cutoff.DroppedAtOrAfter != dropped {
+					t.Fatalf("premise: the boundary must really remove %d candidates; it removed %d",
+						dropped, stream.Cutoff.DroppedAtOrAfter)
+				}
+				t.Logf("projection admits %d raw bytes of retained text alongside %d real removals",
+					lo, stream.Cutoff.DroppedAtOrAfter)
+
+				if ev := predictioneval.EvaluateOrderedRules(stream, orAlwaysAdmitConfig(),
+					orDraws()); ev.Reason == predictioneval.ReasonStreamBytesOverBound {
+					t.Fatalf("the gate refused a stream ProjectOrderedRulesStream ADMITTED, at that "+
+						"projection's own maximum. The reserve per removal is larger than the %d "+
+						"bytes the cheapest admissible candidate actually costs in a %s view, "+
+						"which is the invariant backwards.", v.floor, v.view)
+				}
+			})
 		})
-	if !forged.Cutoff.Established {
-		t.Fatalf("premise: the fixture must establish a boundary to claim removals against")
 	}
-
-	gateMax := func(claimed int) int {
-		t.Helper()
-		over := func(n int) bool {
-			st := forged
-			st.Candidates = fill(n)
-			st.Cutoff.DroppedAtOrAfter = claimed
-			return predictioneval.EvaluateOrderedRules(st, orAlwaysAdmitConfig(), orDraws()).Reason ==
-				predictioneval.ReasonStreamBytesOverBound
-		}
-		lo, hi := 0, nc*no*2*max
-		if over(lo) {
-			t.Fatalf("premise: an empty charged payload must not be over the byte bound")
-		}
-		if !over(hi) {
-			t.Fatalf("premise: %d bytes must be over the byte bound, or the search has no boundary", hi)
-		}
-		for lo < hi {
-			mid := (lo + hi + 1) / 2
-			if over(mid) {
-				hi = mid - 1
-			} else {
-				lo = mid
-			}
-		}
-		return lo
-	}
-
-	free, claimed := gateMax(0), gateMax(dropped)
-	t.Logf("gate admits %d raw bytes claiming no removals, %d claiming %d (difference %d, floor %d)",
-		free, claimed, dropped, free-claimed, dropped*floor)
-	if claimed <= 0 {
-		t.Fatalf("premise: the measurement bottomed out at %d, so the difference is clipped", claimed)
-	}
-	if free-claimed < dropped*floor {
-		t.Fatalf("claiming %d removals moved the gate's limit by %d bytes, not the %d those removals "+
-			"must have cost the projection. A stream can assert a source the projection would have "+
-			"refused for bytes and still be read: the claim is free.",
-			dropped, free-claimed, dropped*floor)
-	}
-
-	// The reserve is arithmetic on a number the caller wrote, and it is applied
-	// BEFORE the invariant pass that bounds that number — so the two values
-	// that would turn the reserve into a discount have to be refused here, not
-	// there. A negative count subtracts outright; a count near the integer
-	// maximum overflows the multiplication into a negative one.
-	t.Run("an impossible removal count never buys budget", func(t *testing.T) {
-		const maxInt = int(^uint(0) >> 1)
-		over := func(claimed int) bool {
-			st := forged
-			st.Candidates = fill(free + 1)
-			st.Cutoff.DroppedAtOrAfter = claimed
-			return predictioneval.EvaluateOrderedRules(st, orAlwaysAdmitConfig(), orDraws()).Reason ==
-				predictioneval.ReasonStreamBytesOverBound
-		}
-		if !over(0) {
-			t.Fatalf("premise: %d bytes must be over the byte bound with nothing claimed", free+1)
-		}
-		for _, claimed := range []int{-1, -1 << 40, maxInt, maxInt - 1, maxInt/floor + 1} {
-			if !over(claimed) {
-				t.Fatalf("a stream claiming %d removals was admitted at %d bytes, which the same "+
-					"stream claiming none is refused for. The claim bought budget instead of "+
-					"spending it.", claimed, free+1)
-			}
-		}
-	})
-
-	// The other direction, which is the one an over-large reserve breaks: the
-	// gate must never refuse a stream the projection ADMITTED. The removals
-	// here are real and are built at exactly the floor, so a reserve one byte
-	// too high refuses the projection's own maximum.
-	t.Run("a stream the projection admitted is never refused for the removals it really made", func(t *testing.T) {
-		const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
-		ins := []predictioneval.OrderedRulesIntervention{
-			orIntervention("call-1", 5000, predictioneval.InterventionAutoCallStarted,
-				predictioneval.RelevanceProven, "boundary"),
-		}
-		// The cheapest candidate the projection will admit, repeated: a
-		// one-byte identity, the shorter source kind, the only membership, the
-		// shortest outcome-vector presence, and a KNOWN balance with the single
-		// provenance byte checkPresence demands. No outcomes, no provenance, no
-		// outcomes reason.
-		build := func(n int) (predictioneval.OrderedRulesStream, error) {
-			cs := fill(n)
-			for i := 0; i < dropped; i++ {
-				cs = append(cs, predictioneval.OrderedRulesCandidate{
-					Identity: alphabet[i : i+1], Position: int64(5001 + i), HasPosition: true,
-					SourceKind:        predictioneval.SourceKindChannelUpdate,
-					EpisodeMembership: predictioneval.MembershipProven,
-					OutcomesPresence:  predictioneval.SuppliedKnown,
-					Balance: predictioneval.SuppliedInt64{
-						Presence: predictioneval.SuppliedKnown, Value: 1,
-						Provenance: "p", HasAvailableAtPosition: true,
-					},
-				})
-			}
-			return predictioneval.ProjectOrderedRulesStream(orSource(cs, ins), orAdmission())
-		}
-
-		lo, hi := 0, nc*no*2*max
-		if _, err := build(lo); err != nil {
-			t.Fatalf("premise: the smallest source must project: %v", err)
-		}
-		if _, err := build(hi); err == nil {
-			t.Fatalf("premise: %d bytes must be past the projection's budget", hi)
-		}
-		for lo < hi {
-			mid := (lo + hi + 1) / 2
-			if _, err := build(mid); err != nil {
-				hi = mid - 1
-			} else {
-				lo = mid
-			}
-		}
-		stream, err := build(lo)
-		if err != nil {
-			t.Fatalf("the widest admitted source must project: %v", err)
-		}
-		if stream.Cutoff.DroppedAtOrAfter != dropped {
-			t.Fatalf("premise: the boundary must really remove %d candidates; it removed %d",
-				dropped, stream.Cutoff.DroppedAtOrAfter)
-		}
-		t.Logf("projection admits %d raw bytes of retained text alongside %d real removals",
-			lo, stream.Cutoff.DroppedAtOrAfter)
-
-		if ev := predictioneval.EvaluateOrderedRules(stream, orAlwaysAdmitConfig(),
-			orDraws()); ev.Reason == predictioneval.ReasonStreamBytesOverBound {
-			t.Fatalf("the gate refused a stream ProjectOrderedRulesStream ADMITTED, at that "+
-				"projection's own maximum. The reserve per removal is larger than the %d bytes the "+
-				"cheapest admissible candidate actually costs, which is the invariant backwards.",
-				floor)
-		}
-	})
 }
