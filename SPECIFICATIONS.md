@@ -3443,6 +3443,43 @@ at the same point and is identical at the end. Which sources are ADMITTED is
 therefore unchanged, and a case at MaxOrderedRulesCandidates times
 MaxOrderedRulesOutcomes pins that alongside the one pinning the new order.
 
+The same rule then reached the four refusals decided AFTER the stream verifies
+but BEFORE a single candidate is read: draw words over bound, rule count over
+bound, an unusable config, and broken stream invariants. Each carried all four
+digests, and three of them witness inputs the call never traversed —
+`ConfigDigest` hashes the whole config, `EntropyDigest` hashes every draw word,
+and `ConsumedInputDigest` binds an EMPTY prefix to which config and which run
+produced it, which traverses `ConfigID` and `RunID` in full. Those two ride the
+config-and-trace ceiling and carry no per-string bound, so all three were bought
+at the caller's price for a run that read nothing. This is the shape gate's own
+rule one layer in: a function that declined to read an input can attest to
+nothing about it. The two whole-input digests are now computed where the
+traversal begins, the pre-traversal refusals carry no consumed-prefix digest at
+all, and the ENCODABILITY scan moved down beside the two digests it exists to
+protect — it is a precondition of hashing those strings, not of evaluating.
+Three steps, each of which looked like the whole repair until the next was
+measured, on a broken stream invariant beside a 64 MiB `ConfigID`: 200.890391
+milliseconds, then 130.908043, then 73.639716, then 4.109 microseconds — against
+4.052 microseconds for the identical refusal with a SHORT identifier, the same
+figure, which is how one knows the identifier is no longer read. The entropy
+side needed only the first step: an unusable config beside 1,048,576 draw words
+went from 90.380221 milliseconds to 5.928 microseconds, the consumed digest
+hashing only the words actually spent. What these refusals still carry is the
+stream digest they genuinely computed, and the counterweight is pinned beside
+them: an ADMITTED run must still report all four.
+
+Two of those four cases are UNREACHABLE and the specification says so rather
+than describing a path that cannot execute. `orderedRulesInputShapeReason` tests
+the draw-word count and the rule count against the same two constants and
+returns the same two reasons, so the gate always answers first and the
+evaluator's own cases for them are a second path only. They are kept rather than
+deleted, on the reasoning the invariant pass already uses — a bound enforced in
+one place moves when that place changes — but the two answers are NOT
+equivalent: a gate refusal carries nothing whatever, not even a stream digest,
+while the evaluator's version would carry the stream digest and the cutoff. The
+behaviour a caller observes is the gate's, and that is what the suite pins; the
+first draft of that case asserted the unreachable contract instead and failed.
+
 One refusal also stopped re-exporting what it never read. A stream whose
 SelectionDigest does not match is not what the projection produced, so its
 Cutoff and its Qualifications are supplied text that the checks judging them —

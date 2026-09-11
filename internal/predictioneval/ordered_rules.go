@@ -769,10 +769,6 @@ func EvaluateOrderedRules(stream OrderedRulesStream, rules OrderedRulesConfig, d
 		return refused
 	}
 
-	if invalidUTF8(rules.ConfigID) || invalidUTF8(draws.RunID) {
-		return orderedRulesUnreadRefusal(ReasonSuppliedTextNotEncodable)
-	}
-
 	out := OrderedRulesEvaluation{
 		EvidenceLabel:           OrderedRulesEvidenceLabel,
 		ModelVersion:            OrderedRulesModelVersion,
@@ -782,8 +778,8 @@ func EvaluateOrderedRules(stream OrderedRulesStream, rules OrderedRulesConfig, d
 		Participation:           ParticipationNotAdmitted,
 		Stake:                   SuppliedUint32{Presence: SuppliedMissing, Reason: ReasonBalanceNotEvaluated},
 		StreamDigest:            streamDigest,
-		ConfigDigest:            orderedRulesConfigDigest(rules),
-		EntropyDigest:           orderedRulesEntropyDigest(draws),
+		// ConfigDigest and EntropyDigest are DEFERRED to the point where the
+		// traversal actually begins, below. See the note there.
 	}
 	if len(stream.Qualifications) > 0 {
 		out.Qualifications = make([]string, len(stream.Qualifications))
@@ -801,11 +797,49 @@ func EvaluateOrderedRules(stream OrderedRulesStream, rules OrderedRulesConfig, d
 		return out
 	}
 
+	// refuseUnread reports a refusal decided BEFORE the traversal began, and it
+	// carries no consumed-prefix digest for the same reason the shape gate, the
+	// two version comparisons and the digest mismatch carry none: the function
+	// read nothing, so it can attest to nothing.
+	//
+	// The distinction is not cosmetic, which is what makes it a separate
+	// closure rather than refuse(r, 0, 0). orderedRulesConsumedDigest binds the
+	// prefix to WHICH config and WHICH run produced it — the recombination
+	// defence — and doing that traverses ConfigID and RunID in full. Those two
+	// ride the config-and-trace ceiling and carry no per-string bound, so on a
+	// path where nothing was consumed the binding was buying an empty
+	// distinction at the caller's price: measured with a broken stream
+	// invariant beside a 64 MiB ConfigID, 130.908043 ms for a digest over a
+	// prefix of nothing.
+	//
+	// An empty prefix has nothing to recombine. What the refusal still carries
+	// is the stream digest it actually computed, and the reason.
+	refuseUnread := func(reason string) OrderedRulesEvaluation {
+		out.Status = StatusRefused
+		out.Reason = reason
+		return out
+	}
+
+	// THESE TWO ARE CURRENTLY UNREACHABLE, and saying so is the point of the
+	// comment. orderedRulesInputShapeReason above tests both conditions, on the
+	// same two arguments, against the same two constants, and returns the same
+	// two reasons — so the gate always answers first and a caller never reaches
+	// the versions here. They are kept as the second path rather than deleted,
+	// on the same reasoning the invariant pass re-establishes the projection's
+	// rules: a bound enforced in one place is a bound that moves when that
+	// place changes. But unreachable code that LOOKS like the enforcement point
+	// is its own hazard — it misled the author of the case in
+	// ordered_rules_stream_test.go that tried to reach them — so the two
+	// answers are not equivalent and the difference belongs here: the gate's
+	// refusal carries nothing at all, having declined to read the input, while
+	// these would carry the stream digest and the cutoff, the stream having
+	// verified. If the gate ever stops testing them, that is the behaviour that
+	// appears.
 	switch {
 	case len(draws.Words) > MaxOrderedRulesDrawWords:
-		return refuse(ReasonDrawWordsOverBound, 0, 0)
+		return refuseUnread(ReasonDrawWordsOverBound)
 	case len(rules.Detailed) > MaxOrderedRulesRules:
-		return refuse(ReasonRuleCountOverBound, 0, 0)
+		return refuseUnread(ReasonRuleCountOverBound)
 	}
 
 	// THE CONFIG BEFORE THE STREAM'S INVARIANTS, which is the same rule as the
@@ -825,7 +859,7 @@ func EvaluateOrderedRules(stream OrderedRulesStream, rules OrderedRulesConfig, d
 	// removes is the walk that used to follow it.
 	cfg, configReason := normalizeOrderedRulesConfig(rules)
 	if configReason != "" {
-		return refuse(configReason, 0, 0)
+		return refuseUnread(configReason)
 	}
 	if orderedRulesStreamInvariantsBroken(stream) {
 		// A matching digest says the stream has not CHANGED. It does not say
@@ -836,8 +870,56 @@ func EvaluateOrderedRules(stream OrderedRulesStream, rules OrderedRulesConfig, d
 		// readable. What actually makes a stream safe to traverse is checking
 		// it, so the projection's invariants are re-established here over the
 		// stream as handed in.
-		return refuse(ReasonStreamInvariantViolated, 0, 0)
+		return refuseUnread(ReasonStreamInvariantViolated)
 	}
+
+	// ENCODABILITY FIRST, which is where it belongs and not where it started.
+	//
+	// The rule is about the two digests below: invalid UTF-8 in ConfigID or
+	// RunID is hashed as supplied and then replaced with U+FFFD by the encoder,
+	// so the same logical run digests differently before and after its own
+	// round trip. That makes this a precondition of HASHING those two strings,
+	// not of evaluating at all — and the scan runs over strings that ride the
+	// config-and-trace ceiling with no per-string bound, so every refusal
+	// placed after it paid for it.
+	//
+	// It has moved twice for that reason. It began inside the shape gate, ahead
+	// of the two version comparisons, where a wrong contract version beside a
+	// 64 MiB valid identifier cost 44.7 ms instead of 1.834 µs. It then sat
+	// ahead of the four pre-traversal refusals, none of which reads either
+	// identifier, where a broken stream invariant beside the same identifier
+	// cost 73.639716 ms against 3.788 µs. Here it guards exactly what it is
+	// about, and every ConfigID-traversing digest in this function is below it.
+	if invalidUTF8(rules.ConfigID) || invalidUTF8(draws.RunID) {
+		return orderedRulesUnreadRefusal(ReasonSuppliedTextNotEncodable)
+	}
+
+	// THE TWO WHOLE-INPUT DIGESTS, computed HERE because this is the first
+	// point at which the traversal is actually going to happen.
+	//
+	// They used to be built into the result literal above, which put an
+	// unbounded hash of the caller's config and of the caller's whole entropy
+	// run ahead of four refusals that depend on neither. Both are whole-input
+	// digests in the sense the shape gate already names: a refusal that
+	// consumed nothing can attest to nothing, and one that attests anyway is
+	// the empty guarantee the rest of this function exists to avoid.
+	//
+	// This was one of THREE things standing between those four refusals and a
+	// constant-time answer, and the staged measurement is worth keeping because
+	// each step looked like the whole fix until the next one was measured. On a
+	// broken stream invariant beside a 64 MiB ConfigID: 200.890391 ms with the
+	// digests eager, 130.908043 ms once they moved here, 73.639716 ms once the
+	// empty-prefix consumed digest went (see refuseUnread above), and 4.109 µs
+	// once the encodability scan moved down beside them — against 4.052 µs for
+	// the identical refusal with a SHORT identifier, which is the same number
+	// and is how one knows the identifier is no longer read at all.
+	//
+	// The entropy side needed only this first step: an unusable config beside
+	// 1,048,576 draw words went from 90.380221 ms to 5.928 µs here, because the
+	// consumed digest hashes only the words actually spent, which on these
+	// paths is none.
+	out.ConfigDigest = orderedRulesConfigDigest(rules)
+	out.EntropyDigest = orderedRulesEntropyDigest(draws)
 
 	words := draws.Words
 	cursor := 0

@@ -3836,3 +3836,159 @@ func TestOrderedRulesAMismatchRefusalReExportsNothingItDidNotRead(t *testing.T) 
 		}
 	})
 }
+
+// TestOrderedRulesARefusalDecidedBeforeTheTraversalAttestsToNothing covers the
+// four refusals that are settled after the stream verifies but before a single
+// candidate is read.
+//
+// Each of them used to carry all four digests, and three of those four witness
+// inputs the call never traversed: ConfigDigest hashes the whole config,
+// EntropyDigest hashes every draw word, and ConsumedInputDigest binds an EMPTY
+// prefix to WHICH config and WHICH run produced it, which traverses ConfigID
+// and RunID in full. Those two identifiers ride the config-and-trace ceiling
+// and carry no per-string bound, so the attestations were bought at the
+// caller's price for a run that read nothing: measured with a broken stream
+// invariant beside a 64 MiB ConfigID, 200.890391 ms against 4.109 µs now, the
+// latter being the same figure as the identical refusal with a SHORT identifier
+// — which is how one knows the identifier is no longer read at all.
+//
+// This is the shape gate's own rule applied one layer in: a function that
+// declined to read an input can attest to nothing about it. What these
+// refusals still carry is the stream digest they genuinely computed.
+func TestOrderedRulesARefusalDecidedBeforeTheTraversalAttestsToNothing(t *testing.T) {
+	cs := []predictioneval.OrderedRulesCandidate{
+		orCandidate("c1", 10, orKnownBalance(1000), orOutcome("A", 4), orOutcome("B", 6)),
+	}
+	cfg := orConfig([]predictioneval.OrderedRule{
+		orRule(predictioneval.ComparatorLe, 40, 100, 0, 10)}, 95, 100, 0, 10)
+
+	// forge reaches the invariant pass through the two-call digest oracle.
+	forge := func(t *testing.T) predictioneval.OrderedRulesStream {
+		t.Helper()
+		st := orProject(t, cs, nil)
+		st.Qualifications = append(st.Qualifications, "FABRICATED")
+		st.SelectionDigest = predictioneval.EvaluateOrderedRules(st, cfg, orDraws()).StreamDigest
+		return st
+	}
+
+	tooManyRules := orConfig(make([]predictioneval.OrderedRule, predictioneval.MaxOrderedRulesRules+1),
+		95, 100, 0, 10)
+	noDefault := orConfig(nil, 95, 100, 0, 10)
+	noDefault.HasDefault = false
+
+	for _, c := range []struct {
+		name   string
+		stream predictioneval.OrderedRulesStream
+		cfg    predictioneval.OrderedRulesConfig
+		words  int
+		reason string
+	}{
+		// DRAW_WORDS_OVER_BOUND and RULE_COUNT_OVER_BOUND are deliberately not
+		// in this table. The evaluator has cases for both, but the shape gate
+		// tests the same two conditions against the same two constants and
+		// answers first, so those cases are unreachable and the gate's own
+		// refusal — which carries nothing whatever, not even a stream digest —
+		// is what a caller sees. The case below pins that instead, and this
+		// table would have asserted a contract that does not exist: the first
+		// draft of it did, and failed.
+		{"config carries no default", orProject(t, cs, nil), noDefault, 0,
+			predictioneval.ReasonConfigDefaultNotSupplied},
+		{"stream invariants broken", forge(t), cfg, 0,
+			predictioneval.ReasonStreamInvariantViolated},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			got := predictioneval.EvaluateOrderedRules(c.stream, c.cfg,
+				orDraws(make([]uint64, c.words)...))
+			switch {
+			case got.Status != predictioneval.StatusRefused || got.Reason != c.reason:
+				t.Fatalf("premise: this input must be refused %q; got %q / %q",
+					c.reason, got.Status, got.Reason)
+			// The one it DID compute, and the one that got it this far.
+			case got.StreamDigest == "":
+				t.Fatal("a refusal reached past the digest comparison stopped carrying the " +
+					"stream digest it verified to get there")
+			case got.ConfigDigest != "", got.EntropyDigest != "":
+				t.Fatalf("a refusal decided before the traversal carried a config or entropy "+
+					"digest (config %q, entropy %q). Each hashes a whole input this call "+
+					"never read — the config's rules, every draw word — and ConfigID rides a "+
+					"ceiling with no per-string bound, so the attestation is bought at the "+
+					"caller's price and witnesses nothing.", got.ConfigDigest, got.EntropyDigest)
+			case got.ConsumedInputDigest != "":
+				t.Fatalf("a refusal decided before the traversal carried a consumed-prefix "+
+					"digest %q over a prefix of NOTHING. It binds the empty prefix to which "+
+					"config and which run produced it, traversing ConfigID and RunID in full "+
+					"to distinguish cases that have nothing to recombine.", got.ConsumedInputDigest)
+			}
+		})
+	}
+
+	// The two over-bound reasons never reach the block above: the shape gate
+	// settles both, and a gate refusal declined to read the input, so it
+	// attests to nothing at all — not even the stream digest, which it never
+	// computed.
+	t.Run("the over-bound reasons are settled by the gate and carry nothing", func(t *testing.T) {
+		for _, c := range []struct {
+			name   string
+			cfg    predictioneval.OrderedRulesConfig
+			words  int
+			reason string
+		}{
+			{"draw words", cfg, predictioneval.MaxOrderedRulesDrawWords + 1,
+				predictioneval.ReasonDrawWordsOverBound},
+			{"rule count", tooManyRules, 0, predictioneval.ReasonRuleCountOverBound},
+		} {
+			t.Run(c.name, func(t *testing.T) {
+				got := predictioneval.EvaluateOrderedRules(orProject(t, cs, nil), c.cfg,
+					orDraws(make([]uint64, c.words)...))
+				switch {
+				case got.Reason != c.reason:
+					t.Fatalf("premise: this input must be refused %q; got %q", c.reason, got.Reason)
+				case got.StreamDigest != "" || got.ConfigDigest != "" ||
+					got.EntropyDigest != "" || got.ConsumedInputDigest != "":
+					t.Fatalf("a shape-gate refusal carried a digest (stream %q, config %q, "+
+						"entropy %q, consumed %q). The gate declined to READ the input; a "+
+						"digest of something never traversed is the empty guarantee it "+
+						"exists to avoid.", got.StreamDigest, got.ConfigDigest,
+						got.EntropyDigest, got.ConsumedInputDigest)
+				}
+			})
+		}
+	})
+
+	// The encodability scan guards the two digests above, so it belongs beside
+	// them rather than ahead of the four refusals — none of which reads either
+	// identifier.
+	t.Run("a broken invariant is decided without scanning the identifiers", func(t *testing.T) {
+		poisoned := orConfig([]predictioneval.OrderedRule{
+			orRule(predictioneval.ComparatorLe, 40, 100, 0, 10)}, 95, 100, 0, 10)
+		poisoned.ConfigID = "id-\xff-tail"
+
+		// The premise: the unencodable identifier really is refused on its own.
+		if got := predictioneval.EvaluateOrderedRules(orProject(t, cs, nil), poisoned,
+			orDraws()); got.Reason != predictioneval.ReasonSuppliedTextNotEncodable {
+			t.Fatalf("premise: the identifier alone must be refused as unencodable; got %q",
+				got.Reason)
+		}
+
+		if got := predictioneval.EvaluateOrderedRules(forge(t), poisoned,
+			orDraws()); got.Reason != predictioneval.ReasonStreamInvariantViolated {
+			t.Fatalf("a forged stream beside an unencodable config identifier was refused %q. "+
+				"The encodability rule exists because the two digests hash those strings; a "+
+				"refusal that computes neither must not scan them to be reached.", got.Reason)
+		}
+	})
+
+	// THE COUNTERWEIGHT. Without it, never producing the three digests at all
+	// would satisfy every case above.
+	t.Run("an admitted run still attests to all four", func(t *testing.T) {
+		got := predictioneval.EvaluateOrderedRules(orProject(t, cs, nil), cfg, orDraws())
+		switch {
+		case got.Status != predictioneval.StatusWouldAttempt:
+			t.Fatalf("premise: the intact fixture must evaluate; got %q", got.Status)
+		case got.StreamDigest == "" || got.ConfigDigest == "" ||
+			got.EntropyDigest == "" || got.ConsumedInputDigest == "":
+			t.Fatal("an evaluation that READ its inputs must still carry all four digests. " +
+				"Withholding them from a refusal must not turn into never computing them.")
+		}
+	})
+}
