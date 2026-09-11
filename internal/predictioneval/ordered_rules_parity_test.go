@@ -165,6 +165,24 @@ func TestOrderedRulesEverythingTheProjectionAdmitsTheEvaluatorAdmits(t *testing.
 	// And one per free-text length, for the reason written above: this
 	// dimension was silently dead in one of its two values.
 	perTextLen := map[int]int{}
+	// AND ONE PER VALUE OF EVERY REMAINING DIMENSION, which is the general form
+	// of the same lesson rather than a fourth one-off.
+	//
+	// Three dimensions of this case have now turned out smaller than they
+	// looked — the bound-field classes, the views, and the free-text lengths —
+	// and each was found by someone asking rather than by a guard. The
+	// aggregate counters could not see any of them: `projected` was in the
+	// hundreds throughout. So every dimension now carries a per-value counter
+	// and a guard, and a value that stops projecting fails by name.
+	//
+	// Measured when these were added, and the space is exactly balanced: 432
+	// projections for each candidate/outcome shape, each balance presence and
+	// each coverage; 648 with and 648 without a boundary; 216 per bound field.
+	// No remaining value is dead.
+	perCount := map[string]int{}
+	perBalance := map[string]int{}
+	perCoverage := map[string]int{}
+	perCutoff := map[bool]int{}
 	// One counter per field class, so a class that never projects cannot hide
 	// behind another that did.
 	atBound := map[string]int{}
@@ -290,6 +308,10 @@ func TestOrderedRulesEverythingTheProjectionAdmitsTheEvaluatorAdmits(t *testing.
 							projected++
 							perView[string(sh.view)]++
 							perTextLen[n]++
+							perCount[strconv.Itoa(c.candidates)+"x"+strconv.Itoa(c.outcomes)]++
+							perBalance[strconv.Itoa(bi)]++
+							perCoverage[string(cov)]++
+							perCutoff[cut]++
 							if stream.Cutoff.Established {
 								cutoffSeen++
 							}
@@ -350,6 +372,35 @@ func TestOrderedRulesEverythingTheProjectionAdmitsTheEvaluatorAdmits(t *testing.
 		}
 	}
 
+	// EVERY value of every remaining dimension must have projected. These read
+	// the same way as the two above and exist for the same reason: an aggregate
+	// counter in the hundreds says nothing about whether a particular value
+	// contributed any of it.
+	for _, c := range counts {
+		k := strconv.Itoa(c.candidates) + "x" + strconv.Itoa(c.outcomes)
+		if perCount[k] == 0 {
+			t.Fatalf("no source projected at candidate/outcome shape %s, so that shape contributes "+
+				"nothing to this property", k)
+		}
+	}
+	for i := range balances {
+		if perBalance[strconv.Itoa(i)] == 0 {
+			t.Fatalf("no source projected with balance presence %q, so that presence word "+
+				"contributes nothing to this property", balances[i].Presence)
+		}
+	}
+	for _, cov := range coverages {
+		if perCoverage[string(cov)] == 0 {
+			t.Fatalf("no source projected under coverage %s, so the qualification derivation this "+
+				"coverage drives is never compared between the two paths", cov)
+		}
+	}
+	for _, cut := range withCutoff {
+		if perCutoff[cut] == 0 {
+			t.Fatalf("no source projected with cutoff=%v, so that half of the boundary dimension "+
+				"contributes nothing to this property", cut)
+		}
+	}
 	// EVERY free-text length must have projected at least once. Without this the
 	// dimension can go dead in one value and nothing notices, which is exactly
 	// what happened with 0.
@@ -400,6 +451,8 @@ func TestOrderedRulesEverythingTheProjectionAdmitsTheEvaluatorAdmits(t *testing.
 		}
 	}
 	t.Logf("%d projected streams evaluated; %d with a boundary, %d with a non-KNOWN balance; "+
-		"at the per-string bound: %v; per view: %v; per free-text length: %v",
-		projected, cutoffSeen, nonKnownSeen, atBound, perView, perTextLen)
+		"at the per-string bound: %v; per view: %v; per free-text length: %v; "+
+		"per shape: %v; per balance: %v; per coverage: %v; per cutoff: %v",
+		projected, cutoffSeen, nonKnownSeen, atBound, perView, perTextLen,
+		perCount, perBalance, perCoverage, perCutoff)
 }

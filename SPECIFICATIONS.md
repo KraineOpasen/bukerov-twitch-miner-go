@@ -4492,6 +4492,29 @@ that fails naming the dead value. Mutation-verified by restoring 0: the guard
 fires. The space genuinely doubles as a result — 648 evaluated streams to
 1,296 — which is the measure of what the dead value was costing.
 
+**Three dimensions of one case turned out smaller than they looked, so the
+remedy is now general rather than a fourth patch.** The bound-field classes, the
+views and the free-text lengths were each found by someone asking, never by a
+guard, and the aggregate counters could not have seen any of them: `projected`
+was in the hundreds throughout. Every dimension therefore carries a per-value
+counter and a guard, and a value that stops projecting fails by name.
+
+Measured when those were added, and the space is exactly balanced — 432
+projections for each candidate/outcome shape, each balance presence word and
+each coverage; 648 with and 648 without a boundary; 216 per bound field; 648 per
+view and per free-text length. **No remaining value is dead.** Mutation-verified
+on the coverage dimension by making the projection refuse `TRUNCATED_PREFIX`:
+the guard fires naming that coverage.
+
+One honest qualification on that balance. The evaluator's STATUS distribution is
+identical across all three coverages — 288 stake-unknown and 144 would-attempt
+each — so coverage never moves the outcome in this space. It is still real
+coverage of a real rule rather than decoration: coverage drives
+`qualCoverageNotComplete`, the evaluator re-derives it in
+`orderedRulesQualificationsNotDerived`, and that derivation is an ingest check
+this property would catch the two paths disagreeing on. The dimension earns its
+place through the qualification comparison, not through the status.
+
 **What the parity property still does NOT cover, stated rather than left to be
 discovered.** The second reviewer, asked directly whether the rotation has gaps,
 named one and it is real: the case rotates **one** bound-length field class at a
