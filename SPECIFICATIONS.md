@@ -4140,13 +4140,51 @@ unrelated case happened to cover them.
 
 `TestOrderedRulesEverythingTheProjectionAdmitsTheEvaluatorAdmits` asserts the
 property those cases were instances of. It enumerates a space over the exact
-dimensions the reorderings touched — candidate and outcome counts, per-string
-lengths from empty to the bound, the three balance presence words, the three
-coverages, and whether a boundary exists — projects each source, and requires
-that a stream the projection ADMITTED never meets an **ingest-validation**
-refusal: contract or semantics mismatch, shape, bytes, text, invariant or digest
-mismatch. 162 sources project, 81 with a boundary, 108 with a non-KNOWN balance,
-54 carrying text at the per-string bound.
+dimensions the reorderings touched — candidate and outcome counts, free-text
+lengths, the three balance presence words, the three coverages, whether a
+boundary exists, and WHICH FIELD CLASS carries a string at the per-string bound —
+projects each source, and requires that a stream the projection ADMITTED never
+meets an **ingest-validation** refusal: contract or semantics mismatch, shape,
+bytes, text, invariant or digest mismatch. 324 sources project, 162 with a
+boundary, 216 with a non-KNOWN balance.
+
+**The bound dimension is a correction, and the counter that was supposed to
+protect it was the thing at fault.** The first version of this case padded three
+FREE-TEXT fields — a candidate's provenance, its outcomes reason, an
+intervention's detail — and counted "text at the bound" if any of them reached
+`MaxOrderedRulesIdentifierBytes`. That counter was green. It was also satisfied
+without a single IDENTIFIER or admission SOURCE REFERENCE ever reaching the
+bound, and those are precisely the fields whose validation this round moved
+between tiers: the two identity passes and `checkTextLength` in the charging
+loops. The property went untested exactly where it was most likely to break,
+behind a non-vacuity guard that said otherwise. A reviewer read the padding
+rather than the counter. This is the tenth finding of the same shape as the nine
+below — a claim true of one instance and asserted of a class — and the first one
+where the false claim was made by a guard written to prevent it.
+
+The repair rotates the bound across five field classes one at a time —
+`candidateIdentity`, `outcomeIdentity`, `scopeNamespace`, `sourceReference`,
+`interventionIdentity` — each built as a 4096-byte string ending in a
+distinguishing suffix so identities that must stay UNIQUE still are at the bound,
+and gives each class its own counter. The counters read the PROJECTED STREAM,
+not the case name: counting on the loop variable would have reproduced the same
+defect one level up, since deleting the line that builds the bounded string
+leaves a name-keyed counter green.
+
+Mutation record, three outcomes and two of them not what a reader would guess.
+Neutering each bounded string in turn — five mutants — fails on that class's
+counter and names it; on the unmutated tree the classes reach the bound 54, 54,
+54, 54 and 27 times, the last halved because only the cutoff cases carry an
+intervention. Widening an EVALUATOR-ONLY bound so it refuses a value the
+projection admits — `len(c.Identity) >= MaxOrderedRulesIdentifierBytes` on the
+cutoff identity — fails on the PROPERTY, 27 cases, all of them the
+`interventionIdentity` rotation, with `STREAM_INVARIANT_VIOLATED`. Widening the
+SHARED validator the same way — `checkIdentifier` — does NOT fail on the
+property: the projection refuses first, the case is skipped, and the failure
+lands on the `candidateIdentity` counter instead. That is correct and it is
+structural. Candidate and outcome identities have no evaluator-only length bound
+that could diverge, because both paths call the same helper; the counters are
+what covers those classes, and the property covers the fields checked twice.
 
 Two things it deliberately does not claim. It is not a claim that the paths agree
 on everything — they do not, and the invariant pass now says so. And refusals
@@ -4158,11 +4196,12 @@ rejections of the stream.
 The space is enumerated rather than randomised because a seeded generator whose
 failures cannot be replayed from the source alone would breach this repository's
 deterministic-test contract. Non-vacuity is asserted rather than assumed: the
-case fails if fewer than fifty sources project, or if no projected stream carried
-a boundary, a non-KNOWN balance, or text at the bound — the guard that three
-cases on this work turned out to need. Mutation-verified by making the evaluator
-reject `GAPS_PRESENT`, a coverage the projection admits: the case fails naming
-that dimension and the reason code.
+case fails if fewer than fifty sources project, if no projected stream carried a
+boundary or a non-KNOWN balance, or if ANY of the five field classes never
+reached the bound — the guard that three cases on this work turned out to need,
+and that a fourth turned out to need per class rather than in aggregate.
+Mutation-verified by making the evaluator reject `GAPS_PRESENT`, a coverage the
+projection admits: the case fails naming that dimension and the reason code.
 
 **A convergence audit, because the round of five was itself a symptom.** Nine of
 the last ten findings have been one shape: a rule or a CLAIM fixed at one seam
