@@ -3260,7 +3260,15 @@ runs ahead of every digest and every allocation, using counts and string lengths
 only — each of them a single length read over a number of elements the preceding
 check has already bounded. It mirrors the projection's own limits field for
 field, the per-string limit included, so an input the projection would have
-admitted is not refused there and one it would have refused is not hashed there;
+admitted is not refused there and one it would have refused is not hashed there.
+Mirroring means the mirror is exact in both directions: text the projection
+DERIVES rather than receives — the qualifications it generates, the boundary it
+computes, the stream's own contract version — is length-bounded but never
+charged, because the projection never charged it, and the config and the trace
+carry a ceiling of their own, because the projection never saw them at all. Two
+inputs, two ceilings, and the derived fields on neither; otherwise a source
+filling the projection's budget would project successfully and then be refused
+here for bytes, which is the invariant backwards. Continuing:
 the per-string limit is not implied by the aggregate, since one 64 MiB note sits
 well inside a 128 MiB budget while being a value the projection refuses outright.
 A refusal from that gate carries no whole-input digest: the model declined to

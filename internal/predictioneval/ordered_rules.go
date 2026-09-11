@@ -222,7 +222,8 @@ func orderedRulesInputShapeReason(s OrderedRulesStream, cfg OrderedRulesConfig, 
 	switch {
 	case budget.overLong:
 		return ReasonStreamTextOverBound
-	case budget.bytes > MaxOrderedRulesAggregateBytes:
+	case budget.bytes > MaxOrderedRulesAggregateBytes,
+		budget.other > MaxOrderedRulesAggregateBytes:
 		return ReasonStreamBytesOverBound
 	}
 	return ""
@@ -238,7 +239,12 @@ func orderedRulesInputShapeReason(s OrderedRulesStream, cfg OrderedRulesConfig, 
 // hashed here. Charging every string individually would break the first half of
 // that; charging none would break the second.
 type orderedRulesTextBudget struct {
-	bytes    int64
+	// bytes is the retained STREAM text, charged exactly as the projection
+	// charges it so the two ceilings agree.
+	bytes int64
+	// other is the config and trace text, which the projection never saw and
+	// which therefore cannot share the stream's ceiling.
+	other    int64
 	overLong bool
 }
 
@@ -253,10 +259,25 @@ func (b *orderedRulesTextBudget) charge(v ...string) {
 // checkIdentifier or checkFreeText.
 func (b *orderedRulesTextBudget) bound(v ...string) {
 	for _, s := range v {
+		b.boundOnly(s)
+		b.bytes += int64(len(s))
+	}
+}
+
+// boundOnly limits a string's length without charging it to the aggregate.
+//
+// It exists for text the projection DERIVES rather than receives: the
+// qualifications it generates, the boundary it computes, and the stream's own
+// contract version. The projection never charged those against its budget, so
+// charging them here would let a source the projection ADMITTED be refused by
+// the evaluator for bytes — which is the invariant backwards. They are still
+// length-bounded, and their count is bounded, so the work they can cause is
+// bounded without them touching the shared ceiling.
+func (b *orderedRulesTextBudget) boundOnly(v ...string) {
+	for _, s := range v {
 		if len(s) > MaxOrderedRulesIdentifierBytes {
 			b.overLong = true
 		}
-		b.bytes += int64(len(s))
 	}
 }
 
@@ -278,14 +299,15 @@ func orderedRulesInputBudget(s OrderedRulesStream, cfg OrderedRulesConfig,
 	// This mirrors the projection field for field, as the division always has.
 	// The projection gates its vocabulary now, so this side must too: leaving
 	// these on the aggregate would refuse nothing the projection refuses.
-	b.bound(s.ContractVersion, s.Scope.SourceContractVersion, string(s.Scope.Coverage))
+	b.boundOnly(s.ContractVersion)
+	b.bound(s.Scope.SourceContractVersion, string(s.Scope.Coverage))
 	b.charge(s.Scope.Namespace, s.Scope.EpisodeID, s.Scope.AccountContext,
 		s.Scope.AssociationEvidence)
 	b.bound(s.Scope.CoverageDetail, string(s.Admission.ViewKind))
 	b.charge(s.Admission.ManifestID, s.Admission.Population, s.Admission.OrderBasis)
 	b.bound(s.Admission.SourceReferences...)
-	b.bound(string(s.Cutoff.Kind), string(s.Cutoff.Basis), s.Cutoff.Identity)
-	b.bound(s.Qualifications...)
+	b.boundOnly(string(s.Cutoff.Kind), string(s.Cutoff.Basis), s.Cutoff.Identity)
+	b.boundOnly(s.Qualifications...)
 	for i := range s.Candidates {
 		c := &s.Candidates[i]
 		b.bound(c.Identity, c.Provenance, c.OutcomesReason,
@@ -300,10 +322,15 @@ func orderedRulesInputBudget(s OrderedRulesStream, cfg OrderedRulesConfig,
 	// closed vocabularies are bound; their free-form identifiers stay on the
 	// aggregate, because inventing a limit nothing else applies would refuse
 	// input no other rule refuses.
-	b.charge(cfg.ConfigID, d.RunID)
-	b.bound(d.EntropySemanticsVersion)
+	//
+	// They are charged to a SEPARATE total. The projection never saw them, so
+	// adding their bytes to the stream's would again let a stream the
+	// projection admitted be refused here — this time because of an unrelated
+	// argument. Two inputs, two ceilings.
+	b.other += int64(len(cfg.ConfigID) + len(d.RunID))
+	b.boundOnly(d.EntropySemanticsVersion)
 	for i := range cfg.Detailed {
-		b.bound(string(cfg.Detailed[i].Comparator))
+		b.boundOnly(string(cfg.Detailed[i].Comparator))
 	}
 	return b
 }

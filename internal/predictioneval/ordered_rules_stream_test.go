@@ -927,7 +927,10 @@ func TestOrderedRulesOversizedInputIsRefusedBeforeItIsRead(t *testing.T) {
 	// does that arithmetic instead of asserting it, so the claim cannot rot the
 	// way the first one did.
 	t.Run("retained text past the aggregate budget", func(t *testing.T) {
-		const fields = 9
+		// Seven fields, not nine: ConfigID and RunID moved to the separate
+		// config-and-trace ceiling, because the projection never saw them and
+		// so they cannot push a stream the projection admitted over the edge.
+		const fields = 7
 		chunk := strings.Repeat("x",
 			predictioneval.MaxOrderedRulesAggregateBytes/fields+1)
 		st := forged(1)
@@ -938,17 +941,13 @@ func TestOrderedRulesOversizedInputIsRefusedBeforeItIsRead(t *testing.T) {
 		st.Admission.ManifestID = chunk
 		st.Admission.Population = chunk
 		st.Admission.OrderBasis = chunk
-		cfgBig := cfg
-		cfgBig.ConfigID = chunk
-		draws := orDraws()
-		draws.RunID = chunk
 
 		counted := int64(fields) * int64(len(chunk))
 		if counted <= predictioneval.MaxOrderedRulesAggregateBytes {
 			t.Fatalf("this case's premise is that the retained text exceeds the budget; it counts "+
 				"%d bytes against %d", counted, int64(predictioneval.MaxOrderedRulesAggregateBytes))
 		}
-		unread(t, predictioneval.EvaluateOrderedRules(st, cfgBig, draws),
+		unread(t, predictioneval.EvaluateOrderedRules(st, cfg, orDraws()),
 			predictioneval.ReasonStreamBytesOverBound)
 	})
 
@@ -960,12 +959,15 @@ func TestOrderedRulesOversizedInputIsRefusedBeforeItIsRead(t *testing.T) {
 	// provenance and reason; an outcome bounds its identity and its points'
 	// presence, provenance and reason.
 	t.Run("the aggregate check stays reachable without the free-form fields", func(t *testing.T) {
-		const perCandidate, perOutcome, fixedStream, fixedTrace = 9, 4, 8, 1
+		// Only fields that are both bounded AND charged to the stream ceiling
+		// count here. The derived text — qualifications, the boundary, the
+		// stream's own contract version — is bounded but deliberately not
+		// charged, and the config and trace have their own ceiling, so none of
+		// them can carry the stream total over.
+		const perCandidate, perOutcome, fixedStream = 9, 4, 4
 		slots := predictioneval.MaxOrderedRulesCandidates*perCandidate +
 			predictioneval.MaxOrderedRulesCandidates*predictioneval.MaxOrderedRulesOutcomes*perOutcome +
-			predictioneval.MaxOrderedRulesSourceReferences +
-			predictioneval.MaxOrderedRulesQualifications +
-			predictioneval.MaxOrderedRulesRules + fixedStream + fixedTrace
+			predictioneval.MaxOrderedRulesSourceReferences + fixedStream
 		capacity := int64(slots) * int64(predictioneval.MaxOrderedRulesIdentifierBytes)
 		if capacity <= predictioneval.MaxOrderedRulesAggregateBytes {
 			t.Fatalf("the individually bounded fields top out at %d bytes against a budget of %d, so "+
@@ -1256,6 +1258,80 @@ func TestOrderedRulesAMatchingDigestIsNotProofOfProjection(t *testing.T) {
 				ev.Status, ev.Reason)
 		}
 	})
+}
+
+// TestOrderedRulesAProjectedStreamIsAlwaysAdmissible pins the invariant the
+// other budget cases are written against, in the direction that was false.
+//
+// The evaluator's budget mirrors the projection's so that an input the
+// projection would have admitted is not refused here. That claim was wrong in
+// one direction and the mirror did not show it: the evaluator also charged text
+// the projection never charged — the qualifications IT generated, the boundary
+// IT computed, the stream's own contract version — plus the config and trace,
+// which the projection never sees at all. A source filling the projection's
+// budget therefore projected successfully and was then refused by the evaluator
+// for bytes. Measured: the projection admitted a 134,217,336-byte namespace and
+// the evaluator answered STREAM_BYTES_OVER_BOUND on that very stream.
+//
+// Derived text is now bounded without being charged, and the config and trace
+// carry their own ceiling. Two inputs, two ceilings, and the derived fields on
+// neither.
+func TestOrderedRulesAProjectedStreamIsAlwaysAdmissible(t *testing.T) {
+	// At the projection's EXACT maximum, not merely near it. A margin makes
+	// this case vacuous — the derived text is only a few hundred bytes, so any
+	// slack absorbs it and the case passes whether or not the bug is present.
+	// That is not hypothetical: the first version of this test left four
+	// kilobytes of slack and failed to notice the defect restored.
+	//
+	// One allocation, then slices of it: re-cutting a 128 MiB string per probe
+	// would cost more than the search is worth, and s[:n] shares the backing
+	// array.
+	big := strings.Repeat("x", predictioneval.MaxOrderedRulesAggregateBytes)
+	source := func(n int) predictioneval.OrderedRulesSource {
+		src := orSource([]predictioneval.OrderedRulesCandidate{
+			orCandidate("c1", 10, orKnownBalance(1000), orOutcome("A", 4), orOutcome("B", 6))}, nil)
+		src.Scope.Namespace = big[:n]
+		return src
+	}
+
+	lo, hi := 0, len(big)
+	for lo < hi {
+		mid := (lo + hi + 1) / 2
+		if _, err := predictioneval.ProjectOrderedRulesStream(source(mid), orAdmission()); err == nil {
+			lo = mid
+		} else {
+			hi = mid - 1
+		}
+	}
+	t.Logf("the projection's exact maximum namespace here is %d bytes, %d below the aggregate",
+		lo, predictioneval.MaxOrderedRulesAggregateBytes-lo)
+	if _, err := predictioneval.ProjectOrderedRulesStream(source(lo+1), orAdmission()); err == nil {
+		t.Fatal("premise: one byte more must be refused, or this is not the projection's maximum")
+	}
+
+	stream, err := predictioneval.ProjectOrderedRulesStream(source(lo), orAdmission())
+	if err != nil {
+		t.Fatalf("this case's premise is that the PROJECTION admits this source: %v", err)
+	}
+	if len(stream.Qualifications) == 0 {
+		t.Fatal("premise: the projection must have derived at least one qualification, or the " +
+			"asymmetry this case exists for is not present")
+	}
+
+	ev := predictioneval.EvaluateOrderedRules(stream,
+		orConfig([]predictioneval.OrderedRule{
+			orRule(predictioneval.ComparatorLe, 40, 100, 0, 10)}, 95, 100, 0, 10),
+		orDraws())
+	if ev.Reason == predictioneval.ReasonStreamBytesOverBound {
+		t.Fatalf("the projection admitted this stream and the evaluator refused it for bytes; the "+
+			"text the projection never charged — %d qualifications, the boundary, the contract "+
+			"version — must not count against the same ceiling",
+			len(stream.Qualifications))
+	}
+	if ev.Status != predictioneval.StatusWouldAttempt {
+		t.Fatalf("status %q reason %q, want WOULD_ATTEMPT: a projected stream at the projection's "+
+			"own limit is still an ordinary stream", ev.Status, ev.Reason)
+	}
 }
 
 // TestOrderedRulesVocabularyIsBoundedBeforeItIsQuoted pins length before
