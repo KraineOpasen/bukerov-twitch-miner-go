@@ -3389,6 +3389,47 @@ ceiling. Neither reordering changes which inputs are admitted; both change only
 what a refusal can be made to cost, and both are pinned by the ORDER they imply
 rather than by timing, which this repository's deterministic-test contract bars.
 
+A sweep of the same axis found four more places where attacker-controlled work
+preceded a cheaper decision, and each was reordered on the same rule. The
+projection now decides the two source COUNTS — candidates and interventions,
+each a slice length against a constant — before any content scan at all, where
+they used to follow validateAdmission's walk over up to 1,024 references of
+4,096 bytes: 3.140461 milliseconds to 220 nanoseconds on the identical input.
+It also establishes the boundary before the intervention DETAIL is scanned,
+detail being free text no decision reads: 3.2537 milliseconds to 21.686
+microseconds. That second move is a reordering rather than a free win, and the
+specification says so — where the detail itself is what is wrong and every
+intervention is otherwise well shaped, the scan now follows a full
+establishCutoff pass instead of preceding it, at most one extra pass over the
+same bounded envelope. The evaluator decides an unusable CONFIG — arithmetic
+over a rule count already bounded — before re-establishing the stream's
+invariants, which on a well-formed stream walks the scope, the references and
+every retained candidate to say so: 7.26947 milliseconds to 4.054034
+milliseconds. Inside that invariant pass the DERIVED checks, a boundary against
+the declared interval and a qualification list against the five conditions that
+imply it, now precede the same scope and admission walks: 7.027512 milliseconds
+to 3.938983 milliseconds. In both of the last two figures the residue is the
+stream digest, computed because it IS the comparison that admitted the stream;
+no ordering avoids it, and only the second traversal was ever avoidable. The
+first three are pinned by which of two faults wins. The fourth is NOT pinned and
+cannot be: orderedRulesStreamInvariantsBroken answers yes or no, both faults
+produce the identical STREAM_INVARIANT_VIOLATED, and timing is barred — the
+ordering is held by a comment at the call site, which is stated here rather than
+left to look like coverage.
+
+One refusal also stopped re-exporting what it never read. A stream whose
+SelectionDigest does not match is not what the projection produced, so its
+Cutoff and its Qualifications are supplied text that the checks judging them —
+both of which run below the mismatch — never see. The refusal carried them out
+anyway, into two fields whose contract is that they were derived: a limitation
+list the evidence never implied, and a boundary no intervention established. At
+the widest shape the gate admits, 64 qualifications of 4,096 bytes, that was
+262,144 measured bytes copied out of a refusal that read nothing and written
+again six-fold by whoever encodes it. The recomputed stream digest is now the
+only thing a mismatch carries, and the counterweight is pinned beside it: an
+ADMITTED run must still report the derived cutoff and qualifications, so
+"carry nothing" cannot degenerate into never producing them.
+
 Continuing:
 the per-string limit is not implied by the aggregate, since one 64 MiB note sits
 well inside a 128 MiB budget while being a value the projection refuses outright.

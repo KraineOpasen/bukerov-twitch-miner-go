@@ -90,8 +90,29 @@ const (
 // inputs and have no field here: a call that FAILED is still a boundary,
 // because the world it acted on is the one that continued.
 func ProjectOrderedRulesStream(source OrderedRulesSource, admission CommonAdmission) (OrderedRulesStream, error) {
-	// LENGTH BEFORE MEANING, for every value that can reach an error formatter.
+	// LENGTH BEFORE MEANING, for every value that can reach an error formatter,
+	// and THE TWO COUNTS FIRST, ahead of every scan below, because both are a
+	// slice length against a constant and neither reads a supplied byte.
 	//
+	// They used to sit after the validators, and validateAdmission walks up to
+	// MaxOrderedRulesSourceReferences strings of MaxOrderedRulesIdentifierBytes
+	// each — so a source with one candidate too many paid a 4 MiB scan of text
+	// the refusal does not depend on before anyone counted its candidates.
+	// Measured on the identical input: 3.140461 ms to 220 ns.
+	//
+	// This is the same length-before-meaning rule the file applies everywhere
+	// else, applied to the one pair that was exempt from it.
+	if len(source.Candidates) > MaxOrderedRulesCandidates {
+		return OrderedRulesStream{}, errors.Join(ErrOrderedRulesOverBound,
+			errors.New("predictioneval: "+strconv.Itoa(len(source.Candidates))+
+				" candidates exceed the bound of "+strconv.Itoa(MaxOrderedRulesCandidates)))
+	}
+	if len(source.Interventions) > MaxOrderedRulesInterventions {
+		return OrderedRulesStream{}, errors.Join(ErrOrderedRulesOverBound,
+			errors.New("predictioneval: "+strconv.Itoa(len(source.Interventions))+
+				" interventions exceed the bound of "+strconv.Itoa(MaxOrderedRulesInterventions)))
+	}
+
 	// The validators below quote the value they reject, and strconv.Quote scans
 	// the whole string and allocates an expanded copy. A vocabulary field is a
 	// closed set of short words, so an enormous one is not a near-miss: it is
@@ -113,16 +134,6 @@ func ProjectOrderedRulesStream(source OrderedRulesSource, admission CommonAdmiss
 	if err := validateAdmission(admission); err != nil {
 		return OrderedRulesStream{}, err
 	}
-	if len(source.Candidates) > MaxOrderedRulesCandidates {
-		return OrderedRulesStream{}, errors.Join(ErrOrderedRulesOverBound,
-			errors.New("predictioneval: "+strconv.Itoa(len(source.Candidates))+
-				" candidates exceed the bound of "+strconv.Itoa(MaxOrderedRulesCandidates)))
-	}
-	if len(source.Interventions) > MaxOrderedRulesInterventions {
-		return OrderedRulesStream{}, errors.Join(ErrOrderedRulesOverBound,
-			errors.New("predictioneval: "+strconv.Itoa(len(source.Interventions))+
-				" interventions exceed the bound of "+strconv.Itoa(MaxOrderedRulesInterventions)))
-	}
 
 	// Every caller-supplied string the projection RETAINS is counted, not just
 	// the identifiers: coverage detail, the admission manifest and each
@@ -139,6 +150,45 @@ func ProjectOrderedRulesStream(source OrderedRulesSource, admission CommonAdmiss
 	for _, ref := range admission.SourceReferences {
 		bytes += chargedWidth(len(ref))
 	}
+	// THE BOUNDARY BEFORE THE PAYLOAD, and the order is the point.
+	//
+	// establishCutoff reads only the interventions and the declared interval.
+	// It is self-bounding: every string it quotes in a refusal passes
+	// checkIdentifier or checkFreeText inside establishCutoff itself first, so
+	// it does not depend on any earlier scan for that — only on the
+	// intervention COUNT, which is bounded at the top of this function. The
+	// candidate walk below is the opposite: it is the bulk of the admitted
+	// budget, and it runs entirely on caller-supplied text. Establishing the
+	// boundary second meant an intervention rejectable on its shape alone — an
+	// undeclared position, a kind outside the vocabulary, an empty identity —
+	// was refused only after every candidate and every outcome had been
+	// validated and charged. Measured: 44 µs to refuse such a source with empty
+	// candidate provenance, against 5.0 ms with 600 bytes on each of 8,192
+	// outcomes, and that fixture is a fraction of what the ceiling admits.
+	//
+	// It now also precedes the INTERVENTION payload, for the same reason one
+	// step down. Detail is free text that no decision reads: nothing about the
+	// boundary depends on it, and scanning it first meant the same shape
+	// refusal was reached only after up to 4 MiB of it. Measured on the
+	// identical input: 3.2537 ms to 21.686 µs.
+	//
+	// That second move is a reordering, not a free win, and saying so is the
+	// honest form of it. Where the DETAIL is what is wrong and every
+	// intervention is otherwise well-shaped, the scan below now runs after a
+	// full establishCutoff pass rather than before it — at most one extra
+	// bounded pass over the same MaxOrderedRulesInterventions x
+	// MaxOrderedRulesIdentifierBytes envelope, since a vocabulary kind and a
+	// relevance are short when they are valid and refused on length when they
+	// are not. The trade buys an unbounded-in-practice saving on the shape path
+	// for a bounded cost on the text path, and both paths stay inside the same
+	// ceiling.
+	//
+	// The refusal it produces is the same either way; only its cost changes.
+	cutoff, err := establishCutoff(source)
+	if err != nil {
+		return OrderedRulesStream{}, err
+	}
+
 	for i := range source.Interventions {
 		if err := checkFreeText(source.Interventions[i].Detail, "intervention "+strconv.Itoa(i)+" detail"); err != nil {
 			return OrderedRulesStream{}, err
@@ -148,26 +198,6 @@ func ProjectOrderedRulesStream(source OrderedRulesSource, admission CommonAdmiss
 	if bytes > orderedRulesTextCeiling {
 		return OrderedRulesStream{}, errors.Join(ErrOrderedRulesOverBound,
 			errors.New("predictioneval: supplied scope, admission and intervention bytes exceed the aggregate budget"))
-	}
-
-	// THE BOUNDARY BEFORE THE PAYLOAD, and the order is the point.
-	//
-	// establishCutoff reads only the interventions and the declared interval,
-	// and the interventions are already bounded in count and in text by the
-	// loop above — so it is small work whose inputs are settled. The candidate
-	// walk below is the opposite: it is the bulk of the admitted budget, and it
-	// runs entirely on caller-supplied text. Establishing the boundary second
-	// meant an intervention rejectable on its shape alone — an undeclared
-	// position, a kind outside the vocabulary, an empty identity — was refused
-	// only after every candidate and every outcome had been validated and
-	// charged. Measured: 44 µs to refuse such a source with empty candidate
-	// provenance, against 5.0 ms with 600 bytes on each of 8,192 outcomes, and
-	// that fixture is a fraction of what the ceiling admits.
-	//
-	// The refusal it produces is the same either way; only its cost changes.
-	cutoff, err := establishCutoff(source)
-	if err != nil {
-		return OrderedRulesStream{}, err
 	}
 
 	seen := make(map[string]bool, len(source.Candidates))

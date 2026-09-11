@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"errors"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -3520,6 +3521,126 @@ func TestOrderedRulesACheapRefusalIsNotPaidForWithTheWholePayload(t *testing.T) 
 		case got.StreamDigest == "" || got.ConfigDigest == "" ||
 			got.EntropyDigest == "" || got.ConsumedInputDigest == "":
 			t.Fatal("an admitted run must still carry all four digests")
+		}
+	})
+
+	// The two source COUNTS are slice lengths against constants. They now
+	// precede every content scan, including validateAdmission's walk over up to
+	// MaxOrderedRulesSourceReferences strings: 3.140461 ms to 220 ns on the
+	// identical input.
+	t.Run("a source past its candidate count is refused before its references are read", func(t *testing.T) {
+		many := make([]predictioneval.OrderedRulesCandidate, predictioneval.MaxOrderedRulesCandidates+1)
+		for i := range many {
+			many[i] = orCandidate("c"+strconv.Itoa(i), int64(i), orMissingBalance())
+		}
+		// A reference fault with its own sentinel, so the two are told apart by
+		// which rule fired rather than by wording.
+		poisoned := orAdmission()
+		poisoned.SourceReferences = []string{"ref-\xff"}
+
+		// The premise: each fault really is raised on its own.
+		if _, err := predictioneval.ProjectOrderedRulesStream(orSource(many, nil),
+			orAdmission()); !errors.Is(err, predictioneval.ErrOrderedRulesOverBound) {
+			t.Fatalf("premise: the candidate count alone must be refused as over-bound; got %v", err)
+		}
+		if _, err := predictioneval.ProjectOrderedRulesStream(orSource(cs, nil),
+			poisoned); !errors.Is(err, predictioneval.ErrOrderedRulesNotEncodable) {
+			t.Fatalf("premise: the reference alone must be refused as unencodable; got %v", err)
+		}
+
+		if _, err := predictioneval.ProjectOrderedRulesStream(orSource(many, nil),
+			poisoned); !errors.Is(err, predictioneval.ErrOrderedRulesOverBound) {
+			t.Fatalf("a source with one candidate too many, beside an unencodable admission "+
+				"reference, was refused %v. Counting a slice reads no supplied byte, and "+
+				"validateAdmission walks up to %d references of %d bytes to reach the same "+
+				"refusal, so the count must be decided first.",
+				err, predictioneval.MaxOrderedRulesSourceReferences,
+				predictioneval.MaxOrderedRulesIdentifierBytes)
+		}
+	})
+
+	// The boundary also precedes the INTERVENTION payload. Detail is free text
+	// no decision reads, and scanning it first meant an intervention rejectable
+	// on its shape was reached only after up to 4 MiB of it: 3.2537 ms to
+	// 21.686 µs on the identical input.
+	t.Run("a malformed intervention is refused before intervention detail is scanned", func(t *testing.T) {
+		// Entry ZERO carries the unencodable detail and entry ONE the shape
+		// fault, so the two loops are told apart rather than the two entries:
+		// a detail scan that ran first would reach entry zero before
+		// establishCutoff ever saw entry one.
+		mixed := []predictioneval.OrderedRulesIntervention{
+			orIntervention("call-1", 100, predictioneval.InterventionAutoCallStarted,
+				predictioneval.RelevanceProven, "detail-\xff"),
+			orIntervention("call-2", 200, predictioneval.InterventionAutoCallStarted,
+				predictioneval.RelevanceProven, "boundary"),
+		}
+		mixed[1].HasPosition = false
+
+		detailOnly := []predictioneval.OrderedRulesIntervention{mixed[0]}
+		shapeOnly := []predictioneval.OrderedRulesIntervention{
+			orIntervention("call-2", 200, predictioneval.InterventionAutoCallStarted,
+				predictioneval.RelevanceProven, "boundary"),
+		}
+		shapeOnly[0].HasPosition = false
+
+		// The premise: each fault really is raised on its own.
+		if _, err := predictioneval.ProjectOrderedRulesStream(orSource(cs, detailOnly),
+			orAdmission()); !errors.Is(err, predictioneval.ErrOrderedRulesNotEncodable) {
+			t.Fatalf("premise: the detail alone must be refused as unencodable; got %v", err)
+		}
+		if _, err := predictioneval.ProjectOrderedRulesStream(orSource(cs, shapeOnly),
+			orAdmission()); !errors.Is(err, predictioneval.ErrOrderedRulesScopeIncomplete) {
+			t.Fatalf("premise: the shape alone must be refused as incomplete; got %v", err)
+		}
+
+		if _, err := predictioneval.ProjectOrderedRulesStream(orSource(cs, mixed),
+			orAdmission()); !errors.Is(err, predictioneval.ErrOrderedRulesScopeIncomplete) {
+			t.Fatalf("a source whose first intervention carries unencodable detail and whose "+
+				"second declares no position was refused %v. The boundary comes from the "+
+				"shape; the detail is text no decision reads, so it must not be scanned to "+
+				"reach the same refusal.", err)
+		}
+	})
+
+	// An unusable config is arithmetic over a rule count already bounded above.
+	// The invariant pass is bounded but not cheap: on a well-formed stream it
+	// walks the scope, the admission references and every retained candidate to
+	// say so. 7.26947 ms to 4.054034 ms on the identical input, the residue
+	// being the stream digest the comparison itself required.
+	t.Run("an unusable config is refused before the stream invariants are re-walked", func(t *testing.T) {
+		unusable := orConfig(nil, 95, 100, 0, 10)
+		unusable.HasDefault = false
+
+		// A stream fault with its own reason code, reached through the oracle
+		// so that it survives the digest comparison and gets as far as the
+		// invariant pass.
+		forge := func(t *testing.T) predictioneval.OrderedRulesStream {
+			t.Helper()
+			st := orProject(t, cs, nil)
+			st.Qualifications = append(st.Qualifications, "FABRICATED")
+			st.SelectionDigest = predictioneval.EvaluateOrderedRules(st, cfg, orDraws()).StreamDigest
+			return st
+		}
+
+		// The premise: each fault really is raised on its own.
+		if got := predictioneval.EvaluateOrderedRules(forge(t), cfg,
+			orDraws()); got.Reason != predictioneval.ReasonStreamInvariantViolated {
+			t.Fatalf("premise: the forged stream alone must be refused for its invariants; got %q",
+				got.Reason)
+		}
+		if got := predictioneval.EvaluateOrderedRules(orProject(t, cs, nil), unusable,
+			orDraws()); got.Reason != predictioneval.ReasonConfigDefaultNotSupplied {
+			t.Fatalf("premise: the config alone must be refused for its missing default; got %q",
+				got.Reason)
+		}
+
+		if got := predictioneval.EvaluateOrderedRules(forge(t), unusable,
+			orDraws()); got.Reason != predictioneval.ReasonConfigDefaultNotSupplied {
+			t.Fatalf("a forged stream beside a config with neither rules nor a default was "+
+				"refused %q. Normalising the config is arithmetic over a bounded rule count; "+
+				"re-establishing the stream's invariants walks the scope, the references and "+
+				"every retained candidate. The run was never going to read the stream, so the "+
+				"config decides first.", got.Reason)
 		}
 	})
 }
