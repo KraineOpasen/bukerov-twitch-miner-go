@@ -124,9 +124,15 @@ func ProjectOrderedRulesStream(source OrderedRulesSource, admission CommonAdmiss
 	// matching LENGTH is compared byte for byte. The evaluator's own tier had
 	// the same overstatement and was corrected first; this one was missed in
 	// that pass and a reviewer caught it, which makes it the fifth time a rule
-	// has been fixed on one of these two paths and not the other. What is true
-	// is what the name now says: nothing here grows with what the caller
-	// supplies, because anything longer fails on length.
+	// has been fixed on one of these two paths and not the other.
+	//
+	// What the name claims is narrower than "independent of the input", and the
+	// broader version was the NEXT thing a reviewer had to correct: this tier
+	// walks every supplied reference, intervention, candidate and outcome, so a
+	// caller chooses how many times each check runs, within the count ceilings
+	// above. What a caller cannot do is make any single one of them cost more by
+	// supplying a LONGER string. Per-element cost is fixed here; element count
+	// is bounded there.
 	//
 	// Splitting the function by what a check COSTS rather than by what it is
 	// about is what makes this tier possible at all. Each earlier repair had
@@ -1100,8 +1106,8 @@ func validateAdmissionShape(a CommonAdmission) error {
 	return nil
 }
 
-// checkPresenceShape is the half of checkPresence whose cost the caller cannot
-// enlarge.
+// checkPresenceShape is the half of checkPresence whose cost does not grow with
+// the LENGTH of anything supplied.
 //
 // It is its own function so the projection's constant-bounded pass can run it
 // over every nested value before any payload text is scanned, without a second

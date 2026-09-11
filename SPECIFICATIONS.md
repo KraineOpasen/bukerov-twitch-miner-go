@@ -4031,7 +4031,19 @@ the same five-byte comparison. A reviewer found it one commit after the
 evaluator's version was corrected, and the claim that each helper had been
 "checked individually" was the overconfident part: three of them compare only
 against the empty string, which is a length test, and the fourth compares
-against a word. Both tiers are now named for what they actually guarantee.
+against a word. Both tiers are now named for what they actually guarantee — which took THREE
+attempts to state, each corrected by a reviewer rather than by me. The first
+claim was that the tiers read no supplied byte; the closed-set comparisons
+falsified it. The second was that nothing in them grows with what the caller
+supplies; the iteration falsified that, because both tiers walk every supplied
+reference, intervention, candidate and outcome, so a caller does choose how many
+times each check runs. The guarantee that survives is narrower and is the one
+that matters for this axis: **no caller can increase the per-element work by
+supplying a longer string**, because longer fails on length — while the number
+of elements is bounded separately, by this repository's own count ceilings. Per-
+element cost is ours; element count is capped. Stating a property loosely is
+what this package keeps getting wrong, and this paragraph is the third draft of
+one sentence.
 
 **Three more constant-size faults were being charged for the whole payload, and
 one of them was a projection/ingest divergence.** A stream declaring an

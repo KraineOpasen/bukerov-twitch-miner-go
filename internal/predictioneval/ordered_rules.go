@@ -456,7 +456,9 @@ func orderedRulesCutoffImpossible(s OrderedRulesStream) bool {
 // a length. The identity's emptiness and its bound are O(1) and read nothing;
 // the Basis and Kind switches compare against closed sets, so a supplied value
 // of matching length is read up to that constant's length and no further. None
-// of it grows with what the caller supplies.
+// No caller can increase the PER-ELEMENT work here by supplying a longer
+// string. The number of elements is a separate question, bounded by this
+// repository's own count limits rather than by anything a check here does.
 func orderedRulesCutoffShapeImpossible(s OrderedRulesStream) bool {
 	c := s.Cutoff
 	// The removal count is bounded by arithmetic, not by taste. The projection
@@ -559,8 +561,9 @@ func orderedRulesQualificationsNotDerived(s OrderedRulesStream) bool {
 // bounds the word with checkFreeText first, because its error QUOTES it; that
 // scan is proportional to a string the caller chose. Here nothing is quoted —
 // the structural tier answers yes or no — so the comparison is against three
-// short constants and a caller cannot make it cost more by supplying a longer
-// word: a longer word fails on length.
+// short constants and a caller cannot make THIS COMPARISON cost more by
+// supplying a longer word: a longer word fails on length. How many times it
+// runs is a different matter, bounded by the candidate and outcome ceilings.
 //
 // It does NOT read zero bytes, and saying it did was wrong. When a supplied
 // word happens to match a constant's LENGTH, Go compares the bytes — up to the
@@ -630,8 +633,16 @@ func orderedRulesStreamIdentitiesAmbiguous(s OrderedRulesStream) bool {
 // and that name survived them by three commits. It is wrong: a supplied word
 // matching a constant's LENGTH is compared byte for byte, up to 36 bytes at the
 // widest constant here. What is true, and what the tier is actually for, is
-// that every bound in it comes from this file — no caller can make any check
-// here cost more by supplying something longer, because longer fails on length.
+// that no caller can make any check here cost more by supplying something
+// LONGER, because longer fails on length. It is not that the tier is
+// independent of the input: it walks every retained candidate and outcome, so a
+// caller chooses how many times each check runs, within the count ceilings this
+// repository sets. Per-element cost is ours; element count is bounded.
+//
+// That distinction took three attempts to state. The first claim was that the
+// tier read no supplied byte, which the closed-set comparisons falsified; the
+// second was that nothing here grows with what the caller supplies, which the
+// iteration falsified. Both were corrected by reviewers, not by me.
 // Emptiness tests and flags really do read nothing; the vocabulary comparisons
 // read up to a constant. The distinction matters because a false invariant is
 // what let a UTF-8 scan sit here for a commit.
@@ -671,7 +682,8 @@ func orderedRulesStreamStructureBroken(s OrderedRulesStream) bool {
 	// validateScopeShape and the projection says so. That reason does not reach
 	// here: this tier quotes nothing, so the comparison is against one short
 	// constant — read to that constant's length when a supplied value matches
-	// it, and no further, which a caller cannot enlarge. Measured
+	// it, and no further. This one runs once per stream rather than per
+	// candidate, so neither its length nor its count is the caller's. Measured
 	// against a four-byte unsupported version beside 128 candidates holding
 	// 4 KiB each: 2.314278 ms before and 4.457 µs now, against 7.219 µs for the
 	// identical fault on a two-candidate stream.
