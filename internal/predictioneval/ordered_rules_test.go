@@ -377,11 +377,17 @@ func TestOrderedRulesKnownZeroStakePreservesAdmission(t *testing.T) {
 				t.Fatalf("a computable stake of zero is still an attempt: got status %q", ev.Status)
 			case ev.Participation != predictioneval.ParticipationAdmitted:
 				t.Fatalf("participation = %q, want ADMITTED", ev.Participation)
+			// KNOWN(0) is the whole assertion, and it already covers the floor
+			// this case is about: substituting [predictioneval.PinnedMinimumStake]
+			// for a computed zero produces KNOWN(10), which fails right here.
+			// A separate case comparing against that constant would sit below a
+			// branch that has already rejected every non-zero value, so it could
+			// never fire — a guard in name only, which is the kind of claim this
+			// package removes rather than keeps.
 			case ev.Stake.Presence != predictioneval.SuppliedKnown || ev.Stake.Value != 0:
-				t.Fatalf("stake = %v(%d), want KNOWN(0)", ev.Stake.Presence, ev.Stake.Value)
-			case ev.Stake.Value == predictioneval.PinnedMinimumStake:
-				t.Fatal("the pinned minimum stake was substituted for a computed zero; the donor applies no " +
-					"such floor")
+				t.Fatalf("stake = %v(%d), want KNOWN(0) — a computed zero stands on its own, and no "+
+					"minimum (the donor applies none) may be substituted for it",
+					ev.Stake.Presence, ev.Stake.Value)
 			}
 		})
 	}

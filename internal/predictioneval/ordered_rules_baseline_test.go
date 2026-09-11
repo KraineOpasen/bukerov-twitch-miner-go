@@ -81,8 +81,14 @@ func TestOrderedRulesConfigAndStreamAreNotMutatedByEvaluation(t *testing.T) {
 	first := predictioneval.EvaluateOrderedRules(stream, cfg, orDraws(orWordAdmit))
 	second := predictioneval.EvaluateOrderedRules(stream, cfg, orDraws(orWordAdmit))
 
-	after, _ := json.Marshal(cfg)
-	streamAfter, _ := json.Marshal(stream)
+	after, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	streamAfter, err := json.Marshal(stream)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
 	switch {
 	case string(before) != string(after):
 		t.Fatalf("the config was mutated in place:\n before = %s\n  after = %s", before, after)

@@ -70,13 +70,43 @@ func loadDonorFixture(t *testing.T) donorFixture {
 	return f
 }
 
+// wantBits parses a recorded 0x-prefixed hex value.
+//
+// The prefix and length are checked before the slice rather than after: a
+// fixture edited down to an empty or unprefixed string would otherwise panic on
+// the slice bounds, and an opaque runtime error tells a reader nothing about
+// which fixture field is wrong.
 func wantBits(t *testing.T, hex string) uint64 {
 	t.Helper()
+	if len(hex) < 3 || hex[:2] != "0x" {
+		t.Fatalf("recorded bits %q are not a 0x-prefixed hex value; the fixture is malformed", hex)
+	}
 	v, err := strconv.ParseUint(hex[2:], 16, 64)
 	if err != nil {
 		t.Fatalf("bad recorded bits %q: %v", hex, err)
 	}
 	return v
+}
+
+// donorCase returns one fixture case by name, with the rule count it must carry.
+//
+// Indexing a trimmed fixture directly panics on the bounds instead of saying
+// which case lost which rule, so the shape is asserted once here.
+func donorCase(t *testing.T, f donorFixture, name string, wantRules int) int {
+	t.Helper()
+	for i, c := range f.Cases {
+		if c.Name != name {
+			continue
+		}
+		if len(c.RawConfig.Detailed) != wantRules || len(c.Expect.Detailed) != wantRules {
+			t.Fatalf("fixture case %q carries %d raw rules and %d recorded expectations, want %d of "+
+				"each; the fixture is malformed", name, len(c.RawConfig.Detailed),
+				len(c.Expect.Detailed), wantRules)
+		}
+		return i
+	}
+	t.Fatalf("the fixture no longer carries a case named %q", name)
+	return 0
 }
 
 // TestOrderedRulesDonorExampleConfigNormalizesAsRecorded pins the single
@@ -138,9 +168,10 @@ func TestOrderedRulesDonorExampleConfigNormalizesAsRecorded(t *testing.T) {
 // stake would be sized from a different rule entirely.
 func TestOrderedRulesDonorExampleConfigDrivesTheMechanism(t *testing.T) {
 	f := loadDonorFixture(t)
-	cfg := f.Cases[0].RawConfig
-	rule1Word := wantBits(t, f.Cases[0].Expect.Detailed[1].BernoulliWord)
-	rule3Word := wantBits(t, f.Cases[0].Expect.Detailed[3].BernoulliWord)
+	i := donorCase(t, f, "streamer_a", 4)
+	cfg := f.Cases[i].RawConfig
+	rule1Word := wantBits(t, f.Cases[i].Expect.Detailed[1].BernoulliWord)
+	rule3Word := wantBits(t, f.Cases[i].Expect.Detailed[3].BernoulliWord)
 
 	cs := []predictioneval.OrderedRulesCandidate{
 		orCandidate("c1", 10, orKnownBalance(100000), orOutcome("A", 1), orOutcome("B", 9)),
