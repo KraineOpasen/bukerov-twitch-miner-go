@@ -56,6 +56,12 @@ var (
 	// ErrOrderedRulesVocabulary is a value outside a closed vocabulary. It is
 	// never mapped onto a plausible member of that vocabulary.
 	ErrOrderedRulesVocabulary = errors.New("predictioneval: ordered-rules source uses a value outside a closed vocabulary")
+	// ErrOrderedRulesNotEncodable is a retained string that would not survive
+	// the stream's own JSON round trip. It is separate from the vocabulary and
+	// bound errors because it is a fact about ENCODING rather than about the
+	// value being wrong or too large: the value is refused precisely so that
+	// what a caller supplies is what the digest witnesses.
+	ErrOrderedRulesNotEncodable = errors.New("predictioneval: ordered-rules source carries text that is not valid UTF-8")
 	// ErrOrderedRulesViewMismatch is a manifest whose declared view disagrees
 	// with the kind of candidates actually supplied — a CALCULATE_ONLY slice
 	// presented as a channel update stream, or the reverse.
@@ -480,6 +486,38 @@ func validateAdmission(a CommonAdmission) error {
 	}
 }
 
+// invalidUTF8 reports a string Go's JSON encoder would not reproduce.
+//
+// The stream carries JSON tags because it is meant to be serialized, and the
+// encoder does not fail on a byte that is not valid UTF-8 — it substitutes
+// U+FFFD. So a stream holding one projects, digests over the ORIGINAL bytes,
+// and then comes back from its own round trip holding different bytes and a
+// digest that no longer matches: an admitted stream refused as a forgery, with
+// nothing forged. Measured: a namespace of "ns-\xff-tail" evaluated to
+// WOULD_ATTEMPT, and the same stream after json.Marshal and json.Unmarshal
+// evaluated to STREAM_SELECTION_DIGEST_MISMATCH.
+//
+// Refusing is the repair rather than canonicalizing before hashing, because a
+// digest taken over bytes the stream does not carry witnesses something the
+// caller never supplied. Narrowing what is admitted is always allowed; quietly
+// hashing a substitute is not.
+//
+// No decoder is hand-rolled and no import is added: ranging over a string is
+// the language's own UTF-8 decode, and it yields U+FFFD for a byte that is not
+// part of a valid sequence. A genuine U+FFFD occupies the three bytes EF BF BD
+// at that index; an invalid one does not, which is the whole distinction.
+func invalidUTF8(v string) bool {
+	for i, r := range v {
+		if r != '\uFFFD' {
+			continue
+		}
+		if len(v)-i < 3 || v[i] != 0xef || v[i+1] != 0xbf || v[i+2] != 0xbd {
+			return true
+		}
+	}
+	return false
+}
+
 // checkFreeText bounds a caller-chosen string the projection retains. Empty is
 // allowed — these are optional — but unbounded is not.
 func checkFreeText(v, where string) error {
@@ -487,6 +525,13 @@ func checkFreeText(v, where string) error {
 		return errors.Join(ErrOrderedRulesOverBound,
 			errors.New("predictioneval: "+where+" is "+strconv.Itoa(len(v))+
 				" bytes, past the bound of "+strconv.Itoa(MaxOrderedRulesIdentifierBytes)))
+	}
+	// Length first, then encoding: this runs after the bound above so an
+	// enormous string is refused for its size without being scanned.
+	if invalidUTF8(v) {
+		return errors.Join(ErrOrderedRulesNotEncodable,
+			errors.New("predictioneval: "+where+" is not valid UTF-8; JSON encoding would "+
+				"substitute U+FFFD and the stream would no longer match its own digest"))
 	}
 	return nil
 }
@@ -591,6 +636,11 @@ func checkIdentifier(id, where string) error {
 		return errors.Join(ErrOrderedRulesOverBound,
 			errors.New("predictioneval: "+where+" is "+strconv.Itoa(len(id))+" bytes, past the bound of "+
 				strconv.Itoa(MaxOrderedRulesIdentifierBytes)))
+	}
+	if invalidUTF8(id) {
+		return errors.Join(ErrOrderedRulesNotEncodable,
+			errors.New("predictioneval: "+where+" is not valid UTF-8; JSON encoding would "+
+				"substitute U+FFFD and the stream would no longer match its own digest"))
 	}
 	return nil
 }

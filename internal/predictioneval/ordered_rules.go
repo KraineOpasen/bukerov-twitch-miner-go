@@ -678,7 +678,7 @@ func EvaluateOrderedRules(stream OrderedRulesStream, rules OrderedRulesConfig, d
 		out.Status = StatusRefused
 		out.Reason = reason
 		out.ConsumedInputDigest = orderedRulesConsumedDigest(stream, rules, draws,
-			candidatesConsumed, wordsConsumed)
+			candidatesConsumed, wordsConsumed, false)
 		return out
 	}
 
@@ -733,7 +733,7 @@ func EvaluateOrderedRules(stream OrderedRulesStream, rules OrderedRulesConfig, d
 			out.Visits = append(out.Visits, visit)
 			out.Status = StatusUnknownInput
 			out.Reason = ReasonOutcomeVectorNotKnown
-			out.ConsumedInputDigest = orderedRulesConsumedDigest(stream, rules, draws, ci+1, cursor)
+			out.ConsumedInputDigest = orderedRulesConsumedDigest(stream, rules, draws, ci+1, cursor, false)
 			return out
 		}
 
@@ -753,7 +753,7 @@ func EvaluateOrderedRules(stream OrderedRulesStream, rules OrderedRulesConfig, d
 			out.Visits = append(out.Visits, visit)
 			out.Status = StatusUnknownInput
 			out.Reason = poolReason
-			out.ConsumedInputDigest = orderedRulesConsumedDigest(stream, rules, draws, ci+1, cursor)
+			out.ConsumedInputDigest = orderedRulesConsumedDigest(stream, rules, draws, ci+1, cursor, false)
 			return out
 		}
 		visit.PoolTotalKnown = true
@@ -824,7 +824,7 @@ func EvaluateOrderedRules(stream OrderedRulesStream, rules OrderedRulesConfig, d
 						out.RawWordsConsumed = cursor
 						out.Status = StatusUnknownInput
 						out.Reason = ReasonEntropyExhausted
-						out.ConsumedInputDigest = orderedRulesConsumedDigest(stream, rules, draws, ci+1, cursor)
+						out.ConsumedInputDigest = orderedRulesConsumedDigest(stream, rules, draws, ci+1, cursor, false)
 						return out
 					}
 					rawIndex = cursor
@@ -884,7 +884,8 @@ func EvaluateOrderedRules(stream OrderedRulesStream, rules OrderedRulesConfig, d
 
 	out.Status = StatusNoAttemptInSuppliedPrefix
 	out.RawWordsConsumed = cursor
-	out.ConsumedInputDigest = orderedRulesConsumedDigest(stream, rules, draws, len(stream.Candidates), cursor)
+	out.ConsumedInputDigest = orderedRulesConsumedDigest(stream, rules, draws,
+		len(stream.Candidates), cursor, true)
 	return out
 }
 
@@ -943,7 +944,7 @@ func admitOrderedRules(out *OrderedRulesEvaluation, visit *OrderedRulesCandidate
 	}
 
 	out.Visits = append(out.Visits, *visit)
-	out.ConsumedInputDigest = orderedRulesConsumedDigest(stream, rules, draws, ci+1, cursor)
+	out.ConsumedInputDigest = orderedRulesConsumedDigest(stream, rules, draws, ci+1, cursor, false)
 }
 
 func balanceReason(b SuppliedInt64, fallback string) string {

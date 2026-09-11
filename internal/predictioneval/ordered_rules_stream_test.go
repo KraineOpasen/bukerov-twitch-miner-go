@@ -2946,3 +2946,225 @@ func TestOrderedRulesAClaimedRemovalIsChargedForTheSourceItImplies(t *testing.T)
 		})
 	}
 }
+
+// TestOrderedRulesAnAdmittedStreamSurvivesItsOwnJSONRoundTrip closes the gap
+// between "admitted" and "storable".
+//
+// The stream type carries JSON tags because a projected stream is meant to be
+// written out and read back — that is the reason an unexported marker was
+// rejected as an integrity mechanism earlier in this package. But Go's encoder
+// does not fail on a byte that is not valid UTF-8; it substitutes U+FFFD. So a
+// stream holding one projected, digested over the ORIGINAL bytes, and came back
+// from its own round trip holding different bytes and a digest that no longer
+// matched: an admitted stream refused as a forgery, with nothing forged.
+//
+// The control is the part that makes this test mean something. A genuine U+FFFD
+// is valid UTF-8 and must still be admitted — otherwise the rule would be
+// "refuse the replacement character", which is a different and wrong rule that
+// would pass every case below.
+func TestOrderedRulesAnAdmittedStreamSurvivesItsOwnJSONRoundTrip(t *testing.T) {
+	cs := []predictioneval.OrderedRulesCandidate{
+		orCandidate("c1", 10, orKnownBalance(1000), orOutcome("A", 4), orOutcome("B", 6)),
+	}
+	cfg := orConfig([]predictioneval.OrderedRule{
+		orRule(predictioneval.ComparatorLe, 40, 100, 0, 10)}, 95, 100, 0, 10)
+
+	t.Run("a projected stream round trips with its evidence intact", func(t *testing.T) {
+		st := orProject(t, cs, nil)
+		direct := predictioneval.EvaluateOrderedRules(st, cfg, orDraws())
+		if direct.Status != predictioneval.StatusWouldAttempt {
+			t.Fatalf("premise: the fixture must evaluate; got %q", direct.Status)
+		}
+		blob, err := json.Marshal(st)
+		if err != nil {
+			t.Fatalf("marshalling a projected stream failed: %v", err)
+		}
+		var back predictioneval.OrderedRulesStream
+		if err := json.Unmarshal(blob, &back); err != nil {
+			t.Fatalf("unmarshalling a projected stream failed: %v", err)
+		}
+		rt := predictioneval.EvaluateOrderedRules(back, cfg, orDraws())
+		switch {
+		case rt.Status != direct.Status || rt.Reason != direct.Reason:
+			t.Fatalf("a projected stream changed verdict across its own JSON round trip: "+
+				"%q/%q became %q/%q", direct.Status, direct.Reason, rt.Status, rt.Reason)
+		case rt.StreamDigest != direct.StreamDigest ||
+			rt.ConsumedInputDigest != direct.ConsumedInputDigest:
+			t.Fatal("a projected stream's digests moved across its own JSON round trip")
+		}
+	})
+
+	// The control, first, because the cases after it are only meaningful if
+	// this holds: the replacement character itself is valid UTF-8.
+	t.Run("a genuine replacement character is still admitted", func(t *testing.T) {
+		src, adm := orSource(cs, nil), orAdmission()
+		src.Scope.Namespace = "ns-�-tail"
+		st, err := predictioneval.ProjectOrderedRulesStream(src, adm)
+		if err != nil {
+			t.Fatalf("a genuine U+FFFD is valid UTF-8 and must project: %v", err)
+		}
+		if got := predictioneval.EvaluateOrderedRules(st, cfg, orDraws()); got.Status !=
+			predictioneval.StatusWouldAttempt {
+			t.Fatalf("status = %q, want the fixture's own verdict", got.Status)
+		}
+	})
+
+	// One invalid byte, in each retained string the projection keeps.
+	const bad = "x-\xff-y"
+	for _, tc := range []struct {
+		name  string
+		apply func(*predictioneval.OrderedRulesSource, *predictioneval.CommonAdmission)
+	}{
+		{"scope namespace", func(s *predictioneval.OrderedRulesSource, _ *predictioneval.CommonAdmission) {
+			s.Scope.Namespace = bad
+		}},
+		{"scope episode id", func(s *predictioneval.OrderedRulesSource, _ *predictioneval.CommonAdmission) {
+			s.Scope.EpisodeID = bad
+		}},
+		{"scope account context", func(s *predictioneval.OrderedRulesSource, _ *predictioneval.CommonAdmission) {
+			s.Scope.AccountContext = bad
+		}},
+		{"scope association evidence", func(s *predictioneval.OrderedRulesSource, _ *predictioneval.CommonAdmission) {
+			s.Scope.AssociationEvidence = bad
+		}},
+		{"scope coverage detail", func(s *predictioneval.OrderedRulesSource, _ *predictioneval.CommonAdmission) {
+			s.Scope.CoverageDetail = bad
+		}},
+		{"admission manifest id", func(_ *predictioneval.OrderedRulesSource, a *predictioneval.CommonAdmission) {
+			a.ManifestID = bad
+		}},
+		{"admission population", func(_ *predictioneval.OrderedRulesSource, a *predictioneval.CommonAdmission) {
+			a.Population = bad
+		}},
+		{"admission order basis", func(_ *predictioneval.OrderedRulesSource, a *predictioneval.CommonAdmission) {
+			a.OrderBasis = bad
+		}},
+		{"admission source reference", func(_ *predictioneval.OrderedRulesSource, a *predictioneval.CommonAdmission) {
+			a.SourceReferences = []string{bad}
+		}},
+		{"candidate identity", func(s *predictioneval.OrderedRulesSource, _ *predictioneval.CommonAdmission) {
+			s.Candidates[0].Identity = bad
+		}},
+		{"candidate provenance", func(s *predictioneval.OrderedRulesSource, _ *predictioneval.CommonAdmission) {
+			s.Candidates[0].Provenance = bad
+		}},
+		{"candidate outcomes reason", func(s *predictioneval.OrderedRulesSource, _ *predictioneval.CommonAdmission) {
+			s.Candidates[0].OutcomesReason = bad
+		}},
+		{"balance provenance", func(s *predictioneval.OrderedRulesSource, _ *predictioneval.CommonAdmission) {
+			s.Candidates[0].Balance.Provenance = bad
+		}},
+		{"outcome identity", func(s *predictioneval.OrderedRulesSource, _ *predictioneval.CommonAdmission) {
+			s.Candidates[0].Outcomes[0].Identity = bad
+		}},
+		{"outcome points provenance", func(s *predictioneval.OrderedRulesSource, _ *predictioneval.CommonAdmission) {
+			s.Candidates[0].Outcomes[0].Points.Provenance = bad
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			src, adm := orSource(append([]predictioneval.OrderedRulesCandidate(nil), cs...), nil), orAdmission()
+			src.Candidates[0].Outcomes = append([]predictioneval.OrderedRulesOutcome(nil),
+				cs[0].Outcomes...)
+			tc.apply(&src, &adm)
+			_, err := predictioneval.ProjectOrderedRulesStream(src, adm)
+			if err == nil {
+				t.Fatalf("a %s that is not valid UTF-8 was admitted; the stream it produces cannot "+
+					"survive its own JSON round trip", tc.name)
+			}
+			if !errors.Is(err, predictioneval.ErrOrderedRulesNotEncodable) {
+				t.Fatalf("refused, but not as unencodable text: %v", err)
+			}
+		})
+	}
+
+	// The mirror. A forged stream carrying the same byte must be refused by the
+	// evaluator too, through the two-call digest oracle — otherwise the rule is
+	// enforced on one path only, which is the divergence this package keeps
+	// having to close.
+	t.Run("the evaluator refuses what the projection refused", func(t *testing.T) {
+		st := orProject(t, cs, nil)
+		st.Scope.Namespace = bad
+		first := predictioneval.EvaluateOrderedRules(st, cfg, orDraws())
+		st.SelectionDigest = first.StreamDigest
+		second := predictioneval.EvaluateOrderedRules(st, cfg, orDraws())
+		if second.Status != predictioneval.StatusRefused {
+			t.Fatalf("a stream carrying invalid UTF-8 reached %q through the digest oracle; the "+
+				"projection refuses that exact source", second.Status)
+		}
+	})
+}
+
+// TestOrderedRulesAWindowExhaustedToItsEndIsBoundToThatEnd pins the second half
+// of the interval asymmetry.
+//
+// The upper endpoint stays out of the consumed digest while an unconsumed
+// suffix can still legitimately grow. But when END OF STREAM is what
+// established the result, there is no such suffix, and the endpoint stops being
+// extent and becomes evidence: two empty COMPLETE_DECLARED sources over [0,10]
+// and [0,100] both answer NO_ATTEMPT_IN_SUPPLIED_PREFIX, and only the second
+// also claims that nothing existed through position 100.
+//
+// Both halves are asserted, because binding it unconditionally is the obvious
+// wrong repair and passes the first half on its own.
+func TestOrderedRulesAWindowExhaustedToItsEndIsBoundToThatEnd(t *testing.T) {
+	cfg := orConfig([]predictioneval.OrderedRule{
+		orRule(predictioneval.ComparatorLe, 40, 100, 0, 10)}, 95, 100, 0, 10)
+
+	eval := func(t *testing.T, to int64, cs []predictioneval.OrderedRulesCandidate,
+		ins []predictioneval.OrderedRulesIntervention) predictioneval.OrderedRulesEvaluation {
+		t.Helper()
+		src, adm := orSource(cs, ins), orAdmission()
+		src.Scope.IntervalToPosition = to
+		st, err := predictioneval.ProjectOrderedRulesStream(src, adm)
+		if err != nil {
+			t.Fatalf("projecting over [0,%d] failed: %v", to, err)
+		}
+		return predictioneval.EvaluateOrderedRules(st, cfg, orDraws())
+	}
+
+	t.Run("exhaustion binds the end it reached", func(t *testing.T) {
+		near, far := eval(t, 10, nil, nil), eval(t, 100, nil, nil)
+		switch {
+		case near.Status != predictioneval.StatusNoAttemptInSuppliedPrefix ||
+			far.Status != predictioneval.StatusNoAttemptInSuppliedPrefix:
+			t.Fatalf("premise: both must end by exhaustion; got %q and %q", near.Status, far.Status)
+		case near.Cutoff.Established || far.Cutoff.Established:
+			t.Fatal("premise: this case needs no boundary established")
+		case near.ConsumedInputDigest == far.ConsumedInputDigest:
+			t.Fatal("a traversal that exhausted [0,10] and one that exhausted [0,100] share a " +
+				"consumed-prefix binding. Both looked and found nothing, but the second searched " +
+				"ninety positions further, and that is the stronger claim of the two")
+		}
+	})
+
+	// The counterweight: with a boundary established the suffix is real — the
+	// candidates it removed — so appending more of them must not move this
+	// digest even though the traversal still ends by running out of retained
+	// stream. Binding the endpoint unconditionally breaks exactly this.
+	t.Run("a boundary keeps the end out even at exhaustion", func(t *testing.T) {
+		ins := []predictioneval.OrderedRulesIntervention{
+			orIntervention("call-1", 5, predictioneval.InterventionAutoCallStarted,
+				predictioneval.RelevanceProven, "boundary"),
+		}
+		// One candidate before the boundary whose pool the donor declines, so
+		// the traversal reaches the end of the retained stream without deciding.
+		cs := []predictioneval.OrderedRulesCandidate{
+			orCandidate("c1", 1, orKnownBalance(1000), orOutcome("A", 1)),
+		}
+		near, far := eval(t, 10, cs, ins), eval(t, 100, cs, ins)
+		switch {
+		case near.Status != predictioneval.StatusNoAttemptInSuppliedPrefix ||
+			far.Status != predictioneval.StatusNoAttemptInSuppliedPrefix:
+			t.Fatalf("premise: both must end by exhaustion; got %q and %q", near.Status, far.Status)
+		case !near.Cutoff.Established || !far.Cutoff.Established:
+			t.Fatal("premise: this case needs a boundary established")
+		case near.StreamDigest == far.StreamDigest:
+			t.Fatal("premise: the WHOLE-STREAM digest must separate the two declared windows, " +
+				"or this case cannot tell a bound endpoint from an ignored one")
+		case near.ConsumedInputDigest != far.ConsumedInputDigest:
+			t.Fatal("with a boundary established, widening the declared end moved the " +
+				"consumed-prefix digest. That stream has an unconsumed suffix by construction, so " +
+				"binding the end makes the no-look-ahead stability false by construction")
+		}
+	})
+}

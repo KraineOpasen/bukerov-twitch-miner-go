@@ -229,7 +229,7 @@ func orderedRulesEntropyDigest(d SuppliedDrawTrace) string {
 // subjects and are reported separately for exactly that contrast. See
 // TestOrderedRulesAppendingPostCutoffFactsCannotChangeEvaluation.
 func orderedRulesConsumedDigest(s OrderedRulesStream, cfg OrderedRulesConfig, d SuppliedDrawTrace,
-	candidatesConsumed, wordsConsumed int) string {
+	candidatesConsumed, wordsConsumed int, exhausted bool) string {
 	h := sha256.New()
 	digestPart(h, domainOrderedConsumed)
 	digestPart(h, OrderedRulesModelVersion)
@@ -275,6 +275,41 @@ func orderedRulesConsumedDigest(s OrderedRulesStream, cfg OrderedRulesConfig, d 
 	// differ by it; hashing it here would separate two refusals from each
 	// other and nothing else.
 	digestInt(h, s.Scope.IntervalFromPosition)
+	// And the END of the declared window, but ONLY when the traversal stopped
+	// because it ran out of stream.
+	//
+	// The two endpoints were excluded together, and that was one distinction
+	// too coarse. The upper one must stay out while an unconsumed suffix can
+	// still legitimately grow — a post-boundary fact appended after a cutoff
+	// changes nothing this digest witnesses, yet can require the window to be
+	// widened, and a digest that followed it would make the no-look-ahead
+	// stability false by construction. But when END OF STREAM is itself what
+	// established the result, there is no such suffix: with no cutoff and every
+	// supplied candidate consumed, anything appended would be consumed too and
+	// would move this digest anyway. The window's end is then load-bearing
+	// evidence rather than extent — two empty COMPLETE_DECLARED sources over
+	// [0,10] and [0,100] both answer NO_ATTEMPT_IN_SUPPLIED_PREFIX, and only
+	// the second also claims nothing existed through position 100.
+	//
+	// The flag is hashed unconditionally so the shape is self-describing, and
+	// because "the traversal exhausted its source" is itself a fact about what
+	// was read.
+	// exhausted comes from the ONE call site that reaches the end of the
+	// retained stream without a decision, not from comparing counts. Inferring
+	// it as "consumed == supplied" was wrong and two existing cases caught it:
+	// an admission on the LAST candidate satisfies that comparison too, and
+	// then appending a candidate the traversal never reaches would flip the
+	// inference and move a digest that must not move.
+	//
+	// An established cutoff disqualifies it even so. Such a stream has an
+	// unconsumed suffix by construction — the candidates the boundary removed —
+	// and appending more of them raises the removal count without changing what
+	// was read, while possibly widening the window.
+	terminal := exhausted && !s.Cutoff.Established
+	digestBool(h, terminal)
+	if terminal {
+		digestInt(h, s.Scope.IntervalToPosition)
+	}
 	digestPart(h, s.Admission.ManifestID)
 	digestPart(h, string(s.Admission.ViewKind))
 	// Population and order basis by the same rule as the warrant above: both

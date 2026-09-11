@@ -3532,7 +3532,39 @@ intervention, one declaring complete coverage over [0,100] and the other over
 intervened over the hundred positions before it, which is a stronger claim about
 the absence of an earlier intervention. It is bound; the pair is asserted in
 both directions, so binding the upper endpoint as well fails the suite rather
-than passing as a tidier-looking symmetry. Like the
+than passing as a tidier-looking symmetry.
+
+The upper endpoint has one exception, and excluding it outright was one
+distinction too coarse. It must stay out while an unconsumed suffix can still
+legitimately grow — that is what the stability is about. But when END OF STREAM
+is itself what established the result, there is no such suffix, and the endpoint
+stops being extent and becomes evidence: two empty COMPLETE_DECLARED sources
+over [0,10] and [0,100] both answer NO_ATTEMPT_IN_SUPPLIED_PREFIX, and only the
+second also claims nothing existed through position 100. So the consumed digest
+binds it exactly when the traversal ran out of retained stream without deciding
+AND no boundary was established — a stream with a boundary has an unconsumed
+suffix by construction, the candidates the boundary removed, and appending more
+of them raises the removal count without changing what was read. Exhaustion is
+reported by the one call site that reaches it rather than inferred from
+"consumed equals supplied": an admission on the LAST candidate satisfies that
+comparison too, and inferring it there would let a candidate the traversal never
+reached move a digest that must not move.
+
+Retained text must also SURVIVE the encoding the stream is meant to travel in.
+Go's JSON encoder does not fail on a byte that is not valid UTF-8; it
+substitutes U+FFFD. A stream holding one therefore projected, digested over the
+original bytes, and came back from its own round trip holding different bytes
+and a digest that no longer matched — an admitted stream refused as a forgery,
+with nothing forged (measured: a namespace of `ns-\xff-tail` evaluated to
+WOULD_ATTEMPT, and the same stream after a marshal and unmarshal evaluated to
+STREAM_SELECTION_DIGEST_MISMATCH). Such text is refused rather than
+canonicalized before hashing, because a digest taken over bytes the stream does
+not carry witnesses something the caller never supplied. The check lives in the
+two validators every retained string already passes through, so the projection
+and the ingest pass acquire it together rather than one path at a time, and it
+adds no import: ranging over a string is the language's own UTF-8 decode, and a
+genuine U+FFFD — which remains admissible — is distinguished from an invalid
+byte by occupying the three bytes EF BF BD at that index. Like the
 baseline's, these are unkeyed hashes over supplied data: they prevent
 recombination and authenticate nothing.
 
