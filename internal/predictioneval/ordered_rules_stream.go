@@ -149,7 +149,7 @@ func ProjectOrderedRulesStream(source OrderedRulesSource, admission CommonAdmiss
 		}
 		bytes += chargedWidth(len(source.Interventions[i].Identity) + len(source.Interventions[i].Detail))
 	}
-	if bytes > MaxOrderedRulesAggregateBytes {
+	if bytes > orderedRulesTextCeiling {
 		return OrderedRulesStream{}, errors.Join(ErrOrderedRulesOverBound,
 			errors.New("predictioneval: supplied scope, admission and intervention bytes exceed the aggregate budget"))
 	}
@@ -256,7 +256,7 @@ func ProjectOrderedRulesStream(source OrderedRulesSource, admission CommonAdmiss
 			return OrderedRulesStream{}, err
 		}
 		bytes += suppliedTextBytes(c.Balance)
-		if bytes > MaxOrderedRulesAggregateBytes {
+		if bytes > orderedRulesTextCeiling {
 			return OrderedRulesStream{}, errors.Join(ErrOrderedRulesOverBound,
 				errors.New("predictioneval: supplied identifier bytes exceed the aggregate budget"))
 		}
@@ -391,6 +391,22 @@ func establishCutoff(source OrderedRulesSource) (OrderedRulesCutoff, error) {
 }
 
 func validateScope(s OrderedRulesScope) error {
+	// LENGTH BEFORE MEANING again, and for a second reason here. These four are
+	// RETAINED and CHARGED, and until this gate existed they were the only
+	// charged strings with no individual bound at all — so the per-string limit
+	// the rest of the projection relies on simply did not apply to them, and a
+	// single one of them could take most of the aggregate on its own. An 8 MiB
+	// admission population was admitted outright.
+	for _, v := range [...][2]string{
+		{s.Namespace, "scope namespace"},
+		{s.EpisodeID, "scope episode id"},
+		{s.AccountContext, "scope account context"},
+		{s.AssociationEvidence, "scope association evidence"},
+	} {
+		if err := checkFreeText(v[0], v[1]); err != nil {
+			return err
+		}
+	}
 	switch {
 	case s.Namespace == "":
 		return errors.Join(ErrOrderedRulesScopeIncomplete, errors.New("predictioneval: scope namespace is empty"))
@@ -424,6 +440,17 @@ func validateScope(s OrderedRulesScope) error {
 }
 
 func validateAdmission(a CommonAdmission) error {
+	// Bounded for the same reason as the scope's four: retained, charged, and
+	// previously unbounded individually.
+	for _, v := range [...][2]string{
+		{a.ManifestID, "admission manifest id"},
+		{a.Population, "admission population"},
+		{a.OrderBasis, "admission order basis"},
+	} {
+		if err := checkFreeText(v[0], v[1]); err != nil {
+			return err
+		}
+	}
 	switch {
 	case a.ManifestID == "":
 		return errors.Join(ErrOrderedRulesAdmissionIncomplete, errors.New("predictioneval: admission manifest id is empty"))
@@ -460,6 +487,26 @@ func checkFreeText(v, where string) error {
 // therefore an upper bound for every possible input byte, and the projection
 // charges it rather than the raw length.
 const orderedRulesMaxJSONExpansion = 6
+
+// orderedRulesStructuralReserveBytes is the part of the aggregate ceiling held
+// back for JSON syntax rather than sold to the caller as text.
+//
+// chargedWidth bounds the encoded width of the CONTENT of each supplied string.
+// It does not cover the quotes around it, the field names beside it, or the
+// braces and commas holding the document together — and none of that is
+// charged, so at the widest admitted shape it lands entirely on top of a budget
+// the caller has already filled. Measured: 1,034,944 bytes of pure structure at
+// MaxOrderedRulesCandidates x MaxOrderedRulesOutcomes, which put an ADMITTED
+// stream 762,930 bytes past the ceiling it is supposed to sit inside.
+//
+// The reserve is the measured worst case with room to spare, and
+// TestOrderedRulesStructuralOverheadFitsItsReserve fails if a field added later
+// grows the structure past it — the point being that this is checked rather
+// than assumed, since assuming it is what went wrong.
+const orderedRulesStructuralReserveBytes = 4 << 20
+
+// orderedRulesTextCeiling is the aggregate actually available to supplied text.
+const orderedRulesTextCeiling = MaxOrderedRulesAggregateBytes - orderedRulesStructuralReserveBytes
 
 // chargedWidth is what n supplied bytes cost against the aggregate budget.
 //

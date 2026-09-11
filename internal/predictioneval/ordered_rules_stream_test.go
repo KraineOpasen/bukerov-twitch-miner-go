@@ -1953,21 +1953,28 @@ func TestOrderedRulesAnOmittedMandatoryFieldIsNotAnExplicitZero(t *testing.T) {
 func TestOrderedRulesAnAdmittedStreamEncodesInsideItsDeclaredCeiling(t *testing.T) {
 	const nc, no = predictioneval.MaxOrderedRulesCandidates, predictioneval.MaxOrderedRulesOutcomes
 
+	// The fixture is adversarial on purpose, and an earlier version of it was
+	// not — which is why it missed this. Every charged byte is the
+	// worst-escaping one, and ASCII is kept to the floor the vocabulary forces,
+	// because ASCII is charged six times what it encodes to and that surplus
+	// silently absorbs the structural overhead being measured. Outcome
+	// identities need not be unique, so they cost no ASCII at all; candidate
+	// identities are made unique by LENGTH rather than by any readable byte.
 	build := func(idLen int) (predictioneval.OrderedRulesStream, error) {
-		nul := strings.Repeat("\x00", idLen)
-		uniq := func(p string) string {
-			if len(p) >= idLen {
-				return p
-			}
-			return p + nul[len(p):]
-		}
+		nul := strings.Repeat("\x00", idLen+nc)
 		cs := make([]predictioneval.OrderedRulesCandidate, 0, nc)
 		for i := 0; i < nc; i++ {
 			outs := make([]predictioneval.OrderedRulesOutcome, 0, no)
 			for j := 0; j < no; j++ {
-				outs = append(outs, orOutcome(uniq("o"+itoaTest(i)+"_"+itoaTest(j)+"-"), int64(j+1)))
+				o := orOutcome(nul[:idLen], int64(j+1))
+				o.Points.Provenance = "p"
+				outs = append(outs, o)
 			}
-			cs = append(cs, orCandidate(uniq("c"+itoaTest(i)+"-"), int64(i+1), orKnownBalance(100), outs...))
+			bal := orKnownBalance(100)
+			bal.Provenance = "p"
+			c := orCandidate(nul[:idLen+i], int64(i+1), bal, outs...)
+			c.Provenance = "p"
+			cs = append(cs, c)
 		}
 		return predictioneval.ProjectOrderedRulesStream(orSource(cs, nil), orAdmission())
 	}
@@ -1975,7 +1982,7 @@ func TestOrderedRulesAnAdmittedStreamEncodesInsideItsDeclaredCeiling(t *testing.
 	// The widest identifier the projection still admits at this shape.
 	// The floor clears the longest generated prefix, so every probe is really
 	// idLen bytes wide and the search measures the bound and not the fixture.
-	lo, hi := 32, predictioneval.MaxOrderedRulesIdentifierBytes
+	lo, hi := 8, predictioneval.MaxOrderedRulesIdentifierBytes-nc
 	if _, err := build(lo); err != nil {
 		t.Fatalf("the smallest fixture must project: %v", err)
 	}
@@ -2012,5 +2019,78 @@ func TestOrderedRulesAnAdmittedStreamEncodesInsideItsDeclaredCeiling(t *testing.
 			"supplied text at its raw length rather than its encoded width puts this near 6x; a "+
 			"smaller overshoot means the stream grew a field the ceiling does not account for.",
 			len(encoded), ratio, ceiling)
+	}
+}
+
+// TestOrderedRulesEveryChargedStringIsAlsoBoundedIndividually closes the gap
+// between what the per-string limit claimed to cover and what it covered.
+//
+// The aggregate and the per-string limit answer different questions, and the
+// package says so: one 64 MiB note sits well inside a 128 MiB budget while
+// being a value the projection refuses outright. That was true of every charged
+// string except seven — the scope's namespace, episode id, account context and
+// association evidence, and the admission's manifest id, population and order
+// basis — which were only ever checked for being non-EMPTY. Nothing bounded
+// their length, so the aggregate was their only limit and a single one of them
+// could take most of it: an 8 MiB admission population was admitted outright.
+//
+// It also made the encoded-ceiling guarantee reachable, because one unbounded
+// field can fill the remaining charge byte-exactly and leave the structural
+// overhead to land past the ceiling.
+func TestOrderedRulesEveryChargedStringIsAlsoBoundedIndividually(t *testing.T) {
+	cs := []predictioneval.OrderedRulesCandidate{
+		orCandidate("c1", 10, orKnownBalance(100), orOutcome("A", 4), orOutcome("B", 6)),
+	}
+	// Past the per-string bound, but far inside the aggregate even when charged
+	// at the worst-case encoded width — so only a per-string limit can refuse it.
+	over := strings.Repeat("x", predictioneval.MaxOrderedRulesIdentifierBytes+1)
+
+	cases := []struct {
+		name  string
+		apply func(*predictioneval.OrderedRulesSource, *predictioneval.CommonAdmission)
+	}{
+		{"scope namespace", func(s *predictioneval.OrderedRulesSource, _ *predictioneval.CommonAdmission) {
+			s.Scope.Namespace = over
+		}},
+		{"scope episode id", func(s *predictioneval.OrderedRulesSource, _ *predictioneval.CommonAdmission) {
+			s.Scope.EpisodeID = over
+		}},
+		{"scope account context", func(s *predictioneval.OrderedRulesSource, _ *predictioneval.CommonAdmission) {
+			s.Scope.AccountContext = over
+		}},
+		{"scope association evidence", func(s *predictioneval.OrderedRulesSource, _ *predictioneval.CommonAdmission) {
+			s.Scope.AssociationEvidence = over
+		}},
+		{"admission manifest id", func(_ *predictioneval.OrderedRulesSource, a *predictioneval.CommonAdmission) {
+			a.ManifestID = over
+		}},
+		{"admission population", func(_ *predictioneval.OrderedRulesSource, a *predictioneval.CommonAdmission) {
+			a.Population = over
+		}},
+		{"admission order basis", func(_ *predictioneval.OrderedRulesSource, a *predictioneval.CommonAdmission) {
+			a.OrderBasis = over
+		}},
+	}
+
+	// The control: the same fixture at the bound projects, so each case below
+	// fails for its own length and not for something else in the fixture.
+	if _, err := predictioneval.ProjectOrderedRulesStream(orSource(cs, nil), orAdmission()); err != nil {
+		t.Fatalf("the unmodified fixture must project: %v", err)
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			src, adm := orSource(cs, nil), orAdmission()
+			tc.apply(&src, &adm)
+			_, err := predictioneval.ProjectOrderedRulesStream(src, adm)
+			if err == nil {
+				t.Fatalf("a %d-byte %s was admitted; the per-string bound does not reach it, so the "+
+					"aggregate is its only limit and one field can take most of it",
+					len(over), tc.name)
+			}
+			if !errors.Is(err, predictioneval.ErrOrderedRulesOverBound) {
+				t.Fatalf("refused, but not as an over-bound value: %v", err)
+			}
+		})
 	}
 }

@@ -3288,7 +3288,20 @@ at its worst-case encoded width. That is a deliberate over-charge for ordinary
 ASCII, taken because computing the exact width means decoding UTF-8 and the
 production files import from a six-entry allowlist with no unicode/utf8 in it; a
 bound that is provably never exceeded is worth more in budget code than a tight
-one. The gate, by contrast, still charges RAW length, and the asymmetry is safe
+one. Charging the text is still not the whole ceiling, because JSON syntax —
+the quotes around each string, the field names beside it, the braces and commas
+holding the document together — is charged to nobody and lands on top of a
+budget the caller has already filled: measured at the widest shape the counts
+allow, just over a megabyte of pure structure, which put an ADMITTED stream
+762,930 bytes past the ceiling it was supposed to sit inside. So a fixed reserve
+is held back from the aggregate for it, sized from that measurement and re-taken
+by a test rather than assumed, since assuming it is what went wrong. The
+per-string limit is what keeps the reserve sufficient: without it a single
+unbounded field could fill the remaining charge byte-exactly and leave the
+structure to land past the ceiling, and four scope strings and three admission
+strings really were unbounded — checked for being non-empty and nothing more —
+so an 8 MiB admission population was admitted outright. The gate, by contrast,
+still charges RAW length, and the asymmetry is safe
 in exactly one direction: the charged width is never below the raw length, so a
 source the projection admitted is charged no more by the gate than by the
 projection and the invariant below survives, while the gate goes on reading
