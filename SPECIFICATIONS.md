@@ -3300,12 +3300,21 @@ per-string limit is what keeps the reserve sufficient: without it a single
 unbounded field could fill the remaining charge byte-exactly and leave the
 structure to land past the ceiling, and four scope strings and three admission
 strings really were unbounded — checked for being non-empty and nothing more —
-so an 8 MiB admission population was admitted outright. The gate, by contrast,
-still charges RAW length, and the asymmetry is safe
-in exactly one direction: the charged width is never below the raw length, so a
-source the projection admitted is charged no more by the gate than by the
-projection and the invariant below survives, while the gate goes on reading
-lengths instead of content — which is what makes it cheap on a forgery.
+so an 8 MiB admission population was admitted outright. The evaluator's shape gate
+applies the SAME charge and the same reserve, and for a while it did not: it
+compared the RAW total, and the two differ by a factor of six. That gap was not
+one-sided safety. A forged stream carrying 32 MiB of perfectly valid
+provenance — inside every count, inside every per-string bound, inside the raw
+aggregate — passed the gate and every semantic invariant while the projection
+refused that same source outright, and a stream the gate admits can still be
+serialized, which is the cost the charged width exists to bound. The per-string
+limit went the same way: the seven strings above gained a bound in the
+projection before the gate had one, so a namespace just under the aggregate was
+hashed by all three whole-input digests before the invariant pass refused it —
+646 ms and 251 MB allocated to say no, which is precisely the length-before-work
+protection the gate exists to provide. Both sides now apply the same condition,
+so "admitted by the projection" implies "admitted here" by construction rather
+than by a margin.
 
 Mirroring means the mirror is exact in both directions: text the projection
 DERIVES rather than receives — the qualifications it generates, the boundary it

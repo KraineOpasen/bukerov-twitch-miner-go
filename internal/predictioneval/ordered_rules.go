@@ -222,7 +222,17 @@ func orderedRulesInputShapeReason(s OrderedRulesStream, cfg OrderedRulesConfig, 
 	switch {
 	case budget.overLong:
 		return ReasonStreamTextOverBound
-	case budget.bytes > MaxOrderedRulesAggregateBytes,
+	// The projection charges every byte at its worst-case ENCODED width and
+	// withholds the structural reserve, so this must too. Comparing the raw
+	// total here left a sixfold gap: a forged stream carrying 32 MiB of valid
+	// provenance passed every check, while ProjectOrderedRulesStream refuses
+	// that same source outright — and a stream this gate admits can still be
+	// serialized, which is the cost the charged width exists to bound.
+	//
+	// Mirroring it exactly also keeps the invariant it was introduced for: the
+	// two sides now apply the SAME condition, so a source the projection
+	// admitted is admitted here by construction rather than by a margin.
+	case budget.bytes*orderedRulesMaxJSONExpansion > orderedRulesTextCeiling,
 		budget.other > MaxOrderedRulesAggregateBytes:
 		return ReasonStreamBytesOverBound
 	}
@@ -232,12 +242,17 @@ func orderedRulesInputShapeReason(s OrderedRulesStream, cfg OrderedRulesConfig, 
 // orderedRulesTextBudget accumulates the retained text the whole-input digests
 // read, and records whether any single string broke the per-string limit.
 //
-// The split between its two methods is the point. The projection bounds SOME
-// retained strings individually and lets the rest ride on the aggregate budget
-// alone; this mirrors that division field for field, so an input the projection
-// would have admitted is not refused here and one it would have refused is not
-// hashed here. Charging every string individually would break the first half of
-// that; charging none would break the second.
+// The split between its methods mirrors the projection field for field, so an
+// input the projection would have admitted is not refused here and one it would
+// have refused is not hashed here.
+//
+// There used to be a third method, for retained strings the projection bounded
+// only through the aggregate. It has no callers left, because the projection no
+// longer has such strings: the four scope strings and three admission strings
+// that were merely charged gained individual bounds, and this side followed.
+// That is worth saying rather than quietly deleting — the category existing at
+// all was what let a namespace just under the aggregate be hashed in full
+// before anything refused it.
 type orderedRulesTextBudget struct {
 	// bytes is the retained STREAM text, charged exactly as the projection
 	// charges it so the two ceilings agree.
@@ -246,13 +261,6 @@ type orderedRulesTextBudget struct {
 	// which therefore cannot share the stream's ceiling.
 	other    int64
 	overLong bool
-}
-
-// charge adds a string the projection bounds only through the aggregate.
-func (b *orderedRulesTextBudget) charge(v ...string) {
-	for _, s := range v {
-		b.bytes += int64(len(s))
-	}
 }
 
 // bound adds a string the projection ALSO bounds individually, with
@@ -301,10 +309,17 @@ func orderedRulesInputBudget(s OrderedRulesStream, cfg OrderedRulesConfig,
 	// these on the aggregate would refuse nothing the projection refuses.
 	b.boundOnly(s.ContractVersion)
 	b.bound(s.Scope.SourceContractVersion, string(s.Scope.Coverage))
-	b.charge(s.Scope.Namespace, s.Scope.EpisodeID, s.Scope.AccountContext,
+	// BOUND, not merely charged. The projection refuses each of these above
+	// MaxOrderedRulesIdentifierBytes, so charging them alone left a namespace
+	// just under the aggregate to pass this gate, be hashed by all three
+	// whole-input digests, and only then be refused by the invariant pass that
+	// calls validateScope — measured at 646 ms and 251 MB allocated to say no,
+	// which is precisely the length-before-work protection this gate exists to
+	// provide.
+	b.bound(s.Scope.Namespace, s.Scope.EpisodeID, s.Scope.AccountContext,
 		s.Scope.AssociationEvidence)
 	b.bound(s.Scope.CoverageDetail, string(s.Admission.ViewKind))
-	b.charge(s.Admission.ManifestID, s.Admission.Population, s.Admission.OrderBasis)
+	b.bound(s.Admission.ManifestID, s.Admission.Population, s.Admission.OrderBasis)
 	b.bound(s.Admission.SourceReferences...)
 	b.boundOnly(string(s.Cutoff.Kind), string(s.Cutoff.Basis), s.Cutoff.Identity)
 	b.boundOnly(s.Qualifications...)
