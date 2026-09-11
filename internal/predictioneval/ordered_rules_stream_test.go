@@ -3789,6 +3789,137 @@ func TestOrderedRulesACheapRefusalIsNotPaidForWithTheWholePayload(t *testing.T) 
 		}
 	})
 
+	// The NESTED declarations are structural too. A KNOWN value that omits the
+	// position it became available at is refused by a flag test, and it used to
+	// sit beside the text scans: 20.07073 ms to 250.373 µs, the latter matching
+	// the same refusal with one-byte provenance, so it is no longer scaled by
+	// the payload at all.
+	t.Run("a later candidate's undeclared availability beats an earlier text scan", func(t *testing.T) {
+		payload := orCandidate("c1", 10, orKnownBalance(1000), orOutcome("A", 4), orOutcome("B", 6))
+		payload.Provenance = "prov-\xff"
+		shape := orCandidate("c2", 20, orKnownBalance(1000), orOutcome("A", 4), orOutcome("B", 6))
+		shape.Balance.HasAvailableAtPosition = false
+
+		// The premise: each fault really is raised on its own.
+		if _, err := predictioneval.ProjectOrderedRulesStream(
+			orSource([]predictioneval.OrderedRulesCandidate{payload}, nil),
+			orAdmission()); !errors.Is(err, predictioneval.ErrOrderedRulesNotEncodable) {
+			t.Fatalf("premise: the provenance alone must be refused as unencodable; got %v", err)
+		}
+		if _, err := predictioneval.ProjectOrderedRulesStream(
+			orSource([]predictioneval.OrderedRulesCandidate{shape}, nil),
+			orAdmission()); !errors.Is(err, predictioneval.ErrOrderedRulesScopeIncomplete) {
+			t.Fatalf("premise: the undeclared availability alone must be refused as incomplete; got %v", err)
+		}
+
+		if _, err := predictioneval.ProjectOrderedRulesStream(
+			orSource([]predictioneval.OrderedRulesCandidate{payload, shape}, nil),
+			orAdmission()); !errors.Is(err, predictioneval.ErrOrderedRulesScopeIncomplete) {
+			t.Fatalf("a source whose first candidate carries unencodable provenance and whose "+
+				"second declares a KNOWN balance without its availability position was refused "+
+				"%v. That declaration is a flag test; it must not wait on the text of every "+
+				"candidate before it.", err)
+		}
+	})
+
+	// The aggregate is a sum of chargedWidth over len(), so it is computable
+	// without reading a byte — and computing it in the structural pass is what
+	// makes that pass a boundary rather than one more step: an over-ceiling
+	// source is refused for its SIZE before anything is scanned at all.
+	t.Run("an over-ceiling source is refused before any text is scanned", func(t *testing.T) {
+		// Just past orderedRulesTextCeiling once charged at the worst-case
+		// encoded width, and spread so that NO SINGLE STRING is over its own
+		// MaxOrderedRulesIdentifierBytes bound — otherwise the per-string rule
+		// refuses it first under the same sentinel and this case pins nothing.
+		// The first draft did exactly that and passed against the old order.
+		//
+		// One shared 2,700-byte string across 128 x 64 outcomes: Go strings are
+		// immutable and shared, so this is one allocation, and the charge is
+		// 128*64*2700*6 bytes, comfortably past the ceiling.
+		const per = 2700
+		note := strings.Repeat("p", per)
+		wide := make([]predictioneval.OrderedRulesCandidate, predictioneval.MaxOrderedRulesCandidates)
+		for i := range wide {
+			outs := make([]predictioneval.OrderedRulesOutcome, predictioneval.MaxOrderedRulesOutcomes)
+			for j := range outs {
+				outs[j] = orOutcome("o"+strconv.Itoa(j), int64(j+1))
+				outs[j].Points.Provenance = note
+			}
+			wide[i] = orCandidate("c"+strconv.Itoa(i), int64(i), orMissingBalance(), outs...)
+		}
+		// A text fault with its own sentinel, on the FIRST candidate, so a scan
+		// that ran first would reach it before the aggregate was known.
+		wide[0].OutcomesReason = "reason-\xff"
+
+		// The premise: the text fault really is raised on its own.
+		lean := []predictioneval.OrderedRulesCandidate{
+			orCandidate("c0", 0, orMissingBalance()),
+		}
+		lean[0].OutcomesReason = "reason-\xff"
+		if _, err := predictioneval.ProjectOrderedRulesStream(orSource(lean, nil),
+			orAdmission()); !errors.Is(err, predictioneval.ErrOrderedRulesNotEncodable) {
+			t.Fatalf("premise: the reason alone must be refused as unencodable; got %v", err)
+		}
+
+		if _, err := predictioneval.ProjectOrderedRulesStream(orSource(wide, nil),
+			orAdmission()); !errors.Is(err, predictioneval.ErrOrderedRulesOverBound) {
+			t.Fatalf("a source past the aggregate ceiling, whose first candidate also carries an "+
+				"unencodable reason, was refused %v. The ceiling is arithmetic over lengths: "+
+				"nothing needs to be read to know the source cannot fit, so it must not be "+
+				"scanned to find out.", err)
+		}
+	})
+
+	// The terminating case for the whole axis: the zero-byte tier is complete
+	// and runs before ANY supplied byte is read anywhere in the projection. A
+	// candidate declaring no position is settled without the admission's
+	// references being scanned — 3.062608 ms to 951 ns — and the same holds for
+	// the scope's own text, which is why this asserts across both.
+	t.Run("no supplied byte is read before the whole structure is settled", func(t *testing.T) {
+		shape := []predictioneval.OrderedRulesCandidate{
+			orCandidate("c1", 10, orKnownBalance(1000), orOutcome("A", 4), orOutcome("B", 6)),
+			orCandidate("c2", 20, orKnownBalance(1000), orOutcome("A", 4), orOutcome("B", 6)),
+		}
+		shape[1].HasPosition = false
+
+		refs := orAdmission()
+		refs.SourceReferences = []string{"ref-\xff"}
+
+		scopeText := orSource(shape, nil)
+		scopeText.Scope.CoverageDetail = "detail-\xff"
+
+		// The premise: each text fault really is raised on its own.
+		if _, err := predictioneval.ProjectOrderedRulesStream(orSource(cs, nil),
+			refs); !errors.Is(err, predictioneval.ErrOrderedRulesNotEncodable) {
+			t.Fatalf("premise: the reference alone must be refused as unencodable; got %v", err)
+		}
+		clean := orSource(cs, nil)
+		clean.Scope.CoverageDetail = "detail-\xff"
+		if _, err := predictioneval.ProjectOrderedRulesStream(clean,
+			orAdmission()); !errors.Is(err, predictioneval.ErrOrderedRulesNotEncodable) {
+			t.Fatalf("premise: the coverage detail alone must be refused as unencodable; got %v", err)
+		}
+
+		for _, c := range []struct {
+			name      string
+			source    predictioneval.OrderedRulesSource
+			admission predictioneval.CommonAdmission
+		}{
+			{"admission references", orSource(shape, nil), refs},
+			{"scope text", scopeText, orAdmission()},
+		} {
+			t.Run(c.name, func(t *testing.T) {
+				if _, err := predictioneval.ProjectOrderedRulesStream(c.source,
+					c.admission); !errors.Is(err, predictioneval.ErrOrderedRulesScopeIncomplete) {
+					t.Fatalf("a candidate declaring no causal position, beside unencodable text "+
+						"elsewhere in the source, was refused %v. A declared position is a flag "+
+						"test; the zero-byte tier is complete and runs before any supplied byte "+
+						"is read, so no text anywhere may be scanned to reach it.", err)
+				}
+			})
+		}
+	})
+
 	// An unusable config is arithmetic over a rule count already bounded above.
 	// The invariant pass is bounded but not cheap: on a well-formed stream it
 	// walks the scope, the admission references and every retained candidate to

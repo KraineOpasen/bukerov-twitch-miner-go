@@ -3521,6 +3521,55 @@ through that oracle, both refusals returned identity `INVENTED-BOUNDARY`,
 now assigned after the invariant pass succeeds rather than cleared on each
 refusal, so a path added later cannot forget to clear them.
 
+The axis then terminated, and how it terminated is the part worth recording. It
+had produced fourteen findings across five review rounds, each one correct and
+each one revealing the next: a scope walk before a candidate's declared
+position, an identity hash before an interval test, a provenance scan before an
+availability flag. Every repair moved one cheap decision ahead of one expensive
+scan, and the iteration did not converge because the function was organised by
+what a check is ABOUT rather than by what it COSTS.
+
+`ProjectOrderedRulesStream` is now split on cost. The whole zero-byte tier runs
+first: the two source counts, the emptiness and interval halves of the scope and
+admission validators (`validateScopeShape`, `validateAdmissionShape`), the
+interventions' declared positions against the declared interval
+(`checkInterventionStructure`), every candidate's declared position, causal
+order, interval membership and outcome count, every nested value's presence
+declaration (`checkPresenceShape` — a KNOWN value's provenance, its declared
+availability position, and the back-dating comparison), and the ENTIRE aggregate
+charge, which is a sum of `chargedWidth` over `len()` and therefore computable
+without reading anything. Then the ceiling. Only then does any text get scanned.
+
+Three consequences. An over-ceiling source is refused for its SIZE before a byte
+is read, rather than scanning its way up to the limit. A nested declaration is
+settled without the payload: a last candidate's balance omitting its
+availability position went from 20.07073 milliseconds to 250.373 microseconds,
+the latter matching the same refusal with one-byte provenance. And the last pair
+found — an admission of 1,024 references beside a candidate declaring no
+position — went from 3.062608 milliseconds to 951 nanoseconds. Across every
+reproduction in this section the refusal now costs the same with a large payload
+as with a tiny one, which is the observation that says the payload is not read.
+
+The terminating argument is structural, not empirical: after that ceiling, every
+remaining check is a bounded scan over a source whose total encoded width is
+already known to fit, so no further reordering of them can change an asymptotic
+cost. The three halves — `validateScopeShape`, `validateAdmissionShape`,
+`checkPresenceShape` — are called BY their full validators rather than copied
+beside them, so the invariant pass in the evaluator re-establishes exactly these
+rules through one definition; `checkInterventionStructure` is likewise called
+twice from one definition, by the projection and by `establishCutoff` which
+depends on it. What does NOT move into the zero-byte tier is anything whose
+refusal quotes a supplied value — `SourceContractVersion`, the admission view
+kind — since quoting requires the per-string bound to have run.
+
+Two costs are stated rather than elided. Splitting on cost changes which refusal
+a doubly-faulty source receives in many more combinations than before: a
+structural fault anywhere now beats a text fault anywhere. And the emptiness
+tests now precede the per-string bounds within each validator, so an empty
+namespace beside an over-long one reports the emptiness. Neither changes which
+sources are ADMITTED — the aggregate is the same sum over the same fields, and a
+case at `MaxOrderedRulesCandidates` x `MaxOrderedRulesOutcomes` holds that.
+
 One refusal also stopped re-exporting what it never read. A stream whose
 SelectionDigest does not match is not what the projection produced, so its
 Cutoff and its Qualifications are supplied text that the checks judging them —

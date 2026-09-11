@@ -113,25 +113,27 @@ func ProjectOrderedRulesStream(source OrderedRulesSource, admission CommonAdmiss
 				" interventions exceed the bound of "+strconv.Itoa(MaxOrderedRulesInterventions)))
 	}
 
-	// The validators below quote the value they reject, and strconv.Quote scans
-	// the whole string and allocates an expanded copy. A vocabulary field is a
-	// closed set of short words, so an enormous one is not a near-miss: it is
-	// an input whose only effect is the cost of refusing it. Measured before
-	// this gate, a 64 MiB contract version took a second to refuse and built a
-	// 67 MB error message — the refusal was the denial of service.
-	if err := checkFreeText(source.Scope.SourceContractVersion, "scope source contract version"); err != nil {
+	// THE ZERO-BYTE TIER, entire, before ANY supplied byte is read anywhere in
+	// this function. Everything from here to the ceiling check is an emptiness
+	// test, an integer comparison, a slice length or arithmetic over len(); no
+	// message below quotes a caller-supplied value.
+	//
+	// This is the axis's terminating condition rather than one more step along
+	// it. Each earlier repair moved one cheap decision ahead of one expensive
+	// scan and the next review found the next pair — a scope walk before a
+	// candidate's declared position, an identity hash before an interval test,
+	// a provenance scan before an availability flag. Splitting the function by
+	// what a check COSTS rather than by what it is about ends that: after the
+	// ceiling below, every remaining check is a bounded scan over a source
+	// whose total encoded width is already known to fit, so no reordering of
+	// them can change an asymptotic cost again.
+	//
+	// The last pair measured, an admission of 1,024 references beside a
+	// candidate that declares no position: 3.062608 ms to 550 ns.
+	if err := validateScopeShape(source.Scope); err != nil {
 		return OrderedRulesStream{}, err
 	}
-	if err := checkFreeText(string(source.Scope.Coverage), "scope coverage"); err != nil {
-		return OrderedRulesStream{}, err
-	}
-	if err := checkFreeText(string(admission.ViewKind), "admission view kind"); err != nil {
-		return OrderedRulesStream{}, err
-	}
-	if err := validateScope(source.Scope); err != nil {
-		return OrderedRulesStream{}, err
-	}
-	if err := validateAdmission(admission); err != nil {
+	if err := validateAdmissionShape(admission); err != nil {
 		return OrderedRulesStream{}, err
 	}
 
@@ -145,56 +147,21 @@ func ProjectOrderedRulesStream(source OrderedRulesSource, admission CommonAdmiss
 		len(source.Scope.Coverage))
 	bytes += chargedWidth(len(admission.ManifestID) + len(admission.Population) + len(admission.OrderBasis) +
 		len(admission.ViewKind))
-	// Validated in validateAdmission above, both for count and for each
-	// element; only the charge belongs here.
+	// Count bounded by validateAdmissionShape above; each ELEMENT is validated
+	// by validateAdmission in the text tier below. Only the charge belongs
+	// here, and it is length arithmetic.
 	for _, ref := range admission.SourceReferences {
 		bytes += chargedWidth(len(ref))
 	}
-	// THE BOUNDARY BEFORE THE PAYLOAD, and the order is the point.
-	//
-	// establishCutoff reads only the interventions and the declared interval.
-	// It is self-bounding: every string it quotes in a refusal passes
-	// checkIdentifier or checkFreeText inside establishCutoff itself first, so
-	// it does not depend on any earlier scan for that — only on the
-	// intervention COUNT, which is bounded at the top of this function. The
-	// candidate walk below is the opposite: it is the bulk of the admitted
-	// budget, and it runs entirely on caller-supplied text. Establishing the
-	// boundary second meant an intervention rejectable on its shape alone — an
-	// undeclared position, a kind outside the vocabulary, an empty identity —
-	// was refused only after every candidate and every outcome had been
-	// validated and charged. Measured: 44 µs to refuse such a source with empty
-	// candidate provenance, against 5.0 ms with 600 bytes on each of 8,192
-	// outcomes, and that fixture is a fraction of what the ceiling admits.
-	//
-	// It now also precedes the INTERVENTION payload, for the same reason one
-	// step down. Detail is free text that no decision reads: nothing about the
-	// boundary depends on it, and scanning it first meant the same shape
-	// refusal was reached only after up to 4 MiB of it. Measured on the
-	// identical input: 3.2537 ms to 21.686 µs.
-	//
-	// That second move is a reordering, not a free win, and saying so is the
-	// honest form of it. Where the DETAIL is what is wrong and every
-	// intervention is otherwise well-shaped, the scan below now runs after a
-	// full establishCutoff pass rather than before it — at most one extra
-	// bounded pass over the same MaxOrderedRulesInterventions x
-	// MaxOrderedRulesIdentifierBytes envelope, since a vocabulary kind and a
-	// relevance are short when they are valid and refused on length when they
-	// are not. The trade buys an unbounded-in-practice saving on the shape path
-	// for a bounded cost on the text path, and both paths stay inside the same
-	// ceiling.
-	//
-	// The refusal it produces is the same either way; only its cost changes.
-	cutoff, err := establishCutoff(source)
-	if err != nil {
+	// The interventions' charge is length arithmetic and belongs here; only the
+	// Detail SCAN is deferred to the text tier below.
+	for i := range source.Interventions {
+		bytes += chargedWidth(len(source.Interventions[i].Identity) + len(source.Interventions[i].Detail))
+	}
+	if err := checkInterventionStructure(source); err != nil {
 		return OrderedRulesStream{}, err
 	}
 
-	for i := range source.Interventions {
-		if err := checkFreeText(source.Interventions[i].Detail, "intervention "+strconv.Itoa(i)+" detail"); err != nil {
-			return OrderedRulesStream{}, err
-		}
-		bytes += chargedWidth(len(source.Interventions[i].Identity) + len(source.Interventions[i].Detail))
-	}
 	if bytes > orderedRulesTextCeiling {
 		return OrderedRulesStream{}, errors.Join(ErrOrderedRulesOverBound,
 			errors.New("predictioneval: supplied scope, admission and intervention bytes exceed the aggregate budget"))
@@ -247,6 +214,114 @@ func ProjectOrderedRulesStream(source OrderedRulesSource, admission CommonAdmiss
 				errors.New("predictioneval: "+where+" carries "+strconv.Itoa(len(c.Outcomes))+
 					" outcomes, past the bound of "+strconv.Itoa(MaxOrderedRulesOutcomes)))
 		}
+
+		// The NESTED declarations belong to this tier too, and leaving them out
+		// was the same mistake one level down. A KNOWN value that omits the
+		// position it became available at is refused by a flag test, but the
+		// check sat beside the text scans in the payload pass — so a last
+		// candidate's balance omitting it waited on every preceding provenance
+		// and reason. A source comfortably inside the ceiling can put
+		// 20,480,000 bytes of provenance ahead of that flag: measured
+		// 20.07073 ms.
+		for j := range c.Outcomes {
+			o := &c.Outcomes[j]
+			if err := checkPresenceShape(o.Points, where+" outcome "+strconv.Itoa(j)+" points",
+				c.Position); err != nil {
+				return OrderedRulesStream{}, err
+			}
+			bytes += chargedWidth(len(o.Identity)+len(o.Points.Presence)) + suppliedTextBytes(o.Points)
+		}
+		if err := checkPresenceShape(c.Balance, where+" balance", c.Position); err != nil {
+			return OrderedRulesStream{}, err
+		}
+
+		// AND THE WHOLE CHARGE, which is what makes this tier a boundary rather
+		// than one more step.
+		//
+		// Every term is chargedWidth over a len(), so the aggregate is
+		// computable without reading a byte. Computing it here means an
+		// over-ceiling source is refused for its SIZE before anything is
+		// scanned at all, instead of scanning its way up to the limit first,
+		// and it settles the accounting in one place: the passes below no
+		// longer charge, so there is nothing to double-count. The total is the
+		// same sum over the same fields, so which sources are ADMITTED does not
+		// move; only where an over-ceiling one is stopped.
+		bytes += chargedWidth(len(c.Identity) + len(c.Provenance) + len(c.OutcomesReason))
+		bytes += chargedWidth(len(c.SourceKind) + len(c.EpisodeMembership) +
+			len(c.OutcomesPresence) + len(c.Balance.Presence))
+		bytes += suppliedTextBytes(c.Balance)
+		if bytes > orderedRulesTextCeiling {
+			return OrderedRulesStream{}, errors.Join(ErrOrderedRulesOverBound,
+				errors.New("predictioneval: supplied identifier bytes exceed the aggregate budget"))
+		}
+	}
+
+	// The validators below quote the value they reject, and strconv.Quote scans
+	// the whole string and allocates an expanded copy. A vocabulary field is a
+	// closed set of short words, so an enormous one is not a near-miss: it is
+	// an input whose only effect is the cost of refusing it. Measured before
+	// this gate, a 64 MiB contract version took a second to refuse and built a
+	// 67 MB error message — the refusal was the denial of service.
+	if err := checkFreeText(source.Scope.SourceContractVersion, "scope source contract version"); err != nil {
+		return OrderedRulesStream{}, err
+	}
+	if err := checkFreeText(string(source.Scope.Coverage), "scope coverage"); err != nil {
+		return OrderedRulesStream{}, err
+	}
+	if err := checkFreeText(string(admission.ViewKind), "admission view kind"); err != nil {
+		return OrderedRulesStream{}, err
+	}
+	if err := validateScope(source.Scope); err != nil {
+		return OrderedRulesStream{}, err
+	}
+	if err := validateAdmission(admission); err != nil {
+		return OrderedRulesStream{}, err
+	}
+
+	// THE BOUNDARY BEFORE THE PAYLOAD, and the order is the point.
+	//
+	// establishCutoff reads only the interventions and the declared interval.
+	// It is self-bounding: every string it quotes in a refusal passes
+	// checkIdentifier or checkFreeText inside establishCutoff itself first, so
+	// it does not depend on any earlier scan for that — only on the
+	// intervention COUNT, which is bounded at the top of this function. The
+	// candidate walk below is the opposite: it is the bulk of the admitted
+	// budget, and it runs entirely on caller-supplied text. Establishing the
+	// boundary second meant an intervention rejectable on its shape alone — an
+	// undeclared position, a kind outside the vocabulary, an empty identity —
+	// was refused only after every candidate and every outcome had been
+	// validated and charged. Measured: 44 µs to refuse such a source with empty
+	// candidate provenance, against 5.0 ms with 600 bytes on each of 8,192
+	// outcomes, and that fixture is a fraction of what the ceiling admits.
+	//
+	// It now also precedes the INTERVENTION payload, for the same reason one
+	// step down. Detail is free text that no decision reads: nothing about the
+	// boundary depends on it, and scanning it first meant the same shape
+	// refusal was reached only after up to 4 MiB of it. Measured on the
+	// identical input: 3.2537 ms to 21.686 µs.
+	//
+	// That second move is a reordering, not a free win, and saying so is the
+	// honest form of it. Where the DETAIL is what is wrong and every
+	// intervention is otherwise well-shaped, the scan below now runs after a
+	// full establishCutoff pass rather than before it — at most one extra
+	// bounded pass over the same MaxOrderedRulesInterventions x
+	// MaxOrderedRulesIdentifierBytes envelope, since a vocabulary kind and a
+	// relevance are short when they are valid and refused on length when they
+	// are not. The trade buys an unbounded-in-practice saving on the shape path
+	// for a bounded cost on the text path, and both paths stay inside the same
+	// ceiling.
+	//
+	// The refusal it produces is the same either way; only its cost changes.
+	cutoff, err := establishCutoff(source)
+	if err != nil {
+		return OrderedRulesStream{}, err
+	}
+
+	// The Detail SCAN, its charge already counted in the zero-byte tier above.
+	for i := range source.Interventions {
+		if err := checkFreeText(source.Interventions[i].Detail, "intervention "+strconv.Itoa(i)+" detail"); err != nil {
+			return OrderedRulesStream{}, err
+		}
 	}
 
 	seen := make(map[string]bool, len(source.Candidates))
@@ -269,7 +344,6 @@ func ProjectOrderedRulesStream(source OrderedRulesSource, admission CommonAdmiss
 			if err := checkFreeText(v, where+" vocabulary"); err != nil {
 				return OrderedRulesStream{}, err
 			}
-			bytes += chargedWidth(len(v))
 		}
 		if c.EpisodeMembership != MembershipProven {
 			return OrderedRulesStream{}, errors.Join(ErrOrderedRulesMembershipUnproven,
@@ -352,7 +426,6 @@ func ProjectOrderedRulesStream(source OrderedRulesSource, admission CommonAdmiss
 		if err := checkFreeText(c.OutcomesReason, where+" outcomes reason"); err != nil {
 			return OrderedRulesStream{}, err
 		}
-		bytes += chargedWidth(len(c.Identity) + len(c.Provenance) + len(c.OutcomesReason))
 		// Outcome identities are unique WITHIN a candidate, for the same reason
 		// candidate and intervention identities are unique within the source: a
 		// pool naming the same outcome twice is not a pool that can exist, and
@@ -377,15 +450,9 @@ func ProjectOrderedRulesStream(source OrderedRulesSource, admission CommonAdmiss
 			if err := checkPresence(o.Points, ow+" points", c.Position); err != nil {
 				return OrderedRulesStream{}, err
 			}
-			bytes += chargedWidth(len(o.Identity)+len(o.Points.Presence)) + suppliedTextBytes(o.Points)
 		}
 		if err := checkPresence(c.Balance, where+" balance", c.Position); err != nil {
 			return OrderedRulesStream{}, err
-		}
-		bytes += suppliedTextBytes(c.Balance)
-		if bytes > orderedRulesTextCeiling {
-			return OrderedRulesStream{}, errors.Join(ErrOrderedRulesOverBound,
-				errors.New("predictioneval: supplied identifier bytes exceed the aggregate budget"))
 		}
 	}
 
@@ -451,19 +518,8 @@ func establishCutoff(source OrderedRulesSource) (OrderedRulesCutoff, error) {
 	//
 	// The interval endpoints are settled before this: validateScope runs above
 	// establishCutoff and refuses a scope that omits them.
-	for i := range source.Interventions {
-		in := &source.Interventions[i]
-		where := "intervention " + strconv.Itoa(i)
-		if !in.HasPosition {
-			return OrderedRulesCutoff{}, errors.Join(ErrOrderedRulesScopeIncomplete,
-				errors.New("predictioneval: "+where+" does not declare its position as supplied; an omitted "+
-					"one would cut the stream at zero and remove every candidate after it"))
-		}
-		if in.Position < source.Scope.IntervalFromPosition || in.Position > source.Scope.IntervalToPosition {
-			return OrderedRulesCutoff{}, errors.Join(ErrOrderedRulesOutsideDeclaredInterval,
-				errors.New("predictioneval: "+where+" at position "+strconv.FormatInt(in.Position, 10)+
-					" lies outside the declared interval"))
-		}
+	if err := checkInterventionStructure(source); err != nil {
+		return OrderedRulesCutoff{}, err
 	}
 
 	seen := make(map[string]bool, len(source.Interventions))
@@ -550,26 +606,13 @@ func validateScope(s OrderedRulesScope) error {
 			return err
 		}
 	}
-	switch {
-	case s.Namespace == "":
-		return errors.Join(ErrOrderedRulesScopeIncomplete, errors.New("predictioneval: scope namespace is empty"))
-	case s.EpisodeID == "":
-		return errors.Join(ErrOrderedRulesScopeIncomplete, errors.New("predictioneval: scope episode id is empty"))
-	case s.AccountContext == "":
-		return errors.Join(ErrOrderedRulesScopeIncomplete, errors.New("predictioneval: scope account context is empty"))
-	case s.AssociationEvidence == "":
-		return errors.Join(ErrOrderedRulesScopeIncomplete,
-			errors.New("predictioneval: scope carries no association evidence; a pool or session id does not prove an account"))
-	case s.SourceContractVersion != OrderedRulesStreamContractVersion:
+	if err := validateScopeShape(s); err != nil {
+		return err
+	}
+	if s.SourceContractVersion != OrderedRulesStreamContractVersion {
 		return errors.Join(ErrOrderedRulesScopeIncomplete,
 			errors.New("predictioneval: scope declares source contract "+strconv.Quote(s.SourceContractVersion)+
 				", not "+strconv.Quote(OrderedRulesStreamContractVersion)))
-	case !s.HasInterval:
-		return errors.Join(ErrOrderedRulesScopeIncomplete,
-			errors.New("predictioneval: scope does not declare its interval endpoints as supplied; an omitted "+
-				"pair decodes to [0,0], which is a real interval and would silently admit only position zero"))
-	case s.IntervalFromPosition > s.IntervalToPosition:
-		return errors.Join(ErrOrderedRulesScopeIncomplete, errors.New("predictioneval: declared interval is empty"))
 	}
 	switch s.Coverage {
 	case CoverageCompleteDeclared, CoverageGapsPresent, CoverageTruncatedPrefix:
@@ -600,30 +643,13 @@ func validateAdmission(a CommonAdmission) error {
 	// merely alongside it — moving the element check here without the count
 	// would put an unbounded loop ahead of the bound that makes it finite,
 	// which is the length-before-work rule this file applies everywhere else.
-	if len(a.SourceReferences) > MaxOrderedRulesSourceReferences {
-		return errors.Join(ErrOrderedRulesOverBound,
-			errors.New("predictioneval: "+strconv.Itoa(len(a.SourceReferences))+
-				" admission source references exceed the bound of "+
-				strconv.Itoa(MaxOrderedRulesSourceReferences)))
+	if err := validateAdmissionShape(a); err != nil {
+		return err
 	}
-	// THE MANDATORY SCALARS BEFORE THE REFERENCE PAYLOAD. Each is an emptiness
-	// test or a switch over a closed set and reads no supplied byte, while the
-	// loop below walks up to MaxOrderedRulesSourceReferences strings of
-	// MaxOrderedRulesIdentifierBytes each. An admission naming no population
-	// therefore paid a 4 MiB scan to be refused on a field the references
-	// cannot affect: measured 2.997708 ms against 353 ns.
-	//
-	// The view kind is settled here too. It is compared against a closed set,
-	// and the projection has already bounded it with checkFreeText before
-	// calling this, so quoting a rejected one is bounded.
-	switch {
-	case a.ManifestID == "":
-		return errors.Join(ErrOrderedRulesAdmissionIncomplete, errors.New("predictioneval: admission manifest id is empty"))
-	case a.Population == "":
-		return errors.Join(ErrOrderedRulesAdmissionIncomplete, errors.New("predictioneval: admission names no population"))
-	case a.OrderBasis == "":
-		return errors.Join(ErrOrderedRulesAdmissionIncomplete, errors.New("predictioneval: admission names no order basis"))
-	}
+	// The view kind is settled after the scalars above and before the payload
+	// below. It is compared against a closed set, but its error QUOTES the
+	// value, so it needs checkFreeText to have run first — which is why it sits
+	// here and not in the shape half the projection runs before any scan.
 	switch a.ViewKind {
 	case ViewChannelCandidateStream, ViewCalculateOnly:
 	default:
@@ -819,6 +845,104 @@ func checkPresence(v SuppliedInt64, where string, candidatePosition int64) error
 	default:
 		return errors.Join(ErrOrderedRulesVocabulary,
 			errors.New("predictioneval: "+where+" has presence "+strconv.Quote(string(v.Presence))))
+	}
+	return checkPresenceShape(v, where, candidatePosition)
+}
+
+// checkPresenceShape is the half of checkPresence that reads no supplied byte.
+//
+// It is its own function so the projection's structural pass can run it over
+// every nested value before any payload text is scanned, without a second copy
+// of the rules to drift from. An emptiness test, a declared flag and an integer
+// comparison, and the only free text any message carries is the caller-supplied
+// `where` the projection builds itself.
+//
+// The Presence comparison is length-first like every Go string comparison, so
+// an enormous supplied presence falls out of the KNOWN branch in constant time
+// rather than being read here; the vocabulary that refuses it lives in
+// checkPresence, after the bound.
+// checkInterventionStructure is the interventions' zero-byte tier: a declared
+// position and the declared interval, integer work quoting only integers.
+//
+// The projection runs it before any text is scanned, and establishCutoff runs
+// it again because it depends on it — the same definition twice rather than a
+// second copy, at the cost of one bounded pass of integer comparisons.
+func checkInterventionStructure(source OrderedRulesSource) error {
+	for i := range source.Interventions {
+		in := &source.Interventions[i]
+		where := "intervention " + strconv.Itoa(i)
+		if !in.HasPosition {
+			return errors.Join(ErrOrderedRulesScopeIncomplete,
+				errors.New("predictioneval: "+where+" does not declare its position as supplied; an omitted "+
+					"one would cut the stream at zero and remove every candidate after it"))
+		}
+		if in.Position < source.Scope.IntervalFromPosition || in.Position > source.Scope.IntervalToPosition {
+			return errors.Join(ErrOrderedRulesOutsideDeclaredInterval,
+				errors.New("predictioneval: "+where+" at position "+strconv.FormatInt(in.Position, 10)+
+					" lies outside the declared interval"))
+		}
+	}
+	return nil
+}
+
+// validateScopeShape is the half of validateScope that reads no supplied byte.
+//
+// Emptiness tests and two integer comparisons, quoting nothing. It exists so
+// ProjectOrderedRulesStream can settle the scope's structure — and in
+// particular the declared INTERVAL, which the candidate and intervention
+// structural passes compare against — before any text anywhere is scanned.
+// validateScope still calls it, so the invariant pass in ordered_rules.go
+// re-establishes exactly these rules through one definition rather than a copy.
+//
+// SourceContractVersion is NOT here: its refusal quotes the supplied value, so
+// it needs the per-string bound to have run first.
+func validateScopeShape(s OrderedRulesScope) error {
+	switch {
+	case s.Namespace == "":
+		return errors.Join(ErrOrderedRulesScopeIncomplete, errors.New("predictioneval: scope namespace is empty"))
+	case s.EpisodeID == "":
+		return errors.Join(ErrOrderedRulesScopeIncomplete, errors.New("predictioneval: scope episode id is empty"))
+	case s.AccountContext == "":
+		return errors.Join(ErrOrderedRulesScopeIncomplete, errors.New("predictioneval: scope account context is empty"))
+	case s.AssociationEvidence == "":
+		return errors.Join(ErrOrderedRulesScopeIncomplete,
+			errors.New("predictioneval: scope carries no association evidence; a pool or session id does not prove an account"))
+	case !s.HasInterval:
+		return errors.Join(ErrOrderedRulesScopeIncomplete,
+			errors.New("predictioneval: scope does not declare its interval endpoints as supplied; an omitted "+
+				"pair decodes to [0,0], which is a real interval and would silently admit only position zero"))
+	case s.IntervalFromPosition > s.IntervalToPosition:
+		return errors.Join(ErrOrderedRulesScopeIncomplete, errors.New("predictioneval: declared interval is empty"))
+	}
+	return nil
+}
+
+// validateAdmissionShape is the half of validateAdmission that reads no
+// supplied byte: three emptiness tests and one slice length.
+//
+// The view kind is NOT here, for the same reason SourceContractVersion is not
+// in the scope's half: its refusal quotes the supplied value.
+func validateAdmissionShape(a CommonAdmission) error {
+	if len(a.SourceReferences) > MaxOrderedRulesSourceReferences {
+		return errors.Join(ErrOrderedRulesOverBound,
+			errors.New("predictioneval: "+strconv.Itoa(len(a.SourceReferences))+
+				" admission source references exceed the bound of "+
+				strconv.Itoa(MaxOrderedRulesSourceReferences)))
+	}
+	switch {
+	case a.ManifestID == "":
+		return errors.Join(ErrOrderedRulesAdmissionIncomplete, errors.New("predictioneval: admission manifest id is empty"))
+	case a.Population == "":
+		return errors.Join(ErrOrderedRulesAdmissionIncomplete, errors.New("predictioneval: admission names no population"))
+	case a.OrderBasis == "":
+		return errors.Join(ErrOrderedRulesAdmissionIncomplete, errors.New("predictioneval: admission names no order basis"))
+	}
+	return nil
+}
+
+func checkPresenceShape(v SuppliedInt64, where string, candidatePosition int64) error {
+	if v.Presence != SuppliedKnown {
+		return nil
 	}
 	if v.Provenance == "" {
 		return errors.Join(ErrOrderedRulesScopeIncomplete,
