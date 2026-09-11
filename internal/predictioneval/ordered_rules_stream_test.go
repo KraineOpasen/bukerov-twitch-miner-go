@@ -388,9 +388,35 @@ func TestOrderedRulesAppendingPostCutoffFactsCannotChangeEvaluation(t *testing.T
 		t.Fatal("the consumed-prefix digest moved when facts beyond the boundary were appended; it must " +
 			"witness only what the traversal read")
 	}
+	// The two whole-subject digests must BOTH move, and for different reasons —
+	// that contrast is what makes the consumed-prefix stability above mean
+	// something rather than being a hash that ignores its inputs.
 	if before.EntropyDigest == later.EntropyDigest {
 		t.Fatal("the whole-trace entropy digest must MOVE when the trace grows — otherwise the " +
 			"consumed-prefix stability above is not distinguishing anything")
+	}
+	// Appending these two candidates does not change which candidates SURVIVE
+	// the boundary — only how many it removed. The two streams must still be
+	// distinguishable: one is a prefix cut short of two candidates, the other a
+	// complete one, and that is different evidence even though what survived is
+	// identical.
+	//
+	// What this does NOT pin, stated because the neighbouring cases would let a
+	// reader assume otherwise: it is not a guard on the digest's dedicated
+	// removal-count line. That line is redundant. The count also reaches the
+	// digest through the boundary qualification, which is appended only when the
+	// count is non-zero and embeds the exact number — so presence separates zero
+	// from non-zero and the text separates every non-zero pair. Dropping the
+	// dedicated line changes no digest for any input, which makes it an
+	// equivalent mutant rather than an untested one.
+	if before.Cutoff.DroppedAtOrAfter != 0 || later.Cutoff.DroppedAtOrAfter != 2 {
+		t.Fatalf("this case needs the boundary's removal count to be the only difference: %d then %d",
+			before.Cutoff.DroppedAtOrAfter, later.Cutoff.DroppedAtOrAfter)
+	}
+	if before.StreamDigest == later.StreamDigest {
+		t.Fatal("the whole-stream digest must MOVE when the boundary removes additional supplied " +
+			"candidates: a stream cut short of two candidates is different evidence from one cut " +
+			"short of none, even though the surviving candidates are identical")
 	}
 }
 
