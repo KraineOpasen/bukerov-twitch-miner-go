@@ -898,6 +898,32 @@ func TestOrderedRulesOversizedInputIsRefusedBeforeItIsRead(t *testing.T) {
 	})
 }
 
+// orRewriteRemovalCount sets a stream's removal count and rewrites the boundary
+// qualification to match, so the forgery stays self-consistent and is refused
+// for the count itself rather than for a qualification that no longer agrees.
+func orRewriteRemovalCount(t *testing.T, st predictioneval.OrderedRulesStream,
+	count int) predictioneval.OrderedRulesStream {
+	t.Helper()
+	was := st.Cutoff.DroppedAtOrAfter
+	if was <= 0 {
+		t.Fatalf("premise: the boundary must really have removed something; it removed %d", was)
+	}
+	old, now := "count="+itoaTest(was), "count="+itoaTest(count)
+	rewritten := false
+	for i, q := range st.Qualifications {
+		if strings.HasSuffix(q, old) {
+			st.Qualifications[i] = strings.TrimSuffix(q, old) + now
+			rewritten = true
+		}
+	}
+	if !rewritten {
+		t.Fatalf("premise: no boundary qualification carried %q, so rewriting it proves nothing; "+
+			"qualifications were %v", old, st.Qualifications)
+	}
+	st.Cutoff.DroppedAtOrAfter = count
+	return st
+}
+
 // TestOrderedRulesAMatchingDigestIsNotProofOfProjection pins the evaluator
 // against a stream that is internally consistent and still impossible.
 //
@@ -1039,6 +1065,27 @@ func TestOrderedRulesAMatchingDigestIsNotProofOfProjection(t *testing.T) {
 			st := cut(t)
 			st.Cutoff.DroppedAtOrAfter = -1
 			return st
+		}},
+		{"more removed than any admissible source could hold", func(t *testing.T) predictioneval.OrderedRulesStream {
+			return orRewriteRemovalCount(t, cut(t), predictioneval.MaxOrderedRulesCandidates+1)
+		}},
+		{"removed plus retained past what a source could hold", func(t *testing.T) predictioneval.OrderedRulesStream {
+			// Each side is individually admissible; their SUM is not, because
+			// every source candidate is either retained or counted as removed.
+			// One candidate before the boundary and one after it, so the
+			// boundary genuinely removed something and genuinely kept
+			// something.
+			st := orProject(t, []predictioneval.OrderedRulesCandidate{
+				orCandidate("c1", 10, orKnownBalance(1000), orOutcome("A", 4), orOutcome("B", 6)),
+				orCandidate("c2", 20, orKnownBalance(1000), orOutcome("A", 4), orOutcome("B", 6)),
+			}, []predictioneval.OrderedRulesIntervention{
+				orIntervention("call-1", 15, predictioneval.InterventionAutoCallStarted,
+					predictioneval.RelevanceProven, "a real call")})
+			if len(st.Candidates) != 1 || st.Cutoff.DroppedAtOrAfter != 1 {
+				t.Fatalf("premise: one kept and one removed; kept %d, removed %d",
+					len(st.Candidates), st.Cutoff.DroppedAtOrAfter)
+			}
+			return orRewriteRemovalCount(t, st, predictioneval.MaxOrderedRulesCandidates)
 		}},
 		{"incomplete coverage without the limitation it requires", func(t *testing.T) predictioneval.OrderedRulesStream {
 			src := orSource(candidates(), nil)

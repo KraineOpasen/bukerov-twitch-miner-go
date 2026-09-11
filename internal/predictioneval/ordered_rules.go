@@ -307,7 +307,18 @@ func orderedRulesInputBudget(s OrderedRulesStream, cfg OrderedRulesConfig,
 // is a claim about evidence that is not there.
 func orderedRulesCutoffImpossible(s OrderedRulesStream) bool {
 	c := s.Cutoff
-	if c.DroppedAtOrAfter < 0 {
+	// The removal count is bounded by arithmetic, not by taste. The projection
+	// refuses a source past MaxOrderedRulesCandidates, and inside it every
+	// source candidate is either retained or counted as removed — one continue,
+	// one append, no third path. So retained plus removed IS the source size,
+	// and a stream claiming more than the ceiling between them describes a
+	// source that could not have been admitted.
+	//
+	// Bounding the count alone would be looser than the truth: it would admit
+	// a stream retaining a hundred candidates while claiming a hundred more
+	// were removed, which is a source of two hundred.
+	if c.DroppedAtOrAfter < 0 ||
+		c.DroppedAtOrAfter > MaxOrderedRulesCandidates-len(s.Candidates) {
 		return true
 	}
 	if !c.Established {
