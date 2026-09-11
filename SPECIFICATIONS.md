@@ -3575,15 +3575,25 @@ longer asserted to be complete: a reflection walk over the scope and admission
 structs requires every plain-string and string-slice field to be refused on
 ingest, so the next retained field added without validation fails without anyone
 remembering a list. The config identifier and the run identifier are the
-exception that proves where the rule lives: they are the only retained strings
-no validator ever reads, so the shape gate refuses them instead, below the two
-ceilings rather than above them — they may legitimately be enormous, and
-scanning a string already past its budget would do the work the bound exists to
-avoid. They carry no per-string LENGTH bound, and that stays true: inventing a
-limit no other rule applies would refuse input nothing else refuses.
-Encodability is a different axis, and without it the same logical run digested
-differently before and after its own round trip while both evaluations returned
-WOULD_ATTEMPT. The check adds no import: ranging over a string is the language's own UTF-8 decode, and a
+exception that proves where the rule lives: neither type is part of the stream,
+so the projection never sees them and no validator reads them — the evaluator
+refuses them directly instead. They carry no per-string LENGTH bound, and that
+stays true: inventing a limit no other rule applies would refuse input nothing
+else refuses. Encodability is a different axis, and without it the same logical
+run digested differently before and after its own round trip while both
+evaluations returned WOULD_ATTEMPT.
+
+WHERE that check sits is the whole subtlety, and the first placement was wrong.
+Putting it in the shape gate put it ahead of the two version comparisons, and
+those identifiers may legitimately approach the aggregate ceiling — so it
+reintroduced attacker-controlled linear work on exactly the early-refusal path
+the digest-ordering repair had made constant-time: measured, a wrong contract
+version beside a 64 MiB valid identifier went from 1.834 microseconds to
+44.7 milliseconds. The scan now runs AFTER both version comparisons and before
+any digest, while the ceilings stay first in the gate — so a string past its
+budget is refused for size rather than read, a wrong version is still settled by
+two string comparisons, and only a run that is otherwise evaluable pays for the
+scan. The check adds no import: ranging over a string is the language's own UTF-8 decode, and a
 genuine U+FFFD — which remains admissible — is distinguished from an invalid
 byte by occupying the three bytes EF BF BD at that index. Like the
 baseline's, these are unkeyed hashes over supplied data: they prevent

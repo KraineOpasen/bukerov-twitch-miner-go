@@ -3279,13 +3279,19 @@ func TestOrderedRulesEveryRetainedScopeAndAdmissionStringIsRevalidatedOnIngest(t
 // These two are also the only retained strings the invariant pass never reads,
 // so the shape gate is the one place that can refuse them.
 //
-// NOT asserted here, stated rather than left as an apparent gap: that the scan
-// runs AFTER the two ceilings. It does — the case sits below them in the gate,
-// deliberately, so a string already past its budget is refused for size rather
-// than scanned — but demonstrating it needs an identifier past
-// MaxOrderedRulesAggregateBytes, and a 128 MiB fixture is two orders of
-// magnitude beyond anything else in this suite. The ordering is argued in the
-// source and unpinned by a test.
+// Position is the whole subtlety here, and the first attempt got it wrong. The
+// scan began life inside the shape gate, which runs BEFORE the two version
+// comparisons — so a wrong contract version beside a 64 MiB valid identifier
+// went from 1.834 µs to 44.7 ms, reintroducing attacker-controlled linear work
+// on exactly the early-refusal path an earlier repair had made constant-time.
+// It now runs after those comparisons, and the case below pins that: a run that
+// is BOTH version-mismatched and unencodable must be refused for the version.
+//
+// The ceilings still come first, in the gate. That half is NOT asserted here,
+// and is stated rather than left as an apparent gap: demonstrating it needs an
+// identifier past MaxOrderedRulesAggregateBytes, and a 128 MiB fixture is two
+// orders of magnitude beyond anything else in this suite, whose largest is
+// 1 MiB. It is argued in the source and unpinned by a test.
 func TestOrderedRulesTheConfigAndTraceIdentifiersMustAlsoBeEncodable(t *testing.T) {
 	cs := []predictioneval.OrderedRulesCandidate{
 		orCandidate("c1", 10, orKnownBalance(1000), orOutcome("A", 4), orOutcome("B", 6)),
@@ -3342,6 +3348,43 @@ func TestOrderedRulesTheConfigAndTraceIdentifiersMustAlsoBeEncodable(t *testing.
 			}
 		})
 	}
+
+	// The ordering that the first attempt at this got wrong. Both faults are
+	// present at once, and the CHEAPER refusal must win: two string comparisons
+	// rather than a scan of an identifier that may approach the aggregate
+	// ceiling. Without this case the scan can drift back ahead of them and
+	// every other case here still passes.
+	t.Run("a version mismatch is decided before either identifier is scanned", func(t *testing.T) {
+		for _, tc := range []struct {
+			name   string
+			broken func(*predictioneval.OrderedRulesStream, *predictioneval.SuppliedDrawTrace)
+			want   string
+		}{
+			{"stream contract version", func(st *predictioneval.OrderedRulesStream,
+				_ *predictioneval.SuppliedDrawTrace) {
+				st.ContractVersion = "WRONG_CONTRACT_VERSION"
+			}, predictioneval.ReasonStreamContractMismatch},
+			{"entropy semantics version", func(_ *predictioneval.OrderedRulesStream,
+				d *predictioneval.SuppliedDrawTrace) {
+				d.EntropySemanticsVersion = "WRONG_ENTROPY_SEMANTICS"
+			}, predictioneval.ReasonEntropySemanticsMismatch},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				st, draws := orProject(t, cs, nil), orDraws()
+				cfg := orConfig(rules, 95, 100, 0, 10)
+				cfg.ConfigID = bad
+				draws.RunID = bad
+				tc.broken(&st, &draws)
+				got := predictioneval.EvaluateOrderedRules(st, cfg, draws)
+				if got.Reason != tc.want {
+					t.Fatalf("a run that is both %s-mismatched and unencodable was refused %q, "+
+						"want %q. The version comparison is two strings against constants; the "+
+						"scan walks identifiers that may approach the aggregate ceiling, and it "+
+						"must not decide first.", tc.name, got.Reason, tc.want)
+				}
+			})
+		}
+	})
 
 	// The positive half: with encodable identifiers, the config and the trace
 	// survive their own round trip with every digest intact.

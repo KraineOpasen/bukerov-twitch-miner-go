@@ -242,22 +242,6 @@ func orderedRulesInputShapeReason(s OrderedRulesStream, cfg OrderedRulesConfig, 
 	case budget.bytes*orderedRulesMaxJSONExpansion > orderedRulesTextCeiling,
 		budget.other > MaxOrderedRulesAggregateBytes:
 		return ReasonStreamBytesOverBound
-	// The config identifier and the run identifier are the only retained
-	// strings no validator ever reads. They carry no per-string bound, for a
-	// reason that still holds — inventing a limit no other rule applies would
-	// refuse input nothing else refuses — but ENCODABILITY is a different axis
-	// from length, and both types carry JSON tags. Invalid UTF-8 in either is
-	// hashed as supplied and then replaced with U+FFFD by the encoder, so the
-	// same logical run digests differently before and after its own round trip:
-	// measured, ConfigDigest e1a65694… became 5251cf94… and the consumed digest
-	// moved with it, with both evaluations returning WOULD_ATTEMPT.
-	//
-	// Deliberately AFTER the two ceilings above. These two can be enormous by
-	// design, and scanning a string that is already past its budget would do
-	// the work the bound exists to avoid — the same length-before-meaning
-	// ordering the rest of this gate applies.
-	case invalidUTF8(cfg.ConfigID), invalidUTF8(d.RunID):
-		return ReasonSuppliedTextNotEncodable
 	}
 	return ""
 }
@@ -675,6 +659,34 @@ func EvaluateOrderedRules(stream OrderedRulesStream, rules OrderedRulesConfig, d
 		return orderedRulesUnreadRefusal(ReasonStreamContractMismatch)
 	case draws.EntropySemanticsVersion != OrderedRulesEntropySemanticsVersion:
 		return orderedRulesUnreadRefusal(ReasonEntropySemanticsMismatch)
+	}
+
+	// ENCODABILITY, last of the cheap refusals and deliberately after the two
+	// comparisons above.
+	//
+	// The config identifier and the run identifier are the only retained
+	// strings no validator ever reads — neither type is part of the stream, so
+	// the projection never sees them and there is no second path to mirror.
+	// They carry no per-string LENGTH bound, for a reason that still holds:
+	// inventing a limit no other rule applies would refuse input nothing else
+	// refuses. Encodability is a different axis. Both types carry JSON tags,
+	// and invalid UTF-8 in either was hashed as supplied and then replaced with
+	// U+FFFD by the encoder, so the same logical run digested differently
+	// before and after its own round trip — ConfigDigest e1a65694… became
+	// 5251cf94…, with both evaluations returning WOULD_ATTEMPT.
+	//
+	// The position is the whole subtlety, and putting it in the shape gate was
+	// wrong. The gate runs BEFORE these version comparisons, and these two
+	// identifiers can legitimately approach the aggregate ceiling — so scanning
+	// them there reintroduced attacker-controlled linear work on exactly the
+	// early-refusal path an earlier repair had made constant-time. Measured at
+	// that position: a wrong contract version beside a 64 MiB valid identifier
+	// took 44.7 ms, against 1.834 µs for the same refusal with a short one.
+	// Here, the version mismatch still costs two string comparisons and the
+	// scan never runs. The ceilings still come first, in the gate, so a string
+	// already past its budget is refused for size rather than read.
+	if invalidUTF8(rules.ConfigID) || invalidUTF8(draws.RunID) {
+		return orderedRulesUnreadRefusal(ReasonSuppliedTextNotEncodable)
 	}
 
 	out := OrderedRulesEvaluation{
