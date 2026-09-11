@@ -209,46 +209,89 @@ func orderedRulesInputShapeReason(s OrderedRulesStream, cfg OrderedRulesConfig, 
 			return ReasonStreamShapeOverBound
 		}
 	}
-	if orderedRulesInputBytes(s, cfg, d) > MaxOrderedRulesAggregateBytes {
+	// One walk, two limits. Both are the projection's own: a single string past
+	// MaxOrderedRulesIdentifierBytes, and the retained total past
+	// MaxOrderedRulesAggregateBytes. The per-string one is not implied by the
+	// aggregate — a 64 MiB provenance note sits well inside a 128 MiB budget
+	// while being a value the projection refuses outright — so checking only
+	// the total left exactly that input to be hashed in full.
+	budget := orderedRulesInputBudget(s, cfg, d)
+	switch {
+	case budget.overLong:
+		return ReasonStreamTextOverBound
+	case budget.bytes > MaxOrderedRulesAggregateBytes:
 		return ReasonStreamBytesOverBound
 	}
 	return ""
 }
 
-// orderedRulesInputBytes sums the retained text the whole-input digests read.
+// orderedRulesTextBudget accumulates the retained text the whole-input digests
+// read, and records whether any single string broke the per-string limit.
+//
+// The split between its two methods is the point. The projection bounds SOME
+// retained strings individually and lets the rest ride on the aggregate budget
+// alone; this mirrors that division field for field, so an input the projection
+// would have admitted is not refused here and one it would have refused is not
+// hashed here. Charging every string individually would break the first half of
+// that; charging none would break the second.
+type orderedRulesTextBudget struct {
+	bytes    int64
+	overLong bool
+}
+
+// charge adds a string the projection bounds only through the aggregate.
+func (b *orderedRulesTextBudget) charge(v ...string) {
+	for _, s := range v {
+		b.bytes += int64(len(s))
+	}
+}
+
+// bound adds a string the projection ALSO bounds individually, with
+// checkIdentifier or checkFreeText.
+func (b *orderedRulesTextBudget) bound(v ...string) {
+	for _, s := range v {
+		if len(s) > MaxOrderedRulesIdentifierBytes {
+			b.overLong = true
+		}
+		b.bytes += int64(len(s))
+	}
+}
+
+// orderedRulesInputBudget walks the retained text the whole-input digests read.
 //
 // It is called only after the count bounds above have passed, so the loops are
-// bounded; each term is a length read, never a copy.
-func orderedRulesInputBytes(s OrderedRulesStream, cfg OrderedRulesConfig, d SuppliedDrawTrace) int64 {
-	bytes := int64(len(s.ContractVersion) + len(s.Scope.Namespace) + len(s.Scope.EpisodeID) +
-		len(s.Scope.AccountContext) + len(s.Scope.AssociationEvidence) +
-		len(s.Scope.SourceContractVersion) + len(s.Scope.Coverage) + len(s.Scope.CoverageDetail))
-	bytes += int64(len(s.Admission.ManifestID) + len(s.Admission.ViewKind) +
-		len(s.Admission.Population) + len(s.Admission.OrderBasis))
-	for _, ref := range s.Admission.SourceReferences {
-		bytes += int64(len(ref))
-	}
-	bytes += int64(len(s.Cutoff.Kind) + len(s.Cutoff.Identity) + len(s.Cutoff.Basis))
-	for _, q := range s.Qualifications {
-		bytes += int64(len(q))
-	}
+// bounded; every term is a length read, never a copy, so even a single enormous
+// string costs one word here rather than a traversal.
+func orderedRulesInputBudget(s OrderedRulesStream, cfg OrderedRulesConfig,
+	d SuppliedDrawTrace) orderedRulesTextBudget {
+	var b orderedRulesTextBudget
+	b.charge(s.ContractVersion, s.Scope.Namespace, s.Scope.EpisodeID, s.Scope.AccountContext,
+		s.Scope.AssociationEvidence, s.Scope.SourceContractVersion, string(s.Scope.Coverage))
+	b.bound(s.Scope.CoverageDetail)
+	b.charge(s.Admission.ManifestID, string(s.Admission.ViewKind), s.Admission.Population,
+		s.Admission.OrderBasis)
+	b.bound(s.Admission.SourceReferences...)
+	b.charge(string(s.Cutoff.Kind), string(s.Cutoff.Basis))
+	b.bound(s.Cutoff.Identity)
+	b.bound(s.Qualifications...)
 	for i := range s.Candidates {
 		c := &s.Candidates[i]
-		bytes += int64(len(c.Identity) + len(c.SourceKind) + len(c.EpisodeMembership) +
-			len(c.Provenance) + len(c.OutcomesPresence) + len(c.OutcomesReason))
-		bytes += suppliedTextBytes(c.Balance) + int64(len(c.Balance.Presence))
+		b.bound(c.Identity, c.Provenance, c.OutcomesReason)
+		b.charge(string(c.SourceKind), string(c.EpisodeMembership), string(c.OutcomesPresence))
+		b.charge(string(c.Balance.Presence))
+		b.bound(c.Balance.Provenance, c.Balance.Reason)
 		for j := range c.Outcomes {
 			o := &c.Outcomes[j]
-			bytes += int64(len(o.Identity) + len(o.Points.Presence))
-			bytes += suppliedTextBytes(o.Points)
+			b.bound(o.Identity, o.Points.Provenance, o.Points.Reason)
+			b.charge(string(o.Points.Presence))
 		}
 	}
-	bytes += int64(len(cfg.ConfigID))
+	b.charge(cfg.ConfigID)
 	for i := range cfg.Detailed {
-		bytes += int64(len(cfg.Detailed[i].Comparator))
+		b.charge(string(cfg.Detailed[i].Comparator))
 	}
-	bytes += int64(len(d.EntropySemanticsVersion) + len(d.RunID))
-	return bytes
+	b.charge(d.EntropySemanticsVersion, d.RunID)
+	return b
 }
 
 // EvaluateOrderedRules re-derives the donor mechanism over a projected stream.

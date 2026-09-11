@@ -811,30 +811,65 @@ func TestOrderedRulesOversizedInputIsRefusedBeforeItIsRead(t *testing.T) {
 			predictioneval.ReasonRuleCountOverBound)
 	})
 
-	// The retained TEXT, not only the counts. Every field below points at the
-	// SAME string, so the budget is exceeded by what would be retained while
-	// the test allocates one copy of it — the sum is over lengths, and Go
-	// strings do not copy on assignment.
+	// The per-string limit, which the aggregate does NOT imply. The projection
+	// refuses a candidate provenance past MaxOrderedRulesIdentifierBytes
+	// outright, and one 64 MiB note sits well inside a 128 MiB budget — so a
+	// gate that checked only the total left exactly that input to be hashed.
+	t.Run("one string past the per-string limit", func(t *testing.T) {
+		over := strings.Repeat("x", predictioneval.MaxOrderedRulesIdentifierBytes+1)
+		st := forged(1)
+		st.Candidates[0].Provenance = over
+
+		// The premise: the projection refuses this very value.
+		c := orCandidate("c1", 10, orKnownBalance(1000), orOutcome("A", 4), orOutcome("B", 6))
+		c.Provenance = over
+		if _, err := predictioneval.ProjectOrderedRulesStream(
+			orSource([]predictioneval.OrderedRulesCandidate{c}, nil), orAdmission()); err == nil {
+			t.Fatal("this case's premise is that the projection refuses this string; it did not")
+		}
+		unread(t, predictioneval.EvaluateOrderedRules(st, cfg, orDraws()),
+			predictioneval.ReasonStreamTextOverBound)
+
+		// Non-vacuity: one byte shorter is admissible, so the bound is the bound.
+		st.Candidates[0].Provenance = over[:len(over)-1]
+		if ev := predictioneval.EvaluateOrderedRules(st, cfg, orDraws()); ev.Reason !=
+			predictioneval.ReasonStreamDigestMismatch {
+			t.Fatalf("reason %q, want %s: a string exactly at the limit is admissible",
+				ev.Reason, predictioneval.ReasonStreamDigestMismatch)
+		}
+	})
+
+	// The retained TEXT in aggregate. Every field below points at the SAME
+	// string, so the budget is exceeded by what would be retained while the
+	// test allocates one copy of it — the sum is over lengths, and Go strings
+	// do not copy on assignment.
+	//
+	// The fields chosen are the ones the projection bounds ONLY through the
+	// aggregate. That is forced rather than arbitrary: with the count bounds
+	// and the per-string limit both in force, every individually-bounded string
+	// in a stream can total at most about 102 MiB, which is under the budget.
+	// So the aggregate check is reachable only through the fields that carry no
+	// per-string limit — which is exactly the division the gate mirrors.
 	t.Run("retained text past the aggregate budget", func(t *testing.T) {
-		chunk := strings.Repeat("x", predictioneval.MaxOrderedRulesIdentifierBytes*2)
+		chunk := predictioneval.SuppliedPresence(
+			strings.Repeat("x", predictioneval.MaxOrderedRulesIdentifierBytes*4))
 		outs := make([]predictioneval.OrderedRulesOutcome, predictioneval.MaxOrderedRulesOutcomes)
 		for i := range outs {
 			outs[i] = predictioneval.OrderedRulesOutcome{
-				Identity: chunk,
-				Points: predictioneval.SuppliedInt64{
-					Presence:               predictioneval.SuppliedKnown,
-					Value:                  1,
-					Provenance:             chunk,
-					Reason:                 chunk,
-					HasAvailableAtPosition: true,
-				},
+				Points: predictioneval.SuppliedInt64{Presence: chunk},
 			}
 		}
 		st := forged(predictioneval.MaxOrderedRulesCandidates)
 		for i := range st.Candidates {
-			st.Candidates[i].Outcomes = outs
+			c := &st.Candidates[i]
+			c.Outcomes = outs
+			c.SourceKind = predictioneval.OrderedRulesSourceKind(chunk)
+			c.EpisodeMembership = predictioneval.OrderedRulesMembership(chunk)
+			c.OutcomesPresence = chunk
+			c.Balance = predictioneval.SuppliedInt64{Presence: chunk}
 		}
-		counted := int64(len(st.Candidates)) * int64(len(outs)) * 3 * int64(len(chunk))
+		perCandidate := int64(4 + len(outs))
+		counted := int64(len(st.Candidates)) * perCandidate * int64(len(chunk))
 		if counted <= predictioneval.MaxOrderedRulesAggregateBytes {
 			t.Fatalf("this case's premise is that the retained text exceeds the budget; it counts "+
 				"%d bytes against %d", counted, int64(predictioneval.MaxOrderedRulesAggregateBytes))

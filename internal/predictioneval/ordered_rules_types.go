@@ -645,6 +645,12 @@ const (
 	// exceeds [MaxOrderedRulesAggregateBytes], the same budget the projection
 	// charges.
 	ReasonStreamBytesOverBound = "STREAM_BYTES_OVER_BOUND"
+	// ReasonStreamTextOverBound is a single supplied string past
+	// [MaxOrderedRulesIdentifierBytes] in a field the projection bounds
+	// individually. The aggregate budget alone does not catch it: one 64 MiB
+	// provenance note sits well inside 128 MiB while being a value the
+	// projection refuses outright.
+	ReasonStreamTextOverBound = "STREAM_TEXT_OVER_BOUND"
 	// ReasonWorkBudgetExceeded covers the evaluated-slot ceiling, which is also
 	// the retained-trace ceiling: see [MaxOrderedRulesWork].
 	ReasonWorkBudgetExceeded = "WORK_BUDGET_EXCEEDED"

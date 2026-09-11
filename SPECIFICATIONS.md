@@ -3251,6 +3251,23 @@ manifest's source references alike. The aggregate byte budget charges payload,
 and payload is not a bound on cardinality: elements with no payload cost nothing
 to admit and still have to be retained, copied and digested.
 
+Those bounds are checked BEFORE the work they bound. The evaluator is exported
+and takes the projected stream by value, so it can be handed one the projection
+never produced; it already refuses such a stream on a digest mismatch, but that
+comparison is circular, because detecting a forgery requires digesting the
+forgery first. What can be bounded is the COST of a forgery, so a shape gate
+runs ahead of every digest and every allocation, using counts and string lengths
+only — each of them a single length read over a number of elements the preceding
+check has already bounded. It mirrors the projection's own limits field for
+field, the per-string limit included, so an input the projection would have
+admitted is not refused there and one it would have refused is not hashed there;
+the per-string limit is not implied by the aggregate, since one 64 MiB note sits
+well inside a 128 MiB budget while being a value the projection refuses outright.
+A refusal from that gate carries no whole-input digest: the model declined to
+read the input, so it attests to nothing about it, and for the same reason the
+gate outranks the contract and digest mismatches — an input too large to read
+cannot be checked for anything else.
+
 **The mechanism.** The outcome vector is the OUTER loop and the rule list the
 inner one. A pool share is `1/(total/points)` — two divisions, never collapsed
 into `points/total`, because in binary64 they differ: for the pool `[9,1]` the
