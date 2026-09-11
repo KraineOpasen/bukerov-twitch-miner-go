@@ -548,21 +548,6 @@ func orderedRulesQualificationsNotDerived(s OrderedRulesStream) bool {
 	return false
 }
 
-// orderedRulesStreamStructureBroken is the stream's zero-byte tier: emptiness
-// tests, integer comparisons and declared flags, over the scope, the admission
-// and every retained candidate and outcome.
-//
-// It is a function of its own because TWO callers need it at two different
-// points: EvaluateOrderedRules runs it before computing the stream digest, and
-// orderedRulesStreamInvariantsBroken runs it again ahead of its own text pass.
-// One definition, so the rules cannot drift between them.
-//
-// An earlier revision said exactly that while the evaluator's call did not
-// exist — the reorder had been reverted and this comment was left describing
-// it. A reviewer found it by grepping the call sites. It is true now.
-//
-// Every check here is one the invariant pass below already makes. Nothing is
-// added, and both callers answer yes or no.
 // orderedRulesPresenceWordUnknown reports a presence word outside the closed
 // set, and it is deliberately a bare comparison rather than a call to
 // checkPresenceVocabulary.
@@ -601,6 +586,45 @@ func orderedRulesPresenceWordUnknown(p SuppliedPresence) bool {
 	}
 }
 
+// orderedRulesStreamIdentitiesAmbiguous reports two retained candidates sharing
+// an identity.
+//
+// It is the evaluator's mirror of the uniqueness pass ProjectOrderedRulesStream
+// runs, and it exists because the two are separate ingests: a stream handed
+// directly to EvaluateOrderedRules never passed through the projection. The
+// invariant pass settles the same question, so nothing here is checked less
+// than before; this only settles it before the hash rather than after.
+//
+// It reads identity bytes — the map hashes them — so it is NOT in the zero-byte
+// tier and must not be moved there. What bounds it is the candidate ceiling and
+// the per-identifier bound, half a megabyte between them.
+func orderedRulesStreamIdentitiesAmbiguous(s OrderedRulesStream) bool {
+	seen := make(map[string]bool, len(s.Candidates))
+	for i := range s.Candidates {
+		id := s.Candidates[i].Identity
+		if seen[id] {
+			return true
+		}
+		seen[id] = true
+	}
+	return false
+}
+
+// orderedRulesStreamStructureBroken is the stream's zero-byte tier: emptiness
+// tests, integer comparisons and declared flags, over the scope, the admission
+// and every retained candidate and outcome.
+//
+// It is a function of its own because TWO callers need it at two different
+// points: EvaluateOrderedRules runs it before computing the stream digest, and
+// orderedRulesStreamInvariantsBroken runs it again ahead of its own text pass.
+// One definition, so the rules cannot drift between them.
+//
+// An earlier revision said exactly that while the evaluator's call did not
+// exist — the reorder had been reverted and this comment was left describing
+// it. A reviewer found it by grepping the call sites. It is true now.
+//
+// Every check here is one the invariant pass below already makes. Nothing is
+// added, and both callers answer yes or no.
 func orderedRulesStreamStructureBroken(s OrderedRulesStream) bool {
 	const where = "retained candidate"
 	if validateScopeShape(s.Scope) != nil || validateAdmissionShape(s.Admission) != nil {
@@ -618,6 +642,17 @@ func orderedRulesStreamStructureBroken(s OrderedRulesStream) bool {
 	switch s.Admission.ViewKind {
 	case ViewChannelCandidateStream, ViewCalculateOnly:
 	default:
+		return true
+	}
+	// The SOURCE CONTRACT, which validateScope settles only after the hash. Its
+	// refusal there quotes the supplied value, which is why it is not in
+	// validateScopeShape and the projection says so. That reason does not reach
+	// here: this tier quotes nothing, so the comparison is length-first against
+	// one short constant and a caller cannot make it cost anything. Measured
+	// against a four-byte unsupported version beside 128 candidates holding
+	// 4 KiB each: 2.314278 ms before and 4.457 µs now, against 7.219 µs for the
+	// identical fault on a two-candidate stream.
+	if s.Scope.SourceContractVersion != OrderedRulesStreamContractVersion {
 		return true
 	}
 	// And the DERIVED boundary — its zero-byte half, which is the whole of that
@@ -957,9 +992,67 @@ func EvaluateOrderedRules(stream OrderedRulesStream, rules OrderedRulesConfig, d
 	if orderedRulesStreamStructureBroken(stream) {
 		return orderedRulesUnreadRefusal(ReasonStreamInvariantViolated)
 	}
+
 	cfg, configReason := normalizeOrderedRulesConfig(rules)
 	if configReason != "" {
 		return orderedRulesUnreadRefusal(configReason)
+	}
+
+	// THE DERIVED QUALIFICATIONS, above the digest and below the config.
+	//
+	// orderedRulesQualificationsNotDerived derives at most five qualifications
+	// from fields the tier above has already checked, builds them itself, and
+	// compares them against a list bounded at MaxOrderedRulesQualifications.
+	// Every comparison is against a short string this package generated, so it
+	// is length-first and an enormous supplied qualification is rejected on
+	// length rather than read. Measured with one fabricated qualification
+	// beside 128 candidates holding 4 KiB each: 2.297362 ms before, 4.575 µs
+	// now, against 7.01 µs for the same fault on two candidates.
+	//
+	// It sits BELOW the config rather than in the zero-byte tier, and that
+	// position is pinned by a case. Putting it in the tier made a stream fault
+	// beat an unusable config, inverting a precedence this package had already
+	// established and tested — the config is arithmetic over a bounded rule
+	// count and decides first. Cost and precedence are different questions, and
+	// moving a check for the first reason silently answered the second.
+	if orderedRulesQualificationsNotDerived(stream) {
+		return orderedRulesUnreadRefusal(ReasonStreamInvariantViolated)
+	}
+
+	// THE BOUNDED IDENTITY TIER, and it is deliberately NOT part of the
+	// zero-byte tier above.
+	//
+	// Two candidates repeating an identity is a stream the projection could not
+	// have produced, and ProjectOrderedRulesStream refuses it before its own
+	// payload scans. That fix did not reach here, because EvaluateOrderedRules
+	// is a SEPARATE ingest: a caller can build a stream and hand it straight in
+	// without the projection ever running. The pre-digest tier checked only
+	// that each identity is non-empty, so two three-byte duplicates were
+	// settled by the invariant pass with the whole stream already hashed —
+	// 8.434 µs on two candidates against 3.549091 ms on 128 holding 4 KiB each.
+	// It is 1.043 µs and 31.909 µs now.
+	//
+	// It gets its own tier because it is NOT free, and folding it into the
+	// zero-byte one would repeat the error this file made with the cutoff's
+	// UTF-8 scan exactly one commit ago. Hashing an identity into a map reads
+	// its bytes. The envelope is MaxOrderedRulesCandidates x
+	// MaxOrderedRulesIdentifierBytes, half a megabyte, against a stream digest
+	// that traverses up to the whole retained ceiling — the same asymmetry the
+	// projection's repair was taken on, and the reason this is worth a tier
+	// rather than a note.
+	//
+	// The cost it adds to a stream that is NOT refused here is real and is not
+	// hidden: a valid stream now walks its identities twice, once here and once
+	// in the invariant pass, both inside the same bounded envelope.
+	//
+	// It runs AFTER the zero-byte tier and not before it, which is the whole
+	// point of there being two. The first arrangement had it first, and that
+	// made every zero-byte fault pay half a megabyte of identity hashing before
+	// a comparison against a constant could answer: an unsupported source
+	// contract went from 4.457 µs to 36.151 µs on the same input. Cheapest
+	// decision first, at every tier, is the rule this file keeps relearning.
+	if orderedRulesStreamIdentitiesAmbiguous(stream) {
+		return orderedRulesUnreadRefusal(ReasonStreamInvariantViolated)
 	}
 
 	streamDigest := orderedRulesStreamDigest(stream)

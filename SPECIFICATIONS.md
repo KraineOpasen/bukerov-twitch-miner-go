@@ -4006,6 +4006,40 @@ these refusals no longer carry the recomputed stream digest, so the two-call
 oracle does not function for them. That is the same narrowing the structural
 tier already made, and narrower is the safe direction.
 
+**Three more constant-size faults were being charged for the whole payload, and
+one of them was a projection/ingest divergence.** A stream declaring an
+unsupported `SourceContractVersion`, one carrying a fabricated qualification,
+and two candidates repeating an identity were each settled only after the stream
+was hashed: measured against 128 candidates holding 4 KiB each, 2.314278 ms,
+2.297362 ms and 3.549091 ms respectively, for faults of four bytes, one string
+and three bytes. They are 4.457 µs, 4.575 µs and 31.909 µs now. The contract
+comparison joins the zero-byte tier, since that tier quotes nothing and
+`validateScope`'s own refusal — which does quote, and is why the check is absent
+from `validateScopeShape` — is not the constraint here.
+
+The other two do not join it, and the reasons differ. The qualification
+derivation is cheap enough to, but putting it there made a stream fault beat an
+unusable config, inverting a precedence this model had already established and
+pinned; cost and precedence are different questions, and moving a check for the
+first silently answered the second. It sits below the config and above the hash.
+Candidate uniqueness cannot join it at all: hashing an identity into a map reads
+its bytes, so it is a BOUNDED tier of its own —
+`MaxOrderedRulesCandidates` x `MaxOrderedRulesIdentifierBytes`, half a megabyte
+against a digest that traverses the whole retained ceiling. Folding it into the
+zero-byte tier would have repeated the cutoff mistake above exactly one commit
+later, and the first arrangement put it AHEAD of that tier, which made every
+zero-byte fault pay half a megabyte before a comparison against a constant could
+answer — 4.457 µs became 36.151 µs on the same input. Cheapest decision first,
+at every tier.
+
+Uniqueness is the fourth instance of one recurring defect in this work: a rule
+present on one of the two paths and not the other. `ProjectOrderedRulesStream`
+refused repeated identities before its own payload scans; `EvaluateOrderedRules`
+is a separate ingest that a caller reaches without the projection ever running,
+and the repair had not been mirrored there. A valid stream now walks its
+identities twice, once in that tier and once in the invariant pass, both inside
+the same bounded envelope, and that cost is stated rather than hidden.
+
 **Two published claims about the evaluator's order were false, and both are
 retracted here.** The first said the stream digest "is not deferred and cannot
 be: it IS the comparison". The comparison cannot precede its own hash, but that

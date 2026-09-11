@@ -973,18 +973,6 @@ func checkPresenceVocabulary(v SuppliedInt64, where string) error {
 	}
 }
 
-// checkPresenceShape is the half of checkPresence that reads no supplied byte.
-//
-// It is its own function so the projection's structural pass can run it over
-// every nested value before any payload text is scanned, without a second copy
-// of the rules to drift from. An emptiness test, a declared flag and an integer
-// comparison, and the only free text any message carries is the caller-supplied
-// `where` the projection builds itself.
-//
-// The Presence comparison is length-first like every Go string comparison, so
-// an enormous supplied presence falls out of the KNOWN branch in constant time
-// rather than being read here; the vocabulary that refuses it lives in
-// checkPresence, after the bound.
 // checkInterventionVocabulary bounds and validates the interventions' two
 // closed-set fields.
 //
@@ -1102,6 +1090,18 @@ func validateAdmissionShape(a CommonAdmission) error {
 	return nil
 }
 
+// checkPresenceShape is the half of checkPresence that reads no supplied byte.
+//
+// It is its own function so the projection's structural pass can run it over
+// every nested value before any payload text is scanned, without a second copy
+// of the rules to drift from. An emptiness test, a declared flag and an integer
+// comparison, and the only free text any message carries is the caller-supplied
+// `where` the projection builds itself.
+//
+// The Presence comparison is length-first like every Go string comparison, so
+// an enormous supplied presence falls out of the KNOWN branch in constant time
+// rather than being read here; the vocabulary that refuses it lives in
+// checkPresence, after the bound.
 func checkPresenceShape(v SuppliedInt64, where string, candidatePosition int64) error {
 	if v.Presence != SuppliedKnown {
 		return nil

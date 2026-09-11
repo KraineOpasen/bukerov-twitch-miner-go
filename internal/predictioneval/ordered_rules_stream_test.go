@@ -4387,6 +4387,18 @@ func TestOrderedRulesARefusalDecidedBeforeTheTraversalAttestsToNothing(t *testin
 		st.SelectionDigest = predictioneval.EvaluateOrderedRules(st, cfg, orDraws()).StreamDigest
 		return st
 	}
+	// Two candidates, because cs above holds one and a duplicate needs a pair.
+	duplicateIdentity := func(t *testing.T) predictioneval.OrderedRulesStream {
+		t.Helper()
+		st := orProject(t, []predictioneval.OrderedRulesCandidate{
+			orCandidate("c1", 10, orKnownBalance(1000), orOutcome("A", 4), orOutcome("B", 6)),
+			orCandidate("c2", 20, orKnownBalance(1000), orOutcome("A", 4), orOutcome("B", 6)),
+		}, nil)
+		st.Candidates[1].Identity = st.Candidates[0].Identity
+		st.SelectionDigest = predictioneval.EvaluateOrderedRules(st, cfg, orDraws()).StreamDigest
+		return st
+	}
+
 	badPresence := func(t *testing.T) predictioneval.OrderedRulesStream {
 		t.Helper()
 		return shortFault(t, func(st *predictioneval.OrderedRulesStream) {
@@ -4416,10 +4428,12 @@ func TestOrderedRulesARefusalDecidedBeforeTheTraversalAttestsToNothing(t *testin
 		// carries nothing at all, and `digest` says so.
 		{"config carries no default", orProject(t, cs, nil), noDefault, 0,
 			predictioneval.ReasonConfigDefaultNotSupplied, false},
-		// The invariant pass runs after the comparison, so this one verified a
-		// digest to get where it was refused and reports it.
+		// A fabricated qualification is now settled ABOVE the digest too — the
+		// derivation check moved into the structural tier — so this row carries
+		// nothing either. It used to be the table's only post-digest row; the
+		// unencodable cutoff identity below is what plays that part now.
 		{"stream invariants broken", forge(t), cfg, 0,
-			predictioneval.ReasonStreamInvariantViolated, true},
+			predictioneval.ReasonStreamInvariantViolated, false},
 		// The SAME reason code, decided in a different tier, and that is why
 		// both rows are here. A presence word outside the closed set is a
 		// constant-size fault that checkPresenceShape cannot see — it returns
@@ -4441,6 +4455,24 @@ func TestOrderedRulesARefusalDecidedBeforeTheTraversalAttestsToNothing(t *testin
 			cfg, 0, predictioneval.ReasonStreamInvariantViolated, false},
 		{"stream declares a cutoff basis outside the closed set", shortFault(t,
 			func(st *predictioneval.OrderedRulesStream) { st.Cutoff.Basis = "NOT-A-BASIS" }),
+			cfg, 0, predictioneval.ReasonStreamInvariantViolated, false},
+		// The SOURCE CONTRACT, settled above the digest by a comparison against
+		// one short constant. validateScope settles it too, but only after the
+		// hash, and its refusal quotes the supplied value — which is why the
+		// tier compares rather than validates. A four-byte unsupported version
+		// beside 128 candidates holding 4 KiB each cost 2.314278 ms; 4.457 µs
+		// now.
+		{"stream declares an unsupported source contract", shortFault(t,
+			func(st *predictioneval.OrderedRulesStream) { st.Scope.SourceContractVersion = "NOPE" }),
+			cfg, 0, predictioneval.ReasonStreamInvariantViolated, false},
+		// Two candidates sharing an identity, settled above the digest by the
+		// bounded identity tier. ProjectOrderedRulesStream already refused this
+		// before its own payload scans; EvaluateOrderedRules is a SEPARATE
+		// ingest and did not, so a stream handed straight in was hashed whole
+		// first — 3.549091 ms on 128 candidates holding 4 KiB each, 31.909 µs
+		// now. That tier is bounded, not free, which is why it is its own and
+		// not part of the zero-byte one.
+		{"stream repeats a candidate identity", duplicateIdentity(t),
 			cfg, 0, predictioneval.ReasonStreamInvariantViolated, false},
 		// And the one part of the boundary invariant that is NOT in the
 		// zero-byte tier, pinned as digest=true for exactly that reason. The
@@ -4506,9 +4538,13 @@ func TestOrderedRulesARefusalDecidedBeforeTheTraversalAttestsToNothing(t *testin
 			t.Fatalf("premise: the fixture must project a boundary and qualifications; got %+v / %v",
 				st.Cutoff, st.Qualifications)
 		}
-		// One fabricated qualification, which the DERIVATION check refuses —
-		// that check lives in the invariant pass, below the digest, so the
-		// stream still passes the structural tier and both routes are reachable.
+		// One fabricated qualification, which the DERIVATION check refuses. That
+		// check sits ABOVE the digest and BELOW the config, so this one stream
+		// reaches both routes: with a usable config it is refused for its
+		// qualifications, and with an unusable one the config answers first.
+		// Neither refusal may hand back the boundary or the qualifications the
+		// projection really did derive, which is what the fixture above exists
+		// to make real rather than invented.
 		st.Qualifications = append(st.Qualifications, "FABRICATED")
 		st.SelectionDigest = predictioneval.EvaluateOrderedRules(st, cfg, orDraws()).StreamDigest
 
