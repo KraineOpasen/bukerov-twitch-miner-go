@@ -3587,6 +3587,65 @@ func TestOrderedRulesACheapRefusalIsNotPaidForWithTheWholePayload(t *testing.T) 
 		}
 	})
 
+	// A closed-set word settled at its bound, ahead of the identity pass that
+	// the projection runs before validateAdmission. The evaluator's own tier
+	// already compared both of these; the projection did not, which made a
+	// four-byte view kind cost a walk of every candidate — 3.28 µs on two
+	// against 459.124 µs on 128 holding 4 KiB each, and 15.646 µs after.
+	// Coverage was the same defect one step earlier: 1.527 µs, 75.238 µs,
+	// 15.9 µs.
+	t.Run("an unsupported vocabulary word is refused before the candidate identities", func(t *testing.T) {
+		duplicated := []predictioneval.OrderedRulesCandidate{
+			orCandidate("same", 10, orKnownBalance(1000), orOutcome("A", 4), orOutcome("B", 6)),
+			orCandidate("same", 20, orKnownBalance(1000), orOutcome("A", 4), orOutcome("B", 6)),
+		}
+		// The premise: the candidate fault really is raised on its own, under
+		// its OWN sentinel, so the two are told apart by which rule fired.
+		if _, err := predictioneval.ProjectOrderedRulesStream(orSource(duplicated, nil),
+			orAdmission()); !errors.Is(err, predictioneval.ErrOrderedRulesDuplicateIdentity) {
+			t.Fatalf("premise: the candidates alone must be refused as duplicated; got %v", err)
+		}
+
+		for _, c := range []struct {
+			name     string
+			mutate   func(*predictioneval.OrderedRulesSource, *predictioneval.CommonAdmission)
+			aloneErr error
+		}{
+			{"admission view kind", func(_ *predictioneval.OrderedRulesSource, a *predictioneval.CommonAdmission) {
+				a.ViewKind = "NOT-A-VIEW-KIND"
+			}, predictioneval.ErrOrderedRulesVocabulary},
+			// This one does NOT discriminate the move, and saying so is the
+			// point. Coverage is settled by validateScope, which already ran
+			// before the identity pass, so removing the tier's comparison
+			// leaves this case green — mutation-verified. It is here because
+			// the cost was real (75.238 µs to 15.9 µs) and because it fails if
+			// validateScope is ever moved BELOW the identities.
+			{"scope coverage", func(src *predictioneval.OrderedRulesSource, _ *predictioneval.CommonAdmission) {
+				src.Scope.Coverage = "NOT-A-COVERAGE"
+			}, predictioneval.ErrOrderedRulesVocabulary},
+		} {
+			t.Run(c.name, func(t *testing.T) {
+				clean, cleanAdm := orSource(cs, nil), orAdmission()
+				c.mutate(&clean, &cleanAdm)
+				if _, err := predictioneval.ProjectOrderedRulesStream(clean,
+					cleanAdm); !errors.Is(err, c.aloneErr) {
+					t.Fatalf("premise: the word alone must be refused %v; got %v", c.aloneErr, err)
+				}
+
+				both, bothAdm := orSource(duplicated, nil), orAdmission()
+				c.mutate(&both, &bothAdm)
+				if _, err := predictioneval.ProjectOrderedRulesStream(both,
+					bothAdm); !errors.Is(err, predictioneval.ErrOrderedRulesVocabulary) {
+					t.Fatalf("a source with a word outside its closed set AND a repeated candidate "+
+						"identity was refused %v. The word is bounded two lines above the "+
+						"comparison, so settling it costs one comparison against a short "+
+						"constant; the identity pass walks every candidate and hashes each "+
+						"identity. The cheap decision comes first.", err)
+				}
+			})
+		}
+	})
+
 	// The other side of that move, and the reason it stops where it does. A
 	// closed-set word is one comparison against a string already bounded, so
 	// the vocabulary tier stays ahead of the identities: a source that fails it

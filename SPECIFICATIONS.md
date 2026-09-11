@@ -4006,6 +4006,25 @@ these refusals no longer carry the recomputed stream digest, so the two-call
 oracle does not function for them. That is the same narrowing the structural
 tier already made, and narrower is the safe direction.
 
+**The projection was missing two closed-set comparisons the evaluator already
+made.** A four-byte unsupported `ViewKind` was bounded in the vocabulary tier and
+then settled only by `validateAdmission`, which runs after the candidate
+vocabulary pass AND the identity pass — so a constant-size fault paid for a walk
+of every candidate: 3.28 µs on two candidates against 459.124 µs on 128 holding
+4 KiB each, and 15.646 µs once the comparison moved to its bound. `Coverage` was
+the same defect one step earlier, at 1.527 µs against 75.238 µs and 15.9 µs now;
+its gap is smaller only because `validateScope` precedes the identity pass and
+`validateAdmission` does not. Both are `checkCoverageVocabulary` and
+`checkViewKindVocabulary` now — one definition, two callers, the shape every
+other vocabulary check in this package already had. The bound must still come
+first, because both refusals quote the value.
+
+This is the SIXTH time a rule has been present on one of the two ingest paths and
+absent from the other, and the first where the projection was the one missing it:
+the previous five went the other way. Every one was found by a reviewer. The
+count is the useful part — a rule added to one path is not a rule added, and this
+model has now produced that defect six times across six different rules.
+
 **The tier was never zero-byte, and the name outlived the truth by three
 commits.** Emptiness tests and declared flags really do read nothing, and that
 is what the name described when it was coined. The closed-set comparisons that

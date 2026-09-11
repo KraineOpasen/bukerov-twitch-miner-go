@@ -300,6 +300,32 @@ func ProjectOrderedRulesStream(source OrderedRulesSource, admission CommonAdmiss
 	if err := checkFreeText(string(admission.ViewKind), "admission view kind"); err != nil {
 		return OrderedRulesStream{}, err
 	}
+	// AND THEIR CLOSED SETS, here rather than only in validateScope and
+	// validateAdmission below.
+	//
+	// Both words are bounded by the two lines above, which is the only reason
+	// their refusals may quote them; settling them now costs one comparison
+	// against a short constant. Leaving it to the validators meant a four-byte
+	// unsupported view kind was refused only after the candidate vocabulary
+	// tier AND the identity pass had walked every candidate — 3.28 µs on two
+	// candidates against 459.124 µs on 128 holding 4 KiB each; it is 15.646 µs
+	// now. Coverage was the same defect one step earlier, at 1.527 µs against
+	// 75.238 µs and 15.9 µs now, the gap smaller only because validateScope
+	// precedes the identity pass and validateAdmission does not. What remains
+	// in both is the aggregate charge and the constant-bounded tier walking the
+	// candidates, which the ceilings bound.
+	//
+	// The evaluator's constant-bounded tier already compared both. This is the
+	// sixth time a rule has been present on one of these two paths and absent
+	// from the other, and the first where the projection was the one missing
+	// it — the previous five went the other way. A reviewer found it, as with
+	// the five before.
+	if err := checkCoverageVocabulary(source.Scope); err != nil {
+		return OrderedRulesStream{}, err
+	}
+	if err := checkViewKindVocabulary(admission); err != nil {
+		return OrderedRulesStream{}, err
+	}
 	// THE CANDIDATE VOCABULARY NEXT.
 	//
 	// Four closed-set fields per candidate. Each is length-bounded first —
@@ -725,6 +751,16 @@ func validateScope(s OrderedRulesScope) error {
 			errors.New("predictioneval: scope declares source contract "+strconv.Quote(s.SourceContractVersion)+
 				", not "+strconv.Quote(OrderedRulesStreamContractVersion)))
 	}
+	return checkCoverageVocabulary(s)
+}
+
+// checkCoverageVocabulary settles the scope's coverage against its closed set.
+//
+// One definition, two callers, like every other vocabulary check here: the full
+// validator runs it last, and the projection's vocabulary tier runs it as soon
+// as checkFreeText has bounded the word. The bound has to come first because
+// the refusal QUOTES the value.
+func checkCoverageVocabulary(s OrderedRulesScope) error {
 	switch s.Coverage {
 	case CoverageCompleteDeclared, CoverageGapsPresent, CoverageTruncatedPrefix:
 		return nil
@@ -733,6 +769,18 @@ func validateScope(s OrderedRulesScope) error {
 	default:
 		return errors.Join(ErrOrderedRulesVocabulary,
 			errors.New("predictioneval: scope coverage "+strconv.Quote(string(s.Coverage))))
+	}
+}
+
+// checkViewKindVocabulary settles the admission's view kind against its closed
+// set, on the same one-definition-two-callers footing as the coverage check.
+func checkViewKindVocabulary(a CommonAdmission) error {
+	switch a.ViewKind {
+	case ViewChannelCandidateStream, ViewCalculateOnly:
+		return nil
+	default:
+		return errors.Join(ErrOrderedRulesVocabulary,
+			errors.New("predictioneval: admission view kind "+strconv.Quote(string(a.ViewKind))))
 	}
 }
 
@@ -761,11 +809,8 @@ func validateAdmission(a CommonAdmission) error {
 	// below. It is compared against a closed set, but its error QUOTES the
 	// value, so it needs checkFreeText to have run first — which is why it sits
 	// here and not in the shape half the projection runs before any scan.
-	switch a.ViewKind {
-	case ViewChannelCandidateStream, ViewCalculateOnly:
-	default:
-		return errors.Join(ErrOrderedRulesVocabulary,
-			errors.New("predictioneval: admission view kind "+strconv.Quote(string(a.ViewKind))))
+	if err := checkViewKindVocabulary(a); err != nil {
+		return err
 	}
 
 	for i, ref := range a.SourceReferences {
