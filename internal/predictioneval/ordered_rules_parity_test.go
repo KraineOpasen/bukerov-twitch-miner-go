@@ -81,7 +81,24 @@ func TestOrderedRulesEverythingTheProjectionAdmitsTheEvaluatorAdmits(t *testing.
 	// The per-string BOUND is delivered by boundField below instead, one field
 	// class at a time, because a reviewer pointed out that padding these three
 	// proved nothing about the fields that actually matter here.
-	textLens := []int{0, 64}
+	//
+	// ONE BYTE, NOT ZERO, AND THAT IS A REPAIR RATHER THAN A STYLE CHOICE.
+	// This read {0, 64}, and every single case with 0 was REFUSED BY THE
+	// PROJECTION: pad(0) is the empty string, and checkPresenceShape requires a
+	// KNOWN value to carry provenance. Measured over the whole space — 1296
+	// constructed, 648 refused, ALL 648 of them the textLen-0 half, every one
+	// with "points is KNOWN but carries no provenance". So the dimension
+	// documented as free-text length had exactly one live value: every stream
+	// this property ever evaluated carried 64 bytes. It doubled the loop count
+	// and added no coverage.
+	//
+	// That is the same shape as the two findings that produced this file's
+	// other repairs — a dimension that looks like coverage and is not — and it
+	// survived because the only guard counted PROJECTIONS, of which there were
+	// plenty. One is the smallest provenance the projection admits, so both
+	// values are now live and the perTextLen counter below fails if that ever
+	// stops being true.
+	textLens := []int{1, 64}
 	// WHICH FIELD CLASS CARRIES A BOUND-LENGTH STRING.
 	//
 	// The first version of this case padded provenance, the outcomes reason and
@@ -145,6 +162,9 @@ func TestOrderedRulesEverythingTheProjectionAdmitsTheEvaluatorAdmits(t *testing.
 	// One counter per view, so a pair that stops projecting cannot hide behind
 	// the other — which is the whole reason this dimension exists.
 	perView := map[string]int{}
+	// And one per free-text length, for the reason written above: this
+	// dimension was silently dead in one of its two values.
+	perTextLen := map[int]int{}
 	// One counter per field class, so a class that never projects cannot hide
 	// behind another that did.
 	atBound := map[string]int{}
@@ -269,6 +289,7 @@ func TestOrderedRulesEverythingTheProjectionAdmitsTheEvaluatorAdmits(t *testing.
 							}
 							projected++
 							perView[string(sh.view)]++
+							perTextLen[n]++
 							if stream.Cutoff.Established {
 								cutoffSeen++
 							}
@@ -329,6 +350,17 @@ func TestOrderedRulesEverythingTheProjectionAdmitsTheEvaluatorAdmits(t *testing.
 		}
 	}
 
+	// EVERY free-text length must have projected at least once. Without this the
+	// dimension can go dead in one value and nothing notices, which is exactly
+	// what happened with 0.
+	for _, n := range textLens {
+		if perTextLen[n] == 0 {
+			t.Fatalf("no source projected with free text of %d bytes, so that value of the "+
+				"textLens dimension contributes nothing and the dimension is smaller than it "+
+				"looks. This guard exists because the value 0 was dead here: pad(0) is empty, "+
+				"and a KNOWN supplied value must carry provenance.", n)
+		}
+	}
 	// EVERY field class must have reached the bound in at least one projected
 	// stream. One counter per class rather than one for all of them, because a
 	// single counter is what let the first version of this case pass while no
@@ -368,5 +400,6 @@ func TestOrderedRulesEverythingTheProjectionAdmitsTheEvaluatorAdmits(t *testing.
 		}
 	}
 	t.Logf("%d projected streams evaluated; %d with a boundary, %d with a non-KNOWN balance; "+
-		"at the per-string bound: %v; per view: %v", projected, cutoffSeen, nonKnownSeen, atBound, perView)
+		"at the per-string bound: %v; per view: %v; per free-text length: %v",
+		projected, cutoffSeen, nonKnownSeen, atBound, perView, perTextLen)
 }

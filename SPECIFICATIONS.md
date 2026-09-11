@@ -4145,8 +4145,15 @@ lengths, the three balance presence words, the three coverages, whether a
 boundary exists, and WHICH FIELD CLASS carries a string at the per-string bound —
 projects each source, and requires that a stream the projection ADMITTED never
 meets an **ingest-validation** refusal: contract or semantics mismatch, shape,
-bytes, text, invariant or digest mismatch. 324 sources project, 162 with a
-boundary, 216 with a non-KNOWN balance.
+bytes, text, invariant or digest mismatch. **1,296 sources project, 648 with a
+boundary, 864 with a non-KNOWN balance, 648 under each of the two views and 648
+at each free-text length.**
+
+Those figures are current, and the sentence they replaced was not. It said 324,
+which was true of the head it was written on and false one dimension later —
+the twelfth stale sibling on this work, and the first found by a reviewer doing
+arithmetic on the loop bounds rather than reading the prose. Every figure in
+this section is now the test's own logged output on the current head.
 
 **The bound dimension is a correction, and the counter that was supposed to
 protect it was the thing at fault.** The first version of this case padded three
@@ -4459,10 +4466,31 @@ and every admission a channel candidate stream, so the
 `CALCULATE_ONLY`/`CALCULATE_SNAPSHOT` pair was projected by a separate case and
 never evaluated at all — while source-kind/view compatibility is one of the six
 rules the evaluator copies inline. The space now crosses both valid pairs, with
-a counter per view: 648 projected streams, 324 under each. Mutation-verified with
-the reviewer's own named mutant — an evaluator rejecting every calculate-only
-stream with the existing invariant reason — which used to leave the case green
-and now fails 324 of them.
+a counter per view: 1,296 projected streams, 648 under each. Mutation-verified
+with the reviewer's own named mutant — an evaluator rejecting every
+calculate-only stream with the existing invariant reason — which used to leave
+the case green and now fails every calculate-only case.
+
+**And a dimension of this case was dead, which the same reviewer's arithmetic
+exposed without quite naming.** It counted 1,296 constructed combinations
+against a logged 648 and asked which condition accounted for the gap. The
+answer: `textLens` was `{0, 64}`, and **every one of the 648 textLen-0 cases was
+refused by the projection** — `pad(0)` is the empty string, and
+`checkPresenceShape` requires a KNOWN value to carry provenance. Measured over
+the whole space: 1,296 constructed, 648 refused, all 648 of them that half, all
+with *"points is KNOWN but carries no provenance"*.
+
+So the dimension documented as free-text length had exactly one live value.
+Every stream this property ever evaluated carried 64 bytes of it. The dimension
+doubled the loop count and contributed nothing — and it survived because the
+only non-vacuity guard counted PROJECTIONS, of which there were 648.
+
+That is the same shape as the two findings this case was already repaired for:
+something that looks like coverage and is not. It is now `{1, 64}`, one byte
+being the smallest provenance the projection admits, with a per-length counter
+that fails naming the dead value. Mutation-verified by restoring 0: the guard
+fires. The space genuinely doubles as a result — 648 evaluated streams to
+1,296 — which is the measure of what the dead value was costing.
 
 **What the parity property still does NOT cover, stated rather than left to be
 discovered.** The second reviewer, asked directly whether the rotation has gaps,
