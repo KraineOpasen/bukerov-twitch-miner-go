@@ -622,8 +622,21 @@ func orderedRulesPresenceWordUnknown(p SuppliedPresence) bool {
 // multiplies that by the outcome ceiling, 32 MiB nominally — but the shape gate
 // above has already charged EVERY supplied stream string against
 // orderedRulesTextCeiling at its worst-case encoded width, so the real cap on
-// both passes together is that aggregate, about 21 MiB of raw text, and it is
-// the same text orderedRulesStreamDigest below would have read anyway.
+// both passes together is that aggregate, about 21 MiB of raw text.
+//
+// It is NOT true that this reads no more than orderedRulesStreamDigest, and an
+// earlier draft of this comment said so. A map hit hashes the probe AND then
+// compares its bytes against the stored key, so the duplicate that ends this
+// tier is read roughly three times over — twice hashed, once compared — where
+// the digest would hash each occurrence once. On a stream that is nothing but
+// two maximum-length equal identities, this tier reads MORE supplied bytes than
+// the digest it precedes. A reviewer checked the argument rather than the
+// wording, which is the correction this comment needed.
+//
+// The claim that survives is the one the tier is actually for: what it reads is
+// bounded by the same aggregate the shape gate already charged, with a small
+// constant factor for the map, and the refusal it reaches costs that bounded
+// pass INSTEAD OF a whole-stream hash followed by the same pass.
 func orderedRulesStreamIdentitiesAmbiguous(s OrderedRulesStream) bool {
 	seen := make(map[string]bool, len(s.Candidates))
 	for i := range s.Candidates {
@@ -720,10 +733,21 @@ func orderedRulesStreamStructureBroken(s OrderedRulesStream) bool {
 	// it, and no further. The supplied version's LENGTH is the caller's, like
 	// every other supplied string; what is not the caller's is the WORK, which
 	// this comment said wrongly on its first attempt and which is the same
-	// conflation the paragraph above exists to correct. A longer version fails
-	// on length, and this check runs once per stream rather than once per
-	// candidate, so neither the length nor the count can raise its cost.
-	// Measured
+	// conflation the paragraph above exists to correct.
+	//
+	// AND THE SECOND ATTEMPT WAS WRONG TOO, in the narrow range the first one
+	// was careless about. It said no supplied length could raise this check's
+	// cost. Go's string equality compares lengths first, so a value SHORTER
+	// than OrderedRulesStreamContractVersion is settled without reading a byte
+	// — but one of exactly that length is compared byte for byte, so growing a
+	// supplied value from one byte to nine does raise the work. A reviewer
+	// caught it in the comment that exists to warn about this exact mistake,
+	// which is the third time the conflation has been written here.
+	//
+	// What is true: the comparison work is bounded above by the length of
+	// OrderedRulesStreamContractVersion — a constant of this package, not a
+	// quantity the caller chooses — and the check runs once per stream rather
+	// than once per candidate. Measured
 	// against a four-byte unsupported version beside 128 candidates holding
 	// 4 KiB each: 2.314278 ms before and 4.457 µs now, against 7.219 µs for the
 	// identical fault on a two-candidate stream.

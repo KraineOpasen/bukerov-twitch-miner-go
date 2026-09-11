@@ -4112,6 +4112,49 @@ sixth found by a reviewer rather than here; more to the point it is the second
 time the same defect class was repaired on one level and left standing one level
 down. Fixing a path is not fixing the class.
 
+**The EIGHTH was the outcome identities, on the projection side, and it is the
+third time this same defect class has been repaired one level at a time.**
+`ProjectOrderedRulesStream` had its candidate-uniqueness pass hoisted above the
+admission references, the boundary and the intervention details one round
+earlier; per-candidate OUTCOME uniqueness stayed in the payload loop far below.
+So a duplicate in the last candidate was reached only after all of that
+auxiliary text had been scanned — measured on the identical source, 1,024
+references of 4 KiB beside 1,024 interventions carrying 4 KiB of identity and
+4 KiB of detail: **8.341694 ms**, against **133.339 µs** for a repeated
+*candidate* identity on that very source, and 8.497 µs for the same outcome
+fault with the auxiliary text removed. The gap was the auxiliary text, entire.
+It is **139.747 µs** now, which is the candidate control's own figure — that
+equality is the evidence the text is no longer read.
+
+It is a SECOND walk beside the candidate pass rather than folded into it, mirroring
+`orderedRulesStreamIdentitiesAmbiguous` on the evaluator side, and for the
+measured reason given there: folded, a repeated candidate identity pays for
+every preceding candidate's outcomes first. `checkIdentifier` stays ahead of the
+map on both passes, so a length bound precedes anything that hashes or quotes.
+
+**Two claims of this document and of the source were falsified by reviewers on
+the same head and are corrected rather than edited away.**
+
+The first said that no supplied length could raise the cost of the
+`SourceContractVersion` comparison. Go compares string lengths first, so a value
+shorter than `OrderedRulesStreamContractVersion` is settled without reading a
+byte — but one of exactly that length is compared byte for byte, so growing a
+supplied value from one byte to nine does raise the work. It is bounded above by
+the length of a constant this package defines, and the check runs once per
+stream; that is the whole of what holds. The sentence was written inside the
+comment that exists to warn against this exact conflation, which is the third
+time it has appeared here.
+
+The second said the bounded identity tier reads no more than
+`orderedRulesStreamDigest` would have read anyway. A map hit hashes the probe
+**and** compares its bytes against the stored key, so the duplicate that ends
+the tier is read about three times over where the digest would hash each
+occurrence once. On a stream that is nothing but two maximum-length equal
+identities the tier reads more than the digest it precedes. What survives is
+that the tier is bounded by the aggregate the shape gate already charged, and
+that the refusal costs that bounded pass INSTEAD OF a whole-stream hash followed
+by the same pass.
+
 **The SEVENTH instance was the same word on the other path.** `ProjectOrderedRulesStream`
 bounded its `SourceContractVersion` at the top and compared it only in
 `validateScope`, which runs BELOW the candidate and intervention vocabulary

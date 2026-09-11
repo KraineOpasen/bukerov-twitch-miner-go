@@ -3587,6 +3587,55 @@ func TestOrderedRulesACheapRefusalIsNotPaidForWithTheWholePayload(t *testing.T) 
 		}
 	})
 
+	// The SAME move one level down, and the eighth finding on this PR of a rule
+	// standing on one side of a paired ingest and not the other. Per-candidate
+	// OUTCOME uniqueness stayed in the payload loop when candidate uniqueness
+	// was hoisted, so a duplicate in the last candidate was reached only after
+	// the admission references, the boundary and every intervention Detail:
+	// 8.341694 ms on 1,024 references of 4 KiB beside 1,024 interventions
+	// carrying 4 KiB of identity and 4 KiB of detail, against 133.339 µs for a
+	// repeated CANDIDATE identity on that very source. It is 139.747 µs now —
+	// the same figure as that control, which is how one knows the auxiliary
+	// text is no longer read.
+	t.Run("a repeated outcome identity is refused before the admission payload", func(t *testing.T) {
+		duplicated := []predictioneval.OrderedRulesCandidate{
+			orCandidate("c1", 10, orKnownBalance(1000), orOutcome("A", 4), orOutcome("B", 6)),
+			orCandidate("c2", 20, orKnownBalance(1000), orOutcome("A", 4), orOutcome("A", 6)),
+		}
+		overBound := orAdmission()
+		overBound.SourceReferences = []string{strings.Repeat("x", predictioneval.MaxOrderedRulesIdentifierBytes+1)}
+
+		// Each fault alone, under its own sentinel.
+		if _, err := predictioneval.ProjectOrderedRulesStream(orSource(cs, nil),
+			overBound); !errors.Is(err, predictioneval.ErrOrderedRulesOverBound) {
+			t.Fatalf("premise: the admission alone must be refused as over-bound; got %v", err)
+		}
+		if _, err := predictioneval.ProjectOrderedRulesStream(orSource(duplicated, nil),
+			orAdmission()); !errors.Is(err, predictioneval.ErrOrderedRulesDuplicateIdentity) {
+			t.Fatalf("premise: the outcomes alone must be refused as duplicated; got %v", err)
+		}
+		// And the control that keeps the rule about REPETITION rather than
+		// about the name: the two candidates above each carry an outcome "A",
+		// which must still project. Without this the pass could be scoped
+		// across candidates and every case here would still pass.
+		spread := []predictioneval.OrderedRulesCandidate{
+			orCandidate("c1", 10, orKnownBalance(1000), orOutcome("A", 4), orOutcome("B", 6)),
+			orCandidate("c2", 20, orKnownBalance(1000), orOutcome("A", 4), orOutcome("B", 6)),
+		}
+		if _, err := predictioneval.ProjectOrderedRulesStream(orSource(spread, nil),
+			orAdmission()); err != nil {
+			t.Fatalf("premise: two candidates each carrying an outcome \"A\" must project; got %v", err)
+		}
+
+		_, err := predictioneval.ProjectOrderedRulesStream(orSource(duplicated, nil), overBound)
+		if !errors.Is(err, predictioneval.ErrOrderedRulesDuplicateIdentity) {
+			t.Fatalf("a source repeating an outcome identity inside one candidate beside an "+
+				"over-bound admission reference was refused %v. The outcome identities are a "+
+				"bounded pass reading nothing but those identities; the scans it now precedes "+
+				"are not consulted to decide that one pool names the same outcome twice.", err)
+		}
+	})
+
 	// A closed-set word settled at its bound, ahead of the identity pass that
 	// the projection runs before validateAdmission. The evaluator's own tier
 	// already compared both of these; the projection did not, which made a
