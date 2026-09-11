@@ -76,8 +76,12 @@ func orKnownBalance(v int64) predictioneval.SuppliedInt64 {
 func orCandidate(id string, pos int64, balance predictioneval.SuppliedInt64,
 	outs ...predictioneval.OrderedRulesOutcome) predictioneval.OrderedRulesCandidate {
 	return predictioneval.OrderedRulesCandidate{
-		Identity:          id,
-		Position:          pos,
+		Identity: id,
+		Position: pos,
+		// Declared, not left to the zero value: every fixture says explicitly
+		// that its causal position is supplied, because an omitted one is now a
+		// refusal and this suite is about what the model does ADMIT.
+		HasPosition:       true,
 		SourceKind:        predictioneval.SourceKindChannelUpdate,
 		EpisodeMembership: predictioneval.MembershipProven,
 		OutcomesPresence:  predictioneval.SuppliedKnown,
@@ -97,6 +101,7 @@ func orScope() predictioneval.OrderedRulesScope {
 		Coverage:              predictioneval.CoverageCompleteDeclared,
 		IntervalFromPosition:  0,
 		IntervalToPosition:    10000,
+		HasInterval:           true,
 	}
 }
 
@@ -147,8 +152,9 @@ func orRule(cmp predictioneval.OrderedRuleComparator, threshold, rate float64,
 func orConfig(detailed []predictioneval.OrderedRule,
 	defMin, defMax float64, defMaxValue uint32, defPercent float64) predictioneval.OrderedRulesConfig {
 	return predictioneval.OrderedRulesConfig{
-		ConfigID: "acceptance-config-1",
-		Detailed: detailed,
+		ConfigID:   "acceptance-config-1",
+		Detailed:   detailed,
+		HasDefault: true,
 		Default: predictioneval.OrderedRulesDefault{
 			RawMinPercent: defMin,
 			RawMaxPercent: defMax,

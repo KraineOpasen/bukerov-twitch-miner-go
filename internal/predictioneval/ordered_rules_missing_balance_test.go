@@ -37,11 +37,12 @@ import (
 // mbCall is the factual intervention that bounds every vector below.
 func mbCall() []predictioneval.OrderedRulesIntervention {
 	return []predictioneval.OrderedRulesIntervention{{
-		Identity:  "call-1",
-		Position:  30,
-		Kind:      predictioneval.InterventionAutoCallStarted,
-		Relevance: predictioneval.RelevanceProven,
-		Detail:    "automatic placement call started",
+		Identity:    "call-1",
+		Position:    30,
+		HasPosition: true,
+		Kind:        predictioneval.InterventionAutoCallStarted,
+		Relevance:   predictioneval.RelevanceProven,
+		Detail:      "automatic placement call started",
 	}}
 }
 

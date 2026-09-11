@@ -156,10 +156,25 @@ const (
 	// Narrowing a bound is always allowed; widening one past what
 	// [MaxOrderedRulesAggregateBytes] permits is not.
 	MaxOrderedRulesWork = 1 << 18
-	// MaxOrderedRulesAggregateBytes bounds the supplied identifier bytes of one
-	// source, matching the reader's existing aggregate ceiling rather than
-	// inventing a looser one. It also fixes [MaxOrderedRulesWork], since the
-	// trace a traversal retains is one entry per evaluated slot.
+	// MaxOrderedRulesAggregateBytes bounds the ENCODED width of the text one
+	// source contributes, matching the reader's existing aggregate ceiling
+	// rather than inventing a looser one. It also fixes [MaxOrderedRulesWork],
+	// since the trace a traversal retains is one entry per evaluated slot.
+	//
+	// Encoded, not raw, and the distinction is the whole point: the stream
+	// carries JSON tags because it is meant to be serialized, and JSON escaping
+	// expands a byte by up to six. Bounding the RAW total therefore bounded the
+	// wrong quantity — a source could sit inside this ceiling and still encode
+	// to roughly 768 MiB, six times the boundary this constant declares. The
+	// projection now charges every supplied byte at its worst-case encoded
+	// width, so a source it admits cannot break the ceiling when encoded.
+	//
+	// The evaluator's shape gate still charges RAW length, and that asymmetry
+	// is safe in exactly one direction: the charged width is never less than
+	// the raw length, so a source the projection admitted is charged no more by
+	// the gate than by the projection, and the "projection-admitted is never
+	// refused for bytes" invariant survives. It also keeps the gate reading
+	// lengths rather than content, which is what makes it cheap on a forgery.
 	MaxOrderedRulesAggregateBytes = 128 << 20
 )
 
@@ -339,6 +354,11 @@ type OrderedRulesScope struct {
 	// input, not a fact to silently include.
 	IntervalFromPosition int64 `json:"intervalFromPosition"`
 	IntervalToPosition   int64 `json:"intervalToPosition"`
+	// HasInterval declares that both endpoints above were supplied. They are
+	// one flag rather than two because they are meaningless apart: an omitted
+	// pair decodes to the interval [0,0], which admits exactly the candidates
+	// at position zero — including any whose position was itself omitted.
+	HasInterval bool `json:"hasInterval"`
 }
 
 // OrderedRulesOutcome is one entry of a candidate's ORDERED outcome vector.
@@ -363,7 +383,17 @@ type OrderedRulesCandidate struct {
 	// increasing across the supplied slice; equal positions mean the caller
 	// does not actually know the order, and an arbitrary tie-break would hide
 	// that. See TestOrderedRulesAmbiguousCausalPositionsAreNotSortedAway.
-	Position          int64                  `json:"position"`
+	Position int64 `json:"position"`
+	// HasPosition declares that Position was actually supplied.
+	//
+	// Zero is a legitimate position, so an omitted one is indistinguishable
+	// from an explicit one without this flag — and the types carry JSON tags,
+	// so decoding caller JSON is a supported way to build them. An omitted
+	// position would decode to zero and be admitted as the EARLIEST candidate
+	// whenever the declared interval contains zero, taking the opportunity from
+	// the candidate that really was first. That is a fabricated fact, which is
+	// the one thing every presence in this model exists to prevent.
+	HasPosition       bool                   `json:"hasPosition"`
 	SourceKind        OrderedRulesSourceKind `json:"sourceKind"`
 	EpisodeMembership OrderedRulesMembership `json:"episodeMembership"`
 	// OutcomesPresence declares whether the caller RECOVERED this candidate's
@@ -400,11 +430,15 @@ type OrderedRulesCandidate struct {
 // acted, and after a real action that world no longer exists. Even a call that
 // FAILED is a boundary — see TestOrderedRulesFailedFactualCallStillCutsOff.
 type OrderedRulesIntervention struct {
-	Identity  string                       `json:"identity"`
-	Position  int64                        `json:"position"`
-	Kind      OrderedRulesInterventionKind `json:"kind"`
-	Relevance OrderedRulesRelevance        `json:"relevance"`
-	Detail    string                       `json:"detail,omitempty"`
+	Identity string `json:"identity"`
+	Position int64  `json:"position"`
+	// HasPosition declares that Position was supplied, for the same reason as
+	// [OrderedRulesCandidate.HasPosition]: an intervention silently at zero
+	// would cut the stream at its very start and remove every candidate.
+	HasPosition bool                         `json:"hasPosition"`
+	Kind        OrderedRulesInterventionKind `json:"kind"`
+	Relevance   OrderedRulesRelevance        `json:"relevance"`
+	Detail      string                       `json:"detail,omitempty"`
 }
 
 // OrderedRulesSource is the explicitly supplied input to the projection.
@@ -514,7 +548,16 @@ type OrderedRulesConfig struct {
 	// here.
 	Detailed []OrderedRule `json:"detailed,omitempty"`
 	// Default is MANDATORY. The donor's Detailed strategy always carries one.
-	Default OrderedRulesDefault `json:"default"`
+	//
+	// HasDefault is what makes that mandatory in fact rather than in comment.
+	// Every field of OrderedRulesDefault has a legitimate zero — the donor's
+	// own `small` preset ships bounds of exactly zero — so an omitted default
+	// decodes to a USABLE [0,0] rule admitting any zero-share outcome, and the
+	// model would report a stake of zero with presence KNOWN from a
+	// configuration the caller never supplied. A fabricated value presented as
+	// known is precisely what this package refuses to do.
+	HasDefault bool                `json:"hasDefault"`
+	Default    OrderedRulesDefault `json:"default"`
 }
 
 // SuppliedDrawTrace is the bounded, explicitly supplied entropy.
@@ -684,7 +727,13 @@ const (
 	ReasonStreamTextOverBound = "STREAM_TEXT_OVER_BOUND"
 	// ReasonWorkBudgetExceeded covers the evaluated-slot ceiling, which is also
 	// the retained-trace ceiling: see [MaxOrderedRulesWork].
-	ReasonWorkBudgetExceeded = "WORK_BUDGET_EXCEEDED"
+	// ReasonConfigDefaultNotSupplied is a config whose MANDATORY default was
+	// not declared as supplied. It is separate from ReasonConfigOutOfDomain
+	// because "you gave me a default I cannot use" and "you gave me no default
+	// at all" are different facts, and only the second is silently produced by
+	// decoding JSON that omits the field.
+	ReasonConfigDefaultNotSupplied = "CONFIG_DEFAULT_NOT_SUPPLIED"
+	ReasonWorkBudgetExceeded       = "WORK_BUDGET_EXCEEDED"
 	// ReasonBalanceNotEvaluated is not a failure. It is what the model reports
 	// about a balance it never needed, because the traversal never admitted
 	// participation on that candidate. Reporting it as MISSING would confuse

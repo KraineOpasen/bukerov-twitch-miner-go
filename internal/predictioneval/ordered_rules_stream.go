@@ -122,14 +122,14 @@ func ProjectOrderedRulesStream(source OrderedRulesSource, admission CommonAdmiss
 	// the identifiers: coverage detail, the admission manifest and each
 	// intervention's detail all survive into the stream, so a budget that
 	// skipped them would bound the wrong thing.
-	bytes := int64(len(source.Scope.Namespace) + len(source.Scope.EpisodeID) +
+	bytes := chargedWidth(len(source.Scope.Namespace) + len(source.Scope.EpisodeID) +
 		len(source.Scope.AccountContext) + len(source.Scope.AssociationEvidence) +
 		len(source.Scope.CoverageDetail) + len(source.Scope.SourceContractVersion) +
 		len(source.Scope.Coverage))
 	if err := checkFreeText(source.Scope.CoverageDetail, "scope coverage detail"); err != nil {
 		return OrderedRulesStream{}, err
 	}
-	bytes += int64(len(admission.ManifestID) + len(admission.Population) + len(admission.OrderBasis) +
+	bytes += chargedWidth(len(admission.ManifestID) + len(admission.Population) + len(admission.OrderBasis) +
 		len(admission.ViewKind))
 	if len(admission.SourceReferences) > MaxOrderedRulesSourceReferences {
 		return OrderedRulesStream{}, errors.Join(ErrOrderedRulesOverBound,
@@ -141,13 +141,13 @@ func ProjectOrderedRulesStream(source OrderedRulesSource, admission CommonAdmiss
 		if err := checkFreeText(ref, "admission source reference "+strconv.Itoa(i)); err != nil {
 			return OrderedRulesStream{}, err
 		}
-		bytes += int64(len(ref))
+		bytes += chargedWidth(len(ref))
 	}
 	for i := range source.Interventions {
 		if err := checkFreeText(source.Interventions[i].Detail, "intervention "+strconv.Itoa(i)+" detail"); err != nil {
 			return OrderedRulesStream{}, err
 		}
-		bytes += int64(len(source.Interventions[i].Identity) + len(source.Interventions[i].Detail))
+		bytes += chargedWidth(len(source.Interventions[i].Identity) + len(source.Interventions[i].Detail))
 	}
 	if bytes > MaxOrderedRulesAggregateBytes {
 		return OrderedRulesStream{}, errors.Join(ErrOrderedRulesOverBound,
@@ -169,6 +169,12 @@ func ProjectOrderedRulesStream(source OrderedRulesSource, admission CommonAdmiss
 		}
 		seen[c.Identity] = true
 
+		if !c.HasPosition {
+			return OrderedRulesStream{}, errors.Join(ErrOrderedRulesScopeIncomplete,
+				errors.New("predictioneval: "+where+" does not declare its causal position as supplied; "+
+					"zero is a legitimate position, so an omitted one would be admitted as the earliest "+
+					"candidate and take the opportunity from whichever candidate really was first"))
+		}
 		if i > 0 && c.Position <= lastPosition {
 			return OrderedRulesStream{}, errors.Join(ErrOrderedRulesAmbiguousOrder,
 				errors.New("predictioneval: "+where+" is at position "+strconv.FormatInt(c.Position, 10)+
@@ -188,7 +194,7 @@ func ProjectOrderedRulesStream(source OrderedRulesSource, admission CommonAdmiss
 			if err := checkFreeText(v, where+" vocabulary"); err != nil {
 				return OrderedRulesStream{}, err
 			}
-			bytes += int64(len(v))
+			bytes += chargedWidth(len(v))
 		}
 		if c.EpisodeMembership != MembershipProven {
 			return OrderedRulesStream{}, errors.Join(ErrOrderedRulesMembershipUnproven,
@@ -231,7 +237,7 @@ func ProjectOrderedRulesStream(source OrderedRulesSource, admission CommonAdmiss
 		if err := checkFreeText(c.OutcomesReason, where+" outcomes reason"); err != nil {
 			return OrderedRulesStream{}, err
 		}
-		bytes += int64(len(c.Identity)) + int64(len(c.Provenance)) + int64(len(c.OutcomesReason))
+		bytes += chargedWidth(len(c.Identity) + len(c.Provenance) + len(c.OutcomesReason))
 		for j := range c.Outcomes {
 			o := &c.Outcomes[j]
 			ow := where + " outcome " + strconv.Itoa(j)
@@ -244,7 +250,7 @@ func ProjectOrderedRulesStream(source OrderedRulesSource, admission CommonAdmiss
 			if err := checkPresence(o.Points, ow+" points", c.Position); err != nil {
 				return OrderedRulesStream{}, err
 			}
-			bytes += int64(len(o.Identity)+len(o.Points.Presence)) + suppliedTextBytes(o.Points)
+			bytes += chargedWidth(len(o.Identity)+len(o.Points.Presence)) + suppliedTextBytes(o.Points)
 		}
 		if err := checkPresence(c.Balance, where+" balance", c.Position); err != nil {
 			return OrderedRulesStream{}, err
@@ -335,6 +341,11 @@ func establishCutoff(source OrderedRulesSource) (OrderedRulesCutoff, error) {
 			return OrderedRulesCutoff{}, errors.Join(ErrOrderedRulesVocabulary,
 				errors.New("predictioneval: "+where+" has kind "+strconv.Quote(string(in.Kind))))
 		}
+		if !in.HasPosition {
+			return OrderedRulesCutoff{}, errors.Join(ErrOrderedRulesScopeIncomplete,
+				errors.New("predictioneval: "+where+" does not declare its position as supplied; an omitted "+
+					"one would cut the stream at zero and remove every candidate after it"))
+		}
 		if in.Position < source.Scope.IntervalFromPosition || in.Position > source.Scope.IntervalToPosition {
 			return OrderedRulesCutoff{}, errors.Join(ErrOrderedRulesOutsideDeclaredInterval,
 				errors.New("predictioneval: "+where+" at position "+strconv.FormatInt(in.Position, 10)+
@@ -394,6 +405,10 @@ func validateScope(s OrderedRulesScope) error {
 		return errors.Join(ErrOrderedRulesScopeIncomplete,
 			errors.New("predictioneval: scope declares source contract "+strconv.Quote(s.SourceContractVersion)+
 				", not "+strconv.Quote(OrderedRulesStreamContractVersion)))
+	case !s.HasInterval:
+		return errors.Join(ErrOrderedRulesScopeIncomplete,
+			errors.New("predictioneval: scope does not declare its interval endpoints as supplied; an omitted "+
+				"pair decodes to [0,0], which is a real interval and would silently admit only position zero"))
 	case s.IntervalFromPosition > s.IntervalToPosition:
 		return errors.Join(ErrOrderedRulesScopeIncomplete, errors.New("predictioneval: declared interval is empty"))
 	}
@@ -437,9 +452,34 @@ func checkFreeText(v, where string) error {
 	return nil
 }
 
+// orderedRulesMaxJSONExpansion is the most bytes one supplied byte can occupy
+// once the stream is JSON-encoded.
+//
+// Go's encoder writes a byte below 0x20, one of < > &, or any byte that is not
+// valid UTF-8 as a six-byte \uXXXX escape; nothing expands further. Six is
+// therefore an upper bound for every possible input byte, and the projection
+// charges it rather than the raw length.
+const orderedRulesMaxJSONExpansion = 6
+
+// chargedWidth is what n supplied bytes cost against the aggregate budget.
+//
+// It is the WORST-CASE encoded width, not the actual one, and the difference is
+// deliberate. Computing the actual width means decoding UTF-8 to tell a valid
+// multi-byte rune from an invalid byte, and this package's production files
+// import from a six-entry allowlist that has no unicode/utf8 in it — so exact
+// accounting would mean hand-rolling a decoder inside the budget code, which is
+// the part of this package that has been wrong before. A bound that is provably
+// never exceeded is worth more here than one that is tight.
+//
+// The cost is that ordinary ASCII is charged six times what it will encode to,
+// so the aggregate admits about a sixth of its nominal byte count. That is a
+// narrowing, which is always allowed; what is NOT allowed is admitting a source
+// whose encoded form breaks the declared ceiling.
+func chargedWidth(n int) int64 { return int64(n) * orderedRulesMaxJSONExpansion }
+
 // suppliedTextBytes is the free text one supplied value contributes.
 func suppliedTextBytes(v SuppliedInt64) int64 {
-	return int64(len(v.Provenance) + len(v.Reason))
+	return chargedWidth(len(v.Provenance) + len(v.Reason))
 }
 
 func checkIdentifier(id, where string) error {

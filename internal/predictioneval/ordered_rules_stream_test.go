@@ -21,7 +21,7 @@ import (
 func orIntervention(id string, pos int64, kind predictioneval.OrderedRulesInterventionKind,
 	rel predictioneval.OrderedRulesRelevance, detail string) predictioneval.OrderedRulesIntervention {
 	return predictioneval.OrderedRulesIntervention{
-		Identity: id, Position: pos, Kind: kind, Relevance: rel, Detail: detail,
+		Identity: id, Position: pos, HasPosition: true, Kind: kind, Relevance: rel, Detail: detail,
 	}
 }
 
@@ -1811,5 +1811,206 @@ func TestOrderedRulesAShapeRefusalReExportsNoneOfTheInput(t *testing.T) {
 					"without reading the input must not grow with it", len(b), cutoffBytes)
 			}
 		})
+	}
+}
+
+// TestOrderedRulesAnOmittedMandatoryFieldIsNotAnExplicitZero pins presence for
+// the scalars that had none.
+//
+// Every scalar the caller supplies in this model carries a presence, because a
+// zero is a legitimate value everywhere and a missing one read as zero is a
+// fabricated input. Four mandatory fields were exceptions — a candidate's
+// causal position, an intervention's position, the scope's interval endpoints
+// and the config's default — and the exception was invisible while the types
+// were only ever built in Go. They carry JSON tags, so decoding is a supported
+// way to build them, and there omission is silent:
+//
+//   - an omitted candidate position decodes to zero, is admitted as the
+//     EARLIEST candidate whenever the interval contains zero, and takes the
+//     opportunity from whichever candidate really was first;
+//   - an omitted intervention position cuts the stream at zero, removing every
+//     candidate;
+//   - omitted interval endpoints decode to [0,0], which is a real interval;
+//   - an omitted default decodes to a USABLE [0,0] rule that admits any
+//     zero-share outcome and reports a stake of zero with presence KNOWN —
+//     a fabricated value presented as known, from a config that was never
+//     supplied. The donor's own `small` preset ships bounds of exactly zero,
+//     so this cannot be fixed by treating all-zero as absent.
+func TestOrderedRulesAnOmittedMandatoryFieldIsNotAnExplicitZero(t *testing.T) {
+	const scopeFlag = `"hasInterval":true,`
+	const candFlag = `"hasPosition":true,"sourceKind"`
+	const invFlag = `"hasPosition":true,"kind"`
+	const defFlag = `"hasDefault":true,`
+
+	sourceJSON := `{"scope":{"namespace":"ns","episodeId":"e1","accountContext":"ac",
+	  "associationEvidence":"ae","sourceContractVersion":"` + predictioneval.OrderedRulesStreamContractVersion + `",
+	  "coverage":"COMPLETE_DECLARED","intervalFromPosition":0,"intervalToPosition":10000,` + scopeFlag + `
+	  "hasNothingElse":0},
+	 "candidates":[{"identity":"c1","position":10,` + candFlag + `:"CHANNEL_UPDATE",
+	   "episodeMembership":"PROVEN","outcomesPresence":"KNOWN","provenance":"p","outcomes":[
+	     {"identity":"A","points":{"presence":"KNOWN","value":4,"provenance":"p","hasAvailableAtPosition":true}},
+	     {"identity":"B","points":{"presence":"KNOWN","value":6,"provenance":"p","hasAvailableAtPosition":true}}],
+	   "balance":{"presence":"KNOWN","value":1000,"provenance":"p","hasAvailableAtPosition":true}}],
+	 "interventions":[{"identity":"call-1","position":9000,` + invFlag + `:"AUTO_CALL_STARTED",
+	   "relevance":"PROVEN_RELEVANT","detail":"d"}]}`
+	configJSON := `{"configId":"cfg",` + defFlag + `
+	  "detailed":[{"comparator":"Le","rawThresholdPercent":100,"rawAttemptRatePercent":100,
+	    "points":{"maxValue":0,"rawPercent":10}}],
+	  "default":{"rawMinPercent":95,"rawMaxPercent":100,"points":{"maxValue":0,"rawPercent":10}}}`
+
+	run := func(t *testing.T, src, cfgText string) (predictioneval.OrderedRulesEvaluation, error) {
+		t.Helper()
+		var s predictioneval.OrderedRulesSource
+		if err := json.Unmarshal([]byte(src), &s); err != nil {
+			t.Fatalf("unmarshalling the source failed: %v", err)
+		}
+		var cfg predictioneval.OrderedRulesConfig
+		if err := json.Unmarshal([]byte(cfgText), &cfg); err != nil {
+			t.Fatalf("unmarshalling the config failed: %v", err)
+		}
+		stream, err := predictioneval.ProjectOrderedRulesStream(s, orAdmission())
+		if err != nil {
+			return predictioneval.OrderedRulesEvaluation{}, err
+		}
+		return predictioneval.EvaluateOrderedRules(stream, cfg, orDraws(orWordAdmit)), nil
+	}
+
+	// The control. Without it every case below could pass for the wrong reason.
+	t.Run("every declaration present", func(t *testing.T) {
+		ev, err := run(t, sourceJSON, configJSON)
+		if err != nil {
+			t.Fatalf("a fully declared source must project: %v", err)
+		}
+		if ev.Status != predictioneval.StatusWouldAttempt {
+			t.Fatalf("the control must reach a decision, got status %q reason %q", ev.Status, ev.Reason)
+		}
+	})
+
+	cases := []struct {
+		name     string
+		drop     string
+		inSource bool
+		want     string // substring of the projection error, or a refusal reason
+	}{
+		{"candidate position", candFlag, true, "causal position"},
+		{"intervention position", invFlag, true, "does not declare its position"},
+		{"scope interval", scopeFlag, true, "interval endpoints"},
+		{"config default", defFlag, false, predictioneval.ReasonConfigDefaultNotSupplied},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			src, cfgText := sourceJSON, configJSON
+			if tc.inSource {
+				src = strings.Replace(src, tc.drop, strings.TrimPrefix(tc.drop, `"hasPosition":true,`), 1)
+				if tc.drop == scopeFlag {
+					src = strings.Replace(sourceJSON, scopeFlag, "", 1)
+				}
+				if src == sourceJSON {
+					t.Fatalf("the fixture did not change, so this case would assert nothing")
+				}
+			} else {
+				cfgText = strings.Replace(cfgText, tc.drop, "", 1)
+				if cfgText == configJSON {
+					t.Fatalf("the fixture did not change, so this case would assert nothing")
+				}
+			}
+
+			ev, err := run(t, src, cfgText)
+			if tc.inSource {
+				if err == nil {
+					t.Fatalf("an omitted %s was accepted; omission decoded to a usable zero", tc.name)
+				}
+				if !strings.Contains(err.Error(), tc.want) {
+					t.Fatalf("refused for the wrong reason: %v", err)
+				}
+				return
+			}
+			switch {
+			case ev.Status != predictioneval.StatusRefused:
+				t.Fatalf("an omitted %s produced status %q, not a refusal; the model decided on a "+
+					"configuration that was never supplied", tc.name, ev.Status)
+			case ev.Reason != tc.want:
+				t.Fatalf("reason = %q, want %q", ev.Reason, tc.want)
+			}
+		})
+	}
+}
+
+// TestOrderedRulesAnAdmittedStreamEncodesInsideItsDeclaredCeiling is the
+// end-to-end half of the charged-width repair.
+//
+// The unit half proves no byte encodes wider than the charged expansion. This
+// half proves the charge is actually applied everywhere it has to be: it takes
+// the widest source the projection will admit, built entirely from the
+// worst-escaping byte there is, and encodes the stream that comes back.
+//
+// Charging raw length instead put this at roughly six times the ceiling — a
+// source sitting inside a declared 128 MiB boundary encoding to about 768 MiB.
+// The remaining margin over the ceiling is JSON structure — field names and
+// punctuation — which is bounded by the element counts rather than by any
+// caller-supplied text, and is what the ceiling never claimed to cover.
+func TestOrderedRulesAnAdmittedStreamEncodesInsideItsDeclaredCeiling(t *testing.T) {
+	const nc, no = predictioneval.MaxOrderedRulesCandidates, predictioneval.MaxOrderedRulesOutcomes
+
+	build := func(idLen int) (predictioneval.OrderedRulesStream, error) {
+		nul := strings.Repeat("\x00", idLen)
+		uniq := func(p string) string {
+			if len(p) >= idLen {
+				return p
+			}
+			return p + nul[len(p):]
+		}
+		cs := make([]predictioneval.OrderedRulesCandidate, 0, nc)
+		for i := 0; i < nc; i++ {
+			outs := make([]predictioneval.OrderedRulesOutcome, 0, no)
+			for j := 0; j < no; j++ {
+				outs = append(outs, orOutcome(uniq("o"+itoaTest(i)+"_"+itoaTest(j)+"-"), int64(j+1)))
+			}
+			cs = append(cs, orCandidate(uniq("c"+itoaTest(i)+"-"), int64(i+1), orKnownBalance(100), outs...))
+		}
+		return predictioneval.ProjectOrderedRulesStream(orSource(cs, nil), orAdmission())
+	}
+
+	// The widest identifier the projection still admits at this shape.
+	// The floor clears the longest generated prefix, so every probe is really
+	// idLen bytes wide and the search measures the bound and not the fixture.
+	lo, hi := 32, predictioneval.MaxOrderedRulesIdentifierBytes
+	if _, err := build(lo); err != nil {
+		t.Fatalf("the smallest fixture must project: %v", err)
+	}
+	for lo < hi {
+		mid := (lo + hi + 1) / 2
+		if _, err := build(mid); err != nil {
+			hi = mid - 1
+		} else {
+			lo = mid
+		}
+	}
+	if _, err := build(lo + 1); err == nil && lo+1 <= predictioneval.MaxOrderedRulesIdentifierBytes {
+		t.Fatalf("binary search did not find the boundary: %d still projects", lo+1)
+	}
+
+	stream, err := build(lo)
+	if err != nil {
+		t.Fatalf("the widest admitted fixture must project: %v", err)
+	}
+	encoded, err := json.Marshal(stream)
+	if err != nil {
+		t.Fatalf("marshalling the projected stream failed: %v", err)
+	}
+
+	ceiling := int64(predictioneval.MaxOrderedRulesAggregateBytes)
+	ratio := float64(len(encoded)) / float64(ceiling)
+	t.Logf("widest admitted identifier = %d bytes of the worst-escaping byte", lo)
+	t.Logf("encoded stream = %d bytes against a ceiling of %d (%.2fx)", len(encoded), ceiling, ratio)
+
+	// Text is charged at its encoded width, so the text alone cannot pass the
+	// ceiling; everything above it is structure bounded by the element counts.
+	if int64(len(encoded)) > ceiling {
+		t.Fatalf("an ADMITTED stream encodes to %d bytes, %.2fx its declared ceiling of %d. Charging "+
+			"supplied text at its raw length rather than its encoded width puts this near 6x; a "+
+			"smaller overshoot means the stream grew a field the ceiling does not account for.",
+			len(encoded), ratio, ceiling)
 	}
 }

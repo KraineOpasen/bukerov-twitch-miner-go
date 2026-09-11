@@ -905,6 +905,15 @@ func traceEntry(step OrderedRulesTraceStep, ci int, c *OrderedRulesCandidate, oi
 // so a min above a max is a configuration that admits nothing, which is a real
 // configuration and not this model's to repair.
 func normalizeOrderedRulesConfig(c OrderedRulesConfig) (normalizedConfig, string) {
+	// The default is MANDATORY, and saying so in a comment is not enforcing it:
+	// every field of OrderedRulesDefault has a legitimate zero, so an omitted
+	// one decodes to a USABLE [0,0] rule that admits any zero-share outcome and
+	// reports a stake of zero with presence KNOWN. Refusing here is the
+	// difference between "no configuration" and a configuration that happens to
+	// be all zeros, which the donor's own `small` preset really does ship.
+	if !c.HasDefault {
+		return normalizedConfig{}, ReasonConfigDefaultNotSupplied
+	}
 	var out normalizedConfig
 	if len(c.Detailed) > 0 {
 		out.detailed = make([]normalizedRule, 0, len(c.Detailed))

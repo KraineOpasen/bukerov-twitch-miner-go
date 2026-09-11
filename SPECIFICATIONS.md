@@ -3223,6 +3223,23 @@ evaluated over the declared common-admitted data, and nothing more. The
 admission manifest is DATA, not a callback: admission is fixed before evaluation
 and cannot be chosen for producing a better answer.
 
+That rule covers the MANDATORY scalars too, and it has to, because the input
+types carry JSON tags: decoding a caller's document is a supported way to build
+them, and there an omitted field is silent. A candidate's causal position, an
+intervention's position, the scope's interval endpoints and the config's default
+each decode to a zero that is ALSO a legitimate value, so each carries an
+explicit declaration that it was supplied and is refused without one. The cost
+of leaving any of them implicit is not abstract: an omitted candidate position
+decodes to zero, is admitted as the EARLIEST candidate whenever the declared
+interval contains zero, and takes the opportunity from whichever candidate
+really was first; an omitted intervention position cuts the stream at zero and
+removes every candidate; omitted endpoints decode to the interval [0,0], which
+is a real interval; and an omitted default decodes to a USABLE [0,0] rule that
+admits any zero-share outcome and reports a stake of zero with presence KNOWN —
+a fabricated value presented as known, from a configuration that was never
+supplied. Treating all-zero as absent would not fix it, because the donor's own
+`small` preset really does ship bounds of exactly zero.
+
 The outcome VECTOR carries a presence of its own, not only its scalars. A pool
 holding fewer than two outcomes is a pool the donor declines and the traversal
 walks on; a pool whose vector the caller could not recover looks identical — a
@@ -3261,6 +3278,22 @@ only — each of them a single length read over a number of elements the precedi
 check has already bounded. It mirrors the projection's own limits field for
 field, the per-string limit included, so an input the projection would have
 admitted is not refused there and one it would have refused is not hashed there.
+The aggregate itself bounds the ENCODED width of that text, not its raw length,
+and the two differ by up to six: the stream carries JSON tags because it is
+meant to be serialized, and the encoder writes a byte below 0x20, one of < > &,
+or anything that is not valid UTF-8 as a six-byte escape. Bounding the raw total
+bounded the wrong quantity — a source could sit inside the declared 128 MiB and
+still encode to roughly 768 MiB — so the projection charges every supplied byte
+at its worst-case encoded width. That is a deliberate over-charge for ordinary
+ASCII, taken because computing the exact width means decoding UTF-8 and the
+production files import from a six-entry allowlist with no unicode/utf8 in it; a
+bound that is provably never exceeded is worth more in budget code than a tight
+one. The gate, by contrast, still charges RAW length, and the asymmetry is safe
+in exactly one direction: the charged width is never below the raw length, so a
+source the projection admitted is charged no more by the gate than by the
+projection and the invariant below survives, while the gate goes on reading
+lengths instead of content — which is what makes it cheap on a forgery.
+
 Mirroring means the mirror is exact in both directions: text the projection
 DERIVES rather than receives — the qualifications it generates, the boundary it
 computes, the stream's own contract version — is length-bounded but never

@@ -14,6 +14,7 @@
       "name": "streamer_a",
       "yamlPath": "streamers.streamer_a.prediction.strategy.detailed",
       "rawConfig": {
+        "hasDefault": true,
         "configId": "donor-example-streamer-a",
         "detailed": [
           {"comparator": "Ge", "rawThresholdPercent": 90.0, "rawAttemptRatePercent": 100.0, "points": {"maxValue": 1000, "rawPercent": 1.0}},
@@ -38,6 +39,7 @@
       "yamlPath": "presets.small.prediction.strategy.detailed",
       "note": "The donor ships a preset whose default bounds and points are EXPLICITLY zero. It is the live counterexample to substituting the 40/60 serde defaults: those fill in a MISSING key while deserializing, and nothing is missing here. A model that replaced these zeros would give this preset a betting range its author never wrote.",
       "rawConfig": {
+        "hasDefault": true,
         "configId": "donor-example-preset-small",
         "detailed": null,
         "default": {"rawMinPercent": 0.0, "rawMaxPercent": 0.0, "points": {"maxValue": 0, "rawPercent": 0.0}}

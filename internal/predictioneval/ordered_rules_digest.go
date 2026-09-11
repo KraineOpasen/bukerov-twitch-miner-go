@@ -93,6 +93,7 @@ func digestSupplied(h hash.Hash, v SuppliedInt64) {
 func digestCandidate(h hash.Hash, c *OrderedRulesCandidate) {
 	digestPart(h, c.Identity)
 	digestInt(h, c.Position)
+	digestBool(h, c.HasPosition)
 	digestPart(h, string(c.SourceKind))
 	digestPart(h, string(c.EpisodeMembership))
 	digestPart(h, c.Provenance)
@@ -127,6 +128,7 @@ func orderedRulesStreamDigest(s OrderedRulesStream) string {
 	digestPart(h, s.Scope.CoverageDetail)
 	digestInt(h, s.Scope.IntervalFromPosition)
 	digestInt(h, s.Scope.IntervalToPosition)
+	digestBool(h, s.Scope.HasInterval)
 
 	digestPart(h, s.Admission.ManifestID)
 	digestPart(h, string(s.Admission.ViewKind))
@@ -176,6 +178,7 @@ func orderedRulesConfigDigest(c OrderedRulesConfig) string {
 		digestUint(h, uint64(r.Points.MaxValue))
 		digestFloat(h, r.Points.RawPercent)
 	}
+	digestBool(h, c.HasDefault)
 	digestFloat(h, c.Default.RawMinPercent)
 	digestFloat(h, c.Default.RawMaxPercent)
 	digestUint(h, uint64(c.Default.Points.MaxValue))
