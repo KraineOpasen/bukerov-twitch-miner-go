@@ -774,17 +774,14 @@ func EvaluateOrderedRules(stream OrderedRulesStream, rules OrderedRulesConfig, d
 		ModelVersion:            OrderedRulesModelVersion,
 		DonorRevision:           OrderedRulesDonorRevision,
 		EntropySemanticsVersion: OrderedRulesEntropySemanticsVersion,
-		Cutoff:                  stream.Cutoff,
 		Participation:           ParticipationNotAdmitted,
 		Stake:                   SuppliedUint32{Presence: SuppliedMissing, Reason: ReasonBalanceNotEvaluated},
 		StreamDigest:            streamDigest,
 		// ConfigDigest and EntropyDigest are DEFERRED to the point where the
 		// traversal actually begins, below. See the note there.
 	}
-	if len(stream.Qualifications) > 0 {
-		out.Qualifications = make([]string, len(stream.Qualifications))
-		copy(out.Qualifications, stream.Qualifications)
-	}
+	// Cutoff and Qualifications are NOT set here. They are derived fields, and
+	// nothing has yet established that this stream was derived. See below.
 
 	// refuse reports a typed refusal witnessing the prefix ACTUALLY consumed.
 	// A refusal reached mid-traversal has already read candidates and spent
@@ -871,6 +868,37 @@ func EvaluateOrderedRules(stream OrderedRulesStream, rules OrderedRulesConfig, d
 		// it, so the projection's invariants are re-established here over the
 		// stream as handed in.
 		return refuseUnread(ReasonStreamInvariantViolated)
+	}
+
+	// THE DERIVED FIELDS, populated HERE and not in the literal above, because
+	// this is the first line at which the stream has been shown to be one the
+	// projection could have produced.
+	//
+	// Cutoff and Qualifications are computed BY ProjectOrderedRulesStream, and
+	// every consumer reads them as facts about a stream that was derived rather
+	// than supplied. Setting them at the top meant the two refusals above
+	// returned them unchanged — so a config refusal and an invariant refusal
+	// both handed back an invented boundary and a fabricated limitation list,
+	// inside fields whose contract says otherwise. Reproduced through the
+	// documented two-call oracle: both refusals returned Identity
+	// "INVENTED-BOUNDARY", DroppedAtOrAfter 3 and two qualifications the
+	// evidence never implied.
+	//
+	// The mismatch path above was repaired for exactly this and the repair
+	// stopped one layer short, on the reasoning that a MATCHING digest makes
+	// the values self-consistent. That reasoning is wrong, and this file says
+	// why three lines up: a matching digest says the stream has not CHANGED,
+	// never that the projection produced it. The digest is unkeyed and a
+	// refusal hands the recomputed value back, so the oracle reaches these
+	// paths carrying any cutoff the caller likes.
+	//
+	// Populating them here rather than clearing them in refuseUnread is the
+	// point: a field that is never set until it is earned cannot be forgotten
+	// on a path added later.
+	out.Cutoff = stream.Cutoff
+	if len(stream.Qualifications) > 0 {
+		out.Qualifications = make([]string, len(stream.Qualifications))
+		copy(out.Qualifications, stream.Qualifications)
 	}
 
 	// ENCODABILITY FIRST, which is where it belongs and not where it started.

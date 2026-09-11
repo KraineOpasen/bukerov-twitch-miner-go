@@ -3697,6 +3697,98 @@ func TestOrderedRulesACheapRefusalIsNotPaidForWithTheWholePayload(t *testing.T) 
 		}
 	})
 
+	// The admission's mandatory scalars are emptiness tests and a closed-set
+	// switch. They now precede the reference walk, which reads up to
+	// MaxOrderedRulesSourceReferences strings of MaxOrderedRulesIdentifierBytes
+	// and cannot affect that decision: 2.997708 ms to 377 ns.
+	t.Run("an incomplete admission is refused before its references are read", func(t *testing.T) {
+		incomplete := orAdmission()
+		incomplete.Population = ""
+		poisoned := orAdmission()
+		poisoned.SourceReferences = []string{"ref-\xff"}
+		both := incomplete
+		both.SourceReferences = poisoned.SourceReferences
+
+		// The premise: each fault really is raised on its own.
+		if _, err := predictioneval.ProjectOrderedRulesStream(orSource(cs, nil),
+			incomplete); !errors.Is(err, predictioneval.ErrOrderedRulesAdmissionIncomplete) {
+			t.Fatalf("premise: the empty population alone must be refused as incomplete; got %v", err)
+		}
+		if _, err := predictioneval.ProjectOrderedRulesStream(orSource(cs, nil),
+			poisoned); !errors.Is(err, predictioneval.ErrOrderedRulesNotEncodable) {
+			t.Fatalf("premise: the reference alone must be refused as unencodable; got %v", err)
+		}
+
+		if _, err := predictioneval.ProjectOrderedRulesStream(orSource(cs, nil),
+			both); !errors.Is(err, predictioneval.ErrOrderedRulesAdmissionIncomplete) {
+			t.Fatalf("an admission naming no population, beside an unencodable source reference, was "+
+				"refused %v. The population is an emptiness test and the references cannot bear "+
+				"on it, so it must not cost a reference walk to reach.", err)
+		}
+	})
+
+	// An IDENTITY is bytes, not shape. checkIdentifier scans it and the
+	// duplicate map hashes it, so the structural checks — a declared position,
+	// the causal order, the interval, the outcome count, all integer work — now
+	// run over every candidate and every intervention before any identity is
+	// read. This is the correction to the two-pass split, which counted an
+	// identity as shape.
+	t.Run("a later candidate's missing position beats an earlier identity scan", func(t *testing.T) {
+		payload := orCandidate("id-\xff", 10, orKnownBalance(1000), orOutcome("A", 4), orOutcome("B", 6))
+		shape := orCandidate("c2", 20, orKnownBalance(1000), orOutcome("A", 4), orOutcome("B", 6))
+		shape.HasPosition = false
+
+		// The premise: each fault really is raised on its own.
+		if _, err := predictioneval.ProjectOrderedRulesStream(
+			orSource([]predictioneval.OrderedRulesCandidate{payload}, nil),
+			orAdmission()); !errors.Is(err, predictioneval.ErrOrderedRulesNotEncodable) {
+			t.Fatalf("premise: the identity alone must be refused as unencodable; got %v", err)
+		}
+		if _, err := predictioneval.ProjectOrderedRulesStream(
+			orSource([]predictioneval.OrderedRulesCandidate{shape}, nil),
+			orAdmission()); !errors.Is(err, predictioneval.ErrOrderedRulesScopeIncomplete) {
+			t.Fatalf("premise: the missing position alone must be refused as incomplete; got %v", err)
+		}
+
+		if _, err := predictioneval.ProjectOrderedRulesStream(
+			orSource([]predictioneval.OrderedRulesCandidate{payload, shape}, nil),
+			orAdmission()); !errors.Is(err, predictioneval.ErrOrderedRulesScopeIncomplete) {
+			t.Fatalf("a source whose first candidate carries an unencodable identity and whose "+
+				"second declares no position was refused %v. An identity is scanned and hashed; "+
+				"a declared position is an integer test, and every candidate's must be settled "+
+				"before any identity is read.", err)
+		}
+	})
+
+	t.Run("a later intervention's missing position beats an earlier identity scan", func(t *testing.T) {
+		payload := orIntervention("id-\xff", 100, predictioneval.InterventionAutoCallStarted,
+			predictioneval.RelevanceProven, "boundary")
+		shape := orIntervention("call-2", 200, predictioneval.InterventionAutoCallStarted,
+			predictioneval.RelevanceProven, "boundary")
+		shape.HasPosition = false
+
+		// The premise: each fault really is raised on its own.
+		if _, err := predictioneval.ProjectOrderedRulesStream(orSource(cs,
+			[]predictioneval.OrderedRulesIntervention{payload}),
+			orAdmission()); !errors.Is(err, predictioneval.ErrOrderedRulesNotEncodable) {
+			t.Fatalf("premise: the identity alone must be refused as unencodable; got %v", err)
+		}
+		if _, err := predictioneval.ProjectOrderedRulesStream(orSource(cs,
+			[]predictioneval.OrderedRulesIntervention{shape}),
+			orAdmission()); !errors.Is(err, predictioneval.ErrOrderedRulesScopeIncomplete) {
+			t.Fatalf("premise: the missing position alone must be refused as incomplete; got %v", err)
+		}
+
+		if _, err := predictioneval.ProjectOrderedRulesStream(orSource(cs,
+			[]predictioneval.OrderedRulesIntervention{payload, shape}),
+			orAdmission()); !errors.Is(err, predictioneval.ErrOrderedRulesScopeIncomplete) {
+			t.Fatalf("a source whose first intervention carries an unencodable identity and whose "+
+				"second declares no position was refused %v. The boundary pass has the same "+
+				"two-tier shape as the candidate walk, and 1,023 identities must not be scanned "+
+				"to reach an integer test.", err)
+		}
+	})
+
 	// An unusable config is arithmetic over a rule count already bounded above.
 	// The invariant pass is bounded but not cheap: on a well-formed stream it
 	// walks the scope, the admission references and every retained candidate to
@@ -3921,6 +4013,53 @@ func TestOrderedRulesARefusalDecidedBeforeTheTraversalAttestsToNothing(t *testin
 			}
 		})
 	}
+
+	// The DERIVED fields are the other half of what these refusals may carry,
+	// and the repair to the mismatch path stopped one layer short of them.
+	//
+	// Cutoff and Qualifications are computed by ProjectOrderedRulesStream, and
+	// a matching digest does not say the projection computed THESE — it says
+	// the stream has not changed since whoever built it. The digest is unkeyed
+	// and a refusal hands the recomputed value back, so the two-call oracle
+	// reaches both refusals below carrying any boundary the caller likes.
+	t.Run("a pre-traversal refusal carries no derived cutoff or qualifications", func(t *testing.T) {
+		st := orProject(t, cs, nil)
+		st.Cutoff = predictioneval.OrderedRulesCutoff{
+			Established:      true,
+			Position:         7,
+			Kind:             predictioneval.InterventionAutoCallStarted,
+			Identity:         "INVENTED-BOUNDARY",
+			Basis:            predictioneval.CutoffFactualIntervention,
+			DroppedAtOrAfter: 3,
+		}
+		st.Qualifications = []string{"FABRICATED-A", "FABRICATED-B"}
+		st.SelectionDigest = predictioneval.EvaluateOrderedRules(st, cfg, orDraws()).StreamDigest
+
+		for _, c := range []struct {
+			name   string
+			cfg    predictioneval.OrderedRulesConfig
+			reason string
+		}{
+			{"invariants broken", cfg, predictioneval.ReasonStreamInvariantViolated},
+			{"config unusable", noDefault, predictioneval.ReasonConfigDefaultNotSupplied},
+		} {
+			t.Run(c.name, func(t *testing.T) {
+				got := predictioneval.EvaluateOrderedRules(st, c.cfg, orDraws())
+				switch {
+				case got.Reason != c.reason:
+					t.Fatalf("premise: this input must be refused %q; got %q", c.reason, got.Reason)
+				case got.Cutoff != (predictioneval.OrderedRulesCutoff{}):
+					t.Fatalf("a refusal decided before the traversal handed back cutoff %+v. No "+
+						"intervention established it and the projection never produced it; a "+
+						"matching digest says only that the stream has not CHANGED.", got.Cutoff)
+				case len(got.Qualifications) != 0:
+					t.Fatalf("a refusal decided before the traversal handed back qualifications %v "+
+						"— a limitation list the evidence never implied, in a field whose "+
+						"contract is that it was derived.", got.Qualifications)
+				}
+			})
+		}
+	})
 
 	// The two over-bound reasons never reach the block above: the shape gate
 	// settles both, and a gate refusal declined to read the input, so it

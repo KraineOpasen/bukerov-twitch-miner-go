@@ -3480,6 +3480,47 @@ while the evaluator's version would carry the stream digest and the cutoff. The
 behaviour a caller observes is the gate's, and that is what the suite pins; the
 first draft of that case asserted the unreachable contract instead and failed.
 
+A further review pass found four more, and two of them corrected claims made
+above rather than only code. They are recorded here in the same form, since the
+pattern — a repair that stops one layer short of its own reasoning — is the one
+this model keeps producing.
+
+The candidate walk is **three** passes, not two. The two-way split claimed the
+shape of every candidate preceded the payload of any, and counted a candidate
+IDENTITY as shape. An identity is bytes: `checkIdentifier` scans up to
+`MaxOrderedRulesIdentifierBytes` of it and the duplicate map hashes the same
+bytes, so a last candidate declaring no position still waited on 127 identity
+scans — measured with 4,000-byte identities, 429.551 microseconds against 22.586
+microseconds. The tiers are now what costs nothing (a declared position, the
+causal order, the declared interval, the outcome count — integer work whose
+messages quote only integers), what costs a bounded scan (identity, uniqueness,
+the four vocabulary fields, membership, source kind, view agreement,
+outcome-vector presence), and what costs the budget (provenance, outcomes
+reason, every outcome and its points, the balance, the running aggregate).
+`establishCutoff` acquired the same first tier for the same reason: a last
+intervention declaring no position waited on 1,023 identity scans, 3.57799
+milliseconds against 163.451 microseconds.
+
+`validateAdmission` decides its mandatory scalars — a manifest id, a population,
+an order basis, and the view kind against its closed set — before walking the
+source references, which cannot bear on any of them: 2.997708 milliseconds to
+377 nanoseconds.
+
+And the derived fields are populated only once they are earned. `Cutoff` and
+`Qualifications` were set in the result literal at the top of the evaluator, so
+the config refusal and the invariant refusal returned them unchanged — an
+invented boundary and a fabricated limitation list, handed back inside fields
+whose contract says the projection derived them. The mismatch path had been
+repaired for exactly this, and the repair stopped one layer short on the
+reasoning that a MATCHING digest makes the values self-consistent. That
+reasoning is wrong, and this document already says why: a matching digest says
+the stream has not CHANGED, never that the projection produced it, and the
+digest is unkeyed with the recomputed value handed back on refusal. Reproduced
+through that oracle, both refusals returned identity `INVENTED-BOUNDARY`,
+`DroppedAtOrAfter` 3 and two qualifications the evidence never implied. They are
+now assigned after the invariant pass succeeds rather than cleared on each
+refusal, so a path added later cannot forget to clear them.
+
 One refusal also stopped re-exporting what it never read. A stream whose
 SelectionDigest does not match is not what the projection produced, so its
 Cutoff and its Qualifications are supplied text that the checks judging them —

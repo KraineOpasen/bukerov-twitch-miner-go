@@ -200,21 +200,30 @@ func ProjectOrderedRulesStream(source OrderedRulesSource, admission CommonAdmiss
 			errors.New("predictioneval: supplied scope, admission and intervention bytes exceed the aggregate budget"))
 	}
 
-	seen := make(map[string]bool, len(source.Candidates))
+	// THE STRUCTURAL PASS FIRST, and the distinction from the pass below is
+	// what a supplied BYTE costs.
+	//
+	// Every check here is an integer comparison or a slice length: a declared
+	// position, the causal order, the declared interval, the outcome count.
+	// None of them reads a caller-supplied byte, and none of their messages
+	// quotes one.
+	//
+	// The pass below is bounded but not free — checkIdentifier scans up to
+	// MaxOrderedRulesIdentifierBytes and the duplicate map hashes the same
+	// bytes, and four vocabulary fields are scanned beside them. So a LAST
+	// candidate declaring no position was reached only after every earlier
+	// candidate's identity had been scanned and hashed: measured with 128
+	// candidates carrying 4,000-byte identities, 429.551 µs against 22.586 µs.
+	//
+	// That is the correction to the claim the two-pass split made. It said
+	// every candidate's SHAPE preceded any candidate's PAYLOAD, and treated an
+	// identity as shape; an identity is bytes, and the split it needed is this
+	// one. Three passes now: what costs nothing, what costs a bounded scan,
+	// and what costs the budget.
 	var lastPosition int64
 	for i := range source.Candidates {
 		c := &source.Candidates[i]
 		where := "candidate " + strconv.Itoa(i)
-		if err := checkIdentifier(c.Identity, where+" identity"); err != nil {
-			return OrderedRulesStream{}, err
-		}
-		if seen[c.Identity] {
-			return OrderedRulesStream{}, errors.Join(ErrOrderedRulesDuplicateIdentity,
-				errors.New("predictioneval: "+where+" repeats identity "+strconv.Quote(c.Identity)+
-					"; two candidates may carry identical VALUES at different positions, but never the same identity"))
-		}
-		seen[c.Identity] = true
-
 		if !c.HasPosition {
 			return OrderedRulesStream{}, errors.Join(ErrOrderedRulesScopeIncomplete,
 				errors.New("predictioneval: "+where+" does not declare its causal position as supplied; "+
@@ -228,12 +237,32 @@ func ProjectOrderedRulesStream(source OrderedRulesSource, admission CommonAdmiss
 					"; equal or decreasing positions mean the causal order is not known and must not be sorted away"))
 		}
 		lastPosition = c.Position
-
 		if c.Position < source.Scope.IntervalFromPosition || c.Position > source.Scope.IntervalToPosition {
 			return OrderedRulesStream{}, errors.Join(ErrOrderedRulesOutsideDeclaredInterval,
 				errors.New("predictioneval: "+where+" at position "+strconv.FormatInt(c.Position, 10)+
 					" lies outside the declared interval"))
 		}
+		if len(c.Outcomes) > MaxOrderedRulesOutcomes {
+			return OrderedRulesStream{}, errors.Join(ErrOrderedRulesOverBound,
+				errors.New("predictioneval: "+where+" carries "+strconv.Itoa(len(c.Outcomes))+
+					" outcomes, past the bound of "+strconv.Itoa(MaxOrderedRulesOutcomes)))
+		}
+	}
+
+	seen := make(map[string]bool, len(source.Candidates))
+	for i := range source.Candidates {
+		c := &source.Candidates[i]
+		where := "candidate " + strconv.Itoa(i)
+		if err := checkIdentifier(c.Identity, where+" identity"); err != nil {
+			return OrderedRulesStream{}, err
+		}
+		if seen[c.Identity] {
+			return OrderedRulesStream{}, errors.Join(ErrOrderedRulesDuplicateIdentity,
+				errors.New("predictioneval: "+where+" repeats identity "+strconv.Quote(c.Identity)+
+					"; two candidates may carry identical VALUES at different positions, but never the same identity"))
+		}
+		seen[c.Identity] = true
+
 		// Same rule as above, for the fields the checks below quote.
 		for _, v := range [...]string{string(c.SourceKind), string(c.EpisodeMembership),
 			string(c.OutcomesPresence), string(c.Balance.Presence)} {
@@ -263,11 +292,6 @@ func ProjectOrderedRulesStream(source OrderedRulesSource, admission CommonAdmiss
 				errors.New("predictioneval: "+where+" is a "+string(c.SourceKind)+
 					" inside a CHANNEL_CANDIDATE_STREAM view; a decision-time snapshot is not a wire frame"))
 		}
-		if len(c.Outcomes) > MaxOrderedRulesOutcomes {
-			return OrderedRulesStream{}, errors.Join(ErrOrderedRulesOverBound,
-				errors.New("predictioneval: "+where+" carries "+strconv.Itoa(len(c.Outcomes))+
-					" outcomes, past the bound of "+strconv.Itoa(MaxOrderedRulesOutcomes)))
-		}
 		switch c.OutcomesPresence {
 		case SuppliedKnown, SuppliedMissing, SuppliedInvalid:
 		default:
@@ -279,10 +303,18 @@ func ProjectOrderedRulesStream(source OrderedRulesSource, admission CommonAdmiss
 		}
 	}
 
-	// THE SHAPE OF EVERY CANDIDATE BEFORE THE PAYLOAD OF ANY, which is the last
-	// place in this function where attacker-controlled work ran ahead of a
-	// cheaper decision — and the only one that needed a second pass rather than
-	// a move.
+	// THE PAYLOAD OF ANY CANDIDATE LAST, after the structure of all of them and
+	// then the bounded strings of all of them. This is the third tier, and the
+	// only one of the three that touches the budget.
+	//
+	// It began as a two-way split, and the header it carried then — the shape
+	// of every candidate before the payload of any — was not quite true, which
+	// is worth leaving on the record because the imprecision was the defect.
+	// It counted a candidate IDENTITY as shape. An identity is bytes:
+	// checkIdentifier scans up to MaxOrderedRulesIdentifierBytes of it and the
+	// duplicate map hashes the same bytes, so a last candidate declaring no
+	// position still waited on 127 identity scans. The structural pass above
+	// is what the claim actually needed.
 	//
 	// Within one candidate the cheap checks already came first. Across
 	// candidates they did not: candidate 127 declaring no causal position was
@@ -295,23 +327,22 @@ func ProjectOrderedRulesStream(source OrderedRulesSource, admission CommonAdmiss
 	// identities the refusal now costs 23.92 µs, statistically the same, so it
 	// is decided by shape rather than scaled by payload.
 	//
-	// The pass above is bounded by MaxOrderedRulesCandidates times a fixed
-	// number of strings each bounded by MaxOrderedRulesIdentifierBytes, and
-	// every value it quotes has passed checkIdentifier or checkFreeText first,
-	// so it cannot become the cost it prevents.
+	// The two passes above are bounded by MaxOrderedRulesCandidates times a
+	// fixed number of strings each bounded by MaxOrderedRulesIdentifierBytes,
+	// and every value either quotes has passed checkIdentifier or checkFreeText
+	// first, so neither can become the cost it prevents.
 	//
-	// It adds NO rule. Every check above was already performed here, in this
-	// order, on the same values; the loop was cut in two and nothing crossed
-	// the cut. That is what keeps the invariant pass in ordered_rules.go
-	// correct without a matching change — it re-establishes the same rules and
-	// answers yes or no, and five divergences in this model have all been a
-	// rule on one path and not the other, never a rule in a different place on
-	// the same path.
+	// Splitting adds NO rule. Every check was already performed here, in this
+	// order, on the same values; the loop was cut and nothing crossed the cut.
+	// That is what keeps the invariant pass in ordered_rules.go correct without
+	// a matching change — it re-establishes the same rules and answers yes or
+	// no, and the divergences in this model have all been a rule on one path
+	// and not the other, never a rule in a different place on the same path.
 	//
-	// What DOES change is which refusal a doubly-faulty source gets: a shape
-	// fault in a later candidate now wins over a payload fault in an earlier
-	// one. Both are refusals, neither admits anything, and the case in the
-	// suite pins the new order by which sentinel fires.
+	// What DOES change is which refusal a doubly-faulty source gets: a fault
+	// from an earlier tier in a later candidate now wins over a later-tier
+	// fault in an earlier one. Both are refusals, neither admits anything, and
+	// two cases in the suite pin the order by which sentinel fires.
 	for i := range source.Candidates {
 		c := &source.Candidates[i]
 		where := "candidate " + strconv.Itoa(i)
@@ -409,6 +440,32 @@ func ProjectOrderedRulesStream(source OrderedRulesSource, admission CommonAdmiss
 // world that had already been acted on.
 func establishCutoff(source OrderedRulesSource) (OrderedRulesCutoff, error) {
 	out := OrderedRulesCutoff{Basis: CutoffNoInterventionDeclared}
+
+	// THE STRUCTURAL PASS FIRST, for the same reason the candidate walk has
+	// one: these two checks are integer comparisons whose messages quote only
+	// integers, while the pass below scans an identity up to
+	// MaxOrderedRulesIdentifierBytes and hashes the same bytes into the
+	// duplicate map. A LAST intervention declaring no position was therefore
+	// reached only after 1,023 identities had been scanned and hashed:
+	// measured with 4,000-byte identities, 3.57799 ms against 163.451 µs.
+	//
+	// The interval endpoints are settled before this: validateScope runs above
+	// establishCutoff and refuses a scope that omits them.
+	for i := range source.Interventions {
+		in := &source.Interventions[i]
+		where := "intervention " + strconv.Itoa(i)
+		if !in.HasPosition {
+			return OrderedRulesCutoff{}, errors.Join(ErrOrderedRulesScopeIncomplete,
+				errors.New("predictioneval: "+where+" does not declare its position as supplied; an omitted "+
+					"one would cut the stream at zero and remove every candidate after it"))
+		}
+		if in.Position < source.Scope.IntervalFromPosition || in.Position > source.Scope.IntervalToPosition {
+			return OrderedRulesCutoff{}, errors.Join(ErrOrderedRulesOutsideDeclaredInterval,
+				errors.New("predictioneval: "+where+" at position "+strconv.FormatInt(in.Position, 10)+
+					" lies outside the declared interval"))
+		}
+	}
+
 	seen := make(map[string]bool, len(source.Interventions))
 	for i := range source.Interventions {
 		in := &source.Interventions[i]
@@ -432,17 +489,6 @@ func establishCutoff(source OrderedRulesSource) (OrderedRulesCutoff, error) {
 			return OrderedRulesCutoff{}, errors.Join(ErrOrderedRulesVocabulary,
 				errors.New("predictioneval: "+where+" has kind "+strconv.Quote(string(in.Kind))))
 		}
-		if !in.HasPosition {
-			return OrderedRulesCutoff{}, errors.Join(ErrOrderedRulesScopeIncomplete,
-				errors.New("predictioneval: "+where+" does not declare its position as supplied; an omitted "+
-					"one would cut the stream at zero and remove every candidate after it"))
-		}
-		if in.Position < source.Scope.IntervalFromPosition || in.Position > source.Scope.IntervalToPosition {
-			return OrderedRulesCutoff{}, errors.Join(ErrOrderedRulesOutsideDeclaredInterval,
-				errors.New("predictioneval: "+where+" at position "+strconv.FormatInt(in.Position, 10)+
-					" lies outside the declared interval"))
-		}
-
 		var basis OrderedRulesCutoffBasis
 		switch in.Relevance {
 		case RelevanceExcluded:
@@ -560,11 +606,16 @@ func validateAdmission(a CommonAdmission) error {
 				" admission source references exceed the bound of "+
 				strconv.Itoa(MaxOrderedRulesSourceReferences)))
 	}
-	for i, ref := range a.SourceReferences {
-		if err := checkFreeText(ref, "admission source reference "+strconv.Itoa(i)); err != nil {
-			return err
-		}
-	}
+	// THE MANDATORY SCALARS BEFORE THE REFERENCE PAYLOAD. Each is an emptiness
+	// test or a switch over a closed set and reads no supplied byte, while the
+	// loop below walks up to MaxOrderedRulesSourceReferences strings of
+	// MaxOrderedRulesIdentifierBytes each. An admission naming no population
+	// therefore paid a 4 MiB scan to be refused on a field the references
+	// cannot affect: measured 2.997708 ms against 353 ns.
+	//
+	// The view kind is settled here too. It is compared against a closed set,
+	// and the projection has already bounded it with checkFreeText before
+	// calling this, so quoting a rejected one is bounded.
 	switch {
 	case a.ManifestID == "":
 		return errors.Join(ErrOrderedRulesAdmissionIncomplete, errors.New("predictioneval: admission manifest id is empty"))
@@ -575,11 +626,17 @@ func validateAdmission(a CommonAdmission) error {
 	}
 	switch a.ViewKind {
 	case ViewChannelCandidateStream, ViewCalculateOnly:
-		return nil
 	default:
 		return errors.Join(ErrOrderedRulesVocabulary,
 			errors.New("predictioneval: admission view kind "+strconv.Quote(string(a.ViewKind))))
 	}
+
+	for i, ref := range a.SourceReferences {
+		if err := checkFreeText(ref, "admission source reference "+strconv.Itoa(i)); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // invalidUTF8 reports a string Go's JSON encoder would not reproduce.
