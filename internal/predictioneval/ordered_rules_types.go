@@ -105,6 +105,12 @@ const (
 	MaxOrderedRulesRules = 128
 	// MaxOrderedRulesInterventions bounds the supplied factual boundary markers.
 	MaxOrderedRulesInterventions = 1024
+	// MaxOrderedRulesQualifications bounds a projected stream's qualification
+	// list. The projection itself emits at most five, so this is headroom
+	// rather than a limit anything real approaches — it exists because
+	// [EvaluateOrderedRules] is exported and must bound a stream it did not
+	// produce.
+	MaxOrderedRulesQualifications = 64
 	// MaxOrderedRulesSourceReferences bounds the admission manifest's source
 	// list, which the projection retains and copies.
 	//
@@ -631,6 +637,14 @@ const (
 	ReasonAttemptRateOutOfDomain   = "ATTEMPT_RATE_OUT_OF_BERNOULLI_DOMAIN"
 	ReasonRuleCountOverBound       = "RULE_COUNT_OVER_BOUND"
 	ReasonDrawWordsOverBound       = "DRAW_WORDS_OVER_BOUND"
+	// ReasonStreamShapeOverBound is a supplied stream whose COUNTS already
+	// exceed a declared bound — candidates, one candidate's outcomes,
+	// qualifications or admission source references.
+	ReasonStreamShapeOverBound = "STREAM_SHAPE_OVER_BOUND"
+	// ReasonStreamBytesOverBound is a supplied input whose retained text
+	// exceeds [MaxOrderedRulesAggregateBytes], the same budget the projection
+	// charges.
+	ReasonStreamBytesOverBound = "STREAM_BYTES_OVER_BOUND"
 	// ReasonWorkBudgetExceeded covers the evaluated-slot ceiling, which is also
 	// the retained-trace ceiling: see [MaxOrderedRulesWork].
 	ReasonWorkBudgetExceeded = "WORK_BUDGET_EXCEEDED"

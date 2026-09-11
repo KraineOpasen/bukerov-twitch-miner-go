@@ -710,6 +710,159 @@ func TestOrderedRulesOverBudgetInputIsRefusedWithoutTruncation(t *testing.T) {
 	})
 }
 
+// TestOrderedRulesOversizedInputIsRefusedBeforeItIsRead pins the ORDER of the
+// bound checks against the work they bound.
+//
+// EvaluateOrderedRules is exported and takes the stream by value, so it can be
+// handed one the projection never produced. It already refuses such a stream on
+// the SelectionDigest — but that comparison is circular, since detecting a
+// forgery requires digesting the forgery first. The three whole-input digests
+// therefore used to run BEFORE every bound, and a draw trace eight times past
+// MaxOrderedRulesDrawWords was hashed in full and only then refused for being
+// too long: the bound was consulted after the work it exists to bound.
+//
+// The assertions below are on the RESULT, never on elapsed time. A refusal that
+// declined to read the input carries no whole-input digest, so the absence of
+// one is the observable proof that nothing walked the input — and it is a
+// deterministic fact rather than a measurement.
+func TestOrderedRulesOversizedInputIsRefusedBeforeItIsRead(t *testing.T) {
+	cfg := orConfig([]predictioneval.OrderedRule{
+		orRule(predictioneval.ComparatorLe, 40, 100, 0, 10)}, 95, 100, 0, 10)
+
+	// forged builds a stream the projection never produced. Its SelectionDigest
+	// is deliberately wrong, so if the shape gate does NOT fire, the digest
+	// mismatch is what refuses it — which is exactly the confusion being pinned.
+	forged := func(candidates int) predictioneval.OrderedRulesStream {
+		cs := make([]predictioneval.OrderedRulesCandidate, candidates)
+		for i := range cs {
+			cs[i] = orCandidate("c"+itoaTest(i), int64(i), orKnownBalance(1000),
+				orOutcome("A", 4), orOutcome("B", 6))
+		}
+		return predictioneval.OrderedRulesStream{
+			ContractVersion: predictioneval.OrderedRulesStreamContractVersion,
+			Candidates:      cs,
+			SelectionDigest: "a digest this stream does not have",
+		}
+	}
+
+	unread := func(t *testing.T, ev predictioneval.OrderedRulesEvaluation, wantReason string) {
+		t.Helper()
+		if ev.Status != predictioneval.StatusRefused || ev.Reason != wantReason {
+			t.Fatalf("status %q reason %q, want REFUSED / %s", ev.Status, ev.Reason, wantReason)
+		}
+		if ev.StreamDigest != "" || ev.ConfigDigest != "" || ev.EntropyDigest != "" {
+			t.Fatalf("a refusal that never read the input must attest to nothing about it; got "+
+				"stream=%q config=%q entropy=%q", ev.StreamDigest, ev.ConfigDigest, ev.EntropyDigest)
+		}
+		if ev.Selected != nil {
+			t.Fatal("a refused evaluation must decide nothing")
+		}
+	}
+
+	t.Run("candidates past the bound", func(t *testing.T) {
+		unread(t, predictioneval.EvaluateOrderedRules(
+			forged(predictioneval.MaxOrderedRulesCandidates+1), cfg, orDraws()),
+			predictioneval.ReasonStreamShapeOverBound)
+	})
+
+	t.Run("one candidate's outcome vector past the bound", func(t *testing.T) {
+		outs := make([]predictioneval.OrderedRulesOutcome, predictioneval.MaxOrderedRulesOutcomes+1)
+		for i := range outs {
+			outs[i] = orOutcome("o"+itoaTest(i), int64(i+1))
+		}
+		st := forged(1)
+		st.Candidates[0].Outcomes = outs
+		unread(t, predictioneval.EvaluateOrderedRules(st, cfg, orDraws()),
+			predictioneval.ReasonStreamShapeOverBound)
+	})
+
+	t.Run("qualifications past the bound", func(t *testing.T) {
+		st := forged(1)
+		st.Qualifications = make([]string, predictioneval.MaxOrderedRulesQualifications+1)
+		unread(t, predictioneval.EvaluateOrderedRules(st, cfg, orDraws()),
+			predictioneval.ReasonStreamShapeOverBound)
+	})
+
+	t.Run("admission source references past the bound", func(t *testing.T) {
+		st := forged(1)
+		st.Admission.SourceReferences = make([]string,
+			predictioneval.MaxOrderedRulesSourceReferences+1)
+		unread(t, predictioneval.EvaluateOrderedRules(st, cfg, orDraws()),
+			predictioneval.ReasonStreamShapeOverBound)
+	})
+
+	// The sharpest case: a bound that already existed, checked after the hash
+	// of the very thing it bounds. The trace is over MaxOrderedRulesDrawWords,
+	// and the stream is forged — so the reason reported says which check ran
+	// first. Before the repair this was the digest mismatch.
+	t.Run("an over-bound trace reports its own bound, not a digest mismatch", func(t *testing.T) {
+		unread(t, predictioneval.EvaluateOrderedRules(forged(1), cfg,
+			orDraws(make([]uint64, predictioneval.MaxOrderedRulesDrawWords+1)...)),
+			predictioneval.ReasonDrawWordsOverBound)
+	})
+
+	t.Run("rules past the bound", func(t *testing.T) {
+		rules := make([]predictioneval.OrderedRule, predictioneval.MaxOrderedRulesRules+1)
+		for i := range rules {
+			rules[i] = orRule(predictioneval.ComparatorLe, 100, 100, 0, 10)
+		}
+		unread(t, predictioneval.EvaluateOrderedRules(forged(1),
+			orConfig(rules, 95, 100, 0, 10), orDraws()),
+			predictioneval.ReasonRuleCountOverBound)
+	})
+
+	// The retained TEXT, not only the counts. Every field below points at the
+	// SAME string, so the budget is exceeded by what would be retained while
+	// the test allocates one copy of it — the sum is over lengths, and Go
+	// strings do not copy on assignment.
+	t.Run("retained text past the aggregate budget", func(t *testing.T) {
+		chunk := strings.Repeat("x", predictioneval.MaxOrderedRulesIdentifierBytes*2)
+		outs := make([]predictioneval.OrderedRulesOutcome, predictioneval.MaxOrderedRulesOutcomes)
+		for i := range outs {
+			outs[i] = predictioneval.OrderedRulesOutcome{
+				Identity: chunk,
+				Points: predictioneval.SuppliedInt64{
+					Presence:               predictioneval.SuppliedKnown,
+					Value:                  1,
+					Provenance:             chunk,
+					Reason:                 chunk,
+					HasAvailableAtPosition: true,
+				},
+			}
+		}
+		st := forged(predictioneval.MaxOrderedRulesCandidates)
+		for i := range st.Candidates {
+			st.Candidates[i].Outcomes = outs
+		}
+		counted := int64(len(st.Candidates)) * int64(len(outs)) * 3 * int64(len(chunk))
+		if counted <= predictioneval.MaxOrderedRulesAggregateBytes {
+			t.Fatalf("this case's premise is that the retained text exceeds the budget; it counts "+
+				"%d bytes against %d", counted, int64(predictioneval.MaxOrderedRulesAggregateBytes))
+		}
+		unread(t, predictioneval.EvaluateOrderedRules(st, cfg, orDraws()),
+			predictioneval.ReasonStreamBytesOverBound)
+	})
+
+	// Non-vacuity: EXACTLY at the counts, the shape gate does not fire and the
+	// forged stream falls through to the digest mismatch it deserves. So the
+	// gate refuses oversized input rather than everything.
+	t.Run("exactly at the bounds the shape gate stands aside", func(t *testing.T) {
+		st := forged(predictioneval.MaxOrderedRulesCandidates)
+		st.Qualifications = make([]string, predictioneval.MaxOrderedRulesQualifications)
+		st.Admission.SourceReferences = make([]string,
+			predictioneval.MaxOrderedRulesSourceReferences)
+		ev := predictioneval.EvaluateOrderedRules(st, cfg,
+			orDraws(make([]uint64, predictioneval.MaxOrderedRulesDrawWords)...))
+		if ev.Reason != predictioneval.ReasonStreamDigestMismatch {
+			t.Fatalf("reason %q, want %s: an input at its bounds is admissible and must be judged "+
+				"on its contents", ev.Reason, predictioneval.ReasonStreamDigestMismatch)
+		}
+		if ev.StreamDigest == "" {
+			t.Fatal("an input that passed the shape gate WAS read, so it must carry its digest")
+		}
+	})
+}
+
 // TestOrderedRulesUnrecoverableOutcomeVectorIsNotTheDonorsDecline pins the
 // distinction the vector's presence marker exists for.
 //

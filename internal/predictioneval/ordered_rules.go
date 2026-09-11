@@ -180,6 +180,77 @@ type normalizedConfig struct {
 	defPoints normalizedPoints
 }
 
+// orderedRulesInputShapeReason refuses an input whose shape already exceeds a
+// declared bound, using only counts and string lengths.
+//
+// Every check here is O(1) per element over a number of elements the preceding
+// checks have already bounded, so the work this function can be made to do is
+// itself bounded. That is the whole point: it is the only thing that runs
+// before the digests.
+//
+// The byte sum covers the text the three digests actually read. It uses
+// MaxOrderedRulesAggregateBytes rather than a new budget, because that is the
+// figure the projection already charges — an input the projection would have
+// admitted must not be refused here, and one it would have refused must not be
+// hashed here.
+func orderedRulesInputShapeReason(s OrderedRulesStream, cfg OrderedRulesConfig, d SuppliedDrawTrace) string {
+	switch {
+	case len(d.Words) > MaxOrderedRulesDrawWords:
+		return ReasonDrawWordsOverBound
+	case len(cfg.Detailed) > MaxOrderedRulesRules:
+		return ReasonRuleCountOverBound
+	case len(s.Candidates) > MaxOrderedRulesCandidates,
+		len(s.Qualifications) > MaxOrderedRulesQualifications,
+		len(s.Admission.SourceReferences) > MaxOrderedRulesSourceReferences:
+		return ReasonStreamShapeOverBound
+	}
+	for i := range s.Candidates {
+		if len(s.Candidates[i].Outcomes) > MaxOrderedRulesOutcomes {
+			return ReasonStreamShapeOverBound
+		}
+	}
+	if orderedRulesInputBytes(s, cfg, d) > MaxOrderedRulesAggregateBytes {
+		return ReasonStreamBytesOverBound
+	}
+	return ""
+}
+
+// orderedRulesInputBytes sums the retained text the whole-input digests read.
+//
+// It is called only after the count bounds above have passed, so the loops are
+// bounded; each term is a length read, never a copy.
+func orderedRulesInputBytes(s OrderedRulesStream, cfg OrderedRulesConfig, d SuppliedDrawTrace) int64 {
+	bytes := int64(len(s.ContractVersion) + len(s.Scope.Namespace) + len(s.Scope.EpisodeID) +
+		len(s.Scope.AccountContext) + len(s.Scope.AssociationEvidence) +
+		len(s.Scope.SourceContractVersion) + len(s.Scope.Coverage) + len(s.Scope.CoverageDetail))
+	bytes += int64(len(s.Admission.ManifestID) + len(s.Admission.ViewKind) +
+		len(s.Admission.Population) + len(s.Admission.OrderBasis))
+	for _, ref := range s.Admission.SourceReferences {
+		bytes += int64(len(ref))
+	}
+	bytes += int64(len(s.Cutoff.Kind) + len(s.Cutoff.Identity) + len(s.Cutoff.Basis))
+	for _, q := range s.Qualifications {
+		bytes += int64(len(q))
+	}
+	for i := range s.Candidates {
+		c := &s.Candidates[i]
+		bytes += int64(len(c.Identity) + len(c.SourceKind) + len(c.EpisodeMembership) +
+			len(c.Provenance) + len(c.OutcomesPresence) + len(c.OutcomesReason))
+		bytes += suppliedTextBytes(c.Balance) + int64(len(c.Balance.Presence))
+		for j := range c.Outcomes {
+			o := &c.Outcomes[j]
+			bytes += int64(len(o.Identity) + len(o.Points.Presence))
+			bytes += suppliedTextBytes(o.Points)
+		}
+	}
+	bytes += int64(len(cfg.ConfigID))
+	for i := range cfg.Detailed {
+		bytes += int64(len(cfg.Detailed[i].Comparator))
+	}
+	bytes += int64(len(d.EntropySemanticsVersion) + len(d.RunID))
+	return bytes
+}
+
 // EvaluateOrderedRules re-derives the donor mechanism over a projected stream.
 //
 // It returns no error: every refusal and every unknown is a TYPED STATUS on the
@@ -193,6 +264,40 @@ type normalizedConfig struct {
 // entropy this function will ever see. There is no clock, no RNG and no
 // fallback: an exhausted trace is an explicit unknown, never a default draw.
 func EvaluateOrderedRules(stream OrderedRulesStream, rules OrderedRulesConfig, draws SuppliedDrawTrace) OrderedRulesEvaluation {
+	// SHAPE FIRST, before anything walks the input.
+	//
+	// The three whole-input digests below read every candidate, every outcome,
+	// every rule and every entropy word, and the qualification copy allocates
+	// a slice the caller sized. All of that used to run BEFORE the bounds that
+	// are supposed to govern it, so a trace eight times past
+	// MaxOrderedRulesDrawWords was hashed in full and only then refused for
+	// being too long — the bound was checked after the work it bounds.
+	//
+	// The stream's own case is worse, because it cannot be fixed by reordering
+	// alone: the SelectionDigest comparison is circular, since detecting a
+	// forged stream requires digesting it first. What CAN be bounded is how
+	// much a forged one costs, and that is what this does.
+	//
+	// A refusal here carries no whole-input digest, and that is deliberate: the
+	// function declined to read the input, so it can attest to nothing about
+	// it. A digest of something never traversed would be the same kind of empty
+	// guarantee this refusal exists to avoid. For the same reason the reason
+	// codes below take precedence over the contract and digest mismatches — an
+	// input too large to read cannot be checked for anything else.
+	if reason := orderedRulesInputShapeReason(stream, rules, draws); reason != "" {
+		return OrderedRulesEvaluation{
+			EvidenceLabel:           OrderedRulesEvidenceLabel,
+			ModelVersion:            OrderedRulesModelVersion,
+			DonorRevision:           OrderedRulesDonorRevision,
+			EntropySemanticsVersion: OrderedRulesEntropySemanticsVersion,
+			Cutoff:                  stream.Cutoff,
+			Participation:           ParticipationNotAdmitted,
+			Stake:                   SuppliedUint32{Presence: SuppliedMissing, Reason: ReasonBalanceNotEvaluated},
+			Status:                  StatusRefused,
+			Reason:                  reason,
+		}
+	}
+
 	out := OrderedRulesEvaluation{
 		EvidenceLabel:           OrderedRulesEvidenceLabel,
 		ModelVersion:            OrderedRulesModelVersion,
