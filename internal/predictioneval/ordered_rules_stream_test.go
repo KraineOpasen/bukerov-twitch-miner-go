@@ -9,6 +9,7 @@ package predictioneval_test
 // it was not computed from.
 
 import (
+	"errors"
 	"reflect"
 	"strings"
 	"testing"
@@ -218,7 +219,7 @@ func TestOrderedRulesLaterBalanceCannotRepairEarlierCandidate(t *testing.T) {
 	c := orCandidate("c1", 10, borrowed, orOutcome("A", 4), orOutcome("B", 6))
 	_, err := predictioneval.ProjectOrderedRulesStream(
 		orSource([]predictioneval.OrderedRulesCandidate{c}, nil), orAdmission())
-	if !errorsIs(err, predictioneval.ErrOrderedRulesBackdatedValue) {
+	if !errors.Is(err, predictioneval.ErrOrderedRulesBackdatedValue) {
 		t.Fatalf("got %v, want a back-dated-value refusal", err)
 	}
 
@@ -244,7 +245,7 @@ func TestOrderedRulesRoundAndSourceEpisodeCannotBeJoinedByEventIDAlone(t *testin
 	c.EpisodeMembership = predictioneval.MembershipUnknown
 	_, err := predictioneval.ProjectOrderedRulesStream(
 		orSource([]predictioneval.OrderedRulesCandidate{c}, nil), orAdmission())
-	if !errorsIs(err, predictioneval.ErrOrderedRulesMembershipUnproven) {
+	if !errors.Is(err, predictioneval.ErrOrderedRulesMembershipUnproven) {
 		t.Fatalf("got %v, want an unproven-membership refusal", err)
 	}
 
@@ -276,7 +277,7 @@ func TestOrderedRulesAmbiguousCausalPositionsAreNotSortedAway(t *testing.T) {
 				orTwoOutcomePool("c1", 10), orTwoOutcomePool("c2", tc.second),
 			}
 			_, err := predictioneval.ProjectOrderedRulesStream(orSource(cs, nil), orAdmission())
-			if !errorsIs(err, predictioneval.ErrOrderedRulesAmbiguousOrder) {
+			if !errors.Is(err, predictioneval.ErrOrderedRulesAmbiguousOrder) {
 				t.Fatalf("got %v, want an ambiguous-order refusal", err)
 			}
 		})
@@ -482,6 +483,15 @@ func TestOrderedRulesInputsAndTraceDoNotAliasCallerValues(t *testing.T) {
 	stream := orProject(t, cs, nil)
 	before := predictioneval.EvaluateOrderedRules(stream, cfg, draws)
 
+	// The trace is snapshotted BEFORE the caller's words are mutated. Without
+	// this the case could not fail on a trace that aliased draws.Words at all —
+	// nothing below reads before.Trace, and the test's own name promises it.
+	if len(before.Trace) == 0 {
+		t.Fatal("the run recorded no trace, so the aliasing assertion below would hold vacuously")
+	}
+	traceSnapshot := make([]predictioneval.OrderedRulesTraceEntry, len(before.Trace))
+	copy(traceSnapshot, before.Trace)
+
 	// Mutate everything the caller still holds.
 	outcomes[0].Points.Value = 9
 	outcomes[1].Points.Value = 1
@@ -493,6 +503,18 @@ func TestOrderedRulesInputsAndTraceDoNotAliasCallerValues(t *testing.T) {
 	after := predictioneval.EvaluateOrderedRules(stream, orConfig([]predictioneval.OrderedRule{
 		orRule(predictioneval.ComparatorLe, 50, 100, 0, 10),
 	}, 95, 100, 0, 10), orDraws(orWordAdmit))
+
+	if len(before.Trace) != len(traceSnapshot) {
+		t.Fatalf("the recorded trace changed length after the caller mutated its own inputs: %d then %d",
+			len(traceSnapshot), len(before.Trace))
+	}
+	for i := range traceSnapshot {
+		if before.Trace[i] != traceSnapshot[i] {
+			t.Fatalf("trace entry %d changed after the caller mutated its own values:\n before = %+v\n"+
+				"  after = %+v\nA recorded draw must be a copy, not a window onto the caller's words.",
+				i, traceSnapshot[i], before.Trace[i])
+		}
+	}
 
 	switch {
 	case stream.Candidates[0].Outcomes[0].Identity != "A":
@@ -523,7 +545,7 @@ func TestOrderedRulesOverBudgetInputIsRefusedWithoutTruncation(t *testing.T) {
 			cs[i] = orTwoOutcomePool("c"+itoaTest(i), int64(i+1))
 		}
 		stream, err := predictioneval.ProjectOrderedRulesStream(orSource(cs, nil), orAdmission())
-		if !errorsIs(err, predictioneval.ErrOrderedRulesOverBound) {
+		if !errors.Is(err, predictioneval.ErrOrderedRulesOverBound) {
 			t.Fatalf("got %v, want an over-bound refusal", err)
 		}
 		if len(stream.Candidates) != 0 {
@@ -556,7 +578,7 @@ func TestOrderedRulesOverBudgetInputIsRefusedWithoutTruncation(t *testing.T) {
 		c := orCandidate("c1", 10, orKnownBalance(1000), outs...)
 		_, err := predictioneval.ProjectOrderedRulesStream(
 			orSource([]predictioneval.OrderedRulesCandidate{c}, nil), orAdmission())
-		if !errorsIs(err, predictioneval.ErrOrderedRulesOverBound) {
+		if !errors.Is(err, predictioneval.ErrOrderedRulesOverBound) {
 			t.Fatalf("got %v, want an over-bound refusal", err)
 		}
 	})
@@ -630,7 +652,7 @@ func TestOrderedRulesUnrecoverableOutcomeVectorIsNotTheDonorsDecline(t *testing.
 	bare := orTwoOutcomePool("c1", 10)
 	bare.OutcomesPresence = ""
 	if _, err := predictioneval.ProjectOrderedRulesStream(
-		orSource([]predictioneval.OrderedRulesCandidate{bare}, nil), orAdmission()); !errorsIs(err,
+		orSource([]predictioneval.OrderedRulesCandidate{bare}, nil), orAdmission()); !errors.Is(err,
 		predictioneval.ErrOrderedRulesVocabulary) {
 		t.Fatalf("got %v, want a vocabulary refusal for an undeclared outcome-vector presence", err)
 	}
@@ -698,7 +720,7 @@ func TestOrderedRulesFreeTextIsBoundedLikeIdentifiers(t *testing.T) {
 		c.Balance = predictioneval.SuppliedInt64{Presence: predictioneval.SuppliedMissing, Reason: big}
 		_, err := predictioneval.ProjectOrderedRulesStream(
 			orSource([]predictioneval.OrderedRulesCandidate{c}, nil), orAdmission())
-		if !errorsIs(err, predictioneval.ErrOrderedRulesOverBound) {
+		if !errors.Is(err, predictioneval.ErrOrderedRulesOverBound) {
 			t.Fatalf("got %v, want an over-bound refusal", err)
 		}
 	})
@@ -709,7 +731,7 @@ func TestOrderedRulesFreeTextIsBoundedLikeIdentifiers(t *testing.T) {
 		c := orCandidate("c1", 10, orKnownBalance(1000), o, orOutcome("B", 6))
 		_, err := predictioneval.ProjectOrderedRulesStream(
 			orSource([]predictioneval.OrderedRulesCandidate{c}, nil), orAdmission())
-		if !errorsIs(err, predictioneval.ErrOrderedRulesOverBound) {
+		if !errors.Is(err, predictioneval.ErrOrderedRulesOverBound) {
 			t.Fatalf("got %v, want an over-bound refusal", err)
 		}
 	})
@@ -717,7 +739,7 @@ func TestOrderedRulesFreeTextIsBoundedLikeIdentifiers(t *testing.T) {
 	t.Run("a coverage detail", func(t *testing.T) {
 		src := orSource([]predictioneval.OrderedRulesCandidate{orTwoOutcomePool("c1", 10)}, nil)
 		src.Scope.CoverageDetail = big
-		if _, err := predictioneval.ProjectOrderedRulesStream(src, orAdmission()); !errorsIs(err,
+		if _, err := predictioneval.ProjectOrderedRulesStream(src, orAdmission()); !errors.Is(err,
 			predictioneval.ErrOrderedRulesOverBound) {
 			t.Fatalf("got %v, want an over-bound refusal", err)
 		}
@@ -731,7 +753,7 @@ func TestOrderedRulesFreeTextIsBoundedLikeIdentifiers(t *testing.T) {
 		_, err := predictioneval.ProjectOrderedRulesStream(
 			orSource([]predictioneval.OrderedRulesCandidate{orTwoOutcomePool("c1", 10)}, ins),
 			orAdmission())
-		if !errorsIs(err, predictioneval.ErrOrderedRulesOverBound) {
+		if !errors.Is(err, predictioneval.ErrOrderedRulesOverBound) {
 			t.Fatalf("got %v, want an over-bound refusal", err)
 		}
 	})
@@ -780,7 +802,7 @@ func TestOrderedRulesEqualPositionBoundaryDoesNotDependOnSupplyOrder(t *testing.
 func TestOrderedRulesUnknownCoverageIsRefused(t *testing.T) {
 	src := orSource([]predictioneval.OrderedRulesCandidate{orTwoOutcomePool("c1", 10)}, nil)
 	src.Scope.Coverage = predictioneval.CoverageUnknown
-	if _, err := predictioneval.ProjectOrderedRulesStream(src, orAdmission()); !errorsIs(err,
+	if _, err := predictioneval.ProjectOrderedRulesStream(src, orAdmission()); !errors.Is(err,
 		predictioneval.ErrOrderedRulesUnknownCoverage) {
 		t.Fatalf("got %v, want an unknown-coverage refusal", err)
 	}
@@ -824,7 +846,7 @@ func TestOrderedRulesCalculateOnlyViewIsLabelledNotPromoted(t *testing.T) {
 
 	// The same candidate presented as a channel update stream is refused.
 	if _, err := predictioneval.ProjectOrderedRulesStream(
-		orSource([]predictioneval.OrderedRulesCandidate{c}, nil), orAdmission()); !errorsIs(err,
+		orSource([]predictioneval.OrderedRulesCandidate{c}, nil), orAdmission()); !errors.Is(err,
 		predictioneval.ErrOrderedRulesViewMismatch) {
 		t.Fatalf("got %v, want a view-mismatch refusal", err)
 	}

@@ -12,6 +12,7 @@ package predictioneval_test
 // field a coarser test would step over.
 
 import (
+	"errors"
 	"math"
 	"testing"
 
@@ -366,7 +367,7 @@ func TestOrderedRulesResourceBoundsAreExactAtTheirOwnBoundary(t *testing.T) {
 		}
 		if _, err := predictioneval.ProjectOrderedRulesStream(
 			orSource([]predictioneval.OrderedRulesCandidate{orTwoOutcomePool(string(id)+"x", 10)}, nil),
-			orAdmission()); !errorsIs(err, predictioneval.ErrOrderedRulesOverBound) {
+			orAdmission()); !errors.Is(err, predictioneval.ErrOrderedRulesOverBound) {
 			t.Fatalf("one byte past the ceiling must be refused: %v", err)
 		}
 	})
@@ -414,7 +415,7 @@ func TestOrderedRulesWholeInputChecksAreRefusalsNotMechanismResults(t *testing.T
 	_, err := predictioneval.ProjectOrderedRulesStream(
 		orSource(append(append([]predictioneval.OrderedRulesCandidate(nil), good...), bad), ins),
 		orAdmission())
-	if !errorsIs(err, predictioneval.ErrOrderedRulesMembershipUnproven) {
+	if !errors.Is(err, predictioneval.ErrOrderedRulesMembershipUnproven) {
 		t.Fatalf("got %v, want an unproven-membership refusal", err)
 	}
 
@@ -424,8 +425,20 @@ func TestOrderedRulesWholeInputChecksAreRefusalsNotMechanismResults(t *testing.T
 	later := predictioneval.EvaluateOrderedRules(
 		orProject(t, append(append([]predictioneval.OrderedRulesCandidate(nil), good...), okPost), ins),
 		orBaseConfig(), orDraws(orWordAdmit))
-	if later.Status != base.Status || *later.Selected != *base.Selected ||
-		later.ConsumedInputDigest != base.ConsumedInputDigest {
+	// The status is checked FIRST and on its own. Folding it into the same
+	// condition short-circuits before `*later.Selected` is evaluated there, and
+	// the failure message then dereferences it anyway — so the one regression
+	// this case exists to report (a post-boundary fact turning an admission into
+	// a non-admitting status) would arrive as a nil-pointer panic instead of the
+	// diagnostic.
+	if later.Status != base.Status {
+		t.Fatalf("a well-formed post-boundary fact changed the status: before = %q, after = %q",
+			base.Status, later.Status)
+	}
+	if later.Selected == nil {
+		t.Fatal("a well-formed post-boundary fact removed the selection entirely")
+	}
+	if *later.Selected != *base.Selected || later.ConsumedInputDigest != base.ConsumedInputDigest {
 		t.Fatalf("a well-formed post-boundary fact changed the decision:\n before = %+v\n  after = %+v",
 			*base.Selected, *later.Selected)
 	}

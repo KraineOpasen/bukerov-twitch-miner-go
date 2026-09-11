@@ -17,6 +17,7 @@ package predictioneval_test
 // silently re-aligns every subsequent draw in the run.
 
 import (
+	"errors"
 	"reflect"
 	"strings"
 	"testing"
@@ -245,7 +246,7 @@ func TestOrderedRulesDuplicateIdentityIsRejected(t *testing.T) {
 	if err == nil {
 		t.Fatal("a repeated candidate identity must be refused, not silently deduplicated")
 	}
-	if !errorsIs(err, predictioneval.ErrOrderedRulesDuplicateIdentity) {
+	if !errors.Is(err, predictioneval.ErrOrderedRulesDuplicateIdentity) {
 		t.Fatalf("got %v, want a duplicate-identity refusal", err)
 	}
 }
@@ -358,25 +359,4 @@ func TestOrderedRulesSuppliedDrawTraceIsIndependentOfObservedStealth(t *testing.
 			t.Fatalf("EvaluateOrderedRules accepts an ObservedRealization at position %d", i)
 		}
 	}
-}
-
-// errorsIs is a local errors.Is, kept here so this file's assertions read
-// directly. The package's own production files may not import errors' helpers
-// beyond the fence's allowlist; test files are outside the fence.
-func errorsIs(err, target error) bool {
-	type unwrapper interface{ Unwrap() []error }
-	if err == target {
-		return true
-	}
-	if u, ok := err.(unwrapper); ok {
-		for _, e := range u.Unwrap() {
-			if errorsIs(e, target) {
-				return true
-			}
-		}
-	}
-	if u, ok := err.(interface{ Unwrap() error }); ok {
-		return errorsIs(u.Unwrap(), target)
-	}
-	return false
 }
