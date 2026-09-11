@@ -3202,11 +3202,31 @@ func TestOrderedRulesEveryRetainedScopeAndAdmissionStringIsRevalidatedOnIngest(t
 		t.Fatalf("premise: the intact fixture must evaluate; got %q", got.Status)
 	}
 
-	strType := reflect.TypeOf("")
 	visited := map[string]bool{}
 
-	// walk sets one invalid byte into each plain-string field it finds, runs the
-	// forged stream through the digest oracle, and requires a refusal.
+	// vocabularies names the fields whose values are a CLOSED set, refused by
+	// their own switch rather than by a text rule.
+	//
+	// This used to be inferred from the TYPE — a named string type was taken to
+	// be a vocabulary and skipped — and Go does not support that inference. A
+	// named string type is a string with a name; nothing obliges it to have a
+	// switch, and the next `type CoverageNote string` added to either struct
+	// would have been skipped silently by a guard whose entire purpose is to
+	// notice a retained string nobody validates.
+	//
+	// So the exemption is written down, and it is CHECKED rather than trusted:
+	// each name below gets a value outside its vocabulary and must be refused
+	// for it, and each must actually be reached. An entry that stops being a
+	// vocabulary fails here instead of quietly exempting itself.
+	vocabularies := map[string]bool{
+		"Scope.Coverage":     true,
+		"Admission.ViewKind": true,
+	}
+
+	// walk probes every string-BACKED field it finds — plain, named, or a slice
+	// of either — and requires the forged stream to be refused through the
+	// digest oracle. Vocabulary fields are probed with a word outside their set;
+	// every other field with one invalid byte.
 	walk := func(t *testing.T, owner string, pick func(*predictioneval.OrderedRulesStream) reflect.Value) {
 		probe := orProject(t, cs, nil)
 		rt := pick(&probe).Type()
@@ -3215,31 +3235,38 @@ func TestOrderedRulesEveryRetainedScopeAndAdmissionStringIsRevalidatedOnIngest(t
 			if f.PkgPath != "" {
 				continue
 			}
-			switch {
-			case f.Type == strType, f.Type == reflect.SliceOf(strType):
-			default:
-				// A named string type is a closed vocabulary, refused by its
-				// own switch rather than by a text rule.
+			slice := f.Type.Kind() == reflect.Slice && f.Type.Elem().Kind() == reflect.String
+			if f.Type.Kind() != reflect.String && !slice {
 				continue
 			}
 			name := owner + "." + f.Name
 			visited[name] = true
+			vocabulary := vocabularies[name]
 			t.Run(name, func(t *testing.T) {
 				st := orProject(t, cs, nil)
 				fv := pick(&st).Field(i)
-				if f.Type == strType {
+				switch {
+				case vocabulary:
+					fv.SetString("NOT-IN-THE-VOCABULARY")
+				case slice:
+					probe := reflect.MakeSlice(f.Type, 1, 1)
+					probe.Index(0).SetString("ref-\xff")
+					fv.Set(probe)
+				default:
 					fv.SetString(fv.String() + "-\xff")
-				} else {
-					fv.Set(reflect.ValueOf([]string{"ref-\xff"}))
 				}
 				first := predictioneval.EvaluateOrderedRules(st, cfg, orDraws())
 				st.SelectionDigest = first.StreamDigest
 				second := predictioneval.EvaluateOrderedRules(st, cfg, orDraws())
 				if second.Status != predictioneval.StatusRefused {
-					t.Fatalf("a stream carrying an invalid byte in %s reached %q through the digest "+
-						"oracle. ProjectOrderedRulesStream refuses that exact source, so the rule is "+
+					what := "an invalid byte"
+					if vocabulary {
+						what = "a word outside its vocabulary"
+					}
+					t.Fatalf("a stream carrying %s in %s reached %q through the digest oracle. "+
+						"ProjectOrderedRulesStream refuses that exact source, so the rule is "+
 						"enforced on one path only and the oracle walks straight through it.",
-						name, second.Status)
+						what, name, second.Status)
 				}
 			})
 		}
@@ -3252,15 +3279,20 @@ func TestOrderedRulesEveryRetainedScopeAndAdmissionStringIsRevalidatedOnIngest(t
 		return reflect.ValueOf(&s.Admission).Elem()
 	})
 
-	// The walk must actually have reached the two fields that were missing, and
-	// enough others that an empty or collapsed traversal cannot pass quietly.
-	for _, want := range []string{
+	// The walk must actually have reached the two fields that were missing, the
+	// two vocabularies claiming an exemption, and enough others that an empty or
+	// collapsed traversal cannot pass quietly.
+	want := []string{
 		"Scope.CoverageDetail", "Admission.SourceReferences",
 		"Scope.Namespace", "Scope.AssociationEvidence", "Admission.Population",
-	} {
-		if !visited[want] {
+	}
+	for name := range vocabularies {
+		want = append(want, name)
+	}
+	for _, name := range want {
+		if !visited[name] {
 			t.Errorf("the reflection walk never reached %s, so this case is not covering what it "+
-				"claims; it visited %d fields", want, len(visited))
+				"claims; it visited %d fields", name, len(visited))
 		}
 	}
 }

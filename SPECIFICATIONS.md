@@ -3635,9 +3635,20 @@ the two-call digest oracle. Both now live in those validators, with the
 reference COUNT bounded ahead of the element loop rather than beside it, so the
 loop cannot be unbounded on the path that reaches it first. The rule is no
 longer asserted to be complete: a reflection walk over the scope and admission
-structs requires every plain-string and string-slice field to be refused on
-ingest, so the next retained field added without validation fails without anyone
-remembering a list. The config identifier and the run identifier are the
+structs requires every retained string field to be refused on ingest, so the
+next one added without validation fails without anyone remembering a list. That
+walk had its own version of the same defect for one round, and it is recorded
+here rather than quietly corrected. It selected fields by exact TYPE — `string`
+and `[]string` — and skipped every NAMED string type on the reasoning that a
+named string type is a closed vocabulary refused by its own switch. Go supports
+no such inference: a named string type is a string with a name, nothing obliges
+it to have a switch, and a `type OrderedRulesNote string` field added to the
+scope was reproduced reaching WOULD_ATTEMPT through the digest oracle while the
+guard reported success. The walk now selects on string KIND, so named types and
+slices of them are probed like any other, and the two genuine vocabularies —
+`Scope.Coverage` and `Admission.ViewKind` — are exempted by an explicit list
+whose entries are themselves checked: each must be reached, and each must refuse
+a word outside its set. The config identifier and the run identifier are the
 exception that proves where the rule lives: neither type is part of the stream,
 so the projection never sees them and no validator reads them — the evaluator
 refuses them directly instead. They carry no per-string LENGTH bound, and that
