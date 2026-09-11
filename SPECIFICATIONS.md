@@ -3663,6 +3663,33 @@ does not function for either. That is strictly narrower: two classes of forgery
 lose a published route, and the forgery case in the suite counts BOTH routes so
 that neither can quietly become the only one.
 
+That reorder also made two digest-binding guards VACUOUS, and both were caught
+by the reviewing lane rather than by the author — which is why they are recorded
+here at the same weight as the repair that caused them.
+
+`TestOrderedRulesDigestsBindTheMandatoryFieldDeclarations` asserted that
+stripping a candidate's `HasPosition`, a scope's `HasInterval` or a config's
+`HasDefault` MOVES the digest, and took that digest off the evaluator's result.
+Once the structural tier and the config normalisation ran first, a stripped
+declaration is refused with an EMPTY digest — and an empty string differs from
+the baseline whatever the digest binds. Verified: with all three bindings
+deleted, every case still passed. Its own comment had said *"Only the digest
+value proves the field is bound"*, which is exactly what stopped being true.
+
+The reflection walk had a second, independent version of the same fault.
+`digestSupplied` hashes the presence word and then BRANCHES on it — a KNOWN
+value binds its value, provenance and availability, a non-KNOWN one binds its
+reason — so mutating `KNOWN` by appending to it crossed that branch and moved
+the digest because a different set of fields was hashed. Verified: deleting
+`digestPart(h, string(v.Presence))` left the whole walk green. The presence case
+now compares MISSING against INVALID with the reason held equal, which stays on
+one side of the branch, so only the word itself can move the digest.
+
+Both now live in `ordered_rules_bindings_internal_test.go` and call
+`orderedRulesStreamDigest` and `orderedRulesConfigDigest` directly. Nothing
+about any of these properties ever needed an evaluation, and the dependency was
+what made them fragile.
+
 One refusal also stopped re-exporting what it never read. A stream whose
 SelectionDigest does not match is not what the projection produced, so its
 Cutoff and its Qualifications are supplied text that the checks judging them —
