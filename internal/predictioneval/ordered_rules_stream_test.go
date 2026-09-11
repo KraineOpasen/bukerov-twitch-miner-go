@@ -3920,6 +3920,70 @@ func TestOrderedRulesACheapRefusalIsNotPaidForWithTheWholePayload(t *testing.T) 
 		}
 	})
 
+	// An identity's PRESENCE is an emptiness test quoting nothing, so it belongs
+	// in the zero-byte tier even though its encoding and uniqueness do not.
+	// 20.344244 ms to 488.369 µs, the latter matching the same refusal with
+	// one-byte provenance.
+	t.Run("a later empty outcome identity beats an earlier text scan", func(t *testing.T) {
+		payload := orCandidate("c1", 10, orKnownBalance(1000), orOutcome("A", 4), orOutcome("B", 6))
+		payload.Provenance = "prov-\xff"
+		empty := orCandidate("c2", 20, orKnownBalance(1000), orOutcome("A", 4), orOutcome("B", 6))
+		empty.Outcomes[1].Identity = ""
+
+		// The premise: each fault really is raised on its own.
+		if _, err := predictioneval.ProjectOrderedRulesStream(
+			orSource([]predictioneval.OrderedRulesCandidate{payload}, nil),
+			orAdmission()); !errors.Is(err, predictioneval.ErrOrderedRulesNotEncodable) {
+			t.Fatalf("premise: the provenance alone must be refused as unencodable; got %v", err)
+		}
+		if _, err := predictioneval.ProjectOrderedRulesStream(
+			orSource([]predictioneval.OrderedRulesCandidate{empty}, nil),
+			orAdmission()); !errors.Is(err, predictioneval.ErrOrderedRulesScopeIncomplete) {
+			t.Fatalf("premise: the empty identity alone must be refused as incomplete; got %v", err)
+		}
+
+		if _, err := predictioneval.ProjectOrderedRulesStream(
+			orSource([]predictioneval.OrderedRulesCandidate{payload, empty}, nil),
+			orAdmission()); !errors.Is(err, predictioneval.ErrOrderedRulesScopeIncomplete) {
+			t.Fatalf("a source whose first candidate carries unencodable provenance and whose "+
+				"second holds an outcome with an empty identity was refused %v. Emptiness is a "+
+				"length test quoting nothing; only the ENCODING and the uniqueness of an "+
+				"identity need bytes read.", err)
+		}
+	})
+
+	// A candidate's vocabulary is four closed-set fields, length-bounded first
+	// because their refusals quote the value. They are settled before the scope
+	// and admission text and before the interventions, none of which bear on
+	// them: 10.093146 ms to 49.724 µs.
+	t.Run("candidate vocabulary is settled before unrelated source text", func(t *testing.T) {
+		bad := []predictioneval.OrderedRulesCandidate{
+			orCandidate("c1", 10, orKnownBalance(1000), orOutcome("A", 4), orOutcome("B", 6)),
+		}
+		bad[0].SourceKind = "NOT-A-SOURCE-KIND"
+
+		poisoned := orAdmission()
+		poisoned.SourceReferences = []string{"ref-\xff"}
+
+		// The premise: each fault really is raised on its own.
+		if _, err := predictioneval.ProjectOrderedRulesStream(orSource(bad, nil),
+			orAdmission()); !errors.Is(err, predictioneval.ErrOrderedRulesVocabulary) {
+			t.Fatalf("premise: the source kind alone must be refused for its vocabulary; got %v", err)
+		}
+		if _, err := predictioneval.ProjectOrderedRulesStream(orSource(cs, nil),
+			poisoned); !errors.Is(err, predictioneval.ErrOrderedRulesNotEncodable) {
+			t.Fatalf("premise: the reference alone must be refused as unencodable; got %v", err)
+		}
+
+		if _, err := predictioneval.ProjectOrderedRulesStream(orSource(bad, nil),
+			poisoned); !errors.Is(err, predictioneval.ErrOrderedRulesVocabulary) {
+			t.Fatalf("a candidate whose source kind is outside its vocabulary, beside an "+
+				"unencodable admission reference, was refused %v. Four short closed-set fields "+
+				"do not depend on the admission's references, the scope's text or the "+
+				"interventions, and must not wait behind them.", err)
+		}
+	})
+
 	// An unusable config is arithmetic over a rule count already bounded above.
 	// The invariant pass is bounded but not cheap: on a well-formed stream it
 	// walks the scope, the admission references and every retained candidate to

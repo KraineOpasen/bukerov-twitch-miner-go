@@ -118,18 +118,25 @@ func ProjectOrderedRulesStream(source OrderedRulesSource, admission CommonAdmiss
 	// test, an integer comparison, a slice length or arithmetic over len(); no
 	// message below quotes a caller-supplied value.
 	//
-	// This is the axis's terminating condition rather than one more step along
-	// it. Each earlier repair moved one cheap decision ahead of one expensive
-	// scan and the next review found the next pair — a scope walk before a
-	// candidate's declared position, an identity hash before an interval test,
-	// a provenance scan before an availability flag. Splitting the function by
-	// what a check COSTS rather than by what it is about ends that: after the
-	// ceiling below, every remaining check is a bounded scan over a source
-	// whose total encoded width is already known to fit, so no reordering of
-	// them can change an asymptotic cost again.
+	// Splitting the function by what a check COSTS rather than by what it is
+	// about is what makes this tier possible at all. Each earlier repair had
+	// moved one cheap decision ahead of one expensive scan and the next review
+	// found the next pair — a scope walk before a candidate's declared
+	// position, an identity hash before an interval test, a provenance scan
+	// before an availability flag. Measured for the last of those, an admission
+	// of 1,024 references beside a candidate that declares no position:
+	// 3.062608 ms to 550 ns.
 	//
-	// The last pair measured, an admission of 1,024 references beside a
-	// candidate that declares no position: 3.062608 ms to 550 ns.
+	// AN EARLIER REVISION CLAIMED THIS CLOSED THE AXIS, and it does not. The
+	// claim was that after the ceiling below every remaining check is a bounded
+	// scan over a source already known to fit, so no reordering could change an
+	// asymptotic cost again. That is true and beside the point: this axis has
+	// never been about asymptotics. Every finding on it has been a constant
+	// factor between 100x and 20,000x, and the text tier below still holds a
+	// cost gradient — four short vocabulary words per candidate against 4 MiB
+	// of admission references against 8 MiB of intervention text against the
+	// outcome payload. Ordering within that gradient is what the tier below
+	// now does as far as it goes, and no claim is made that it goes far enough.
 	if err := validateScopeShape(source.Scope); err != nil {
 		return OrderedRulesStream{}, err
 	}
@@ -191,6 +198,9 @@ func ProjectOrderedRulesStream(source OrderedRulesSource, admission CommonAdmiss
 	for i := range source.Candidates {
 		c := &source.Candidates[i]
 		where := "candidate " + strconv.Itoa(i)
+		if err := checkIdentifierPresent(c.Identity, where+" identity"); err != nil {
+			return OrderedRulesStream{}, err
+		}
 		if !c.HasPosition {
 			return OrderedRulesStream{}, errors.Join(ErrOrderedRulesScopeIncomplete,
 				errors.New("predictioneval: "+where+" does not declare its causal position as supplied; "+
@@ -225,8 +235,11 @@ func ProjectOrderedRulesStream(source OrderedRulesSource, admission CommonAdmiss
 		// 20.07073 ms.
 		for j := range c.Outcomes {
 			o := &c.Outcomes[j]
-			if err := checkPresenceShape(o.Points, where+" outcome "+strconv.Itoa(j)+" points",
-				c.Position); err != nil {
+			ow := where + " outcome " + strconv.Itoa(j)
+			if err := checkIdentifierPresent(o.Identity, ow+" identity"); err != nil {
+				return OrderedRulesStream{}, err
+			}
+			if err := checkPresenceShape(o.Points, ow+" points", c.Position); err != nil {
 				return OrderedRulesStream{}, err
 			}
 			bytes += chargedWidth(len(o.Identity)+len(o.Points.Presence)) + suppliedTextBytes(o.Points)
@@ -271,6 +284,64 @@ func ProjectOrderedRulesStream(source OrderedRulesSource, admission CommonAdmiss
 	if err := checkFreeText(string(admission.ViewKind), "admission view kind"); err != nil {
 		return OrderedRulesStream{}, err
 	}
+	// THE CANDIDATE VOCABULARY NEXT, ahead of every other text in the source.
+	//
+	// Four closed-set fields per candidate. Each is length-bounded first —
+	// their refusals quote the value, which is why they cannot join the
+	// zero-byte tier — and then compared against a short constant, so the tier
+	// reads at most MaxOrderedRulesCandidates x 4 x MaxOrderedRulesIdentifierBytes
+	// and in practice a few words per candidate.
+	//
+	// It runs before the scope and admission text, before the interventions,
+	// and before any identity, because those are larger and a candidate whose
+	// source kind is outside its vocabulary does not depend on any of them: a
+	// first candidate with a short invalid SourceKind was reached only after
+	// roughly 12 MB of unrelated text had been scanned.
+	//
+	// This does NOT close the ordering axis, and the previous revision claimed
+	// it did. See the note above the text tier.
+	for i := range source.Candidates {
+		c := &source.Candidates[i]
+		where := "candidate " + strconv.Itoa(i)
+		// Same rule as above, for the fields the checks below quote.
+		for _, v := range [...]string{string(c.SourceKind), string(c.EpisodeMembership),
+			string(c.OutcomesPresence), string(c.Balance.Presence)} {
+			if err := checkFreeText(v, where+" vocabulary"); err != nil {
+				return OrderedRulesStream{}, err
+			}
+		}
+		if c.EpisodeMembership != MembershipProven {
+			return OrderedRulesStream{}, errors.Join(ErrOrderedRulesMembershipUnproven,
+				errors.New("predictioneval: "+where+" declares membership "+strconv.Quote(string(c.EpisodeMembership))+
+					"; a shared event id, pool or nearby timestamp does not prove an episode or an account"))
+		}
+		switch c.SourceKind {
+		case SourceKindChannelUpdate, SourceKindCalculateSnapshot:
+		default:
+			return OrderedRulesStream{}, errors.Join(ErrOrderedRulesVocabulary,
+				errors.New("predictioneval: "+where+" has source kind "+strconv.Quote(string(c.SourceKind))))
+		}
+		if admission.ViewKind == ViewCalculateOnly && c.SourceKind != SourceKindCalculateSnapshot {
+			return OrderedRulesStream{}, errors.Join(ErrOrderedRulesViewMismatch,
+				errors.New("predictioneval: "+where+" is a "+string(c.SourceKind)+
+					" inside a CALCULATE_ONLY view"))
+		}
+		if admission.ViewKind == ViewChannelCandidateStream && c.SourceKind != SourceKindChannelUpdate {
+			return OrderedRulesStream{}, errors.Join(ErrOrderedRulesViewMismatch,
+				errors.New("predictioneval: "+where+" is a "+string(c.SourceKind)+
+					" inside a CHANNEL_CANDIDATE_STREAM view; a decision-time snapshot is not a wire frame"))
+		}
+		switch c.OutcomesPresence {
+		case SuppliedKnown, SuppliedMissing, SuppliedInvalid:
+		default:
+			return OrderedRulesStream{}, errors.Join(ErrOrderedRulesVocabulary,
+				errors.New("predictioneval: "+where+" declares outcome-vector presence "+
+					strconv.Quote(string(c.OutcomesPresence))+
+					"; a caller must say whether it recovered the ordered vector whole, because a short "+
+					"vector the donor declines and a vector nobody could recover are different facts"))
+		}
+	}
+
 	if err := validateScope(source.Scope); err != nil {
 		return OrderedRulesStream{}, err
 	}
@@ -338,43 +409,6 @@ func ProjectOrderedRulesStream(source OrderedRulesSource, admission CommonAdmiss
 		}
 		seen[c.Identity] = true
 
-		// Same rule as above, for the fields the checks below quote.
-		for _, v := range [...]string{string(c.SourceKind), string(c.EpisodeMembership),
-			string(c.OutcomesPresence), string(c.Balance.Presence)} {
-			if err := checkFreeText(v, where+" vocabulary"); err != nil {
-				return OrderedRulesStream{}, err
-			}
-		}
-		if c.EpisodeMembership != MembershipProven {
-			return OrderedRulesStream{}, errors.Join(ErrOrderedRulesMembershipUnproven,
-				errors.New("predictioneval: "+where+" declares membership "+strconv.Quote(string(c.EpisodeMembership))+
-					"; a shared event id, pool or nearby timestamp does not prove an episode or an account"))
-		}
-		switch c.SourceKind {
-		case SourceKindChannelUpdate, SourceKindCalculateSnapshot:
-		default:
-			return OrderedRulesStream{}, errors.Join(ErrOrderedRulesVocabulary,
-				errors.New("predictioneval: "+where+" has source kind "+strconv.Quote(string(c.SourceKind))))
-		}
-		if admission.ViewKind == ViewCalculateOnly && c.SourceKind != SourceKindCalculateSnapshot {
-			return OrderedRulesStream{}, errors.Join(ErrOrderedRulesViewMismatch,
-				errors.New("predictioneval: "+where+" is a "+string(c.SourceKind)+
-					" inside a CALCULATE_ONLY view"))
-		}
-		if admission.ViewKind == ViewChannelCandidateStream && c.SourceKind != SourceKindChannelUpdate {
-			return OrderedRulesStream{}, errors.Join(ErrOrderedRulesViewMismatch,
-				errors.New("predictioneval: "+where+" is a "+string(c.SourceKind)+
-					" inside a CHANNEL_CANDIDATE_STREAM view; a decision-time snapshot is not a wire frame"))
-		}
-		switch c.OutcomesPresence {
-		case SuppliedKnown, SuppliedMissing, SuppliedInvalid:
-		default:
-			return OrderedRulesStream{}, errors.Join(ErrOrderedRulesVocabulary,
-				errors.New("predictioneval: "+where+" declares outcome-vector presence "+
-					strconv.Quote(string(c.OutcomesPresence))+
-					"; a caller must say whether it recovered the ordered vector whole, because a short "+
-					"vector the donor declines and a vector nobody could recover are different facts"))
-		}
 	}
 
 	// THE PAYLOAD OF ANY CANDIDATE LAST, after the structure of all of them and
@@ -807,9 +841,19 @@ func suppliedTextBytes(v SuppliedInt64) int64 {
 	return chargedWidth(len(v.Provenance) + len(v.Reason))
 }
 
-func checkIdentifier(id, where string) error {
+// checkIdentifierPresent is the zero-byte half of checkIdentifier: an emptiness
+// test whose message quotes nothing, so the structural tier can run it over
+// every identity before any identity is scanned or hashed.
+func checkIdentifierPresent(id, where string) error {
 	if id == "" {
 		return errors.Join(ErrOrderedRulesScopeIncomplete, errors.New("predictioneval: "+where+" is empty"))
+	}
+	return nil
+}
+
+func checkIdentifier(id, where string) error {
+	if err := checkIdentifierPresent(id, where); err != nil {
+		return err
 	}
 	if len(id) > MaxOrderedRulesIdentifierBytes {
 		return errors.Join(ErrOrderedRulesOverBound,
@@ -871,6 +915,9 @@ func checkInterventionStructure(source OrderedRulesSource) error {
 	for i := range source.Interventions {
 		in := &source.Interventions[i]
 		where := "intervention " + strconv.Itoa(i)
+		if err := checkIdentifierPresent(in.Identity, where+" identity"); err != nil {
+			return err
+		}
 		if !in.HasPosition {
 			return errors.Join(ErrOrderedRulesScopeIncomplete,
 				errors.New("predictioneval: "+where+" does not declare its position as supplied; an omitted "+

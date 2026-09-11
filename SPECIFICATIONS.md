@@ -3550,10 +3550,17 @@ position — went from 3.062608 milliseconds to 951 nanoseconds. Across every
 reproduction in this section the refusal now costs the same with a large payload
 as with a tiny one, which is the observation that says the payload is not read.
 
-The terminating argument is structural, not empirical: after that ceiling, every
-remaining check is a bounded scan over a source whose total encoded width is
-already known to fit, so no further reordering of them can change an asymptotic
-cost. The three halves — `validateScopeShape`, `validateAdmissionShape`,
+**That was claimed to close the axis, and it does not.** The claim was
+structural: after that ceiling every remaining check is a bounded scan over a
+source whose total encoded width is already known to fit, so no further
+reordering could change an asymptotic cost. The statement is true and beside the
+point, and the next review round said so. This axis has never been about
+asymptotics — every finding on it has been a constant factor between 100x and
+20,000x — and the text tier still holds a cost gradient: four short vocabulary
+words per candidate, against 4 MiB of admission references, against 8 MiB of
+intervention text, against the outcome payload. Three further orderings were
+repaired on that gradient (below), and no claim is now made that it is
+exhausted. The three halves — `validateScopeShape`, `validateAdmissionShape`,
 `checkPresenceShape` — are called BY their full validators rather than copied
 beside them, so the invariant pass in the evaluator re-establishes exactly these
 rules through one definition; `checkInterventionStructure` is likewise called
@@ -3569,6 +3576,36 @@ tests now precede the per-string bounds within each validator, so an empty
 namespace beside an over-long one reports the emptiness. Neither changes which
 sources are ADMITTED — the aggregate is the same sum over the same fields, and a
 case at `MaxOrderedRulesCandidates` x `MaxOrderedRulesOutcomes` holds that.
+
+Three orderings on that gradient followed, and one of them was the INGEST pass
+rather than the projection — the sixth time a rule or an ordering has existed on
+one of the two paths and not the other. `orderedRulesStreamInvariantsBroken` had
+been left walking retained candidates sequentially, scanning each one's
+provenance, reason and presence text before reaching the next one's flags, so a
+forged stream whose last candidate omits the position its KNOWN balance became
+available at was refused only after roughly 20 MB of earlier payload — reached
+over the two-call digest oracle at no cost to the caller. It now carries the
+same zero-byte tier, built from the same shape helpers the projection calls:
+44.199912 milliseconds to 27.434148, against a floor of 27.675032 measured on a
+stream failing that pass's FIRST check. The fix reaches the floor; what remains
+is the stream digest, which is the comparison that admitted the stream and which
+no ordering can defer.
+
+An identity's PRESENCE joined the zero-byte tier for candidates, outcomes and
+interventions alike — it is an emptiness test whose message quotes nothing,
+while only its ENCODING and its uniqueness need bytes read. A last outcome with
+an empty identity went from 20.344244 milliseconds to 488.369 microseconds,
+matching the same refusal with one-byte provenance.
+
+And a candidate's VOCABULARY — four closed-set fields, length-bounded first
+because their refusals quote the value — is now settled before the scope and
+admission text, before the interventions, and before any identity is scanned or
+hashed, none of which bear on it: a first candidate with a short invalid source
+kind went from 10.093146 milliseconds to 49.724 microseconds.
+
+The ordering inside the text tier is therefore by how much text a tier reads,
+as far as that has been taken. It is not proven exhaustive and is not claimed
+to be.
 
 One refusal also stopped re-exporting what it never read. A stream whose
 SelectionDigest does not match is not what the projection produced, so its

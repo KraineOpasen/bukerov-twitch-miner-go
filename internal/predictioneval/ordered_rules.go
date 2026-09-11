@@ -552,6 +552,69 @@ func orderedRulesStreamInvariantsBroken(s OrderedRulesStream) bool {
 	if orderedRulesCutoffImpossible(s) || orderedRulesQualificationsNotDerived(s) {
 		return true
 	}
+	// THE ZERO-BYTE TIER, mirroring the projection's, and its absence here was
+	// the same defect one path over.
+	//
+	// ProjectOrderedRulesStream was split so that nothing reading a supplied
+	// byte runs before every structural decision is made. This pass re-
+	// establishes the same RULES, so it was correct — and it walked candidates
+	// sequentially, scanning each one's provenance, reason and presence text
+	// before reaching the next one's flags. A forged stream whose LAST
+	// candidate omits the position its KNOWN balance became available at was
+	// therefore refused only after roughly 20 MB of earlier payload, reached
+	// over the documented two-call oracle at no cost to the caller.
+	//
+	// Six divergences in this model have now been a rule, or an ordering, on
+	// one path and not the other. The shape halves below are the same functions
+	// the projection calls, for the same reason: one definition, two callers.
+	//
+	// Nothing here is a new rule. Every check is one the sequential pass below
+	// already makes, and this function answers yes or no, so the order is
+	// invisible in the result and only its cost changes.
+	if validateScopeShape(s.Scope) != nil || validateAdmissionShape(s.Admission) != nil {
+		return true
+	}
+	var structuralLast int64
+	for i := range s.Candidates {
+		c := &s.Candidates[i]
+		switch {
+		case checkIdentifierPresent(c.Identity, where) != nil,
+			!c.HasPosition,
+			i > 0 && c.Position <= structuralLast,
+			c.Position < s.Scope.IntervalFromPosition,
+			c.Position > s.Scope.IntervalToPosition,
+			c.EpisodeMembership != MembershipProven,
+			s.Cutoff.Established && c.Position >= s.Cutoff.Position,
+			checkPresenceShape(c.Balance, where, c.Position) != nil:
+			return true
+		}
+		switch c.SourceKind {
+		case SourceKindChannelUpdate:
+			if s.Admission.ViewKind == ViewCalculateOnly {
+				return true
+			}
+		case SourceKindCalculateSnapshot:
+			if s.Admission.ViewKind == ViewChannelCandidateStream {
+				return true
+			}
+		default:
+			return true
+		}
+		switch c.OutcomesPresence {
+		case SuppliedKnown, SuppliedMissing, SuppliedInvalid:
+		default:
+			return true
+		}
+		for j := range c.Outcomes {
+			o := &c.Outcomes[j]
+			if checkIdentifierPresent(o.Identity, where) != nil ||
+				checkPresenceShape(o.Points, where, c.Position) != nil {
+				return true
+			}
+		}
+		structuralLast = c.Position
+	}
+
 	if validateScope(s.Scope) != nil || validateAdmission(s.Admission) != nil {
 		return true
 	}
