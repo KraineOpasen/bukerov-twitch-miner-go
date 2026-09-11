@@ -113,10 +113,20 @@ func ProjectOrderedRulesStream(source OrderedRulesSource, admission CommonAdmiss
 				" interventions exceed the bound of "+strconv.Itoa(MaxOrderedRulesInterventions)))
 	}
 
-	// THE ZERO-BYTE TIER, entire, before ANY supplied byte is read anywhere in
-	// this function. Everything from here to the ceiling check is an emptiness
-	// test, an integer comparison, a slice length or arithmetic over len(); no
-	// message below quotes a caller-supplied value.
+	// THE CONSTANT-BOUNDED TIER, entire, before any caller-scaled read anywhere
+	// in this function. Everything from here to the ceiling check is an
+	// emptiness test, an integer comparison, a slice length, arithmetic over
+	// len(), or a comparison against a short constant; no message below quotes
+	// a caller-supplied value.
+	//
+	// It was called the zero-byte tier, and that was not quite true: checkPresenceShape
+	// compares a presence word against SuppliedKnown, and a supplied word of
+	// matching LENGTH is compared byte for byte. The evaluator's own tier had
+	// the same overstatement and was corrected first; this one was missed in
+	// that pass and a reviewer caught it, which makes it the fifth time a rule
+	// has been fixed on one of these two paths and not the other. What is true
+	// is what the name now says: nothing here grows with what the caller
+	// supplies, because anything longer fails on length.
 	//
 	// Splitting the function by what a check COSTS rather than by what it is
 	// about is what makes this tier possible at all. Each earlier repair had
@@ -1090,18 +1100,21 @@ func validateAdmissionShape(a CommonAdmission) error {
 	return nil
 }
 
-// checkPresenceShape is the half of checkPresence that reads no supplied byte.
+// checkPresenceShape is the half of checkPresence whose cost the caller cannot
+// enlarge.
 //
-// It is its own function so the projection's structural pass can run it over
-// every nested value before any payload text is scanned, without a second copy
-// of the rules to drift from. An emptiness test, a declared flag and an integer
-// comparison, and the only free text any message carries is the caller-supplied
-// `where` the projection builds itself.
+// It is its own function so the projection's constant-bounded pass can run it
+// over every nested value before any payload text is scanned, without a second
+// copy of the rules to drift from. An emptiness test, a declared flag and an
+// integer comparison, and the only free text any message carries is the
+// caller-supplied `where` the projection builds itself.
 //
-// The Presence comparison is length-first like every Go string comparison, so
-// an enormous supplied presence falls out of the KNOWN branch in constant time
-// rather than being read here; the vocabulary that refuses it lives in
-// checkPresence, after the bound.
+// It does NOT read zero supplied bytes, and an earlier version of this comment
+// said it did. The Presence comparison rejects an ENORMOUS word on length, but
+// a word of the same length as SuppliedKnown is compared byte for byte — five
+// bytes at most, fixed by this file rather than by the caller. That is the
+// property worth claiming, and the vocabulary that refuses an invalid word
+// still lives in checkPresence, after the bound.
 func checkPresenceShape(v SuppliedInt64, where string, candidatePosition int64) error {
 	if v.Presence != SuppliedKnown {
 		return nil

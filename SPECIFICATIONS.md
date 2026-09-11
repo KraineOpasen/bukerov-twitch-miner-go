@@ -4022,6 +4022,17 @@ helper genuinely reads nothing — `validateScopeShape`, `checkIdentifierPresent
 `checkInterventionStructure` — it is still described that way, because there the
 claim is true.
 
+That correction was made on the evaluator and NOT on the projection, which is
+the fifth time in this work a rule has been fixed on one of those two paths and
+left standing on the other — this time in the documentation rather than the
+code. `ProjectOrderedRulesStream` kept describing its own first block as reading
+no supplied byte while calling `checkPresenceShape`, whose `!= SuppliedKnown` is
+the same five-byte comparison. A reviewer found it one commit after the
+evaluator's version was corrected, and the claim that each helper had been
+"checked individually" was the overconfident part: three of them compare only
+against the empty string, which is a length test, and the fourth compares
+against a word. Both tiers are now named for what they actually guarantee.
+
 **Three more constant-size faults were being charged for the whole payload, and
 one of them was a projection/ingest divergence.** A stream declaring an
 unsupported `SourceContractVersion`, one carrying a fabricated qualification,

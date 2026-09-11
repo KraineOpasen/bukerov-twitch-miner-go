@@ -4011,12 +4011,14 @@ func TestOrderedRulesACheapRefusalIsNotPaidForWithTheWholePayload(t *testing.T) 
 		}
 	})
 
-	// The terminating case for the whole axis: the zero-byte tier is complete
-	// and runs before ANY supplied byte is read anywhere in the projection. A
-	// candidate declaring no position is settled without the admission's
-	// references being scanned — 3.062608 ms to 951 ns — and the same holds for
-	// the scope's own text, which is why this asserts across both.
-	t.Run("no supplied byte is read before the whole structure is settled", func(t *testing.T) {
+	// The terminating case for the whole axis: the constant-bounded tier is
+	// complete and runs before any CALLER-SCALED read anywhere in the
+	// projection. A candidate declaring no position is settled without the
+	// admission's references being scanned — 3.062608 ms to 951 ns — and the
+	// same holds for the scope's own text, which is why this asserts across
+	// both. The tier does compare presence words against a five-byte constant;
+	// what it never does is read something whose length the caller chose.
+	t.Run("no caller-scaled text is read before the whole structure is settled", func(t *testing.T) {
 		shape := []predictioneval.OrderedRulesCandidate{
 			orCandidate("c1", 10, orKnownBalance(1000), orOutcome("A", 4), orOutcome("B", 6)),
 			orCandidate("c2", 20, orKnownBalance(1000), orOutcome("A", 4), orOutcome("B", 6)),
@@ -4054,15 +4056,15 @@ func TestOrderedRulesACheapRefusalIsNotPaidForWithTheWholePayload(t *testing.T) 
 					c.admission); !errors.Is(err, predictioneval.ErrOrderedRulesScopeIncomplete) {
 					t.Fatalf("a candidate declaring no causal position, beside unencodable text "+
 						"elsewhere in the source, was refused %v. A declared position is a flag "+
-						"test; the zero-byte tier is complete and runs before any supplied byte "+
-						"is read, so no text anywhere may be scanned to reach it.", err)
+						"test; the constant-bounded tier is complete before it, so no text whose "+
+						"length the caller chose may be scanned to reach it.", err)
 				}
 			})
 		}
 	})
 
 	// An identity's PRESENCE is an emptiness test quoting nothing, so it belongs
-	// in the zero-byte tier even though its encoding and uniqueness do not.
+	// in the constant-bounded tier even though its encoding and uniqueness do not.
 	// 20.344244 ms to 488.369 µs, the latter matching the same refusal with
 	// one-byte provenance.
 	t.Run("a later empty outcome identity beats an earlier text scan", func(t *testing.T) {
@@ -4429,9 +4431,10 @@ func TestOrderedRulesARefusalDecidedBeforeTheTraversalAttestsToNothing(t *testin
 		{"config carries no default", orProject(t, cs, nil), noDefault, 0,
 			predictioneval.ReasonConfigDefaultNotSupplied, false},
 		// A fabricated qualification is now settled ABOVE the digest too — the
-		// derivation check moved into the structural tier — so this row carries
-		// nothing either. It used to be the table's only post-digest row; the
-		// unencodable cutoff identity below is what plays that part now.
+		// derivation check runs after the config is normalised and before the
+		// hash, NOT inside orderedRulesStreamStructureBroken — so this row
+		// carries nothing either. It used to be the table's only post-digest
+		// row; the unencodable cutoff identity below is what plays that part.
 		{"stream invariants broken", forge(t), cfg, 0,
 			predictioneval.ReasonStreamInvariantViolated, false},
 		// The SAME reason code, decided in a different tier, and that is why
@@ -4471,11 +4474,11 @@ func TestOrderedRulesARefusalDecidedBeforeTheTraversalAttestsToNothing(t *testin
 		// ingest and did not, so a stream handed straight in was hashed whole
 		// first — 3.549091 ms on 128 candidates holding 4 KiB each, 31.909 µs
 		// now. That tier is bounded, not free, which is why it is its own and
-		// not part of the zero-byte one.
+		// not part of the constant-bounded one.
 		{"stream repeats a candidate identity", duplicateIdentity(t),
 			cfg, 0, predictioneval.ReasonStreamInvariantViolated, false},
 		// And the one part of the boundary invariant that is NOT in the
-		// zero-byte tier, pinned as digest=true for exactly that reason. The
+		// constant-bounded tier, pinned as digest=true for exactly that reason. The
 		// cutoff identity's emptiness and its length are settled before the
 		// hash; its UTF-8 VALIDITY is a scan of a string the caller chose, so
 		// it stays in the invariant pass. An earlier version of this package
