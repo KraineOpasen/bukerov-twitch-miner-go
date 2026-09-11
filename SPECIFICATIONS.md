@@ -4124,14 +4124,35 @@ beside its length bound, as `checkSourceContractVersion` — one definition, two
 callers, because a second copy is how a rule comes to stand on one path and not
 the other.
 
-That is TWO-FOLD, not fifty-fold, and the residual is named rather than rounded
-away: the ~480 µs that remains is the count-and-length budget tier at the top of
-the projection, which walks every candidate, outcome and intervention doing
-`len()` arithmetic. It is count-bounded by construction and has to run first —
-it is what refuses an over-ceiling source for its SIZE before anything is
-scanned — so it is the floor for an input of that shape rather than something
-the move could have avoided. What the move removes is the per-element vocabulary
-work and the per-byte scope scans, neither of which the refusal depends on.
+**And the paragraph that stood here was wrong, which is the part worth keeping.**
+It said the move was two-fold rather than fifty-fold, and that the ~480 µs left
+over was the count-and-length budget tier — count-bounded, obliged to run first,
+therefore the floor for an input of that shape. A reviewer falsified it on the
+very head that shipped it. The tier below the comparison does not only do length
+arithmetic: it walks every intervention and every candidate, checking positions,
+causal order, interval membership, outcome counts and nested presence
+declarations, and building a diagnostic label per candidate. None of that is
+free and none of it is evidence for or against an unsupported contract.
+
+The comparison now sits above every loop in the function, third after the two
+global count checks. The same four-byte fault on the same widest source is
+**222 ns**, against a measured floor of 160 ns — those two count checks, which
+really are the floor. The three figures for one refusal, in the order this PR
+produced them: 1.024333 ms, 479.662 µs, 222 ns.
+
+A source declaring a contract this package does not project is not a source
+whose candidates, interventions or byte total mean anything, so there is no
+precedence being sacrificed for speed here; the whole suite passes unchanged.
+Pinned by two cases rather than one, and only the second discriminates the
+second move: an unsupported contract beside a candidate outside its source-kind
+vocabulary was already refused for the contract at the first placement, while an
+unsupported contract beside a candidate outside the declared interval was not —
+that one fails by name if the comparison goes back.
+
+The lesson is the one this file keeps paying for. A cost claim is a claim, and
+"what remains is inherent" is the easiest kind to assert and the hardest to
+notice being wrong. This is the second time a claim of mine about this axis has
+been retracted after a reviewer measured it.
 
 The outcome pass is a SECOND walk inside that tier rather than one loop doing
 both, and the split is measured rather than assumed: folded together, a repeated

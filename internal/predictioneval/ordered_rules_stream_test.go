@@ -3676,18 +3676,11 @@ func TestOrderedRulesACheapRefusalIsNotPaidForWithTheWholePayload(t *testing.T) 
 	// evaluator's own tier had compared it since the commit before, and this
 	// side had not, which is the seventh rule on this PR found standing on one
 	// of the two ingest paths and not the other.
-	t.Run("an unsupported source contract is refused before the candidate vocabulary", func(t *testing.T) {
-		badKind := []predictioneval.OrderedRulesCandidate{
-			orCandidate("c1", 10, orKnownBalance(1000), orOutcome("A", 4), orOutcome("B", 6)),
-		}
-		badKind[0].SourceKind = "NOT-A-SOURCE-KIND"
-
-		// Each fault alone, under its OWN sentinel, so the pair below is told
-		// apart by which rule fired rather than by which message came back.
-		if _, err := predictioneval.ProjectOrderedRulesStream(orSource(badKind, nil),
-			orAdmission()); !errors.Is(err, predictioneval.ErrOrderedRulesVocabulary) {
-			t.Fatalf("premise: the candidate alone must be refused as a vocabulary fault; got %v", err)
-		}
+	t.Run("an unsupported source contract is refused before every loop", func(t *testing.T) {
+		// The contract's own sentinel, for the premises below. It must be
+		// DIFFERENT from each companion fault's, or the pair proves nothing
+		// about which rule fired — a source missing HasPosition is refused
+		// ErrOrderedRulesScopeIncomplete too, which is why it is not used here.
 		clean := orSource(cs, nil)
 		clean.Scope.SourceContractVersion = "NOPE"
 		if _, err := predictioneval.ProjectOrderedRulesStream(clean,
@@ -3695,15 +3688,45 @@ func TestOrderedRulesACheapRefusalIsNotPaidForWithTheWholePayload(t *testing.T) 
 			t.Fatalf("premise: the contract alone must be refused as an incomplete scope; got %v", err)
 		}
 
-		both := orSource(badKind, nil)
-		both.Scope.SourceContractVersion = "NOPE"
-		if _, err := predictioneval.ProjectOrderedRulesStream(both,
-			orAdmission()); !errors.Is(err, predictioneval.ErrOrderedRulesScopeIncomplete) {
-			t.Fatalf("a source declaring an unsupported contract AND carrying a candidate outside "+
-				"its source-kind vocabulary was refused %v. The contract is bounded two lines "+
-				"above its comparison, so settling it costs one comparison against a short "+
-				"constant; the vocabulary tier below walks every candidate, every outcome and "+
-				"every intervention. The cheap decision comes first.", err)
+		for _, c := range []struct {
+			name     string
+			mutate   func(*predictioneval.OrderedRulesSource)
+			aloneErr error
+		}{
+			// Settled in the candidate VOCABULARY tier, below the contract's
+			// first home as well as its second.
+			{"a candidate outside its source-kind vocabulary", func(src *predictioneval.OrderedRulesSource) {
+				src.Candidates[0].SourceKind = "NOT-A-SOURCE-KIND"
+			}, predictioneval.ErrOrderedRulesVocabulary},
+			// Settled in the candidate STRUCTURAL loop, which the contract's
+			// first home did NOT precede. This case is what makes the move
+			// from that home to this one observable: it was green before it
+			// and fails if the comparison goes back.
+			{"a candidate outside the declared interval", func(src *predictioneval.OrderedRulesSource) {
+				src.Candidates[0].Position = src.Scope.IntervalToPosition + 1
+			}, predictioneval.ErrOrderedRulesOutsideDeclaredInterval},
+		} {
+			t.Run(c.name, func(t *testing.T) {
+				alone := orSource(append([]predictioneval.OrderedRulesCandidate(nil), cs...), nil)
+				c.mutate(&alone)
+				if _, err := predictioneval.ProjectOrderedRulesStream(alone,
+					orAdmission()); !errors.Is(err, c.aloneErr) {
+					t.Fatalf("premise: the candidate alone must be refused %v; got %v", c.aloneErr, err)
+				}
+
+				both := orSource(append([]predictioneval.OrderedRulesCandidate(nil), cs...), nil)
+				c.mutate(&both)
+				both.Scope.SourceContractVersion = "NOPE"
+				if _, err := predictioneval.ProjectOrderedRulesStream(both,
+					orAdmission()); !errors.Is(err, predictioneval.ErrOrderedRulesScopeIncomplete) {
+					t.Fatalf("a source declaring an unsupported contract AND carrying %s was refused "+
+						"%v. A source whose declared contract this package does not project is one "+
+						"whose candidates and interventions mean nothing, so settling it costs one "+
+						"comparison against a short constant while everything below walks every "+
+						"candidate, outcome and intervention. The cheap decision comes first.",
+						c.name, err)
+				}
+			})
 		}
 	})
 

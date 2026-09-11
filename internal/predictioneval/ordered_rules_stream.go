@@ -113,6 +113,42 @@ func ProjectOrderedRulesStream(source OrderedRulesSource, admission CommonAdmiss
 				" interventions exceed the bound of "+strconv.Itoa(MaxOrderedRulesInterventions)))
 	}
 
+	// AND THE SOURCE CONTRACT, third, above every loop in this function.
+	//
+	// A source declaring a contract this package does not project is not a
+	// source whose candidates, interventions or byte total mean anything, so
+	// nothing below is evidence for or against the refusal. The word is
+	// length-bounded first because the comparison's error QUOTES it, and
+	// strconv.Quote scans the whole string and allocates an expanded copy:
+	// measured before that gate existed, a 64 MiB contract version took a
+	// second to refuse and built a 67 MB error message — the refusal was the
+	// denial of service. Bounded, the scan is at most
+	// MaxOrderedRulesIdentifierBytes, a constant, which is why it may sit ahead
+	// of the constant-bounded tier without breaking that tier's own rule.
+	//
+	// THIS IS THE SECOND PLACE IT HAS BEEN, and the first was wrong for a
+	// reason worth keeping. The comparison first moved out of validateScope to
+	// just below the vocabulary bounds, on the claim that what remained was the
+	// count-and-length budget tier and could not be avoided. A reviewer
+	// falsified that: the tier below also walks every intervention and every
+	// candidate, checking positions, causal order, interval membership, outcome
+	// counts and nested presence declarations, and building a diagnostic label
+	// per candidate. None of that is length arithmetic and none of it is free.
+	// Measured at the widest admitted counts — 128 candidates x 64 outcomes,
+	// 1024 interventions — the same four-byte fault: 1.024333 ms in
+	// validateScope, 479.662 µs below the vocabulary bounds, 222 ns here.
+	// The floor inside this function is 160 ns, the two count checks above.
+	//
+	// The lesson is the one this file keeps paying for: a cost claim is a claim,
+	// and "what remains is inherent" is the easiest kind to assert and the
+	// hardest to notice being wrong.
+	if err := checkFreeText(source.Scope.SourceContractVersion, "scope source contract version"); err != nil {
+		return OrderedRulesStream{}, err
+	}
+	if err := checkSourceContractVersion(source.Scope); err != nil {
+		return OrderedRulesStream{}, err
+	}
+
 	// THE CONSTANT-BOUNDED TIER, entire, before any caller-scaled read anywhere
 	// in this function. Everything from here to the ceiling check is an
 	// emptiness test, an integer comparison, a slice length, arithmetic over
@@ -285,42 +321,6 @@ func ProjectOrderedRulesStream(source OrderedRulesSource, admission CommonAdmiss
 		}
 	}
 
-	// The validators below quote the value they reject, and strconv.Quote scans
-	// the whole string and allocates an expanded copy. A vocabulary field is a
-	// closed set of short words, so an enormous one is not a near-miss: it is
-	// an input whose only effect is the cost of refusing it. Measured before
-	// this gate, a 64 MiB contract version took a second to refuse and built a
-	// 67 MB error message — the refusal was the denial of service.
-	if err := checkFreeText(source.Scope.SourceContractVersion, "scope source contract version"); err != nil {
-		return OrderedRulesStream{}, err
-	}
-	// AND THE COMPARISON, here rather than in validateScope below.
-	//
-	// Bounding the word without settling it left the equality to validateScope,
-	// which runs under the candidate and intervention vocabulary tiers — so a
-	// four-byte unsupported contract paid for every candidate, outcome and
-	// intervention the caller chose to send, plus validateScope's own five
-	// scope scans of up to MaxOrderedRulesIdentifierBytes each. Measured at the
-	// widest admitted counts, 128 candidates x 64 outcomes and 1024
-	// interventions: 1.024333 ms, against 479.662 µs here.
-	//
-	// TWO-FOLD, NOT FIFTY-FOLD, and the residual is worth naming rather than
-	// rounding away: the ~480 µs that remains is the count-and-length budget
-	// tier at the top of this function, which walks every candidate, outcome
-	// and intervention doing len() arithmetic. That tier is count-bounded by
-	// construction and has to run first — it is what refuses an over-ceiling
-	// source for its SIZE before anything is scanned — so it is the floor for
-	// an input of this shape, not something this move could have avoided. What
-	// the move does remove is the per-element vocabulary work and the per-byte
-	// scope scans, neither of which the refusal depends on.
-	//
-	// The evaluator's own tier had compared this contract before its candidate
-	// loop since the previous commit; this side had not, which is the seventh
-	// time on this PR that a rule stood on one of the two ingest paths and not
-	// the other, and the seventh found by a reviewer rather than here.
-	if err := checkSourceContractVersion(source.Scope); err != nil {
-		return OrderedRulesStream{}, err
-	}
 	if err := checkFreeText(string(source.Scope.Coverage), "scope coverage"); err != nil {
 		return OrderedRulesStream{}, err
 	}
