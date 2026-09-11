@@ -4464,6 +4464,31 @@ the reviewer's own named mutant — an evaluator rejecting every calculate-only
 stream with the existing invariant reason — which used to leave the case green
 and now fails 324 of them.
 
+**What the parity property still does NOT cover, stated rather than left to be
+discovered.** The second reviewer, asked directly whether the rotation has gaps,
+named one and it is real: the case rotates **one** bound-length field class at a
+time, so a divergence that requires **two** of those fields at their bound
+*simultaneously* is outside its reach. Covering that is combinatorial — five
+classes pairwise across the existing six dimensions — and the cost was judged
+not worth paying for a defect shape nothing has yet exhibited. It is recorded
+here beside the other honestly-scoped exemptions rather than described as
+covered, which is the distinction this work keeps having to relearn.
+
+The same reviewer declined to re-verify the family-A table independently and
+said so, which is the right answer: *"a self-audit of one's own three code
+copies is weaker evidence than a reviewer's finding — treat the 'no gap found'
+claim as provisional, not confirmed."* It is recorded that way above and stays
+that way.
+
+It did confirm two things by reading the code rather than the comments: the
+qualification-derivation interference is closed for the reflection walk's scope,
+because the only two qualification-driving fields that walk touches are
+`Scope.Coverage` (repaired) and `Admission.ViewKind` (which discriminates, since
+the fixture's base view is not `CALCULATE_ONLY`, so `qualCalculateOnlyView` is
+absent either way); and the `Scope.SourceContractVersion` subsumption claim
+holds, because `checkSourceContractVersion` is a plain equality against a fixed
+constant and any invalid byte is a difference.
+
 **A round of five, and the shape of them is the finding.** One reviewer pass
 produced five separate orderings on one head, and every one was the same
 question asked at a different seam: does a refusal whose truth depends on a
