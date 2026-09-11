@@ -915,13 +915,17 @@ func TestOrderedRulesOversizedInputIsRefusedBeforeItIsRead(t *testing.T) {
 	// test allocates one copy of it — the sum is over lengths, and Go strings
 	// do not copy on assignment.
 	//
-	// The fields chosen are forced, not arbitrary: they are the only ones left
-	// that carry no per-string limit. Everything with a closed vocabulary or an
-	// identifier shape is now bounded individually, which is why this case
-	// drives all the remaining free-form singletons at once rather than a
-	// single field. If a later round bounds these too, the aggregate check
-	// becomes unreachable and this case should be removed rather than propped
-	// up — an assertion that cannot fail is worse than no assertion.
+	// The fields chosen are the cheapest construction, not the only one: they
+	// are the free-form singletons that carry no per-string limit, so a handful
+	// of them reach the budget with one shared string.
+	//
+	// An earlier version of this comment claimed that bounding those two would
+	// make the aggregate check UNREACHABLE, and that was wrong — asserted
+	// without doing the arithmetic. The individually bounded slots alone exceed
+	// the budget, so the check stays reachable and this case must be rewritten
+	// rather than removed if the singletons are ever bounded. The subtest below
+	// does that arithmetic instead of asserting it, so the claim cannot rot the
+	// way the first one did.
 	t.Run("retained text past the aggregate budget", func(t *testing.T) {
 		const fields = 9
 		chunk := strings.Repeat("x",
@@ -946,6 +950,29 @@ func TestOrderedRulesOversizedInputIsRefusedBeforeItIsRead(t *testing.T) {
 		}
 		unread(t, predictioneval.EvaluateOrderedRules(st, cfgBig, draws),
 			predictioneval.ReasonStreamBytesOverBound)
+	})
+
+	// The reachability claim above, computed rather than believed.
+	//
+	// Slot counts per candidate and per outcome are read off the budget walk:
+	// a candidate bounds its identity, provenance, outcome reason, source kind,
+	// membership, outcome-vector presence and its balance's presence,
+	// provenance and reason; an outcome bounds its identity and its points'
+	// presence, provenance and reason.
+	t.Run("the aggregate check stays reachable without the free-form fields", func(t *testing.T) {
+		const perCandidate, perOutcome, fixedStream, fixedTrace = 9, 4, 8, 1
+		slots := predictioneval.MaxOrderedRulesCandidates*perCandidate +
+			predictioneval.MaxOrderedRulesCandidates*predictioneval.MaxOrderedRulesOutcomes*perOutcome +
+			predictioneval.MaxOrderedRulesSourceReferences +
+			predictioneval.MaxOrderedRulesQualifications +
+			predictioneval.MaxOrderedRulesRules + fixedStream + fixedTrace
+		capacity := int64(slots) * int64(predictioneval.MaxOrderedRulesIdentifierBytes)
+		if capacity <= predictioneval.MaxOrderedRulesAggregateBytes {
+			t.Fatalf("the individually bounded fields top out at %d bytes against a budget of %d, so "+
+				"the aggregate check would be reachable only through the free-form singletons. The "+
+				"case above must then be the only one that can reach it — check that it still can.",
+				capacity, int64(predictioneval.MaxOrderedRulesAggregateBytes))
+		}
 	})
 
 	// Non-vacuity: EXACTLY at the counts, the shape gate does not fire and the
