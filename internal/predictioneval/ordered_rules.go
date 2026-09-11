@@ -709,17 +709,32 @@ func EvaluateOrderedRules(stream OrderedRulesStream, rules OrderedRulesConfig, d
 	streamDigest := orderedRulesStreamDigest(stream)
 	if stream.SelectionDigest != streamDigest {
 		refused := orderedRulesUnreadRefusal(ReasonStreamDigestMismatch)
-		refused.Cutoff = stream.Cutoff
-		// The recomputed digest still travels back, deliberately. It is the
-		// documented two-call oracle, and hiding it would raise a forgery's
-		// cost from one extra call to reading this repository, which is not a
-		// boundary. The invariant pass below is what actually stands in the
-		// way.
+		// The recomputed digest travels back, deliberately, and it is the ONLY
+		// thing that does. It is the documented two-call oracle, and hiding it
+		// would raise a forgery's cost from one extra call to reading this
+		// repository, which is not a boundary. The invariant pass below is what
+		// actually stands in the way.
 		refused.StreamDigest = streamDigest
-		if len(stream.Qualifications) > 0 {
-			refused.Qualifications = make([]string, len(stream.Qualifications))
-			copy(refused.Qualifications, stream.Qualifications)
-		}
+		// The cutoff and the qualifications used to travel with it, and that
+		// was wrong in the same way the shape gate above says: a refusal that
+		// declined to read the input re-exports none of it.
+		//
+		// Here the reason is sharper than cost. A mismatch means this stream is
+		// NOT what the projection produced, so its cutoff and its
+		// qualifications are caller text that no derived check has seen —
+		// orderedRulesCutoffImpossible and orderedRulesQualificationsNotDerived
+		// both run BELOW this point. Copying them out put attacker-chosen
+		// values into two fields whose whole contract is that they are derived:
+		// a consumer reading Qualifications off a refusal saw a limitation list
+		// the evidence never implied, and one reading Cutoff saw a boundary no
+		// intervention established.
+		//
+		// The bill is real as well as wrong. The gate bounds each qualification
+		// to MaxOrderedRulesIdentifierBytes and the count to
+		// MaxOrderedRulesQualifications, so the measured re-export was 262,144
+		// bytes of supplied text — copied, and then written again, six-fold
+		// once JSON escaping is counted, by whoever encodes a refusal that read
+		// nothing.
 		return refused
 	}
 

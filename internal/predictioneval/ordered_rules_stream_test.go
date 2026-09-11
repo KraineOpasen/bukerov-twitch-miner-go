@@ -3523,3 +3523,100 @@ func TestOrderedRulesACheapRefusalIsNotPaidForWithTheWholePayload(t *testing.T) 
 		}
 	})
 }
+
+// TestOrderedRulesAMismatchRefusalReExportsNothingItDidNotRead pins the one
+// field a digest mismatch is entitled to carry.
+//
+// The cutoff and the qualifications are DERIVED fields: the projection computes
+// both, and every consumer reads them as facts about a stream that was
+// produced, not supplied. A digest mismatch says this stream is not what the
+// projection produced — so at that point both are caller text, and the two
+// checks that would judge them, orderedRulesCutoffImpossible and
+// orderedRulesQualificationsNotDerived, have not run and will not.
+//
+// Carrying them out was a re-export of unread input in the exact sense the
+// shape gate declines: a limitation list the evidence never implied and a
+// boundary no intervention established, handed back inside a typed result.
+// Measured at the bound the gate admits, 64 qualifications of
+// MaxOrderedRulesIdentifierBytes each, that was 262,144 bytes copied and then
+// written again by whoever encodes the refusal.
+//
+// The recomputed digest is the deliberate exception and the counterweight below
+// is what keeps this from degenerating: an ADMITTED evaluation must still
+// report the genuine cutoff and qualifications, or "carry nothing" would pass
+// this case by never producing them at all.
+func TestOrderedRulesAMismatchRefusalReExportsNothingItDidNotRead(t *testing.T) {
+	cfg := orConfig([]predictioneval.OrderedRule{
+		orRule(predictioneval.ComparatorLe, 40, 100, 0, 10)}, 95, 100, 0, 10)
+	cs := []predictioneval.OrderedRulesCandidate{
+		orCandidate("c1", 10, orKnownBalance(1000), orOutcome("A", 4), orOutcome("B", 6)),
+	}
+
+	t.Run("a mismatch carries the recomputed digest and nothing else", func(t *testing.T) {
+		st := orProject(t, cs, nil)
+		// Both fields filled with values the projection would never derive, at
+		// the widest shape the gate admits.
+		st.Qualifications = make([]string, predictioneval.MaxOrderedRulesQualifications)
+		for i := range st.Qualifications {
+			st.Qualifications[i] = strings.Repeat("Q", predictioneval.MaxOrderedRulesIdentifierBytes)
+		}
+		st.Cutoff = predictioneval.OrderedRulesCutoff{
+			Established:      true,
+			Position:         7,
+			Kind:             predictioneval.InterventionAutoCallStarted,
+			Identity:         "invented-boundary",
+			Basis:            predictioneval.CutoffFactualIntervention,
+			DroppedAtOrAfter: 3,
+		}
+		st.SelectionDigest = strings.Repeat("0", 64)
+
+		got := predictioneval.EvaluateOrderedRules(st, cfg, orDraws())
+		switch {
+		case got.Reason != predictioneval.ReasonStreamDigestMismatch:
+			t.Fatalf("premise: the probe must be refused for the digest; got %q", got.Reason)
+		case got.StreamDigest == "":
+			t.Fatal("the mismatch refusal stopped carrying the recomputed stream digest, which " +
+				"the documented oracle and several cases in this file depend on")
+		case len(got.Qualifications) != 0:
+			t.Fatalf("a digest mismatch handed back %d qualifications totalling %d bytes. They are "+
+				"caller text at this point — the derivation check runs below the mismatch and "+
+				"never sees them — so this re-exports a limitation list the evidence never "+
+				"implied, inside a field whose contract is that it was derived.",
+				len(got.Qualifications), len(got.Qualifications)*predictioneval.MaxOrderedRulesIdentifierBytes)
+		case got.Cutoff != (predictioneval.OrderedRulesCutoff{}):
+			t.Fatalf("a digest mismatch handed back cutoff %+v. No intervention established it and "+
+				"orderedRulesCutoffImpossible never ran, so it is supplied text wearing a "+
+				"derived field's name.", got.Cutoff)
+		}
+	})
+
+	// THE COUNTERWEIGHT. Without it, a change that simply stopped producing
+	// either field would satisfy the case above.
+	t.Run("an admitted run still reports the derived cutoff and qualifications", func(t *testing.T) {
+		ins := []predictioneval.OrderedRulesIntervention{
+			orIntervention("i1", 40, predictioneval.InterventionAutoCallStarted,
+				predictioneval.RelevanceAmbiguous, "ambiguous call"),
+		}
+		cut := orProject(t, []predictioneval.OrderedRulesCandidate{
+			orCandidate("c1", 10, orKnownBalance(1000), orOutcome("A", 4), orOutcome("B", 6)),
+			orCandidate("c2", 50, orKnownBalance(1000), orOutcome("A", 4), orOutcome("B", 6)),
+		}, ins)
+		if !cut.Cutoff.Established || len(cut.Qualifications) == 0 {
+			t.Fatalf("premise: the fixture must project a boundary and qualifications; got %+v / %v",
+				cut.Cutoff, cut.Qualifications)
+		}
+
+		got := predictioneval.EvaluateOrderedRules(cut, cfg, orDraws())
+		switch {
+		case got.Reason == predictioneval.ReasonStreamDigestMismatch:
+			t.Fatalf("premise: the projected stream must pass its own digest; got %q", got.Reason)
+		case got.Cutoff != cut.Cutoff:
+			t.Fatalf("an evaluation that READ the stream reported cutoff %+v, not the projected "+
+				"%+v. Refusing to re-export an unread cutoff must not turn into never "+
+				"reporting a derived one.", got.Cutoff, cut.Cutoff)
+		case len(got.Qualifications) != len(cut.Qualifications):
+			t.Fatalf("an evaluation that READ the stream reported %d qualifications, not the "+
+				"projected %d", len(got.Qualifications), len(cut.Qualifications))
+		}
+	})
+}
