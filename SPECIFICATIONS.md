@@ -3367,7 +3367,29 @@ the gate exists at all. Each is one string against a constant and each settles
 that the input is not evaluable; computing three digests first does the work the
 check governs. Measured with a 125 MiB config identifier beside a wrong contract
 version, that refusal cost 1.23 seconds and 251,662,352 bytes to compare two
-short strings. Continuing:
+short strings.
+
+The same rule governs every other refusal, and two more places were paying the
+caller's price for a decision that did not need the caller's data. The evaluator
+compares the stream against its own digest BEFORE reading the config or the
+trace: a mismatch means nothing was consumed, so a config, entropy or
+consumed-prefix digest would witness an input the call never read — and each of
+them traverses identifiers that may legitimately approach their own ceiling.
+Measured with a small stream and a 64 MiB identifier, that refusal took 582.770
+milliseconds; it now takes 15.484 microseconds, against 14.049 for the same
+refusal with a short identifier. The recomputed stream digest still travels
+back, since it is the documented oracle and withholding it would raise a
+forgery's cost from one extra call to reading this repository. In the
+projection, the boundary is established from the interventions — already bounded
+in count and in text — BEFORE the candidate walk that is the bulk of the
+admitted budget, so an intervention rejectable on its shape alone no longer
+costs a full validation pass over every candidate and outcome first: 44
+microseconds rather than 5.011 milliseconds on a fixture well short of the
+ceiling. Neither reordering changes which inputs are admitted; both change only
+what a refusal can be made to cost, and both are pinned by the ORDER they imply
+rather than by timing, which this repository's deterministic-test contract bars.
+
+Continuing:
 the per-string limit is not implied by the aggregate, since one 64 MiB note sits
 well inside a 128 MiB budget while being a value the projection refuses outright.
 Re-establishing those invariants means ALL of them, and the mandatory
