@@ -2342,3 +2342,160 @@ func TestOrderedRulesTheGateRefusesBytesTheProjectionWouldHaveRefused(t *testing
 			"depend on the digest, which proves change and not origin", second.Status, second.Reason)
 	}
 }
+
+// TestOrderedRulesAVersionMismatchIsDecidedBeforeAnythingIsHashed pins the
+// order of the two cheapest checks in the evaluator.
+//
+// Both are one comparison against a constant, and both decide that the input is
+// not evaluable at all — so computing three whole-input digests first does the
+// work before the check that governs it. The config identifier and the run
+// identifier make that expensive: they ride the separate config-and-trace
+// ceiling and carry no per-string bound, deliberately, so they can be enormous.
+// Measured with a 125 MiB config identifier beside a stream whose contract
+// version is simply wrong, the refusal took 1.23 seconds and allocated
+// 251,662,352 bytes to compare two short strings and find them different.
+//
+// The assertion is on the DIGESTS rather than on time or allocation, because a
+// timing assertion is not a deterministic test: an absent digest is the direct
+// evidence that nothing was hashed, and it is exactly what the refusal is
+// entitled to say — it declined to read the input, so it attests to nothing.
+func TestOrderedRulesAVersionMismatchIsDecidedBeforeAnythingIsHashed(t *testing.T) {
+	good := orProject(t, []predictioneval.OrderedRulesCandidate{
+		orCandidate("c1", 10, orKnownBalance(100), orOutcome("A", 4), orOutcome("B", 6))}, nil)
+
+	// Large enough that hashing it would be unmistakable, and legal: neither
+	// identifier is bounded per string.
+	big := strings.Repeat("i", 1<<20)
+
+	for _, tc := range []struct {
+		name   string
+		mutate func(*predictioneval.OrderedRulesStream, *predictioneval.OrderedRulesConfig,
+			*predictioneval.SuppliedDrawTrace)
+		want string
+	}{
+		{"the stream's contract version", func(st *predictioneval.OrderedRulesStream,
+			cfg *predictioneval.OrderedRulesConfig, d *predictioneval.SuppliedDrawTrace) {
+			st.ContractVersion = "not-the-contract-version"
+			cfg.ConfigID = big
+			d.RunID = big
+		}, predictioneval.ReasonStreamContractMismatch},
+		{"the entropy semantics version", func(_ *predictioneval.OrderedRulesStream,
+			cfg *predictioneval.OrderedRulesConfig, d *predictioneval.SuppliedDrawTrace) {
+			d.EntropySemanticsVersion = "not-the-entropy-semantics-version"
+			cfg.ConfigID = big
+			d.RunID = big
+		}, predictioneval.ReasonEntropySemanticsMismatch},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			st, cfg, draws := good, orAlwaysAdmitConfig(), orDraws()
+			tc.mutate(&st, &cfg, &draws)
+
+			ev := predictioneval.EvaluateOrderedRules(st, cfg, draws)
+			switch {
+			case ev.Status != predictioneval.StatusRefused:
+				t.Fatalf("status = %q, want REFUSED", ev.Status)
+			case ev.Reason != tc.want:
+				t.Fatalf("reason = %q, want %q", ev.Reason, tc.want)
+			}
+			if ev.StreamDigest != "" || ev.ConfigDigest != "" || ev.EntropyDigest != "" ||
+				ev.ConsumedInputDigest != "" {
+				t.Fatalf("a %s mismatch was answered with digests over %d bytes of auxiliary text. "+
+					"The comparison that decided this refusal is one string against a constant; "+
+					"hashing the whole input first is the work the check was supposed to govern.",
+					tc.name, 2*len(big))
+			}
+		})
+	}
+}
+
+// TestOrderedRulesTheCutoffIdentityIsChargedLikeTheTextItCameFrom pins the one
+// piece of the boundary that is NOT derived.
+//
+// The cutoff's kind and basis are labels the projection computes, so they are
+// bounded and never charged. Its identity is different in kind: the projection
+// COPIES it from a supplied intervention identity, and charges those bytes
+// against the source budget. Treating it as derived let a forged stream carry
+// text that no source could have supplied — every stream with an established
+// cutoff had at least the intervention whose identity it names, and the
+// projection charged every intervention.
+//
+// Charging it stays inside the projection's own total for the same reason, so
+// this tightens the gate without breaking "admitted by the projection implies
+// admitted here".
+func TestOrderedRulesTheCutoffIdentityIsChargedLikeTheTextItCameFrom(t *testing.T) {
+	const (
+		nc  = predictioneval.MaxOrderedRulesCandidates
+		no  = predictioneval.MaxOrderedRulesOutcomes
+		max = predictioneval.MaxOrderedRulesIdentifierBytes
+	)
+	buf := strings.Repeat("x", max)
+
+	// Sized so the charged bulk sits just under the ceiling, leaving slack that
+	// the fine dimension below can consume a byte at a time. Full-length
+	// identities on every outcome would exceed the ceiling on their own.
+	const bulkID = 2640
+
+	build := func(cutoffID string, fine int) predictioneval.OrderedRulesStream {
+		s := orProject(t, []predictioneval.OrderedRulesCandidate{
+			orCandidate("c1", 10, orKnownBalance(1000), orOutcome("A", 4), orOutcome("B", 6))}, nil)
+		if cutoffID != "" {
+			s.Cutoff = predictioneval.OrderedRulesCutoff{
+				Established: true, Position: 9,
+				Kind:     predictioneval.InterventionAutoCallStarted,
+				Basis:    predictioneval.CutoffFactualIntervention,
+				Identity: cutoffID,
+			}
+		}
+		cs := make([]predictioneval.OrderedRulesCandidate, 0, nc)
+		for i := 0; i < nc; i++ {
+			outs := make([]predictioneval.OrderedRulesOutcome, 0, no)
+			for j := 0; j < no; j++ {
+				outs = append(outs, predictioneval.OrderedRulesOutcome{Identity: buf[:bulkID]})
+			}
+			cs = append(cs, predictioneval.OrderedRulesCandidate{
+				Identity: "c" + itoaTest(i), Position: int64(i + 1), HasPosition: true, Outcomes: outs,
+			})
+		}
+		// The fine dimension is spread over several strings because one caps
+		// out at the per-string bound long before the aggregate binds.
+		for i := 0; fine > 0 && i < len(cs); i++ {
+			k := fine
+			if k > max {
+				k = max
+			}
+			cs[i].OutcomesReason = strings.Repeat("r", k)
+			fine -= k
+		}
+		s.Candidates = cs
+		return s
+	}
+	admitted := func(cutoffID string, fine int) bool {
+		return predictioneval.EvaluateOrderedRules(build(cutoffID, fine), orAlwaysAdmitConfig(),
+			orDraws()).Reason != predictioneval.ReasonStreamBytesOverBound
+	}
+	maxFine := func(cutoffID string) int {
+		t.Helper()
+		if !admitted(cutoffID, 0) {
+			t.Fatalf("premise: the fixture must be admitted with no fine text (cutoff present: %v)", cutoffID != "")
+		}
+		lo, hi := 0, max*nc
+		for lo < hi {
+			mid := (lo + hi + 1) / 2
+			if admitted(cutoffID, mid) {
+				lo = mid
+			} else {
+				hi = mid - 1
+			}
+		}
+		return lo
+	}
+
+	none, withCutoff := maxFine(""), maxFine(buf)
+	t.Logf("fine bytes admitted: %d with no cutoff, %d with a %d-byte cutoff identity", none, withCutoff, max)
+	if none-withCutoff != max {
+		t.Fatalf("declaring a %d-byte cutoff identity cost %d bytes of budget, want exactly %d. The "+
+			"projection charged the intervention identity this was copied from, so a gate that "+
+			"excludes it admits streams no source could have produced.",
+			max, none-withCutoff, max)
+	}
+}

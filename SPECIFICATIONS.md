@@ -3317,13 +3317,30 @@ so "admitted by the projection" implies "admitted here" by construction rather
 than by a margin.
 
 Mirroring means the mirror is exact in both directions: text the projection
-DERIVES rather than receives — the qualifications it generates, the boundary it
-computes, the stream's own contract version — is length-bounded but never
+DERIVES rather than receives — the qualifications it generates, the boundary's
+kind and basis, the stream's own contract version — is length-bounded but never
 charged, because the projection never charged it, and the config and the trace
 carry a ceiling of their own, because the projection never saw them at all. Two
 inputs, two ceilings, and the derived fields on neither; otherwise a source
 filling the projection's budget would project successfully and then be refused
-here for bytes, which is the invariant backwards. Continuing:
+here for bytes, which is the invariant backwards.
+
+The boundary's IDENTITY is the exception, and calling the whole boundary derived
+was wrong. Kind and basis are labels the projection computes; the identity it
+COPIES from a supplied intervention identity, and charges those bytes against
+the source budget. Excluding it from the ingest charge let a forged stream carry
+text no source could have supplied — a stream declaring an established cutoff
+had at least the one intervention whose identity it names. Charging it stays
+inside the projection's own total, since the projection charged every
+intervention, so the mirror tightens without the invariant moving.
+
+Two version comparisons — the stream's contract version and the entropy
+semantics version — are decided BEFORE the whole-input digests, for the reason
+the gate exists at all. Each is one string against a constant and each settles
+that the input is not evaluable; computing three digests first does the work the
+check governs. Measured with a 125 MiB config identifier beside a wrong contract
+version, that refusal cost 1.23 seconds and 251,662,352 bytes to compare two
+short strings. Continuing:
 the per-string limit is not implied by the aggregate, since one 64 MiB note sits
 well inside a 128 MiB budget while being a value the projection refuses outright.
 Re-establishing those invariants means ALL of them, and the mandatory

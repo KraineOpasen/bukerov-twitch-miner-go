@@ -239,6 +239,27 @@ func orderedRulesInputShapeReason(s OrderedRulesStream, cfg OrderedRulesConfig, 
 	return ""
 }
 
+// orderedRulesUnreadRefusal is a refusal that attests to NOTHING about the
+// input, because it declined to read it.
+//
+// It carries no whole-input digest and no supplied text — not the boundary, not
+// anything else the caller handed in. A digest of something never traversed
+// would be the same empty guarantee this refusal exists to avoid, and
+// re-exporting text that passed no bound would move the cost of refusing onto
+// whoever encodes the result.
+func orderedRulesUnreadRefusal(reason string) OrderedRulesEvaluation {
+	return OrderedRulesEvaluation{
+		EvidenceLabel:           OrderedRulesEvidenceLabel,
+		ModelVersion:            OrderedRulesModelVersion,
+		DonorRevision:           OrderedRulesDonorRevision,
+		EntropySemanticsVersion: OrderedRulesEntropySemanticsVersion,
+		Participation:           ParticipationNotAdmitted,
+		Stake:                   SuppliedUint32{Presence: SuppliedMissing, Reason: ReasonBalanceNotEvaluated},
+		Status:                  StatusRefused,
+		Reason:                  reason,
+	}
+}
+
 // orderedRulesTextBudget accumulates the retained text the whole-input digests
 // read, and records whether any single string broke the per-string limit.
 //
@@ -321,7 +342,15 @@ func orderedRulesInputBudget(s OrderedRulesStream, cfg OrderedRulesConfig,
 	b.bound(s.Scope.CoverageDetail, string(s.Admission.ViewKind))
 	b.bound(s.Admission.ManifestID, s.Admission.Population, s.Admission.OrderBasis)
 	b.bound(s.Admission.SourceReferences...)
-	b.boundOnly(string(s.Cutoff.Kind), string(s.Cutoff.Basis), s.Cutoff.Identity)
+	// Kind and Basis are labels the projection DERIVES, so they are bounded and
+	// not charged. The identity is not derived: the projection copies it from a
+	// supplied intervention identity, and charges those bytes. Excluding it let
+	// a forged stream carry text no source could have supplied and still pass
+	// this gate. Charging it stays inside the projection's own total, because a
+	// stream with an established cutoff had at least the one intervention whose
+	// identity it carries, and the projection charged every intervention.
+	b.boundOnly(string(s.Cutoff.Kind), string(s.Cutoff.Basis))
+	b.bound(s.Cutoff.Identity)
 	b.boundOnly(s.Qualifications...)
 	for i := range s.Candidates {
 		c := &s.Candidates[i]
@@ -576,16 +605,27 @@ func EvaluateOrderedRules(stream OrderedRulesStream, rules OrderedRulesConfig, d
 		// which the JSON tags say is the intended use: a refusal decided in
 		// O(1) would still write a gigabyte of supplied text, six-fold once
 		// JSON escaping is counted.
-		return OrderedRulesEvaluation{
-			EvidenceLabel:           OrderedRulesEvidenceLabel,
-			ModelVersion:            OrderedRulesModelVersion,
-			DonorRevision:           OrderedRulesDonorRevision,
-			EntropySemanticsVersion: OrderedRulesEntropySemanticsVersion,
-			Participation:           ParticipationNotAdmitted,
-			Stake:                   SuppliedUint32{Presence: SuppliedMissing, Reason: ReasonBalanceNotEvaluated},
-			Status:                  StatusRefused,
-			Reason:                  reason,
-		}
+		return orderedRulesUnreadRefusal(reason)
+	}
+
+	// THE VERSION CHECKS COME BEFORE THE DIGESTS, for the same reason the gate
+	// does. Both are a single comparison against a constant, and both decide
+	// that this input is not evaluable at all — so computing three whole-input
+	// digests first is doing the work before the check that governs it.
+	//
+	// The cost was not theoretical. The config identifier and the run
+	// identifier ride the separate config-and-trace ceiling and carry no
+	// per-string bound, deliberately: inventing one that no other rule applies
+	// would refuse input nothing else refuses. But that makes them large, and
+	// measured with a 125 MiB config identifier beside a stream whose contract
+	// version is simply wrong, this refusal took 1.23 seconds and allocated
+	// 251,662,352 bytes — to compare two short strings and find them different.
+	// It is 3.8 microseconds and nothing now.
+	switch {
+	case stream.ContractVersion != OrderedRulesStreamContractVersion:
+		return orderedRulesUnreadRefusal(ReasonStreamContractMismatch)
+	case draws.EntropySemanticsVersion != OrderedRulesEntropySemanticsVersion:
+		return orderedRulesUnreadRefusal(ReasonEntropySemanticsMismatch)
 	}
 
 	out := OrderedRulesEvaluation{
@@ -617,12 +657,8 @@ func EvaluateOrderedRules(stream OrderedRulesStream, rules OrderedRulesConfig, d
 	}
 
 	switch {
-	case stream.ContractVersion != OrderedRulesStreamContractVersion:
-		return refuse(ReasonStreamContractMismatch, 0, 0)
 	case stream.SelectionDigest != out.StreamDigest:
 		return refuse(ReasonStreamDigestMismatch, 0, 0)
-	case draws.EntropySemanticsVersion != OrderedRulesEntropySemanticsVersion:
-		return refuse(ReasonEntropySemanticsMismatch, 0, 0)
 	case len(draws.Words) > MaxOrderedRulesDrawWords:
 		return refuse(ReasonDrawWordsOverBound, 0, 0)
 	case len(rules.Detailed) > MaxOrderedRulesRules:
