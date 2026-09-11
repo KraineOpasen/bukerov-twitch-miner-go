@@ -288,7 +288,7 @@ func ProjectOrderedRulesStream(source OrderedRulesSource, admission CommonAdmiss
 	//
 	// Four closed-set fields per candidate. Each is length-bounded first —
 	// their refusals quote the value, which is why they cannot join the
-	// zero-byte tier — and then compared against a short constant, so the tier
+	// constant-bounded tier — and then compared against a short constant, so the tier
 	// reads at most MaxOrderedRulesCandidates x 4 x MaxOrderedRulesIdentifierBytes
 	// and in practice a few words per candidate.
 	//
@@ -462,7 +462,7 @@ func ProjectOrderedRulesStream(source OrderedRulesSource, admission CommonAdmiss
 		return OrderedRulesStream{}, err
 	}
 
-	// The Detail SCAN, its charge already counted in the zero-byte tier above.
+	// The Detail SCAN, its charge already counted in the constant-bounded tier above.
 	for i := range source.Interventions {
 		if err := checkFreeText(source.Interventions[i].Detail, "intervention "+strconv.Itoa(i)+" detail"); err != nil {
 			return OrderedRulesStream{}, err
@@ -959,7 +959,7 @@ func checkPresence(v SuppliedInt64, where string, candidatePosition int64) error
 // balance AND every outcome's points — in one early pass, rather than reaching
 // the last outcome's word only after every earlier candidate's provenance and
 // reason have been scanned. The length bound comes first because the refusal
-// quotes the value, which is also why this cannot join the zero-byte tier.
+// quotes the value, which is also why this cannot join the constant-bounded tier.
 func checkPresenceVocabulary(v SuppliedInt64, where string) error {
 	if err := checkFreeText(string(v.Presence), where+" presence vocabulary"); err != nil {
 		return err

@@ -414,8 +414,9 @@ func orderedRulesInputBudget(s OrderedRulesStream, cfg OrderedRulesConfig,
 // to check is that the assertion is internally possible. An unestablished
 // boundary that names an intervention, or an established one with no identity,
 // is a claim about evidence that is not there.
-// orderedRulesCutoffImpossible is the whole boundary invariant: the zero-byte
-// half below, plus the one part of it that reads supplied bytes.
+// orderedRulesCutoffImpossible is the whole boundary invariant: the
+// constant-bounded half below, plus the one part of it whose cost the caller
+// controls.
 //
 // The split exists because the structural tier calls the half and the invariant
 // pass calls this. An earlier version hoisted the WHOLE predicate into the
@@ -448,12 +449,14 @@ func orderedRulesCutoffImpossible(s OrderedRulesStream) bool {
 	return s.Cutoff.Established && invalidUTF8(s.Cutoff.Identity)
 }
 
-// orderedRulesCutoffShapeImpossible is the zero-byte half of the boundary
-// invariant, and it is what the structural tier runs before the digest.
+// orderedRulesCutoffShapeImpossible is the CONSTANT-BOUNDED half of the
+// boundary invariant, and it is what the structural tier runs before the digest.
 //
 // Every test here is a comparison against a constant, an integer comparison, or
-// a length — including the identity's emptiness and its bound, both of which
-// are O(1) and neither of which reads a byte of a string the caller chose.
+// a length. The identity's emptiness and its bound are O(1) and read nothing;
+// the Basis and Kind switches compare against closed sets, so a supplied value
+// of matching length is read up to that constant's length and no further. None
+// of it grows with what the caller supplies.
 func orderedRulesCutoffShapeImpossible(s OrderedRulesStream) bool {
 	c := s.Cutoff
 	// The removal count is bounded by arithmetic, not by taste. The projection
@@ -555,9 +558,16 @@ func orderedRulesQualificationsNotDerived(s OrderedRulesStream) bool {
 // The difference is the whole point of where this runs. checkPresenceVocabulary
 // bounds the word with checkFreeText first, because its error QUOTES it; that
 // scan is proportional to a string the caller chose. Here nothing is quoted —
-// the structural tier answers yes or no — so the comparison against three short
-// constants fails on length before it reads a byte, and a caller cannot make
-// this cost anything by supplying a longer word.
+// the structural tier answers yes or no — so the comparison is against three
+// short constants and a caller cannot make it cost more by supplying a longer
+// word: a longer word fails on length.
+//
+// It does NOT read zero bytes, and saying it did was wrong. When a supplied
+// word happens to match a constant's LENGTH, Go compares the bytes — up to the
+// constant's own length, 36 at the widest in this package. That is bounded by
+// this file rather than by the caller, which is the property that matters, but
+// it is not nothing and the difference is exactly the kind that misleads a
+// later reordering. A reviewer caught the overstatement.
 //
 // It closes a hole that checkPresenceShape cannot: that function returns
 // immediately for every non-KNOWN value, because the availability rules it
@@ -595,8 +605,9 @@ func orderedRulesPresenceWordUnknown(p SuppliedPresence) bool {
 // invariant pass settles the same question, so nothing here is checked less
 // than before; this only settles it before the hash rather than after.
 //
-// It reads identity bytes — the map hashes them — so it is NOT in the zero-byte
-// tier and must not be moved there. What bounds it is the candidate ceiling and
+// It reads identity bytes — the map hashes them, all of them, at a length the
+// caller chooses — so it is NOT in the constant-bounded tier and must not be
+// moved there. What bounds it is the candidate ceiling and
 // the per-identifier bound, half a megabyte between them.
 func orderedRulesStreamIdentitiesAmbiguous(s OrderedRulesStream) bool {
 	seen := make(map[string]bool, len(s.Candidates))
@@ -610,9 +621,20 @@ func orderedRulesStreamIdentitiesAmbiguous(s OrderedRulesStream) bool {
 	return false
 }
 
-// orderedRulesStreamStructureBroken is the stream's zero-byte tier: emptiness
-// tests, integer comparisons and declared flags, over the scope, the admission
-// and every retained candidate and outcome.
+// orderedRulesStreamStructureBroken is the stream's CONSTANT-BOUNDED tier:
+// emptiness tests, integer comparisons, declared flags and closed-set
+// comparisons, over the scope, the admission and every retained candidate and
+// outcome.
+//
+// It was called the zero-byte tier until the closed-set comparisons moved in,
+// and that name survived them by three commits. It is wrong: a supplied word
+// matching a constant's LENGTH is compared byte for byte, up to 36 bytes at the
+// widest constant here. What is true, and what the tier is actually for, is
+// that every bound in it comes from this file — no caller can make any check
+// here cost more by supplying something longer, because longer fails on length.
+// Emptiness tests and flags really do read nothing; the vocabulary comparisons
+// read up to a constant. The distinction matters because a false invariant is
+// what let a UTF-8 scan sit here for a commit.
 //
 // It is a function of its own because TWO callers need it at two different
 // points: EvaluateOrderedRules runs it before computing the stream digest, and
@@ -647,16 +669,17 @@ func orderedRulesStreamStructureBroken(s OrderedRulesStream) bool {
 	// The SOURCE CONTRACT, which validateScope settles only after the hash. Its
 	// refusal there quotes the supplied value, which is why it is not in
 	// validateScopeShape and the projection says so. That reason does not reach
-	// here: this tier quotes nothing, so the comparison is length-first against
-	// one short constant and a caller cannot make it cost anything. Measured
+	// here: this tier quotes nothing, so the comparison is against one short
+	// constant — read to that constant's length when a supplied value matches
+	// it, and no further, which a caller cannot enlarge. Measured
 	// against a four-byte unsupported version beside 128 candidates holding
 	// 4 KiB each: 2.314278 ms before and 4.457 µs now, against 7.219 µs for the
 	// identical fault on a two-candidate stream.
 	if s.Scope.SourceContractVersion != OrderedRulesStreamContractVersion {
 		return true
 	}
-	// And the DERIVED boundary — its zero-byte half, which is the whole of that
-	// invariant except one UTF-8 scan of the cutoff identity.
+	// And the DERIVED boundary — its constant-bounded half, which is the whole of
+	// that invariant except one UTF-8 scan of the cutoff identity.
 	//
 	// The first version of this called orderedRulesCutoffImpossible whole, on
 	// the claim that the predicate reads no supplied text. It does: see the
@@ -1009,7 +1032,7 @@ func EvaluateOrderedRules(stream OrderedRulesStream, rules OrderedRulesConfig, d
 	// beside 128 candidates holding 4 KiB each: 2.297362 ms before, 4.575 µs
 	// now, against 7.01 µs for the same fault on two candidates.
 	//
-	// It sits BELOW the config rather than in the zero-byte tier, and that
+	// It sits BELOW the config rather than in the constant-bounded tier, and that
 	// position is pinned by a case. Putting it in the tier made a stream fault
 	// beat an unusable config, inverting a precedence this package had already
 	// established and tested — the config is arithmetic over a bounded rule
@@ -1020,7 +1043,7 @@ func EvaluateOrderedRules(stream OrderedRulesStream, rules OrderedRulesConfig, d
 	}
 
 	// THE BOUNDED IDENTITY TIER, and it is deliberately NOT part of the
-	// zero-byte tier above.
+	// constant-bounded tier above.
 	//
 	// Two candidates repeating an identity is a stream the projection could not
 	// have produced, and ProjectOrderedRulesStream refuses it before its own
@@ -1033,7 +1056,7 @@ func EvaluateOrderedRules(stream OrderedRulesStream, rules OrderedRulesConfig, d
 	// It is 1.043 µs and 31.909 µs now.
 	//
 	// It gets its own tier because it is NOT free, and folding it into the
-	// zero-byte one would repeat the error this file made with the cutoff's
+	// constant-bounded one would repeat the error this file made with the cutoff's
 	// UTF-8 scan exactly one commit ago. Hashing an identity into a map reads
 	// its bytes. The envelope is MaxOrderedRulesCandidates x
 	// MaxOrderedRulesIdentifierBytes, half a megabyte, against a stream digest
@@ -1045,9 +1068,9 @@ func EvaluateOrderedRules(stream OrderedRulesStream, rules OrderedRulesConfig, d
 	// hidden: a valid stream now walks its identities twice, once here and once
 	// in the invariant pass, both inside the same bounded envelope.
 	//
-	// It runs AFTER the zero-byte tier and not before it, which is the whole
+	// It runs AFTER the constant-bounded tier and not before it, which is the whole
 	// point of there being two. The first arrangement had it first, and that
-	// made every zero-byte fault pay half a megabyte of identity hashing before
+	// made every constant-bounded fault pay half a megabyte of identity hashing before
 	// a comparison against a constant could answer: an unsupported source
 	// contract went from 4.457 µs to 36.151 µs on the same input. Cheapest
 	// decision first, at every tier, is the rule this file keeps relearning.

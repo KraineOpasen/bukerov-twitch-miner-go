@@ -3536,7 +3536,7 @@ availability flag. Every repair moved one cheap decision ahead of one expensive
 scan, and the iteration did not converge because the function was organised by
 what a check is ABOUT rather than by what it COSTS.
 
-`ProjectOrderedRulesStream` is now split on cost. The whole zero-byte tier runs
+`ProjectOrderedRulesStream` is now split on cost. The whole constant-bounded tier runs
 first: the two source counts, the emptiness and interval halves of the scope and
 admission validators (`validateScopeShape`, `validateAdmissionShape`), the
 interventions' declared positions against the declared interval
@@ -3572,7 +3572,7 @@ exhausted. The three halves — `validateScopeShape`, `validateAdmissionShape`,
 beside them, so the invariant pass in the evaluator re-establishes exactly these
 rules through one definition; `checkInterventionStructure` is likewise called
 twice from one definition, by the projection and by `establishCutoff` which
-depends on it. What does NOT move into the zero-byte tier is anything whose
+depends on it. What does NOT move into the constant-bounded tier is anything whose
 refusal quotes a supplied value — `SourceContractVersion`, the admission view
 kind — since quoting requires the per-string bound to have run.
 
@@ -3592,13 +3592,13 @@ provenance, reason and presence text before reaching the next one's flags, so a
 forged stream whose last candidate omits the position its KNOWN balance became
 available at was refused only after roughly 20 MB of earlier payload — reached
 over the two-call digest oracle at no cost to the caller. It now carries the
-same zero-byte tier, built from the same shape helpers the projection calls:
+same constant-bounded tier, built from the same shape helpers the projection calls:
 44.199912 milliseconds to 27.434148, against a floor of 27.675032 measured on a
 stream failing that pass's FIRST check. The fix reaches the floor; what remains
 is the stream digest, which is the comparison that admitted the stream and which
 no ordering can defer.
 
-An identity's PRESENCE joined the zero-byte tier for candidates, outcomes and
+An identity's PRESENCE joined the constant-bounded tier for candidates, outcomes and
 interventions alike — it is an emptiness test whose message quotes nothing,
 while only its ENCODING and its uniqueness need bytes read. A last outcome with
 an empty identity went from 20.344244 milliseconds to 488.369 microseconds,
@@ -3983,7 +3983,7 @@ bare comparisons against short constants rather than through the quoting
 validators: the error messages in the invariant pass QUOTE the offending value
 and so must bound it first, and that scan is proportional to a string the caller
 chose, while the structural tier answers only yes or no and a comparison against
-`KNOWN` fails on length before reading a byte. The refusal costs 649 ns and
+`KNOWN` fails on length. The refusal costs 649 ns and
 7.092 µs on those same two inputs. The derived cutoff contributes its ZERO-BYTE HALF,
 `orderedRulesCutoffShapeImpossible`, and the first version of this got that
 wrong: it hoisted the whole `orderedRulesCutoffImpossible` predicate and claimed
@@ -4006,6 +4006,22 @@ these refusals no longer carry the recomputed stream digest, so the two-call
 oracle does not function for them. That is the same narrowing the structural
 tier already made, and narrower is the safe direction.
 
+**The tier was never zero-byte, and the name outlived the truth by three
+commits.** Emptiness tests and declared flags really do read nothing, and that
+is what the name described when it was coined. The closed-set comparisons that
+moved in later do not: when a supplied word happens to match a constant's
+LENGTH, Go compares the bytes, up to that constant's own length — 36 at the
+widest here. The work is still capped by this repository rather than by the
+caller, since anything longer fails on length, and that is the property the tier
+exists for; but "reads no supplied byte" was an overstatement, repeated in the
+source, in this document and in every review request for several rounds. It is
+now the CONSTANT-BOUNDED tier, and the distinction is not pedantry: a false
+invariant is precisely what let a UTF-8 scan of the cutoff identity sit inside it
+for a commit, and the reviewer who raised this said so in those terms. Where a
+helper genuinely reads nothing — `validateScopeShape`, `checkIdentifierPresent`,
+`checkInterventionStructure` — it is still described that way, because there the
+claim is true.
+
 **Three more constant-size faults were being charged for the whole payload, and
 one of them was a projection/ingest divergence.** A stream declaring an
 unsupported `SourceContractVersion`, one carrying a fabricated qualification,
@@ -4013,7 +4029,7 @@ and two candidates repeating an identity were each settled only after the stream
 was hashed: measured against 128 candidates holding 4 KiB each, 2.314278 ms,
 2.297362 ms and 3.549091 ms respectively, for faults of four bytes, one string
 and three bytes. They are 4.457 µs, 4.575 µs and 31.909 µs now. The contract
-comparison joins the zero-byte tier, since that tier quotes nothing and
+comparison joins the constant-bounded tier, since that tier quotes nothing and
 `validateScope`'s own refusal — which does quote, and is why the check is absent
 from `validateScopeShape` — is not the constraint here.
 
@@ -4026,9 +4042,9 @@ Candidate uniqueness cannot join it at all: hashing an identity into a map reads
 its bytes, so it is a BOUNDED tier of its own —
 `MaxOrderedRulesCandidates` x `MaxOrderedRulesIdentifierBytes`, half a megabyte
 against a digest that traverses the whole retained ceiling. Folding it into the
-zero-byte tier would have repeated the cutoff mistake above exactly one commit
+constant-bounded tier would have repeated the cutoff mistake above exactly one commit
 later, and the first arrangement put it AHEAD of that tier, which made every
-zero-byte fault pay half a megabyte before a comparison against a constant could
+constant-bounded fault pay half a megabyte before a comparison against a constant could
 answer — 4.457 µs became 36.151 µs on the same input. Cheapest decision first,
 at every tier.
 
