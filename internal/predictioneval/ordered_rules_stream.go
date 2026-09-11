@@ -238,12 +238,24 @@ func ProjectOrderedRulesStream(source OrderedRulesSource, admission CommonAdmiss
 			return OrderedRulesStream{}, err
 		}
 		bytes += chargedWidth(len(c.Identity) + len(c.Provenance) + len(c.OutcomesReason))
+		// Outcome identities are unique WITHIN a candidate, for the same reason
+		// candidate and intervention identities are unique within the source: a
+		// pool naming the same outcome twice is not a pool that can exist, and
+		// the model must not compute shares over one. It was the only identity
+		// in the model without this rule.
+		outcomesSeen := make(map[string]bool, len(c.Outcomes))
 		for j := range c.Outcomes {
 			o := &c.Outcomes[j]
 			ow := where + " outcome " + strconv.Itoa(j)
 			if err := checkIdentifier(o.Identity, ow+" identity"); err != nil {
 				return OrderedRulesStream{}, err
 			}
+			if outcomesSeen[o.Identity] {
+				return OrderedRulesStream{}, errors.Join(ErrOrderedRulesDuplicateIdentity,
+					errors.New("predictioneval: "+ow+" repeats identity "+strconv.Quote(o.Identity)+
+						"; two outcomes may carry identical POINTS, but never the same identity"))
+			}
+			outcomesSeen[o.Identity] = true
 			if err := checkFreeText(string(o.Points.Presence), ow+" points vocabulary"); err != nil {
 				return OrderedRulesStream{}, err
 			}

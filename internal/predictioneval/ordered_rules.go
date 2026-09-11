@@ -541,12 +541,18 @@ func orderedRulesStreamInvariantsBroken(s OrderedRulesStream) bool {
 		default:
 			return true
 		}
+		// Mirrored from the projection, and added at the same time as it rather
+		// than a commit later: three findings on this PR were a rule that
+		// existed on one side of this pair and not the other.
+		outcomesSeen := make(map[string]bool, len(c.Outcomes))
 		for j := range c.Outcomes {
 			o := &c.Outcomes[j]
 			if checkIdentifier(o.Identity, where) != nil ||
+				outcomesSeen[o.Identity] ||
 				checkPresence(o.Points, where, c.Position) != nil {
 				return true
 			}
+			outcomesSeen[o.Identity] = true
 		}
 		// The boundary is EXCLUSIVE, and a stream retaining a candidate at or
 		// after it is one the projection would have cut.

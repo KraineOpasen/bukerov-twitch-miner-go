@@ -3423,6 +3423,17 @@ An exhausted trace is an explicit unknown — never a default draw, never a skip
 The baseline's `ObservedRealization` is structurally excluded: it is a recorded
 draw from a different mechanism, conditioned on a decision that already happened.
 
+**Identity conflicts are refused, never reconciled.** A candidate identity is
+unique within a source and an intervention identity within the boundary scan,
+because two things carrying one identity are an input conflict where neither
+dropping one nor keeping both is a safe reading. Outcome identities were the
+exception until a reviewer noticed, so a pool could name the same outcome twice
+while the model computed shares over it and reached a decision — a pool that
+cannot exist in the source domain. They are unique within their candidate now,
+on both the projection and the ingest path. The selection was never ambiguous,
+since it carries the outcome INDEX beside the identity; what was wrong is that
+the model answered at all.
+
 **The factual boundary.** A stream is bounded by the first relevant placement
 call in the declared episode, automatic or manual. Manual calls carry no attempt
 discriminator and may carry a different or empty round incarnation, so they are

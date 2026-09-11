@@ -329,23 +329,57 @@ func TestOrderedRulesStopDoesNotReadNextCandidateOrDraw(t *testing.T) {
 // ordered-rules input types can hold one, and the evaluator's signature cannot
 // accept one.
 func TestOrderedRulesSuppliedDrawTraceIsIndependentOfObservedStealth(t *testing.T) {
+	// The claim above is about the whole reachable type graph, so the walk has
+	// to be the whole graph. Checking only the four roots' direct fields left
+	// OrderedRulesOutcome and SuppliedInt64 — everything a candidate holds —
+	// free to acquire one without failing here, which is a test that cannot
+	// detect the regression it names.
 	observed := reflect.TypeOf(predictioneval.ObservedRealization{})
+	seen := map[reflect.Type]bool{}
+	var walk func(typ reflect.Type, path string)
+	walk = func(typ reflect.Type, path string) {
+		for typ.Kind() == reflect.Pointer || typ.Kind() == reflect.Slice ||
+			typ.Kind() == reflect.Array || typ.Kind() == reflect.Map {
+			if typ.Kind() == reflect.Map {
+				walk(typ.Key(), path+"[key]")
+			}
+			typ = typ.Elem()
+		}
+		if typ.Kind() != reflect.Struct || seen[typ] {
+			return
+		}
+		seen[typ] = true
+		if typ == observed {
+			t.Errorf("%s reaches an ObservedRealization; the donor's entropy must be SUPPLIED, "+
+				"never borrowed from a recorded stealth draw", path)
+			return
+		}
+		for i := 0; i < typ.NumField(); i++ {
+			f := typ.Field(i)
+			where := path + "." + f.Name
+			if strings.Contains(strings.ToLower(f.Name), "stealth") ||
+				strings.Contains(strings.ToLower(f.Name), "observedrealization") {
+				t.Errorf("%s names an observed realization", where)
+			}
+			walk(f.Type, where)
+		}
+	}
 	for _, typ := range []reflect.Type{
 		reflect.TypeOf(predictioneval.SuppliedDrawTrace{}),
 		reflect.TypeOf(predictioneval.OrderedRulesStream{}),
 		reflect.TypeOf(predictioneval.OrderedRulesCandidate{}),
 		reflect.TypeOf(predictioneval.OrderedRulesConfig{}),
 	} {
-		for i := 0; i < typ.NumField(); i++ {
-			f := typ.Field(i)
-			if f.Type == observed {
-				t.Errorf("%s.%s carries an ObservedRealization; the donor's entropy must be SUPPLIED, "+
-					"never borrowed from a recorded stealth draw", typ.Name(), f.Name)
-			}
-			if strings.Contains(strings.ToLower(f.Name), "stealth") ||
-				strings.Contains(strings.ToLower(f.Name), "observedrealization") {
-				t.Errorf("%s.%s names an observed realization", typ.Name(), f.Name)
-			}
+		walk(typ, typ.Name())
+	}
+	// The walk must actually have gone past the roots, or it proves nothing.
+	for _, nested := range []reflect.Type{
+		reflect.TypeOf(predictioneval.OrderedRulesOutcome{}),
+		reflect.TypeOf(predictioneval.SuppliedInt64{}),
+		reflect.TypeOf(predictioneval.OrderedRulesScope{}),
+	} {
+		if !seen[nested] {
+			t.Fatalf("the walk never reached %s, so it is not inspecting the reachable graph", nested.Name())
 		}
 	}
 

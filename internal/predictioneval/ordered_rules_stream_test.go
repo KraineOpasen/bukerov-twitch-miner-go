@@ -1094,6 +1094,11 @@ func TestOrderedRulesAMatchingDigestIsNotProofOfProjection(t *testing.T) {
 		// declared: the projection refused the input while this path admitted
 		// the same stream, reached WOULD_ATTEMPT, and handed the first
 		// opportunity to a candidate whose position was a decoded zero.
+		{"a pool naming the same outcome twice", func(t *testing.T) predictioneval.OrderedRulesStream {
+			st := orProject(t, candidates(), nil)
+			st.Candidates[0].Outcomes[1].Identity = st.Candidates[0].Outcomes[0].Identity
+			return st
+		}},
 		{"a candidate whose causal position was never declared", func(t *testing.T) predictioneval.OrderedRulesStream {
 			st := orProject(t, candidates(), nil)
 			st.Candidates[0].HasPosition = false
@@ -2001,12 +2006,14 @@ func TestOrderedRulesAnAdmittedStreamEncodesInsideItsDeclaredCeiling(t *testing.
 	// identities need not be unique, so they cost no ASCII at all; candidate
 	// identities are made unique by LENGTH rather than by any readable byte.
 	build := func(idLen int) (predictioneval.OrderedRulesStream, error) {
-		nul := strings.Repeat("\x00", idLen+nc)
+		nul := strings.Repeat("\x00", idLen+nc+no)
 		cs := make([]predictioneval.OrderedRulesCandidate, 0, nc)
 		for i := 0; i < nc; i++ {
 			outs := make([]predictioneval.OrderedRulesOutcome, 0, no)
 			for j := 0; j < no; j++ {
-				o := orOutcome(nul[:idLen], int64(j+1))
+				// Unique WITHIN the candidate, as the model now requires, and
+				// unique by LENGTH so the fixture still carries no ASCII.
+				o := orOutcome(nul[:idLen+j], int64(j+1))
 				o.Points.Provenance = "p"
 				outs = append(outs, o)
 			}
@@ -2022,7 +2029,7 @@ func TestOrderedRulesAnAdmittedStreamEncodesInsideItsDeclaredCeiling(t *testing.
 	// The widest identifier the projection still admits at this shape.
 	// The floor clears the longest generated prefix, so every probe is really
 	// idLen bytes wide and the search measures the bound and not the fixture.
-	lo, hi := 8, predictioneval.MaxOrderedRulesIdentifierBytes-nc
+	lo, hi := 8, predictioneval.MaxOrderedRulesIdentifierBytes-nc-no
 	if _, err := build(lo); err != nil {
 		t.Fatalf("the smallest fixture must project: %v", err)
 	}
@@ -2497,5 +2504,42 @@ func TestOrderedRulesTheCutoffIdentityIsChargedLikeTheTextItCameFrom(t *testing.
 			"projection charged the intervention identity this was copied from, so a gate that "+
 			"excludes it admits streams no source could have produced.",
 			max, none-withCutoff, max)
+	}
+}
+
+// TestOrderedRulesDuplicateOutcomeIdentityIsRejected closes the last identity
+// in the model without a uniqueness rule.
+//
+// Candidate identities are unique within a source and intervention identities
+// are unique within the boundary scan, both for the same stated reason: two
+// things carrying the same identity are an input conflict, and neither dropping
+// one nor keeping both is a safe reading. Outcome identities had no such rule,
+// so a pool could name the same outcome twice — which is not a pool that can
+// exist, while the model computed shares over it and reached a decision.
+//
+// The selection itself is not ambiguous — it carries OutcomeIndex beside
+// OutcomeIdentity — so the harm is not a misattributed choice. It is that the
+// model answered at all about a pool the source domain cannot produce.
+func TestOrderedRulesDuplicateOutcomeIdentityIsRejected(t *testing.T) {
+	// Different points, so the duplicate cannot be dismissed as a harmless copy.
+	cs := []predictioneval.OrderedRulesCandidate{
+		orCandidate("c1", 10, orKnownBalance(1000), orOutcome("A", 4), orOutcome("A", 6)),
+	}
+	_, err := predictioneval.ProjectOrderedRulesStream(orSource(cs, nil), orAdmission())
+	if err == nil {
+		t.Fatal("a pool naming the same outcome twice was projected; every other identity in this " +
+			"model is unique within its scope, and this was the exception")
+	}
+	if !errors.Is(err, predictioneval.ErrOrderedRulesDuplicateIdentity) {
+		t.Fatalf("refused, but not as a duplicate identity: %v", err)
+	}
+
+	// The control: identical POINTS under distinct identities stay legal, which
+	// is what keeps the rule about identity rather than about values.
+	ok := []predictioneval.OrderedRulesCandidate{
+		orCandidate("c1", 10, orKnownBalance(1000), orOutcome("A", 5), orOutcome("B", 5)),
+	}
+	if _, err := predictioneval.ProjectOrderedRulesStream(orSource(ok, nil), orAdmission()); err != nil {
+		t.Fatalf("two outcomes with equal points and distinct identities must project: %v", err)
 	}
 }

@@ -83,7 +83,10 @@ func TestOrderedRulesStructuralOverheadFitsItsReserve(t *testing.T) {
 		outs := make([]OrderedRulesOutcome, 0, MaxOrderedRulesOutcomes)
 		for j := 0; j < MaxOrderedRulesOutcomes; j++ {
 			outs = append(outs, OrderedRulesOutcome{
-				Identity: count("o"),
+				// Unique within the candidate, as the model now requires. The
+				// extra bytes are COUNTED, so they leave the structure figure
+				// this case measures untouched.
+				Identity: count("o" + itoaInternal(j)),
 				Points: SuppliedInt64{
 					Presence: SuppliedKnown, Value: int64(j + 1),
 					Provenance: count("p"), HasAvailableAtPosition: true,
