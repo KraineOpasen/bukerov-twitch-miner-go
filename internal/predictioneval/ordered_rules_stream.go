@@ -224,6 +224,46 @@ func ProjectOrderedRulesStream(source OrderedRulesSource, admission CommonAdmiss
 	// MaxOrderedRulesInterventions x 2 x MaxOrderedRulesIdentifierBytes of it
 	// free of charge because none of it is retained. Discarded input is still
 	// input; charging it at the source boundary is the point.
+	// LENGTH WHERE THE LENGTH IS ALREADY READ. Every string charged below has
+	// its per-string bound applied HERE rather than by whichever validator
+	// happens to reach it later, and the rule is uniform across this function:
+	// if a loop reads len(v) to charge it, it settles the bound on the same
+	// line.
+	//
+	// A reviewer filed two of these — a candidate's Provenance and its
+	// OutcomesReason — and the measurement that reproduced them showed the
+	// class is five times wider. On a 128 x 64 source with 2,400-byte
+	// provenance, one byte past the per-string limit cost:
+	//
+	//	candidate Provenance           13.363578 ms
+	//	candidate OutcomesReason       14.103507 ms
+	//	candidate Balance.Provenance   15.446561 ms
+	//	outcome Points.Provenance      14.323082 ms
+	//	admission Population            1.414274 ms
+	//	scope Namespace                   909.374 µs
+	//
+	// against a 38.384156 ms control for the admissible source. Only the two
+	// named were filed; the other four were found by enumerating every site
+	// where a len() is read for the charge, which is what this rule replaces
+	// the enumeration with. Deliberately checkTextLength and not checkFreeText:
+	// the UTF-8 scan of an ADMISSIBLE string is correctly deferred to the
+	// validators, and only the length is free here.
+	for _, v := range [...][2]string{
+		{source.Scope.Namespace, "scope namespace"},
+		{source.Scope.EpisodeID, "scope episode id"},
+		{source.Scope.AccountContext, "scope account context"},
+		{source.Scope.AssociationEvidence, "scope association evidence"},
+		{source.Scope.CoverageDetail, "scope coverage detail"},
+		{string(source.Scope.Coverage), "scope coverage"},
+		{admission.ManifestID, "admission manifest id"},
+		{admission.Population, "admission population"},
+		{admission.OrderBasis, "admission order basis"},
+		{string(admission.ViewKind), "admission view kind"},
+	} {
+		if err := checkTextLength(v[0], v[1]); err != nil {
+			return OrderedRulesStream{}, err
+		}
+	}
 	bytes := chargedWidth(len(source.Scope.Namespace) + len(source.Scope.EpisodeID) +
 		len(source.Scope.AccountContext) + len(source.Scope.AssociationEvidence) +
 		len(source.Scope.CoverageDetail) + len(source.Scope.SourceContractVersion) +
@@ -343,6 +383,16 @@ func ProjectOrderedRulesStream(source OrderedRulesSource, admission CommonAdmiss
 			if err := checkPresenceShape(o.Points, ow+" points", c.Position); err != nil {
 				return OrderedRulesStream{}, err
 			}
+			for _, v := range [...][2]string{
+				{o.Identity, ow + " identity"},
+				{string(o.Points.Presence), ow + " points presence vocabulary"},
+				{o.Points.Provenance, ow + " points provenance"},
+				{o.Points.Reason, ow + " points reason"},
+			} {
+				if err := checkTextLength(v[0], v[1]); err != nil {
+					return OrderedRulesStream{}, err
+				}
+			}
 			bytes += chargedWidth(len(o.Identity)+len(o.Points.Presence)) + suppliedTextBytes(o.Points)
 		}
 		if err := checkPresenceShape(c.Balance, where+" balance", c.Position); err != nil {
@@ -360,6 +410,21 @@ func ProjectOrderedRulesStream(source OrderedRulesSource, admission CommonAdmiss
 		// longer charge, so there is nothing to double-count. The total is the
 		// same sum over the same fields, so which sources are ADMITTED does not
 		// move; only where an over-ceiling one is stopped.
+		for _, v := range [...][2]string{
+			{c.Identity, where + " identity"},
+			{c.Provenance, where + " provenance"},
+			{c.OutcomesReason, where + " outcomes reason"},
+			{string(c.SourceKind), where + " source kind vocabulary"},
+			{string(c.EpisodeMembership), where + " membership vocabulary"},
+			{string(c.OutcomesPresence), where + " outcomes presence vocabulary"},
+			{string(c.Balance.Presence), where + " balance presence vocabulary"},
+			{c.Balance.Provenance, where + " balance provenance"},
+			{c.Balance.Reason, where + " balance reason"},
+		} {
+			if err := checkTextLength(v[0], v[1]); err != nil {
+				return OrderedRulesStream{}, err
+			}
+		}
 		bytes += chargedWidth(len(c.Identity) + len(c.Provenance) + len(c.OutcomesReason))
 		bytes += chargedWidth(len(c.SourceKind) + len(c.EpisodeMembership) +
 			len(c.OutcomesPresence) + len(c.Balance.Presence))
@@ -602,6 +667,16 @@ func ProjectOrderedRulesStream(source OrderedRulesSource, admission CommonAdmiss
 	//
 	// checkIdentifier stays AHEAD of the map, exactly as in the pass above: it
 	// bounds the length before anything hashes the bytes or quotes them.
+	// THE INTERVENTION IDENTITIES BETWEEN THE TWO CANDIDATE PASSES, which is
+	// where the cost ordering puts them: above the outcome walk because that
+	// walk is up to MaxOrderedRulesCandidates x MaxOrderedRulesOutcomes
+	// identities, below the candidate walk because that one is the shorter
+	// list. A reviewer found them sitting below BOTH, and below the admission
+	// references as well, inside establishCutoff.
+	if err := checkInterventionIdentities(source); err != nil {
+		return OrderedRulesStream{}, err
+	}
+
 	for i := range source.Candidates {
 		c := &source.Candidates[i]
 		where := "candidate " + strconv.Itoa(i)
@@ -818,18 +893,15 @@ func establishCutoff(source OrderedRulesSource) (OrderedRulesCutoff, error) {
 		return OrderedRulesCutoff{}, err
 	}
 
-	seen := make(map[string]bool, len(source.Interventions))
+	// The identities and their uniqueness, through the shared helper rather
+	// than restated here — the projection settles them in its identity tier and
+	// this runs them again for the same reason it re-runs the vocabulary.
+	if err := checkInterventionIdentities(source); err != nil {
+		return OrderedRulesCutoff{}, err
+	}
 	for i := range source.Interventions {
 		in := &source.Interventions[i]
 		where := "intervention " + strconv.Itoa(i)
-		if err := checkIdentifier(in.Identity, where+" identity"); err != nil {
-			return OrderedRulesCutoff{}, err
-		}
-		if seen[in.Identity] {
-			return OrderedRulesCutoff{}, errors.Join(ErrOrderedRulesDuplicateIdentity,
-				errors.New("predictioneval: "+where+" repeats identity "+strconv.Quote(in.Identity)))
-		}
-		seen[in.Identity] = true
 		for _, v := range [...]string{string(in.Kind), string(in.Relevance)} {
 			if err := checkFreeText(v, where+" vocabulary"); err != nil {
 				return OrderedRulesCutoff{}, err
@@ -1227,6 +1299,38 @@ func checkPresenceVocabulary(v SuppliedInt64, where string) error {
 		return errors.Join(ErrOrderedRulesVocabulary,
 			errors.New("predictioneval: "+where+" has presence "+strconv.Quote(string(v.Presence))))
 	}
+}
+
+// checkInterventionIdentities bounds each intervention identity and settles
+// their uniqueness, on the same one-definition-two-callers footing as
+// checkInterventionVocabulary.
+//
+// The projection runs it in the identity tier, above the OUTCOME identity pass;
+// establishCutoff runs it again because it quotes these values in its own
+// refusals. A reviewer measured why: two short duplicate identities were
+// reached only after every outcome identity had been scanned and hashed and
+// every admission reference scanned — 2.507047 ms on a 128 x 64 source with
+// 1,024 references, against a 36.768782 ms control for the admissible one.
+//
+// It stays BELOW the candidate identity pass deliberately. That pass is
+// MaxOrderedRulesCandidates identities where this is up to
+// MaxOrderedRulesInterventions, so the cheaper list is settled first; it is the
+// same reasoning that split the candidate and outcome passes.
+func checkInterventionIdentities(source OrderedRulesSource) error {
+	seen := make(map[string]bool, len(source.Interventions))
+	for i := range source.Interventions {
+		in := &source.Interventions[i]
+		where := "intervention " + strconv.Itoa(i)
+		if err := checkIdentifier(in.Identity, where+" identity"); err != nil {
+			return err
+		}
+		if seen[in.Identity] {
+			return errors.Join(ErrOrderedRulesDuplicateIdentity,
+				errors.New("predictioneval: "+where+" repeats identity "+strconv.Quote(in.Identity)))
+		}
+		seen[in.Identity] = true
+	}
+	return nil
 }
 
 // checkInterventionVocabulary bounds and validates the interventions' two

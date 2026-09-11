@@ -30,18 +30,45 @@ import (
 // deterministic-test contract bars a seeded generator whose failures cannot be
 // replayed from the source alone.
 func TestOrderedRulesEverythingTheProjectionAdmitsTheEvaluatorAdmits(t *testing.T) {
-	// The refusals that mean "this stream is not evaluable" — the ones a
-	// projected stream must never see. Reason codes about the MECHANISM
-	// (entropy, balance, pool, config domain) are deliberately absent: those
-	// are answers, and a projected stream may legitimately receive them.
-	ingestRefusal := map[string]bool{
-		predictioneval.ReasonStreamContractMismatch:   true,
-		predictioneval.ReasonEntropySemanticsMismatch: true,
-		predictioneval.ReasonStreamShapeOverBound:     true,
-		predictioneval.ReasonStreamBytesOverBound:     true,
-		predictioneval.ReasonStreamTextOverBound:      true,
-		predictioneval.ReasonStreamInvariantViolated:  true,
-		predictioneval.ReasonStreamDigestMismatch:     true,
+	// THE LIST IS OF MECHANISM ANSWERS, AND EVERYTHING ELSE FAILS.
+	//
+	// It used to be the other way round: an allowlist of the seven ingest
+	// reasons known at the time, with every other refusal silently accepted. A
+	// reviewer read it as what it was — "an allowlist of currently known ingest
+	// reasons, not an exclusion list of mechanism outcomes as the comment
+	// claims" — and named the consequence exactly: the property intended to
+	// catch the NEXT divergence would ignore it, because a newly named stream
+	// refusal is not in a list written before it existed. A guard that fails
+	// open on the case it was built for is not a guard, and this is the fourth
+	// finding on this pull request of that shape.
+	//
+	// So this enumerates what a PROJECTED stream may legitimately be told by
+	// the MECHANISM — it ran out of entropy, the balance is unusable, the pool
+	// cannot be summed, the config is outside its domain, the work budget is
+	// spent — and every other StatusRefused is a failure. The config and draws
+	// below are fixed and valid, so the config-and-trace refusals
+	// (SUPPLIED_TEXT_NOT_ENCODABLE, DRAW_WORDS_OVER_BOUND, RULE_COUNT_OVER_BOUND)
+	// are NOT reachable here and are deliberately absent: if one ever fires,
+	// this case should say so rather than wave it through.
+	//
+	// The cost of failing closed is that a genuinely NEW mechanism answer also
+	// fails here until someone adds it. That is the right way round — a test
+	// that stops a new answer until it is looked at beats one that hides a new
+	// divergence — and it is stated so the next person does not read the
+	// failure as a false alarm.
+	mechanismAnswer := map[string]bool{
+		predictioneval.ReasonEntropyExhausted:         true,
+		predictioneval.ReasonBalanceInvalid:           true,
+		predictioneval.ReasonBalanceNotSupplied:       true,
+		predictioneval.ReasonBalanceOutOfDomain:       true,
+		predictioneval.ReasonOutcomeVectorNotKnown:    true,
+		predictioneval.ReasonOutcomePointsNotKnown:    true,
+		predictioneval.ReasonOutcomePointsOutOfDomain: true,
+		predictioneval.ReasonPoolSumOverflow:          true,
+		predictioneval.ReasonAttemptRateOutOfDomain:   true,
+		predictioneval.ReasonConfigOutOfDomain:        true,
+		predictioneval.ReasonConfigDefaultNotSupplied: true,
+		predictioneval.ReasonWorkBudgetExceeded:       true,
 	}
 
 	pad := func(n int) string { return strings.Repeat("p", n) }
@@ -81,7 +108,43 @@ func TestOrderedRulesEverythingTheProjectionAdmitsTheEvaluatorAdmits(t *testing.
 	}
 	withCutoff := []bool{false, true}
 
+	// THE TWO VALID VIEW / SOURCE-KIND PAIRS, because one of them was never
+	// projected here at all.
+	//
+	// Every candidate came from orCandidate, a CHANNEL_UPDATE, and every
+	// admission from orAdmission, a CHANNEL_CANDIDATE_STREAM — so the
+	// CALCULATE_ONLY / CALCULATE_SNAPSHOT pair was never evaluated, even though
+	// source-kind/view compatibility is one of the six rules the evaluator
+	// copies inline rather than sharing, and is named in this package as
+	// drift-prone. A reviewer put it exactly: a change rejecting every
+	// legitimately projected calculate-only stream with the existing invariant
+	// reason left this case green, and the separate calculate-only test only
+	// PROJECTS such a stream — it never calls EvaluateOrderedRules.
+	//
+	// A calculate-only admission also derives qualCalculateOnlyView, so this
+	// dimension exercises a qualification the old space never produced.
+	//
+	// It is crossed with boundFields into one flat list rather than nested as a
+	// seventh loop, which keeps the body at the indentation it already had.
+	type shape struct {
+		bf   string
+		view predictioneval.OrderedRulesViewKind
+		kind predictioneval.OrderedRulesSourceKind
+	}
+	var shapes []shape
+	for _, v := range []shape{
+		{view: predictioneval.ViewChannelCandidateStream, kind: predictioneval.SourceKindChannelUpdate},
+		{view: predictioneval.ViewCalculateOnly, kind: predictioneval.SourceKindCalculateSnapshot},
+	} {
+		for _, bf := range boundFields {
+			shapes = append(shapes, shape{bf: bf, view: v.view, kind: v.kind})
+		}
+	}
+
 	projected, cutoffSeen, nonKnownSeen := 0, 0, 0
+	// One counter per view, so a pair that stops projecting cannot hide behind
+	// the other — which is the whole reason this dimension exists.
+	perView := map[string]int{}
 	// One counter per field class, so a class that never projects cannot hide
 	// behind another that did.
 	atBound := map[string]int{}
@@ -143,11 +206,12 @@ func TestOrderedRulesEverythingTheProjectionAdmitsTheEvaluatorAdmits(t *testing.
 			for bi, bal := range balances {
 				for _, cov := range coverages {
 					for _, cut := range withCutoff {
-						for _, bf := range boundFields {
+						for _, sh := range shapes {
+							bf := sh.bf
 							name := "c" + strconv.Itoa(c.candidates) + "x" + strconv.Itoa(c.outcomes) +
 								"/text" + strconv.Itoa(n) + "/bal" + strconv.Itoa(bi) +
 								"/" + string(cov) + "/cutoff" + strconv.FormatBool(cut) +
-								"/bound:" + bf
+								"/" + string(sh.view) + "/bound:" + bf
 
 							cs := make([]predictioneval.OrderedRulesCandidate, 0, c.candidates)
 							for i := 0; i < c.candidates; i++ {
@@ -166,6 +230,7 @@ func TestOrderedRulesEverythingTheProjectionAdmitsTheEvaluatorAdmits(t *testing.
 									cid = bound(cid)
 								}
 								cand := orCandidate(cid, int64(i+1), bal, outs...)
+								cand.SourceKind = sh.kind
 								cand.Provenance = pad(n)
 								cand.OutcomesReason = pad(n)
 								cs = append(cs, cand)
@@ -189,6 +254,7 @@ func TestOrderedRulesEverythingTheProjectionAdmitsTheEvaluatorAdmits(t *testing.
 								src.Scope.Namespace = bound("ns")
 							}
 							adm := orAdmission()
+							adm.ViewKind = sh.view
 							if bf == "sourceReference" {
 								adm.SourceReferences = []string{bound("ref")}
 							}
@@ -202,6 +268,7 @@ func TestOrderedRulesEverythingTheProjectionAdmitsTheEvaluatorAdmits(t *testing.
 								continue
 							}
 							projected++
+							perView[string(sh.view)]++
 							if stream.Cutoff.Established {
 								cutoffSeen++
 							}
@@ -219,13 +286,16 @@ func TestOrderedRulesEverythingTheProjectionAdmitsTheEvaluatorAdmits(t *testing.
 									orRule(predictioneval.ComparatorLe, 40, 100, 0, 10)}, 95, 100, 0, 10),
 								orDraws(orWordAdmit, orWordAdmit, orWordAdmit, orWordAdmit))
 
-							if got.Status == predictioneval.StatusRefused && ingestRefusal[got.Reason] {
+							if got.Status == predictioneval.StatusRefused && !mechanismAnswer[got.Reason] {
 								t.Errorf("%s: ProjectOrderedRulesStream ADMITTED this source, and the "+
-									"evaluator then refused the stream it produced with %q. A projected "+
-									"stream must never meet an ingest-validation refusal: every tier "+
-									"that can produce one is supposed to be a mirror of a rule the "+
-									"projection already applied, so this is a rule the two paths "+
-									"disagree on.", name, got.Reason)
+									"evaluator then refused the stream it produced with %q. That reason "+
+									"is not one of the mechanism answers a projected stream may "+
+									"legitimately receive, so either it is an ingest-validation refusal "+
+									"— a rule the two paths disagree on, since every tier that can "+
+									"produce one is supposed to mirror a rule the projection already "+
+									"applied — or it is a NEW mechanism answer that belongs in the list "+
+									"above. Both need a person; neither may be waved through.",
+									name, got.Reason)
 							}
 						}
 					}
@@ -245,6 +315,20 @@ func TestOrderedRulesEverythingTheProjectionAdmitsTheEvaluatorAdmits(t *testing.
 	case nonKnownSeen == 0:
 		t.Fatal("no projected stream carried a non-KNOWN balance, so the presence tiers were never exercised")
 	}
+	// EVERY view must have projected. Without this the calculate-only half
+	// could stop projecting entirely and the case would still pass on the
+	// channel half alone — which is the exact failure mode that made this
+	// dimension necessary in the first place.
+	for _, v := range []predictioneval.OrderedRulesViewKind{
+		predictioneval.ViewChannelCandidateStream, predictioneval.ViewCalculateOnly,
+	} {
+		if perView[string(v)] == 0 {
+			t.Fatalf("no source projected under view %s, so that view/source-kind pair was never "+
+				"evaluated at all. The pair is one of the six rules the evaluator copies inline, "+
+				"and a counter that only proves the OTHER pair projected is how it went untested.", v)
+		}
+	}
+
 	// EVERY field class must have reached the bound in at least one projected
 	// stream. One counter per class rather than one for all of them, because a
 	// single counter is what let the first version of this case pass while no
@@ -284,5 +368,5 @@ func TestOrderedRulesEverythingTheProjectionAdmitsTheEvaluatorAdmits(t *testing.
 		}
 	}
 	t.Logf("%d projected streams evaluated; %d with a boundary, %d with a non-KNOWN balance; "+
-		"at the per-string bound: %v", projected, cutoffSeen, nonKnownSeen, atBound)
+		"at the per-string bound: %v; per view: %v", projected, cutoffSeen, nonKnownSeen, atBound, perView)
 }

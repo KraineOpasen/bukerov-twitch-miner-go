@@ -3478,7 +3478,14 @@ func TestOrderedRulesEveryRetainedScopeAndAdmissionStringIsRevalidatedOnIngest(t
 // digest moved with it, and both evaluations returned WOULD_ATTEMPT.
 //
 // These two are also the only retained strings the invariant pass never reads,
-// so the shape gate is the one place that can refuse them.
+// so nothing below them will catch one — which is why they get a check of their
+// own. An earlier version of this sentence went further and said the SHAPE GATE
+// is the one place that can refuse them. That was true when it was written and
+// stopped being true when the scan moved, twice, to where it now sits: below
+// the gate, below both version comparisons, below the stream digest and its
+// match, and below the invariant pass. The sentence outlived the arrangement it
+// described, which is the tenth time on this work that a claim survived the
+// repair that falsified it.
 //
 // Position is the whole subtlety here, and the first attempt got it wrong. The
 // scan began life inside the shape gate, which runs BEFORE the two version
@@ -3527,12 +3534,46 @@ func TestOrderedRulesTheConfigAndTraceIdentifiersMustAlsoBeEncodable(t *testing.
 			case got.Reason != predictioneval.ReasonSuppliedTextNotEncodable:
 				t.Fatalf("an unencodable %s was answered %q / %q; the same logical run would "+
 					"digest differently after its own JSON round trip", tc.name, got.Status, got.Reason)
-			// The strongest form of the refusal, and the reason it belongs in
-			// the gate: nothing was hashed at all before saying no.
-			case got.StreamDigest != "" || got.ConfigDigest != "" ||
-				got.EntropyDigest != "" || got.ConsumedInputDigest != "":
-				t.Fatal("the refusal carried digests; a value refused for being unencodable must be " +
-					"refused before anything is hashed, like the other unread refusals")
+			// THE THREE DIGESTS THIS CHECK GUARDS MUST BE ABSENT. That is the
+			// whole point of the check: invalid UTF-8 in either identifier
+			// would be hashed as supplied and come back as U+FFFD, so the
+			// config, entropy and consumed-prefix digests must never be
+			// computed over it.
+			case got.ConfigDigest != "" || got.EntropyDigest != "" || got.ConsumedInputDigest != "":
+				t.Fatalf("the refusal carried a config, entropy or consumed digest (%q / %q / %q). "+
+					"Those three are exactly what this check guards: hashing an unencodable "+
+					"identifier is the defect, so a refusal for it must not have done so.",
+					got.ConfigDigest, got.EntropyDigest, got.ConsumedInputDigest)
+			// AND THE STREAM DIGEST MUST BE PRESENT, which is the opposite of
+			// what this case asserted until a reviewer read the call site.
+			//
+			// It used to demand that NO digest came back, on the stated grounds
+			// that "nothing was hashed at all before saying no". That was true
+			// of the gate, where the scan began. It has not been true since the
+			// scan moved below the stream digest and its match — by the time
+			// this refusal is reached the stream HAS been hashed, the hash HAS
+			// been compared, the invariant pass HAS run and the derived fields
+			// HAVE been assigned. Returning an empty digest did not mean
+			// "nothing was hashed"; it meant the evidence was computed and then
+			// discarded, making a post-digest refusal impersonate a pre-read
+			// one.
+			//
+			// Measured across the tier, which is how the inconsistency showed:
+			// a shape-gate refusal carries no stream digest (it really did read
+			// nothing), while STREAM_SELECTION_DIGEST_MISMATCH and
+			// STREAM_INVARIANT_VIOLATED both carry one. This refusal was the
+			// only post-digest one withholding it.
+			case got.StreamDigest == "":
+				t.Fatal("the refusal carried no stream digest. It is decided below the digest, its " +
+					"match, the invariant pass and the derived-field assignment, and every other " +
+					"refusal at that tier returns the digest it computed — so withholding it here " +
+					"makes a post-digest refusal indistinguishable from a pre-read one")
+			// And it must be the REAL one, not a placeholder: the same value an
+			// admissible run over the same stream returns.
+			case got.StreamDigest != base.StreamDigest:
+				t.Fatalf("the refusal returned stream digest %q where an admissible run over the "+
+					"same stream returns %q; a digest that does not match the stream it names "+
+					"attests to nothing", got.StreamDigest, base.StreamDigest)
 			}
 		})
 

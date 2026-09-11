@@ -4377,6 +4377,93 @@ It is still not implemented. The hazard is recorded at each of the four field
 sites, naming the contradiction with `hex64`'s own documentation, and the
 decision is carried to the owner.
 
+**A sixth review round, and five of its findings are worth more than their
+labels.** The audit above declared no gap in family A. A reviewer then filed
+five P2s across two heads, and every one of them was real. Recording that
+plainly is the point: an audit designed by the author of the code found nothing
+in the area the reviewer then found five things in.
+
+*The charging-pass class, and it is five times wider than it was filed.* The
+reviewer named a candidate's `Provenance` and `OutcomesReason`: their lengths
+are already read to charge them, and the per-string bound is applied much later,
+so a one-byte-over-limit fault is amplified into a traversal of nearly all
+retained text. Reproduced on a 128 x 64 source with 2,400-byte provenance,
+one byte past the limit, against a 38.384156 ms control for the admissible
+source:
+
+| charged string, one byte over the per-string limit | before | after |
+| --- | ---: | ---: |
+| candidate `Provenance` | 13.363578 ms | 1.177698 ms |
+| candidate `OutcomesReason` | 14.103507 ms | 1.266311 ms |
+| candidate `Balance.Provenance` | 15.446561 ms | 1.274968 ms |
+| outcome `Points.Provenance` | 14.323082 ms | 1.277651 ms |
+| admission `Population` | 1.414274 ms | 202 ns |
+| scope `Namespace` | 909.374 µs | 200 ns |
+
+Only the first two were filed. The other four were found by enumerating every
+site where a `len()` is read for the charge, which is the rule that replaces the
+enumeration: **if a loop reads a length to charge a string, it settles that
+string's bound on the same line.** Deliberately `checkTextLength` and not
+`checkFreeText` — the UTF-8 scan of an ADMISSIBLE string is correctly deferred.
+
+**And the residual is named rather than rounded away, including a regression.**
+The five candidate and outcome faults now sit at the structural pass's own
+floor: a LAST candidate that merely declares no position — a flag test, no text
+at all — costs 1.248567 ms, while the same fault in the FIRST candidate costs
+209 ns. So ~1.25 ms is what reaching candidate 127 costs, not residue from the
+repair. The cost of that floor went UP: adding roughly 34,000 length
+comparisons raised the structural pass from about 0.9 ms to about 1.25 ms, which
+is paid by every refusal decided in or after that loop. A duplicate candidate
+identity was 920.277 µs before and is at the floor now. That is the trade — about
+0.35 ms added to one pass to remove 12–14 ms from five others — and it is stated
+with both numbers.
+
+*The intervention identity pass* sat below the outcome identity walk (up to
+`MaxOrderedRulesCandidates` x `MaxOrderedRulesOutcomes` identities) and below the
+admission references. Two short duplicate identities cost 2.507047 ms; the pass
+is now between the two candidate passes, at 1.584997 ms against a 1.880291 ms
+floor set by the sibling pass directly above it. It is one definition with two
+callers, like the vocabulary check beside it.
+
+*A post-digest refusal that impersonated a pre-read one.* The unencodable
+`ConfigID`/`RunID` refusal used the package-level `orderedRulesUnreadRefusal`,
+which builds a FRESH result — so a refusal reached only after the stream digest
+was computed AND matched, the invariant pass passed, and the derived fields were
+assigned came back with an empty `StreamDigest` and an empty `Cutoff`. Measured
+across the tier: a shape-gate refusal carries no stream digest because it really
+did read nothing, while `STREAM_SELECTION_DIGEST_MISMATCH` and
+`STREAM_INVARIANT_VIOLATED` both carry one. This refusal was the only
+post-digest one withholding it.
+
+Its test asserted the opposite — *"nothing was hashed at all before saying no"* —
+and that assertion was a stale pin. It was true when the scan lived in the shape
+gate; the scan has moved twice since, and the sentence outlived the arrangement
+it described. Returning an empty digest never meant nothing was hashed; it meant
+the evidence was computed and discarded. The case now requires the stream digest
+to be PRESENT and to equal an admissible run's, and the config, entropy and
+consumed-prefix digests to be ABSENT — which is what this check actually guards.
+
+*The parity property failed OPEN on the case it was built for.* Its
+`ingestRefusal` map was an allowlist of the seven ingest reasons known when it
+was written, so a newly named stream refusal would be silently accepted — the
+property built to catch the next divergence would have ignored it. It now
+enumerates the twelve MECHANISM answers a projected stream may legitimately
+receive and fails on every other `StatusRefused`. Mutation-verified with a
+brand-new reason code: 216 cases fail, naming it. The config-and-trace refusals
+are deliberately absent because the fixed valid config and draws make them
+unreachable; the cost is that a genuinely new mechanism answer also fails until
+someone looks at it, which is the right way round.
+
+*And it never evaluated half the model.* Every candidate was a channel update
+and every admission a channel candidate stream, so the
+`CALCULATE_ONLY`/`CALCULATE_SNAPSHOT` pair was projected by a separate case and
+never evaluated at all — while source-kind/view compatibility is one of the six
+rules the evaluator copies inline. The space now crosses both valid pairs, with
+a counter per view: 648 projected streams, 324 under each. Mutation-verified with
+the reviewer's own named mutant — an evaluator rejecting every calculate-only
+stream with the existing invariant reason — which used to leave the case green
+and now fails 324 of them.
+
 **A round of five, and the shape of them is the finding.** One reviewer pass
 produced five separate orderings on one head, and every one was the same
 question asked at a different seam: does a refusal whose truth depends on a

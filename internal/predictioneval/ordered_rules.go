@@ -1480,8 +1480,25 @@ func EvaluateOrderedRules(stream OrderedRulesStream, rules OrderedRulesConfig, d
 	// identifier, where a broken stream invariant beside the same identifier
 	// cost 73.639716 ms against 3.788 µs. Here it guards exactly what it is
 	// about, and every ConfigID-traversing digest in this function is below it.
+	//
+	// AND IT USES THE LOCAL refuseUnread, NOT THE PACKAGE-LEVEL HELPER. That
+	// was the defect a reviewer found here: the package-level
+	// orderedRulesUnreadRefusal builds a FRESH result, so this refusal — which
+	// is reached only after the stream digest has been computed AND matched,
+	// the invariant pass has passed, and the derived fields have been assigned
+	// above — came back with an empty StreamDigest and an empty Cutoff. That
+	// made it indistinguishable from a refusal decided before the stream was
+	// read, which is the one distinction the attestation convention in this
+	// function exists to carry. Reproduced: this refusal returned
+	// StreamDigest "" where the same stream's digest-mismatch refusal one tier
+	// up returned 97f42dfb… and an admissible run returned 94142827….
+	//
+	// The right helper is the closure, which keeps what was earned — the
+	// stream digest, the cutoff and the qualifications — and leaves absent what
+	// was not: the config, entropy and consumed-prefix digests, all computed
+	// below this line.
 	if invalidUTF8(rules.ConfigID) || invalidUTF8(draws.RunID) {
-		return orderedRulesUnreadRefusal(ReasonSuppliedTextNotEncodable)
+		return refuseUnread(ReasonSuppliedTextNotEncodable)
 	}
 
 	// THE TWO WHOLE-INPUT DIGESTS, computed HERE because this is the first
