@@ -600,18 +600,30 @@ func orderedRulesPresenceWordUnknown(p SuppliedPresence) bool {
 }
 
 // orderedRulesStreamIdentitiesAmbiguous reports two retained candidates sharing
-// an identity.
+// an identity, or two outcomes sharing one inside the same candidate.
 //
-// It is the evaluator's mirror of the uniqueness pass ProjectOrderedRulesStream
+// It is the evaluator's mirror of the uniqueness passes ProjectOrderedRulesStream
 // runs, and it exists because the two are separate ingests: a stream handed
 // directly to EvaluateOrderedRules never passed through the projection. The
-// invariant pass settles the same question, so nothing here is checked less
-// than before; this only settles it before the hash rather than after.
+// invariant pass settles both questions, so nothing here is checked less than
+// before; this only settles them before the hash rather than after.
 //
-// It reads identity bytes — the map hashes them, all of them, at a length the
+// It covered CANDIDATES ONLY for one commit, and the outcome half was found by
+// a reviewer rather than here — the sixth time on this PR that a rule existed on
+// one side of a pair and not the other. A stream repeating two SHORT outcome
+// identities inside its last candidate was hashed whole first: 35.97074 ms on
+// 128 candidates each holding 64 outcomes with 2,400-byte provenance, against
+// 69.413 µs for a constant-bounded fault on that identical payload.
+//
+// It reads identity bytes — the maps hash them, all of them, at lengths the
 // caller chooses — so it is NOT in the constant-bounded tier and must not be
-// moved there. What bounds it is the candidate ceiling and
-// the per-identifier bound, half a megabyte between them.
+// moved there. The candidate pass is bounded by the candidate ceiling times the
+// per-identifier bound, half a megabyte between them. The outcome pass
+// multiplies that by the outcome ceiling, 32 MiB nominally — but the shape gate
+// above has already charged EVERY supplied stream string against
+// orderedRulesTextCeiling at its worst-case encoded width, so the real cap on
+// both passes together is that aggregate, about 21 MiB of raw text, and it is
+// the same text orderedRulesStreamDigest below would have read anyway.
 func orderedRulesStreamIdentitiesAmbiguous(s OrderedRulesStream) bool {
 	seen := make(map[string]bool, len(s.Candidates))
 	for i := range s.Candidates {
@@ -620,6 +632,29 @@ func orderedRulesStreamIdentitiesAmbiguous(s OrderedRulesStream) bool {
 			return true
 		}
 		seen[id] = true
+	}
+	// A SECOND walk rather than one loop doing both, and deliberately: the
+	// candidate pass costs at most half a megabyte, the outcome pass up to the
+	// whole text aggregate. Folded into one loop, a repeated CANDIDATE identity
+	// pays for every preceding candidate's outcomes first — measured both ways
+	// on the same two inputs: 59.849 µs against 698.095 µs with 64 candidates
+	// holding 64 outcomes on 2,400-byte identities, and 120.089 µs against
+	// 345.477 µs on the outcome-provenance payload above. That is the
+	// cheapest-decision-first rule this file keeps relearning, applied inside a
+	// single function rather than between two.
+	for i := range s.Candidates {
+		c := &s.Candidates[i]
+		// Scoped PER CANDIDATE, matching both the projection and the invariant
+		// pass: two candidates may each carry an outcome called "A", and a
+		// shared map would refuse a stream neither of those passes refuses.
+		outcomes := make(map[string]bool, len(c.Outcomes))
+		for j := range c.Outcomes {
+			id := c.Outcomes[j].Identity
+			if outcomes[id] {
+				return true
+			}
+			outcomes[id] = true
+		}
 	}
 	return false
 }
@@ -1075,11 +1110,25 @@ func EvaluateOrderedRules(stream OrderedRulesStream, rules OrderedRulesConfig, d
 	// It gets its own tier because it is NOT free, and folding it into the
 	// constant-bounded one would repeat the error this file made with the cutoff's
 	// UTF-8 scan exactly one commit ago. Hashing an identity into a map reads
-	// its bytes. The envelope is MaxOrderedRulesCandidates x
+	// its bytes. The candidate envelope is MaxOrderedRulesCandidates x
 	// MaxOrderedRulesIdentifierBytes, half a megabyte, against a stream digest
 	// that traverses up to the whole retained ceiling — the same asymmetry the
 	// projection's repair was taken on, and the reason this is worth a tier
 	// rather than a note.
+	//
+	// It covered CANDIDATES ONLY for one commit, and the outcome half — the
+	// projection refuses a candidate repeating an outcome identity, this side
+	// left it to the invariant pass — was found by a reviewer, not here. Two
+	// SHORT duplicate outcome identities inside the last candidate cost
+	// 35.97074 ms on 128 candidates each holding 64 outcomes with 2,400-byte
+	// provenance; 286.824 µs now, against 67.342 µs for a constant-bounded fault
+	// on that identical payload. Fixing one path is not fixing the class: six
+	// findings on this PR have now been a rule present on one side of a paired
+	// ingest and absent on the other, and every one of the six was a reviewer's.
+	//
+	// The outcome pass widens the envelope to the whole text aggregate rather
+	// than half a megabyte — see orderedRulesStreamIdentitiesAmbiguous for why
+	// that is still bounded, and why the two walks are separate.
 	//
 	// The cost it adds to a stream that is NOT refused here is real and is not
 	// hidden: a valid stream now walks its identities twice, once here and once

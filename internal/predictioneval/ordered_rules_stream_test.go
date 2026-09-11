@@ -4460,6 +4460,18 @@ func TestOrderedRulesARefusalDecidedBeforeTheTraversalAttestsToNothing(t *testin
 		return st
 	}
 
+	// One candidate whose LAST outcome repeats its first outcome's identity.
+	// cs above already carries a candidate with two outcomes, so the fault
+	// needs no extra fixture — only a rename that the projection would have
+	// refused, carried in through the oracle.
+	duplicateOutcomeIdentity := func(t *testing.T) predictioneval.OrderedRulesStream {
+		t.Helper()
+		return shortFault(t, func(st *predictioneval.OrderedRulesStream) {
+			last := &st.Candidates[len(st.Candidates)-1]
+			last.Outcomes[len(last.Outcomes)-1].Identity = last.Outcomes[0].Identity
+		})
+	}
+
 	badPresence := func(t *testing.T) predictioneval.OrderedRulesStream {
 		t.Helper()
 		return shortFault(t, func(st *predictioneval.OrderedRulesStream) {
@@ -4535,6 +4547,18 @@ func TestOrderedRulesARefusalDecidedBeforeTheTraversalAttestsToNothing(t *testin
 		// now. That tier is bounded, not free, which is why it is its own and
 		// not part of the constant-bounded one.
 		{"stream repeats a candidate identity", duplicateIdentity(t),
+			cfg, 0, predictioneval.ReasonStreamInvariantViolated, false},
+		// The SAME defect one level down, and the sixth time on this PR that a
+		// rule was found on one side of a pair and not the other. The candidate
+		// row above was repaired while per-candidate OUTCOME uniqueness stayed
+		// where it had always been, in the invariant pass below the hash — so a
+		// forged stream repeating two SHORT outcome identities inside its last
+		// candidate still bought the whole-stream digest first: 35.97074 ms on
+		// 128 candidates each holding 64 outcomes with 2,400-byte provenance,
+		// against 69.413 µs for a constant-bounded fault on the identical
+		// payload. Fixing one path is not fixing the class; this row is the
+		// class's other half.
+		{"stream repeats an outcome identity inside one candidate", duplicateOutcomeIdentity(t),
 			cfg, 0, predictioneval.ReasonStreamInvariantViolated, false},
 		// And the one part of the boundary invariant that is NOT in the
 		// constant-bounded tier, pinned as digest=true for exactly that reason. The

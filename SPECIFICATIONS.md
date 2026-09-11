@@ -4098,6 +4098,35 @@ and the repair had not been mirrored there. A valid stream now walks its
 identities twice, once in that tier and once in the invariant pass, both inside
 the same bounded envelope, and that cost is stated rather than hidden.
 
+**And that repair was itself half a repair.** The bounded identity tier covered
+CANDIDATE identities only. Outcome identities are unique per candidate on both
+paths — the projection refuses a repeat before its own payload scans, the
+evaluator's invariant pass refuses one after the whole stream is hashed — so a
+forged stream repeating two SHORT outcome identities inside its last candidate
+still bought the digest first: 35.97074 ms on 128 candidates each holding 64
+outcomes with 2,400-byte provenance, against 69.413 µs for a constant-bounded
+fault on that identical payload, and the refusal handed back a stream digest it
+had computed over an input it was about to reject. It is 286.824 µs now and
+carries no digest. This is the SIXTH instance of the divergence defect and the
+sixth found by a reviewer rather than here; more to the point it is the second
+time the same defect class was repaired on one level and left standing one level
+down. Fixing a path is not fixing the class.
+
+The outcome pass is a SECOND walk inside that tier rather than one loop doing
+both, and the split is measured rather than assumed: folded together, a repeated
+CANDIDATE identity pays for every preceding candidate's outcomes first —
+59.849 µs against 698.095 µs with 64 candidates holding 64 outcomes on
+2,400-byte identities, and 120.089 µs against 345.477 µs on the
+outcome-provenance payload. The tier's envelope is no longer half a megabyte:
+the candidate pass keeps that bound, while the outcome pass is
+`MaxOrderedRulesCandidates` x `MaxOrderedRulesOutcomes` x
+`MaxOrderedRulesIdentifierBytes`, 32 MiB nominally. What actually caps it is the
+shape gate above, which already charges every supplied stream string against
+`orderedRulesTextCeiling` at its worst-case encoded width — about 21 MiB of raw
+text for the whole stream, and the same text the digest below would have read
+anyway. That is the honest bound, stated in place of the half-megabyte figure
+the tier inherited.
+
 **Two published claims about the evaluator's order were false, and both are
 retracted here.** The first said the stream digest "is not deferred and cannot
 be: it IS the comparison". The comparison cannot precede its own hash, but that
