@@ -1083,6 +1083,21 @@ func TestOrderedRulesAMatchingDigestIsNotProofOfProjection(t *testing.T) {
 			st.Candidates[0].Balance.HasAvailableAtPosition = false
 			return st
 		}},
+		// The declaration matters HERE more than in the projection. Enforcing it
+		// only there left the evaluator comparing a position the caller never
+		// declared: the projection refused the input while this path admitted
+		// the same stream, reached WOULD_ATTEMPT, and handed the first
+		// opportunity to a candidate whose position was a decoded zero.
+		{"a candidate whose causal position was never declared", func(t *testing.T) predictioneval.OrderedRulesStream {
+			st := orProject(t, candidates(), nil)
+			st.Candidates[0].HasPosition = false
+			return st
+		}},
+		{"a scope whose interval endpoints were never declared", func(t *testing.T) predictioneval.OrderedRulesStream {
+			st := orProject(t, candidates(), nil)
+			st.Scope.HasInterval = false
+			return st
+		}},
 		{"a balance available only AFTER the candidate", func(t *testing.T) predictioneval.OrderedRulesStream {
 			st := orProject(t, candidates(), nil)
 			st.Candidates[0].Balance.AvailableAtPosition = 25

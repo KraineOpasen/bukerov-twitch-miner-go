@@ -3317,6 +3317,15 @@ filling the projection's budget would project successfully and then be refused
 here for bytes, which is the invariant backwards. Continuing:
 the per-string limit is not implied by the aggregate, since one 64 MiB note sits
 well inside a 128 MiB budget while being a value the projection refuses outright.
+Re-establishing those invariants means ALL of them, and the mandatory
+declarations are the easy ones to forget: enforcing a candidate's declared
+position only in the projection left the ingest path comparing a position the
+caller never declared, so the projection refused an input the evaluator admitted
+— reached over the same two-call digest oracle, since a refusal hands back the
+value it wanted. A declaration that gates admission is exactly the kind of field
+worth stripping from a forged stream, so it is checked here as well as there,
+and before the comparisons that read the value it declares.
+
 A refusal from that gate carries no whole-input digest: the model declined to
 read the input, so it attests to nothing about it, and for the same reason the
 gate outranks the contract and digest mismatches — an input too large to read

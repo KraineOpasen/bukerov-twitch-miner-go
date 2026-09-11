@@ -463,6 +463,14 @@ func orderedRulesStreamInvariantsBroken(s OrderedRulesStream) bool {
 		switch {
 		case checkIdentifier(c.Identity, where) != nil,
 			seen[c.Identity],
+			// Checked BEFORE the three comparisons below, which are exactly the
+			// reason it matters: without it they compare a position the caller
+			// never declared, and the projection's refusal of that same input
+			// does not reach here. The digest is no substitute — it is unkeyed
+			// and a refusal hands back the recomputed value, so stripping the
+			// declaration and resubmitting with that value is two calls and no
+			// cryptography.
+			!c.HasPosition,
 			i > 0 && c.Position <= lastPosition,
 			c.Position < s.Scope.IntervalFromPosition,
 			c.Position > s.Scope.IntervalToPosition,
