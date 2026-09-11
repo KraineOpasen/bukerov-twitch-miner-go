@@ -370,6 +370,55 @@ func ProjectOrderedRulesStream(source OrderedRulesSource, admission CommonAdmiss
 	if err := validateScope(source.Scope); err != nil {
 		return OrderedRulesStream{}, err
 	}
+	// THE CANDIDATE IDENTITIES HERE, ahead of the three payload scans below.
+	//
+	// Uniqueness is the cheapest fact about the candidate list that can refuse
+	// it outright, and it depends on nothing else: not the admission, not the
+	// boundary, not a single byte of intervention detail. It used to be settled
+	// after all three, so two candidates repeating a three-byte identity were
+	// refused only once the admission references, the cutoff and every Detail
+	// had been walked — attacker-supplied text the decision does not read.
+	// Measured on the identical input, 1,024 references of 4 KiB beside 1,024
+	// interventions carrying 4 KiB of identity and 4 KiB of detail each:
+	// 7.981383 ms to report a repeated identity, against 127.186 µs here.
+	//
+	// This is a reordering and not a free win, which is the same thing the
+	// Detail move below had to say about itself. Where the fault is in the
+	// ADMISSION and the candidates are well-formed, that refusal now runs after
+	// a full identity pass rather than before it — bounded by
+	// MaxOrderedRulesCandidates x MaxOrderedRulesIdentifierBytes, so 512 KiB at
+	// the ceiling and nothing at all for the short identities a real source
+	// carries. Measured on the identical input, 128 candidates each holding a
+	// near-ceiling identity beside an admission whose view kind is not in the
+	// vocabulary: 67.3 µs before, 675.213 µs here.
+	//
+	// The trade is taken because the two envelopes are not the same size. What
+	// this pass can be made to read is capped at 512 KiB; what it now refuses
+	// to read first — the admission references, the cutoff's identities and the
+	// intervention details — is three separate MaxOrderedRulesInterventions x
+	// MaxOrderedRulesIdentifierBytes envelopes, 12 MiB between them. Paying a
+	// bounded half-megabyte to stop paying an unbounded-in-practice twelve is
+	// the same bargain every tier above this one makes.
+	//
+	// It does NOT move ahead of the vocabulary tier, and the case below pins
+	// that: a closed-set word is one comparison against a short string, so a
+	// source that fails it should not first pay for 128 identities either.
+	seen := make(map[string]bool, len(source.Candidates))
+	for i := range source.Candidates {
+		c := &source.Candidates[i]
+		where := "candidate " + strconv.Itoa(i)
+		if err := checkIdentifier(c.Identity, where+" identity"); err != nil {
+			return OrderedRulesStream{}, err
+		}
+		if seen[c.Identity] {
+			return OrderedRulesStream{}, errors.Join(ErrOrderedRulesDuplicateIdentity,
+				errors.New("predictioneval: "+where+" repeats identity "+strconv.Quote(c.Identity)+
+					"; two candidates may carry identical VALUES at different positions, but never the same identity"))
+		}
+		seen[c.Identity] = true
+
+	}
+
 	if err := validateAdmission(admission); err != nil {
 		return OrderedRulesStream{}, err
 	}
@@ -418,22 +467,6 @@ func ProjectOrderedRulesStream(source OrderedRulesSource, admission CommonAdmiss
 		if err := checkFreeText(source.Interventions[i].Detail, "intervention "+strconv.Itoa(i)+" detail"); err != nil {
 			return OrderedRulesStream{}, err
 		}
-	}
-
-	seen := make(map[string]bool, len(source.Candidates))
-	for i := range source.Candidates {
-		c := &source.Candidates[i]
-		where := "candidate " + strconv.Itoa(i)
-		if err := checkIdentifier(c.Identity, where+" identity"); err != nil {
-			return OrderedRulesStream{}, err
-		}
-		if seen[c.Identity] {
-			return OrderedRulesStream{}, errors.Join(ErrOrderedRulesDuplicateIdentity,
-				errors.New("predictioneval: "+where+" repeats identity "+strconv.Quote(c.Identity)+
-					"; two candidates may carry identical VALUES at different positions, but never the same identity"))
-		}
-		seen[c.Identity] = true
-
 	}
 
 	// THE PAYLOAD OF ANY CANDIDATE LAST, after the structure of all of them and

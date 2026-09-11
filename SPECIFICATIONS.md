@@ -3476,7 +3476,14 @@ evaluator's own cases for them are a second path only. They are kept rather than
 deleted, on the reasoning the invariant pass already uses — a bound enforced in
 one place moves when that place changes — but the two answers are NOT
 equivalent: a gate refusal carries nothing whatever, not even a stream digest,
-while the evaluator's version would carry the stream digest and the cutoff. The
+while the evaluator's version would carry the stream digest but NOT the cutoff,
+which is assigned only after the invariant pass that both of those cases
+precede. This sentence promised the cutoff too until the claim was checked. It
+was written while that assignment still sat at the top of the evaluator, and
+moving it down to the line that earns it falsified the promise silently, because
+an unreachable path has no test to break. Reproduced by neutralising the gate's
+rule-count case: the refusal returned a stream digest and an empty
+`Cutoff.Identity`, against a stream whose projected identity was `call-1`. The
 behaviour a caller observes is the gate's, and that is what the suite pins; the
 first draft of that case asserted the unreachable contract instead and failed.
 
@@ -3945,6 +3952,60 @@ genuine U+FFFD — which remains admissible — is distinguished from an invalid
 byte by occupying the three bytes EF BF BD at that index. Like the
 baseline's, these are unkeyed hashes over supplied data: they prevent
 recombination and authenticate nothing.
+
+**Candidate uniqueness precedes the payload scans.** Two candidates repeating a
+three-byte identity are refused on the identities alone, and nothing else is
+consulted to establish it — not the admission, not the boundary, not a byte of
+intervention detail. That pass used to run after all three, so the refusal was
+reached only once attacker-supplied text the decision never reads had been
+walked: measured on the identical input, 1,024 admission references of 4 KiB
+beside 1,024 interventions carrying 4 KiB of identity and 4 KiB of detail each,
+7.981383 ms against 127.186 µs after the move. It is a reordering and not a free
+win. An ADMISSION fault beside well-formed candidates now runs after a full
+identity pass — 67.3 µs became 675.213 µs with 128 near-ceiling identities — and
+the trade is taken only because the envelopes differ in size: what the identity
+pass can be made to read is capped at `MaxOrderedRulesCandidates` x
+`MaxOrderedRulesIdentifierBytes`, half a megabyte, while the three scans it now
+precedes are three times the intervention envelope between them. It does NOT
+move ahead of the vocabulary tier, and a case pins that a closed-set word is
+still refused first.
+
+**The pre-digest tier was checking shapes and not vocabularies.** A presence
+word outside the closed set is a constant-size fault, and `checkPresenceShape`
+structurally cannot see one: it returns immediately for every non-`KNOWN` value,
+because the availability rules it enforces only apply to a value that is
+present. An `INVALID` word therefore passed the whole structural tier and was
+caught only by the invariant pass, with the entire stream already hashed —
+9.038 µs on two candidates against 3.555366 ms on 128 holding 4 KiB each, for a
+five-byte fault. The same hole covered the scope coverage, the admission view
+kind and the derived cutoff basis. All four are now settled before the hash, as
+bare comparisons against short constants rather than through the quoting
+validators: the error messages in the invariant pass QUOTE the offending value
+and so must bound it first, and that scan is proportional to a string the caller
+chose, while the structural tier answers only yes or no and a comparison against
+`KNOWN` fails on length before reading a byte. The refusal costs 649 ns and
+7.092 µs on those same two inputs. The derived cutoff is hoisted as the WHOLE
+`orderedRulesCutoffImpossible` predicate rather than its two vocabularies,
+because a subset would be a second place to keep in step with the first — which
+is exactly how these four came to be missing. One thing a caller sees changes:
+these refusals no longer carry the recomputed stream digest, so the two-call
+oracle does not function for them. That is the same narrowing the structural
+tier already made, and narrower is the safe direction.
+
+**Two published claims about the evaluator's order were false, and both are
+retracted here.** The first said the stream digest "is not deferred and cannot
+be: it IS the comparison". The comparison cannot precede its own hash, but that
+never made the hash undeferrable, and the structural and config refusals were
+moved ahead of it precisely because neither depends on the comparison. The
+second said a mismatch is decided without the config being "consulted, not
+traversed and not attested to". The config is normalised BEFORE the hash, so a
+stream carrying a forged `SelectionDigest` beside a config declaring no default
+is refused `CONFIG_DEFAULT_NOT_SUPPLIED`, not `STREAM_SELECTION_DIGEST_MISMATCH`
+— only "not attested to" survives. Both sentences were left standing when the
+reordering that falsified them was made, one of them directly above the code
+that contradicts it, and the test suite had recorded the correct order in a
+comment the whole time. The ordering each denied is now pinned by a case rather
+than asserted by prose.
 
 **What this is not.** It is NOT a faithful replay of the donor's full runtime
 policy, and no result may be described as one. The donor branches on lock/end

@@ -522,9 +522,72 @@ func orderedRulesQualificationsNotDerived(s OrderedRulesStream) bool {
 //
 // Every check here is one the invariant pass below already makes. Nothing is
 // added, and both callers answer yes or no.
+// orderedRulesPresenceWordUnknown reports a presence word outside the closed
+// set, and it is deliberately a bare comparison rather than a call to
+// checkPresenceVocabulary.
+//
+// The difference is the whole point of where this runs. checkPresenceVocabulary
+// bounds the word with checkFreeText first, because its error QUOTES it; that
+// scan is proportional to a string the caller chose. Here nothing is quoted —
+// the structural tier answers yes or no — so the comparison against three short
+// constants fails on length before it reads a byte, and a caller cannot make
+// this cost anything by supplying a longer word.
+//
+// It closes a hole that checkPresenceShape cannot: that function returns
+// immediately for every non-KNOWN value, because the availability rules it
+// enforces only apply to a value that is present. An INVALID word is non-KNOWN,
+// so it passed the whole pre-digest tier and was caught only by the invariant
+// pass, AFTER the stream had been hashed. Measured on a stream whose final
+// outcome carries a five-byte word outside the set: 9.038 µs with two
+// candidates, 3.555366 ms with 128 candidates each holding 4 KiB of text — a
+// constant-size fault charged for the entire retained payload. It is 649 ns and
+// 7.092 µs now.
+//
+// A caller sees one thing change beyond the cost: this refusal used to be
+// reached past the digest and handed the recomputed value back, so the
+// documented two-call oracle worked on it. It now carries nothing, which is the
+// same narrowing the rest of this tier already made and narrower is the safe
+// direction — one more class of forged stream loses a published route.
+//
+// The candidate's own OutcomesPresence was already checked here in exactly this
+// form. These two are the fields that were missed, not a new kind of rule.
+func orderedRulesPresenceWordUnknown(p SuppliedPresence) bool {
+	switch p {
+	case SuppliedKnown, SuppliedMissing, SuppliedInvalid:
+		return false
+	default:
+		return true
+	}
+}
+
 func orderedRulesStreamStructureBroken(s OrderedRulesStream) bool {
 	const where = "retained candidate"
 	if validateScopeShape(s.Scope) != nil || validateAdmissionShape(s.Admission) != nil {
+		return true
+	}
+	// The two whole-stream vocabularies, for the same reason and at the same
+	// price as the presence words below: each is one comparison against a short
+	// constant, neither is quoted here, and both were previously settled only
+	// by validateScope and validateAdmission — after the hash.
+	switch s.Scope.Coverage {
+	case CoverageCompleteDeclared, CoverageGapsPresent, CoverageTruncatedPrefix:
+	default:
+		return true
+	}
+	switch s.Admission.ViewKind {
+	case ViewChannelCandidateStream, ViewCalculateOnly:
+	default:
+		return true
+	}
+	// And the DERIVED boundary, hoisted whole rather than picked apart.
+	// orderedRulesCutoffImpossible compares counts and constants and nothing
+	// else — it reads no supplied text at any length — so running it here costs
+	// what it costs in the invariant pass and saves the hash when it answers
+	// yes. Hoisting the whole predicate rather than only its two vocabularies
+	// is deliberate: a subset would be a second place to keep in step with the
+	// first, which is how the three vocabularies above came to be missing here
+	// in the first place.
+	if orderedRulesCutoffImpossible(s) {
 		return true
 	}
 	var structuralLast int64
@@ -538,7 +601,8 @@ func orderedRulesStreamStructureBroken(s OrderedRulesStream) bool {
 			c.Position > s.Scope.IntervalToPosition,
 			c.EpisodeMembership != MembershipProven,
 			s.Cutoff.Established && c.Position >= s.Cutoff.Position,
-			checkPresenceShape(c.Balance, where, c.Position) != nil:
+			checkPresenceShape(c.Balance, where, c.Position) != nil,
+			orderedRulesPresenceWordUnknown(c.Balance.Presence):
 			return true
 		}
 		switch c.SourceKind {
@@ -561,7 +625,8 @@ func orderedRulesStreamStructureBroken(s OrderedRulesStream) bool {
 		for j := range c.Outcomes {
 			o := &c.Outcomes[j]
 			if checkIdentifierPresent(o.Identity, where) != nil ||
-				checkPresenceShape(o.Points, where, c.Position) != nil {
+				checkPresenceShape(o.Points, where, c.Position) != nil ||
+				orderedRulesPresenceWordUnknown(o.Points.Presence) {
 				return true
 			}
 		}
@@ -783,14 +848,23 @@ func EvaluateOrderedRules(stream OrderedRulesStream, rules OrderedRulesConfig, d
 	// Here, the version mismatch still costs two string comparisons and the
 	// scan never runs. The ceilings still come first, in the gate, so a string
 	// already past its budget is refused for size rather than read.
-	// THE STREAM'S OWN COMPARISON NEXT, before anything unrelated to it is read.
+	//
+	// THE STREAM'S OWN COMPARISON, once the two refusals below have passed.
 	//
 	// A caller handing in a stream whose SelectionDigest does not match is
-	// refused on the strength of that stream alone. The config and the trace
-	// are not consulted, not traversed and not attested to — a mismatch means
-	// nothing was consumed, so a digest over either would witness something
-	// this call never read, which is the same reason the two version refusals
-	// above carry no digests at all.
+	// refused without its TRACE being consulted, traversed or attested to, and
+	// without a config, entropy or consumed-prefix digest over either — a
+	// mismatch means nothing was consumed, so such a digest would witness
+	// something this call never read, which is the same reason the two version
+	// refusals above carry no digests at all.
+	//
+	// The CONFIG is the exception, and an earlier version of this paragraph
+	// denied it in all three respects. normalizeOrderedRulesConfig runs below,
+	// ahead of the hash, so an unusable config is decided first: a stream
+	// carrying a forged SelectionDigest beside a config declaring no default is
+	// refused CONFIG_DEFAULT_NOT_SUPPLIED, not STREAM_SELECTION_DIGEST_MISMATCH.
+	// The config is consulted and traversed before a mismatch; only "not
+	// attested to" survives, that refusal still carrying no config digest.
 	//
 	// Cost, which is why the position matters rather than only the principle.
 	// The identifier scan and the config, entropy and consumed-prefix digests
@@ -800,10 +874,14 @@ func EvaluateOrderedRules(stream OrderedRulesStream, rules OrderedRulesConfig, d
 	// the identical refusal with a short one — four traversals of text the
 	// refusal does not depend on.
 	//
-	// The stream digest itself is not deferred and cannot be: it IS the
-	// comparison. Its cost is proportional to the stream being judged, which is
-	// the one input a mismatch refusal is about, and the gate above has already
-	// bounded it.
+	// The stream digest IS the comparison, so nothing that depends on the
+	// comparison can precede it. That is not the same as the digest being
+	// undeferrable, which is what this paragraph claimed until the two refusals
+	// below were moved ahead of it — they were moved precisely because they do
+	// NOT depend on the comparison. What survives is narrower: the hash is the
+	// cheapest thing that can decide a MISMATCH, its cost is proportional to
+	// the stream being judged, and the gate above has already bounded it.
+	//
 	// THE STREAM'S STRUCTURE AND THE CONFIG BEFORE THE DIGEST.
 	//
 	// A stream that could not have been projected is refused whatever its
@@ -934,9 +1012,25 @@ func EvaluateOrderedRules(stream OrderedRulesStream, rules OrderedRulesConfig, d
 	// ordered_rules_stream_test.go that tried to reach them — so the two
 	// answers are not equivalent and the difference belongs here: the gate's
 	// refusal carries nothing at all, having declined to read the input, while
-	// these would carry the stream digest and the cutoff, the stream having
-	// verified. If the gate ever stops testing them, that is the behaviour that
-	// appears.
+	// these would carry the stream digest — computed and matched above — but
+	// NOT the cutoff, which is assigned below, after the invariant pass that
+	// these two precede.
+	//
+	// This sentence used to promise the cutoff as well. It was written while
+	// that assignment still sat at the top of the function, and moving it down
+	// to the line that earns it falsified the promise silently, because an
+	// unreachable path has no test to break. Reproduced by neutralising the
+	// gate's rule-count case so this one becomes reachable: the refusal came
+	// back carrying a stream digest and an empty Cutoff.Identity, against a
+	// stream whose projected identity was "call-1". It cannot be pinned by a
+	// test for the same reason it drifted, and that is the third ordering in
+	// this package documented as unpinnable rather than quietly asserted.
+	//
+	// Withholding the cutoff here is not an accident waiting to be repaired: it
+	// is the rule the derived-field block below states. Nothing has yet
+	// established that this stream was DERIVED, and a matching digest does not
+	// establish it. If the gate ever stops testing these two conditions, that
+	// is the behaviour that appears.
 	switch {
 	case len(draws.Words) > MaxOrderedRulesDrawWords:
 		return refuseUnread(ReasonDrawWordsOverBound)

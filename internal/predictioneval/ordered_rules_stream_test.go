@@ -3549,11 +3549,72 @@ func TestOrderedRulesACheapRefusalIsNotPaidForWithTheWholePayload(t *testing.T) 
 		}
 	})
 
+	// Candidate uniqueness depends on nothing but the candidate identities, so
+	// it is settled before the three payload scans that follow it in the
+	// projection — the admission references, the cutoff and every intervention
+	// Detail. It used to be settled after all three: 7.981383 ms to report a
+	// repeated three-byte identity beside 12 MiB of unrelated supplied text,
+	// against 127.186 µs once the pass moved.
+	t.Run("a repeated candidate identity is refused before the admission payload", func(t *testing.T) {
+		duplicated := []predictioneval.OrderedRulesCandidate{
+			orCandidate("same", 10, orKnownBalance(1000), orOutcome("A", 4), orOutcome("B", 6)),
+			orCandidate("same", 20, orKnownBalance(1000), orOutcome("A", 4), orOutcome("B", 6)),
+		}
+		// An ADMISSION fault with its own sentinel, so the two are told apart
+		// by which rule fired rather than by wording. A source reference one
+		// byte past the per-string bound is refused by validateAdmission, which
+		// is the first of the three scans this pass now precedes.
+		overBound := orAdmission()
+		overBound.SourceReferences = []string{strings.Repeat("x", predictioneval.MaxOrderedRulesIdentifierBytes+1)}
+
+		// The premise: each fault really is raised on its own.
+		if _, err := predictioneval.ProjectOrderedRulesStream(orSource(cs, nil),
+			overBound); !errors.Is(err, predictioneval.ErrOrderedRulesOverBound) {
+			t.Fatalf("premise: the admission alone must be refused as over-bound; got %v", err)
+		}
+		if _, err := predictioneval.ProjectOrderedRulesStream(orSource(duplicated, nil),
+			orAdmission()); !errors.Is(err, predictioneval.ErrOrderedRulesDuplicateIdentity) {
+			t.Fatalf("premise: the candidates alone must be refused as duplicated; got %v", err)
+		}
+
+		_, err := predictioneval.ProjectOrderedRulesStream(orSource(duplicated, nil), overBound)
+		if !errors.Is(err, predictioneval.ErrOrderedRulesDuplicateIdentity) {
+			t.Fatalf("a source repeating a candidate identity beside an over-bound admission "+
+				"reference was refused %v. Uniqueness reads nothing but the identities and is "+
+				"capped at MaxOrderedRulesCandidates x MaxOrderedRulesIdentifierBytes; the three "+
+				"scans it precedes are three times that envelope, and none of them is consulted "+
+				"to decide that two candidates carry the same name.", err)
+		}
+	})
+
+	// The other side of that move, and the reason it stops where it does. A
+	// closed-set word is one comparison against a string already bounded, so
+	// the vocabulary tier stays ahead of the identities: a source that fails it
+	// must not first pay for 128 of them. This case does not discriminate the
+	// move above — it holds in both arrangements — and it is here to fail if a
+	// later change pushes the identity pass one tier too far.
+	t.Run("a closed-set word is still refused before the candidate identities", func(t *testing.T) {
+		duplicated := []predictioneval.OrderedRulesCandidate{
+			orCandidate("same", 10, orKnownBalance(1000), orOutcome("A", 4), orOutcome("B", 6)),
+			orCandidate("same", 20, orKnownBalance(1000), orOutcome("A", 4), orOutcome("B", 6)),
+		}
+		duplicated[0].Balance = predictioneval.SuppliedInt64{Presence: "NOT-A-PRESENCE-WORD"}
+
+		if _, err := predictioneval.ProjectOrderedRulesStream(orSource(duplicated, nil),
+			orAdmission()); !errors.Is(err, predictioneval.ErrOrderedRulesVocabulary) {
+			t.Fatalf("a source carrying both a presence word outside the closed set and a repeated "+
+				"candidate identity was refused %v. The vocabulary tier is a comparison against a "+
+				"short bounded string and must stay ahead of the identity pass.", err)
+		}
+	})
+
 	// The evaluator compares the stream against its own digest before reading
-	// anything else. The config and the trace are not consulted, not traversed
-	// and not attested to: 14.049 µs rather than 582.770 ms with a 64 MiB
-	// identifier beside a small stream.
-	t.Run("a digest mismatch is decided without reading the config or the trace", func(t *testing.T) {
+	// the TRACE, and before scanning either retained identifier for encodability:
+	// 14.049 µs rather than 582.770 ms with a 64 MiB identifier beside a small
+	// stream. The config is a different case — it is normalised BEFORE the hash,
+	// and the case after this one pins that — but a mismatch still attests to
+	// neither, carrying no config, entropy or consumed-prefix digest.
+	t.Run("a digest mismatch is decided without reading the trace", func(t *testing.T) {
 		st := orProject(t, cs, nil)
 		st.SelectionDigest = strings.Repeat("0", 64)
 
@@ -3581,6 +3642,44 @@ func TestOrderedRulesACheapRefusalIsNotPaidForWithTheWholePayload(t *testing.T) 
 			t.Fatal("the mismatch refusal carried a config, entropy or consumed-prefix digest. " +
 				"Nothing was consumed, so each of those witnesses an input this call never read " +
 				"— and computing them traverses identifiers the refusal does not depend on")
+		}
+	})
+
+	// And the config's side of it, which the production comment above the
+	// comparison denied until this case was written. normalizeOrderedRulesConfig
+	// runs BEFORE the hash, so an unusable config beats a mismatch: the stream
+	// is never hashed at all, and the refusal names the config.
+	t.Run("an unusable config is decided before the stream is hashed", func(t *testing.T) {
+		forged := orProject(t, cs, nil)
+		forged.SelectionDigest = strings.Repeat("0", 64)
+
+		// The declaration, not the value: a config whose bounds are all zero is
+		// a perfectly usable config, so the fault has to be the missing
+		// declaration or this case pins nothing.
+		unusable := orConfig([]predictioneval.OrderedRule{
+			orRule(predictioneval.ComparatorLe, 40, 100, 0, 10)}, 95, 100, 0, 10)
+		unusable.HasDefault = false
+
+		// The premise: each fault really is raised on its own.
+		if got := predictioneval.EvaluateOrderedRules(forged, cfg,
+			orDraws()); got.Reason != predictioneval.ReasonStreamDigestMismatch {
+			t.Fatalf("premise: the forged digest alone must be refused as a mismatch; got %q", got.Reason)
+		}
+		if got := predictioneval.EvaluateOrderedRules(orProject(t, cs, nil), unusable,
+			orDraws()); got.Reason != predictioneval.ReasonConfigDefaultNotSupplied {
+			t.Fatalf("premise: the config alone must be refused for its missing default; got %q", got.Reason)
+		}
+
+		got := predictioneval.EvaluateOrderedRules(forged, unusable, orDraws())
+		switch {
+		case got.Reason != predictioneval.ReasonConfigDefaultNotSupplied:
+			t.Fatalf("a forged stream beside a config declaring no default was refused %q. "+
+				"Normalising the config is arithmetic over a bounded rule count; hashing the "+
+				"stream traverses every retained candidate and outcome, and the run was never "+
+				"going to read that stream — so the config decides first.", got.Reason)
+		case got.StreamDigest != "":
+			t.Fatalf("the config refusal carried stream digest %q. It was decided before the "+
+				"hash ran, so it computed none and can attest to none.", got.StreamDigest)
 		}
 	})
 
@@ -4259,6 +4358,26 @@ func TestOrderedRulesARefusalDecidedBeforeTheTraversalAttestsToNothing(t *testin
 	noDefault := orConfig(nil, 95, 100, 0, 10)
 	noDefault.HasDefault = false
 
+	// A projected stream carrying ONE short fault outside a closed set, carried
+	// through the oracle so it is not refused as a MISMATCH instead — which is
+	// a different rule under a different reason and would pin nothing about
+	// these. Each of the four was settled only by the invariant pass, after the
+	// whole stream had been hashed.
+	shortFault := func(t *testing.T, mutate func(*predictioneval.OrderedRulesStream)) predictioneval.OrderedRulesStream {
+		t.Helper()
+		st := orProject(t, cs, nil)
+		mutate(&st)
+		st.SelectionDigest = predictioneval.EvaluateOrderedRules(st, cfg, orDraws()).StreamDigest
+		return st
+	}
+	badPresence := func(t *testing.T) predictioneval.OrderedRulesStream {
+		t.Helper()
+		return shortFault(t, func(st *predictioneval.OrderedRulesStream) {
+			last := &st.Candidates[len(st.Candidates)-1]
+			last.Outcomes[len(last.Outcomes)-1].Points.Presence = "BOGUS"
+		})
+	}
+
 	for _, c := range []struct {
 		name   string
 		stream predictioneval.OrderedRulesStream
@@ -4284,6 +4403,28 @@ func TestOrderedRulesARefusalDecidedBeforeTheTraversalAttestsToNothing(t *testin
 		// digest to get where it was refused and reports it.
 		{"stream invariants broken", forge(t), cfg, 0,
 			predictioneval.ReasonStreamInvariantViolated, true},
+		// The SAME reason code, decided in a different tier, and that is why
+		// both rows are here. A presence word outside the closed set is a
+		// constant-size fault that checkPresenceShape cannot see — it returns
+		// immediately for every non-KNOWN value — so it used to reach the
+		// invariant pass with the whole stream already hashed: 3.555366 ms on
+		// 128 candidates holding 4 KiB each, against 7.092 µs once the
+		// structural tier compared the word. A caller cannot tell the two rows
+		// apart by their reason, only by what the refusal carries.
+		{"stream carries a presence word outside the closed set", badPresence(t), cfg, 0,
+			predictioneval.ReasonStreamInvariantViolated, false},
+		// The same defect in the three other vocabularies the pre-digest tier
+		// had not been taught. Each is one comparison against a short constant,
+		// so none of them can be made expensive by a longer supplied word.
+		{"stream declares a coverage outside the closed set", shortFault(t,
+			func(st *predictioneval.OrderedRulesStream) { st.Scope.Coverage = "NOT-A-COVERAGE" }),
+			cfg, 0, predictioneval.ReasonStreamInvariantViolated, false},
+		{"stream declares a view kind outside the closed set", shortFault(t,
+			func(st *predictioneval.OrderedRulesStream) { st.Admission.ViewKind = "NOT-A-VIEW-KIND" }),
+			cfg, 0, predictioneval.ReasonStreamInvariantViolated, false},
+		{"stream declares a cutoff basis outside the closed set", shortFault(t,
+			func(st *predictioneval.OrderedRulesStream) { st.Cutoff.Basis = "NOT-A-BASIS" }),
+			cfg, 0, predictioneval.ReasonStreamInvariantViolated, false},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			got := predictioneval.EvaluateOrderedRules(c.stream, c.cfg,
