@@ -913,74 +913,156 @@ func TestOrderedRulesOversizedInputIsRefusedBeforeItIsRead(t *testing.T) {
 // can be serialized and read back — a check a legitimate reader can repeat is
 // one an illegitimate reader can repeat. What makes a stream safe to traverse
 // is checking it, so the projection's invariants are re-established on ingest.
+//
+// Every case below starts from a stream the projection REALLY produced and
+// breaks exactly one thing. That matters: a hand-built base would let a case
+// pass for some unrelated reason it was never shaped correctly to begin with,
+// which is precisely how an earlier version of this test fooled itself.
 func TestOrderedRulesAMatchingDigestIsNotProofOfProjection(t *testing.T) {
 	cfg := orConfig([]predictioneval.OrderedRule{
 		orRule(predictioneval.ComparatorLe, 40, 100, 0, 10)}, 95, 100, 0, 10)
+	candidates := func() []predictioneval.OrderedRulesCandidate {
+		return []predictioneval.OrderedRulesCandidate{
+			orCandidate("c1", 10, orKnownBalance(1000), orOutcome("A", 4), orOutcome("B", 6))}
+	}
 
 	// selfConsistent runs the oracle: take the digest the evaluator publishes
 	// on refusal, put it back, and hand the same stream in again.
 	selfConsistent := func(t *testing.T, st predictioneval.OrderedRulesStream) predictioneval.OrderedRulesEvaluation {
 		t.Helper()
+		st.SelectionDigest = "deliberately wrong"
 		first := predictioneval.EvaluateOrderedRules(st, cfg, orDraws())
-		if first.StreamDigest == "" {
-			t.Fatal("the probe must reach the digest, or the oracle is not being exercised")
+		if first.Reason != predictioneval.ReasonStreamDigestMismatch || first.StreamDigest == "" {
+			t.Fatalf("the probe must reach the digest comparison and be refused by it; got reason %q",
+				first.Reason)
 		}
 		st.SelectionDigest = first.StreamDigest
 		return predictioneval.EvaluateOrderedRules(st, cfg, orDraws())
 	}
 
-	// forge builds a stream that is well formed in every way the projection
-	// checks, then lets the caller break exactly one thing.
-	forge := func(break_ func(*predictioneval.OrderedRulesStream)) predictioneval.OrderedRulesStream {
-		st := predictioneval.OrderedRulesStream{
-			ContractVersion: predictioneval.OrderedRulesStreamContractVersion,
-			Scope:           orScope(),
-			Admission:       orAdmission(),
-			Candidates: []predictioneval.OrderedRulesCandidate{
-				orCandidate("c1", 10, orKnownBalance(1000), orOutcome("A", 4), orOutcome("B", 6))},
-		}
-		break_(&st)
-		return st
+	// cut is a stream the projection produced WITH a boundary, so its cutoff
+	// and qualifications are genuine rather than invented here.
+	cut := func(t *testing.T) predictioneval.OrderedRulesStream {
+		t.Helper()
+		return orProject(t, candidates(), []predictioneval.OrderedRulesIntervention{
+			orIntervention("call-1", 5, predictioneval.InterventionAutoCallStarted,
+				predictioneval.RelevanceProven, "a real call")})
 	}
 
 	for _, tc := range []struct {
 		name   string
-		break_ func(*predictioneval.OrderedRulesStream)
+		stream func(t *testing.T) predictioneval.OrderedRulesStream
 	}{
-		{"a KNOWN balance that never declared its availability", func(st *predictioneval.OrderedRulesStream) {
+		{"a KNOWN balance that never declared its availability", func(t *testing.T) predictioneval.OrderedRulesStream {
+			st := orProject(t, candidates(), nil)
 			st.Candidates[0].Balance.HasAvailableAtPosition = false
+			return st
 		}},
-		{"a balance available only AFTER the candidate", func(st *predictioneval.OrderedRulesStream) {
+		{"a balance available only AFTER the candidate", func(t *testing.T) predictioneval.OrderedRulesStream {
+			st := orProject(t, candidates(), nil)
 			st.Candidates[0].Balance.AvailableAtPosition = 25
+			return st
 		}},
-		{"outcome points that never declared availability", func(st *predictioneval.OrderedRulesStream) {
+		{"outcome points that never declared availability", func(t *testing.T) predictioneval.OrderedRulesStream {
+			st := orProject(t, candidates(), nil)
 			st.Candidates[0].Outcomes[0].Points.HasAvailableAtPosition = false
+			return st
 		}},
-		{"membership that was never proven", func(st *predictioneval.OrderedRulesStream) {
+		{"membership that was never proven", func(t *testing.T) predictioneval.OrderedRulesStream {
+			st := orProject(t, candidates(), nil)
 			st.Candidates[0].EpisodeMembership = predictioneval.MembershipUnknown
+			return st
 		}},
-		{"a candidate retained at the boundary that should have cut it", func(st *predictioneval.OrderedRulesStream) {
-			st.Cutoff = predictioneval.OrderedRulesCutoff{
-				Established: true, Position: 5, Kind: predictioneval.InterventionAutoCallStarted,
-				Identity: "call-1", Basis: predictioneval.CutoffFactualIntervention}
-		}},
-		{"two candidates the causal order cannot separate", func(st *predictioneval.OrderedRulesStream) {
+		{"two candidates the causal order cannot separate", func(t *testing.T) predictioneval.OrderedRulesStream {
+			st := orProject(t, candidates(), nil)
 			st.Candidates = append(st.Candidates,
 				orCandidate("c2", 10, orKnownBalance(1000), orOutcome("A", 4), orOutcome("B", 6)))
+			return st
 		}},
-		{"a repeated identity", func(st *predictioneval.OrderedRulesStream) {
+		{"a repeated identity", func(t *testing.T) predictioneval.OrderedRulesStream {
+			st := orProject(t, candidates(), nil)
 			st.Candidates = append(st.Candidates,
 				orCandidate("c1", 20, orKnownBalance(1000), orOutcome("A", 4), orOutcome("B", 6)))
+			return st
 		}},
-		{"a scope missing its association evidence", func(st *predictioneval.OrderedRulesStream) {
+		{"a scope missing its association evidence", func(t *testing.T) predictioneval.OrderedRulesStream {
+			st := orProject(t, candidates(), nil)
 			st.Scope.AssociationEvidence = ""
+			return st
 		}},
-		{"a snapshot inside a channel-candidate view", func(st *predictioneval.OrderedRulesStream) {
+		{"a snapshot inside a channel-candidate view", func(t *testing.T) predictioneval.OrderedRulesStream {
+			st := orProject(t, candidates(), nil)
 			st.Candidates[0].SourceKind = predictioneval.SourceKindCalculateSnapshot
+			return st
+		}},
+
+		// The DERIVED fields. A caller handing these in is asserting facts
+		// about interventions and coverage the stream no longer carries, so
+		// the only defence is that the assertion be internally possible and
+		// exactly what this stream's own fields imply.
+		{"a candidate retained past the boundary that cut it", func(t *testing.T) predictioneval.OrderedRulesStream {
+			st := cut(t)
+			st.Candidates = append(st.Candidates, candidates()...)
+			return st
+		}},
+		{"an unestablished boundary claiming a factual basis", func(t *testing.T) predictioneval.OrderedRulesStream {
+			st := orProject(t, candidates(), nil)
+			st.Cutoff.Basis = predictioneval.CutoffFactualIntervention
+			return st
+		}},
+		{"an unestablished boundary that still names an intervention", func(t *testing.T) predictioneval.OrderedRulesStream {
+			st := orProject(t, candidates(), nil)
+			st.Cutoff.Identity = "a call that was never supplied"
+			return st
+		}},
+		{"an unestablished boundary that claims it removed candidates", func(t *testing.T) predictioneval.OrderedRulesStream {
+			st := orProject(t, candidates(), nil)
+			st.Cutoff.DroppedAtOrAfter = 3
+			return st
+		}},
+		{"an established boundary with no identity", func(t *testing.T) predictioneval.OrderedRulesStream {
+			st := cut(t)
+			st.Cutoff.Identity = ""
+			return st
+		}},
+		{"an established boundary with a kind outside the vocabulary", func(t *testing.T) predictioneval.OrderedRulesStream {
+			st := cut(t)
+			st.Cutoff.Kind = "SOMETHING_ELSE"
+			return st
+		}},
+		{"an established boundary outside the declared interval", func(t *testing.T) predictioneval.OrderedRulesStream {
+			st := cut(t)
+			st.Cutoff.Position = st.Scope.IntervalToPosition + 1
+			return st
+		}},
+		{"a removal count that cannot be negative", func(t *testing.T) predictioneval.OrderedRulesStream {
+			st := cut(t)
+			st.Cutoff.DroppedAtOrAfter = -1
+			return st
+		}},
+		{"incomplete coverage without the limitation it requires", func(t *testing.T) predictioneval.OrderedRulesStream {
+			src := orSource(candidates(), nil)
+			src.Scope.Coverage = predictioneval.CoverageGapsPresent
+			st, err := predictioneval.ProjectOrderedRulesStream(src, orAdmission())
+			if err != nil {
+				t.Fatalf("project: %v", err)
+			}
+			if len(st.Qualifications) < 2 {
+				t.Fatalf("premise: incomplete coverage must carry its own qualification; got %v",
+					st.Qualifications)
+			}
+			// Strip the coverage limitation and keep the rest.
+			st.Qualifications = st.Qualifications[1:]
+			return st
+		}},
+		{"a limitation the evidence does not support", func(t *testing.T) predictioneval.OrderedRulesStream {
+			st := orProject(t, candidates(), nil)
+			st.Qualifications = append(st.Qualifications, "FABRICATED_LIMITATION: invented here")
+			return st
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			ev := selfConsistent(t, forge(tc.break_))
+			ev := selfConsistent(t, tc.stream(t))
 			if ev.Status != predictioneval.StatusRefused ||
 				ev.Reason != predictioneval.ReasonStreamInvariantViolated {
 				t.Fatalf("status %q reason %q, want REFUSED / %s: the digest verified, so only a "+
@@ -993,26 +1075,25 @@ func TestOrderedRulesAMatchingDigestIsNotProofOfProjection(t *testing.T) {
 		})
 	}
 
-	// Non-vacuity in two directions. A stream that really did come from the
-	// projection still evaluates — so the new pass refuses the impossible
-	// rather than everything — and the SAME forging attempt, left unbroken,
-	// gets through the oracle, which proves the oracle itself works and that
-	// the refusals above come from the invariants and not from a stuck digest.
+	// Non-vacuity in both directions. A projected stream still evaluates — so
+	// the pass refuses the impossible rather than everything — and the SAME
+	// stream still survives the oracle round trip, which proves the refusals
+	// above come from the invariants and not from a digest that stopped
+	// matching. The second half is what caught this test lying to itself once
+	// already, when its base stream was hand-built and never projection-shaped.
 	t.Run("a projected stream still evaluates", func(t *testing.T) {
-		stream := orProject(t, []predictioneval.OrderedRulesCandidate{
-			orCandidate("c1", 10, orKnownBalance(1000), orOutcome("A", 4), orOutcome("B", 6))}, nil)
-		if ev := predictioneval.EvaluateOrderedRules(stream, cfg, orDraws()); ev.Status !=
-			predictioneval.StatusWouldAttempt {
+		if ev := predictioneval.EvaluateOrderedRules(orProject(t, candidates(), nil), cfg,
+			orDraws()); ev.Status != predictioneval.StatusWouldAttempt {
 			t.Fatalf("status %q reason %q, want WOULD_ATTEMPT", ev.Status, ev.Reason)
 		}
 	})
 
-	t.Run("the oracle itself works on a well-formed forgery", func(t *testing.T) {
-		if ev := selfConsistent(t, forge(func(*predictioneval.OrderedRulesStream) {})); ev.Status !=
+	t.Run("an unbroken stream survives the oracle", func(t *testing.T) {
+		if ev := selfConsistent(t, orProject(t, candidates(), nil)); ev.Status !=
 			predictioneval.StatusWouldAttempt {
-			t.Fatalf("status %q reason %q, want WOULD_ATTEMPT: a hand-built stream that breaks no "+
-				"invariant must still pass, or the cases above prove nothing about WHICH check "+
-				"refused them", ev.Status, ev.Reason)
+			t.Fatalf("status %q reason %q, want WOULD_ATTEMPT: a stream that breaks no invariant "+
+				"must pass, or the cases above prove nothing about WHICH check refused them",
+				ev.Status, ev.Reason)
 		}
 	})
 }

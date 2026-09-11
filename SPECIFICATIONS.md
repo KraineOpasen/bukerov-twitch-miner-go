@@ -3280,9 +3280,24 @@ evidence that the stream has not changed since the digest was taken, and the
 evaluator re-establishes the projection's invariants over the stream it is
 handed before traversing it: scope and admission completeness, identity,
 uniqueness, strict causal order, the declared interval, proven membership,
-source/view compatibility, the presence and availability of every supplied
-value, and a boundary that really did remove what it claims. Those checks are
-the projection's own, called rather than restated, so the two cannot drift.
+source/view compatibility, and the presence and availability of every supplied
+value. Those checks are the projection's own, called rather than restated, so
+the two cannot drift.
+
+The DERIVED fields need a different treatment, because the stream no longer
+carries what they were derived from. A boundary is computed from interventions
+the projection did not retain, so a caller handing one in is asserting a fact
+that can no longer be recomputed; what remains checkable is that the assertion
+is internally possible — an unestablished boundary names no intervention and
+removed nothing, an established one carries a real intervention kind, a
+non-empty identity and a position inside the declared interval, and a removal
+count is never negative. The qualifications are stronger than that: they follow
+deterministically from coverage, boundary basis, view kind and removal count, so
+they are re-derived and compared as a whole. Equality, not containment — a
+missing limitation would let a result read as though the absence of an earlier
+intervention were established, and an added one asserts a limitation the
+evidence does not support, both silently, because qualifications travel verbatim
+into every result computed from the stream.
 
 **The mechanism.** The outcome vector is the OUTER loop and the rule list the
 inner one. A pool share is `1/(total/points)` — two divisions, never collapsed

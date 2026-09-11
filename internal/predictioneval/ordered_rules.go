@@ -1,6 +1,9 @@
 package predictioneval
 
-import "math"
+import (
+	"math"
+	"strconv"
+)
 
 // THE ORDERED-RULES MECHANISM.
 //
@@ -294,6 +297,79 @@ func orderedRulesInputBudget(s OrderedRulesStream, cfg OrderedRulesConfig,
 	return b
 }
 
+// orderedRulesCutoffImpossible reports a boundary the projection could not have
+// produced.
+//
+// The boundary is DERIVED, not supplied: a caller handing one in is asserting a
+// fact about interventions the stream no longer carries, so the only thing left
+// to check is that the assertion is internally possible. An unestablished
+// boundary that names an intervention, or an established one with no identity,
+// is a claim about evidence that is not there.
+func orderedRulesCutoffImpossible(s OrderedRulesStream) bool {
+	c := s.Cutoff
+	if c.DroppedAtOrAfter < 0 {
+		return true
+	}
+	if !c.Established {
+		// Nothing cut means nothing removed and nothing to name.
+		return c.Basis != CutoffNoInterventionDeclared || c.Position != 0 ||
+			c.Kind != "" || c.Identity != "" || c.DroppedAtOrAfter != 0
+	}
+	switch c.Basis {
+	case CutoffFactualIntervention, CutoffConservativeAmbiguous:
+	default:
+		return true
+	}
+	switch c.Kind {
+	case InterventionAutoCallStarted, InterventionManualCallStarted:
+	default:
+		return true
+	}
+	// The projection takes the boundary FROM an intervention, and refuses an
+	// intervention outside the declared interval, so a boundary outside it
+	// could not have come from one.
+	return checkIdentifier(c.Identity, "cutoff identity") != nil ||
+		c.Position < s.Scope.IntervalFromPosition || c.Position > s.Scope.IntervalToPosition
+}
+
+// orderedRulesQualificationsNotDerived reports qualifications that are not
+// exactly the ones this stream's own fields imply.
+//
+// Equality, not containment. A missing qualification drops a limitation the
+// result is required to carry — a stream declaring incomplete coverage without
+// SOURCE_COVERAGE_NOT_COMPLETE would produce a mechanism result that reads as
+// though the absence of an earlier intervention were established. An ADDED one
+// is just as wrong in the other direction: it asserts a limitation the evidence
+// does not support. Both are silent, because qualifications travel verbatim
+// into every result computed from the stream.
+func orderedRulesQualificationsNotDerived(s OrderedRulesStream) bool {
+	want := make([]string, 0, 5)
+	if s.Scope.Coverage != CoverageCompleteDeclared {
+		want = append(want, qualCoverageNotComplete)
+	}
+	if s.Cutoff.Basis == CutoffConservativeAmbiguous {
+		want = append(want, qualConservativeCutoff)
+	}
+	if s.Cutoff.Basis == CutoffNoInterventionDeclared {
+		want = append(want, qualNoInterventionSeen)
+	}
+	if s.Admission.ViewKind == ViewCalculateOnly {
+		want = append(want, qualCalculateOnlyView)
+	}
+	if s.Cutoff.DroppedAtOrAfter > 0 {
+		want = append(want, qualBoundaryRemovedCandidates+strconv.Itoa(s.Cutoff.DroppedAtOrAfter))
+	}
+	if len(want) != len(s.Qualifications) {
+		return true
+	}
+	for i := range want {
+		if want[i] != s.Qualifications[i] {
+			return true
+		}
+	}
+	return false
+}
+
 // orderedRulesStreamInvariantsBroken reports a stream that could not have come
 // from [ProjectOrderedRulesStream], however well its digest verifies.
 //
@@ -306,6 +382,9 @@ func orderedRulesInputBudget(s OrderedRulesStream, cfg OrderedRulesConfig,
 func orderedRulesStreamInvariantsBroken(s OrderedRulesStream) bool {
 	const where = "retained candidate"
 	if validateScope(s.Scope) != nil || validateAdmission(s.Admission) != nil {
+		return true
+	}
+	if orderedRulesCutoffImpossible(s) || orderedRulesQualificationsNotDerived(s) {
 		return true
 	}
 	seen := make(map[string]bool, len(s.Candidates))
