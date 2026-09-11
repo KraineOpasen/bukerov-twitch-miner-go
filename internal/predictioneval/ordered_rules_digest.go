@@ -217,12 +217,13 @@ func orderedRulesEntropyDigest(d SuppliedDrawTrace) string {
 // a post-boundary fact was appended, then "later facts cannot change an earlier
 // result" would be unprovable — the digest itself would be the counterexample.
 //
-// The declared INTERVAL is excluded for that reason and is the only mandatory
-// declaration that is: it is the source's extent, and appending a fact past the
-// boundary can legitimately widen it, so binding it would break the stability
-// above for precisely the appends the stability is about. The scope's coverage
-// detail and the admission's source references are optional elaborations rather
-// than declarations, and stay out with the rest of the optional text.
+// The declared interval's UPPER endpoint is excluded for that reason, and is
+// the only mandatory declaration that is: appending a fact past the boundary
+// can legitimately widen IntervalToPosition, so binding it would break the
+// stability above for precisely the appends the stability is about. Its LOWER
+// endpoint is not symmetric with it and is bound — see below. The scope's
+// coverage detail and the admission's source references are optional
+// elaborations rather than declarations, and stay out with the optional text.
 // Compare [OrderedRulesStream.SelectionDigest] and
 // [OrderedRulesEvaluation.EntropyDigest], which DO cover the whole of their
 // subjects and are reported separately for exactly that contrast. See
@@ -253,6 +254,27 @@ func orderedRulesConsumedDigest(s OrderedRulesStream, cfg OrderedRulesConfig, d 
 	// read from a source that claims to be complete — the second says no
 	// earlier intervention occurred, the first cannot.
 	digestPart(h, string(s.Scope.Coverage))
+	// And how far back that coverage claim REACHES. The two interval endpoints
+	// look like one value and are not: appending a fact past the boundary can
+	// widen IntervalToPosition, which is why binding it would break the
+	// stability above — but no append lowers IntervalFromPosition, so binding
+	// it costs that stability nothing. It carries evidence the upper endpoint
+	// does not. Two sources holding the same candidate at position 10 and no
+	// intervention, one declaring complete coverage over [0,100] and the other
+	// over [-100,100], read the same prefix; only the second also asserts that
+	// nothing intervened in the hundred positions before it. That is a stronger
+	// claim about the absence of an earlier intervention, which is the claim
+	// this whole model is careful about, and it was invisible here.
+	//
+	// HasInterval is NOT hashed beside it, and the difference from the
+	// availability declaration — where calling the flag decoration was wrong —
+	// is worth stating rather than assuming a second time. That flag was
+	// unbound by the WHOLE-STREAM digest, so a projected stream could be
+	// stripped of it and still verify. This one is bound there already, and
+	// validateScope refuses a stream that omits it, so no ADMITTED prefix can
+	// differ by it; hashing it here would separate two refusals from each
+	// other and nothing else.
+	digestInt(h, s.Scope.IntervalFromPosition)
 	digestPart(h, s.Admission.ManifestID)
 	digestPart(h, string(s.Admission.ViewKind))
 	// Population and order basis by the same rule as the warrant above: both

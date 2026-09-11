@@ -2557,10 +2557,19 @@ func TestOrderedRulesDuplicateOutcomeIdentityIsRejected(t *testing.T) {
 // That is the recombination the four separate digests exist to prevent.
 //
 // Each case varies ONE declaration in the SOURCE and re-projects, rather than
-// editing a projected stream: a stripped field is refused by the invariant
-// pass, and a refusal carries no consumed digest at all, so "the digest moved"
-// would be satisfied by the empty string. The premise assertions below are what
-// keep that from happening silently.
+// editing a projected stream, because the property is about two sources the
+// projection ADMITS: a result computed over one must not be presentable as a
+// result computed over the other. Editing a projected stream tests something
+// else — the edited stream is refused by the invariant pass, so the comparison
+// would be between an admitted prefix and a rejected one.
+//
+// An earlier version of this comment justified that choice by claiming a
+// refusal carries no consumed digest. It does. EvaluateOrderedRules computes
+// one on every refusal it reaches mid-traversal, deliberately and for a stated
+// reason — a refusal that has already read candidates and spent words is
+// misdescribed by a digest claiming an empty prefix. Only the two unread
+// refusals, the shape gate and the version mismatch, carry none. The premise
+// assertions below are what actually keep each case honest.
 func TestOrderedRulesTheConsumedPrefixBindsEveryMandatoryDeclaration(t *testing.T) {
 	cs := []predictioneval.OrderedRulesCandidate{
 		orCandidate("c1", 10, orKnownBalance(1000), orOutcome("A", 4), orOutcome("B", 6)),
@@ -2584,9 +2593,12 @@ func TestOrderedRulesTheConsumedPrefixBindsEveryMandatoryDeclaration(t *testing.
 	//     candidate's source kind, which the projection couples to it — it is
 	//     bound, and TestOrderedRulesDigestsBindTheMandatoryFieldDeclarations'
 	//     neighbours cover the coupling;
-	//   - the declared interval is bound in the whole-stream digest and
-	//     deliberately NOT here, because appending a fact past the boundary can
-	//     legitimately widen it and this digest must survive that append.
+	//   - the declared interval's UPPER endpoint is bound in the whole-stream
+	//     digest and deliberately NOT in the consumed one, because appending a
+	//     fact past the boundary can legitimately widen it and this digest must
+	//     survive that append. Its LOWER endpoint is not symmetric with it, is
+	//     bound in both, and has its own case below — with the asymmetry
+	//     asserted at the end rather than merely described here.
 	cases := []struct {
 		name  string
 		apply func(*predictioneval.OrderedRulesSource, *predictioneval.CommonAdmission)
@@ -2615,6 +2627,13 @@ func TestOrderedRulesTheConsumedPrefixBindsEveryMandatoryDeclaration(t *testing.
 		{"admission order basis", func(_ *predictioneval.OrderedRulesSource, a *predictioneval.CommonAdmission) {
 			a.OrderBasis = "arrival order at the collector, ascending"
 		}},
+		// The lower endpoint of the declared interval. It says how far BACK the
+		// coverage claim reaches, so moving it downwards asserts that nothing
+		// intervened over the additional span — a stronger claim about the
+		// absence of an earlier intervention, over an identical prefix.
+		{"scope interval start", func(s *predictioneval.OrderedRulesSource, _ *predictioneval.CommonAdmission) {
+			s.Scope.IntervalFromPosition = -100
+		}},
 	}
 
 	for _, tc := range cases {
@@ -2641,6 +2660,35 @@ func TestOrderedRulesTheConsumedPrefixBindsEveryMandatoryDeclaration(t *testing.
 			}
 		})
 	}
+
+	// The counterweight, and the reason the two interval endpoints are not one
+	// value. Widening the upper endpoint must move NOTHING here: it is the
+	// extent a later fact can legitimately push outwards, and a consumed-prefix
+	// digest that followed it would make "later facts cannot change an earlier
+	// result" false by construction. Without this case, binding the whole
+	// interval would satisfy every assertion above and break that property
+	// silently.
+	t.Run("widening the interval end does not move it", func(t *testing.T) {
+		src, adm := orSource(cs, nil), orAdmission()
+		src.Scope.IntervalToPosition *= 10
+		stream, err := predictioneval.ProjectOrderedRulesStream(src, adm)
+		if err != nil {
+			t.Fatalf("the widened source must still project: %v", err)
+		}
+		got := predictioneval.EvaluateOrderedRules(stream, cfg, orDraws())
+		switch {
+		case got.Status != predictioneval.StatusWouldAttempt || got.ConsumedInputDigest == "":
+			t.Fatalf("premise: the widened input must evaluate the same prefix; got %q / %q",
+				got.Status, got.ConsumedInputDigest)
+		case got.StreamDigest == base.StreamDigest:
+			t.Fatal("premise: the WHOLE-STREAM digest must move when the declared extent changes, " +
+				"or this case cannot tell a bound endpoint from an ignored one")
+		case got.ConsumedInputDigest != base.ConsumedInputDigest:
+			t.Fatal("widening the declared interval's end moved the consumed-prefix digest. That " +
+				"endpoint is the extent a post-boundary fact can legitimately push outwards, so " +
+				"binding it here makes the no-look-ahead stability false by construction")
+		}
+	})
 }
 
 // TestOrderedRulesAClaimedRemovalIsChargedForTheSourceItImplies pins the byte

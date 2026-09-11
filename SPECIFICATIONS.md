@@ -3513,10 +3513,19 @@ account context without the association evidence bound the claim and not its
 warrant, so two prefixes read under different evidence — one solid, one only
 just admissible — carried the same consumed-prefix binding, and a result
 computed under either could be presented as a result computed under the other.
-That is the recombination these four exist to prevent. The declared INTERVAL is
-the one mandatory declaration still excluded, and deliberately: it is the
-source's extent, and appending a fact past the boundary can legitimately widen
-it, so binding it would break the stability the digest is for. Like the
+That is the recombination these four exist to prevent. The declared interval's
+UPPER endpoint is the one mandatory declaration still excluded, and
+deliberately: it is the source's extent, and appending a fact past the boundary
+can legitimately widen it, so binding it would break the stability the digest is
+for. Its LOWER endpoint looks like half of the same value and is not — no append
+lowers it, so binding it costs that stability nothing, and it carries evidence
+the upper endpoint does not. Two sources holding the same candidate and no
+intervention, one declaring complete coverage over [0,100] and the other over
+[-100,100], read the same prefix; only the second also asserts that nothing
+intervened over the hundred positions before it, which is a stronger claim about
+the absence of an earlier intervention. It is bound; the pair is asserted in
+both directions, so binding the upper endpoint as well fails the suite rather
+than passing as a tidier-looking symmetry. Like the
 baseline's, these are unkeyed hashes over supplied data: they prevent
 recombination and authenticate nothing.
 
