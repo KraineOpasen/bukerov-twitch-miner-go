@@ -3612,34 +3612,56 @@ The ordering inside the text tier is therefore by how much text a tier reads,
 as far as that has been taken. It is not proven exhaustive and is not claimed
 to be.
 
-One further ordering on the same axis was implemented, measured and then
-**deliberately reverted**, and the trade is recorded because the reasoning is
-the useful part. The evaluator computes the whole-stream digest before
-re-establishing the stream's invariants, so a structurally impossible stream —
-a KNOWN balance omitting the position it became available at, say — is hashed in
-full before being refused. An earlier revision of this document said the digest
-was a floor that no ordering could defer, because it IS the comparison. The
-first half is true and the second does not follow: such a stream is refused
-whatever its digest says, so its digest never needs computing. The reviewing
-lane measured 98.6 milliseconds against 8.2 with one-byte provenance, and 122.4
-against 7.2 once the two-call oracle is counted.
+Three smaller orderings followed on the same gradient. An outcome's PRESENCE
+word joined the vocabulary tier beside the candidate's balance — both are short
+closed sets, and leaving the outcomes out meant a last outcome's invalid word
+waited on every earlier candidate's payload text. An intervention's KIND and
+RELEVANCE joined it too, ahead of the admission references and every identity,
+neither of which bears on them. And `orderedRulesConsumedDigest` stopped
+recomputing the config digest: that binding has always been the config's DIGEST
+rather than its fields, and the caller has already computed exactly that value,
+so passing it in traverses `ConfigID` once instead of twice and no digest value
+moves.
 
-What deferring it costs is the reason it is not kept.
-`TestOrderedRulesSuppliedDigestBindsEveryFieldThatCouldChangeADecision` walks
-`SuppliedInt64` by reflection, strips one field at a time and requires the
+One further ordering on the same axis was implemented, measured, **reverted, and
+then taken after all** — and the round trip is the useful part. The evaluator
+computed the whole-stream digest before re-establishing the stream's invariants
+and before normalising the config, so a structurally impossible stream, or any
+stream presented with an unusable config, was hashed in full before being
+refused. An earlier revision of this document said the digest was a floor no
+ordering could defer, because it IS the comparison. The first half is true and
+the second does not follow: such a stream is refused whatever its digest says.
+
+The first attempt was reverted because of what it cost.
+`TestOrderedRulesSuppliedDigestBindsEveryFieldThatCouldChangeADecision` walked
+`SuppliedInt64` by reflection, stripped one field at a time and required THE
 DIGEST to move — and that walk is what caught `HasAvailableAtPosition` being
-unbound, a P1 in this pull request. With the structure decided first, every
-structural field is refused before the digest is computed, so the walk can no
-longer distinguish "the digest binds this field" from "the structural tier
-refused it". Implemented, it fails with its own words: *the probe stream must be
-readable, or this test compares nothing.* Six test functions and roughly twenty
-cases degrade the same way, including the nine forged streams that reach the
-invariant pass through the oracle.
+unbound, a P1 in this pull request. It took its digest off
+`EvaluateOrderedRules`' result, so deciding the structure first made every
+structural field refuse before a digest existed, and the walk could no longer
+distinguish "the digest binds this field" from "the structural tier refused it".
+It failed in its own words: *the probe stream must be readable, or this test
+compares nothing.*
 
-So a proven guard against an unbound digest field is kept, against a
-constant-factor refusal cost on an API this repository has no runtime caller
-for. The ordering stands and the claim that it *could not* be otherwise does
-not.
+The reviewing lane then supplied the half that was missing: the walk belongs in
+an INTERNAL test calling `orderedRulesStreamDigest` directly, where the probe
+need not be a stream anything would admit. It is now
+`TestSuppliedDigestBindsEveryFieldThatCouldChangeADecision` in
+`ordered_rules_bindings_internal_test.go`, it still fails by name when the flag
+is unbound, and it is a better test for having lost the dependency — the
+coupling was never part of the property. With that gone the reorder is free, and
+both the structural tier and the config normalisation now precede the digest: a
+128x64 stream with 2,500-byte provenance and a final undeclared availability
+went from 25.589455 milliseconds to 130.161 microseconds, and the same stream
+beside a config with no default from 27.130597 milliseconds to 127.621
+microseconds. Both now match their one-byte-provenance controls.
+
+What a caller sees changes, deliberately. Both refusals used to be decided by
+the digest first, and that refusal handed the recomputed value back, so the
+documented two-call oracle worked on them. Both now carry nothing and the oracle
+does not function for either. That is strictly narrower: two classes of forgery
+lose a published route, and the forgery case in the suite counts BOTH routes so
+that neither can quietly become the only one.
 
 One refusal also stopped re-exporting what it never read. A stream whose
 SelectionDigest does not match is not what the projection produced, so its

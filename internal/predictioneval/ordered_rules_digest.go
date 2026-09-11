@@ -228,7 +228,7 @@ func orderedRulesEntropyDigest(d SuppliedDrawTrace) string {
 // [OrderedRulesEvaluation.EntropyDigest], which DO cover the whole of their
 // subjects and are reported separately for exactly that contrast. See
 // TestOrderedRulesAppendingPostCutoffFactsCannotChangeEvaluation.
-func orderedRulesConsumedDigest(s OrderedRulesStream, cfg OrderedRulesConfig, d SuppliedDrawTrace,
+func orderedRulesConsumedDigest(s OrderedRulesStream, configDigest string, d SuppliedDrawTrace,
 	candidatesConsumed, wordsConsumed int, exhausted bool) string {
 	h := sha256.New()
 	digestPart(h, domainOrderedConsumed)
@@ -329,7 +329,14 @@ func orderedRulesConsumedDigest(s OrderedRulesStream, cfg OrderedRulesConfig, d 
 	digestPart(h, s.Cutoff.Identity)
 	digestPart(h, string(s.Cutoff.Basis))
 
-	digestPart(h, orderedRulesConfigDigest(cfg))
+	// The config digest is PASSED IN, not recomputed. This binding has always
+	// been the config's digest rather than its fields, and the caller has
+	// already computed exactly that value for out.ConfigDigest — recomputing it
+	// traversed ConfigID a second time, and that identifier rides the
+	// config-and-trace ceiling with no per-string bound. The bytes hashed here
+	// are identical, so no digest value moves; only the number of traversals
+	// does.
+	digestPart(h, configDigest)
 	digestPart(h, d.RunID)
 	digestPart(h, d.EntropySemanticsVersion)
 

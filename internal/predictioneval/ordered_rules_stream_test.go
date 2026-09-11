@@ -832,11 +832,15 @@ func TestOrderedRulesOversizedInputIsRefusedBeforeItIsRead(t *testing.T) {
 			predictioneval.ReasonStreamTextOverBound)
 
 		// Non-vacuity: one byte shorter is admissible, so the bound is the bound.
+		// What matters is that the GATE stands aside; the forged probe is then
+		// refused by the structural tier, which is a strictly later decision —
+		// if the gate had fired, the reason would be one of its over-bound
+		// codes rather than this one.
 		st.Candidates[0].Provenance = over[:len(over)-1]
 		if ev := predictioneval.EvaluateOrderedRules(st, cfg, orDraws()); ev.Reason !=
-			predictioneval.ReasonStreamDigestMismatch {
-			t.Fatalf("reason %q, want %s: a string exactly at the limit is admissible",
-				ev.Reason, predictioneval.ReasonStreamDigestMismatch)
+			predictioneval.ReasonStreamInvariantViolated {
+			t.Fatalf("reason %q, want %s: a string exactly at the limit is admissible and must be "+
+				"carried past the gate", ev.Reason, predictioneval.ReasonStreamInvariantViolated)
 		}
 	})
 
@@ -985,8 +989,10 @@ func TestOrderedRulesOversizedInputIsRefusedBeforeItIsRead(t *testing.T) {
 	})
 
 	// Non-vacuity: EXACTLY at the counts, the shape gate does not fire and the
-	// forged stream falls through to the digest mismatch it deserves. So the
-	// gate refuses oversized input rather than everything.
+	// forged stream falls through to a later decision — the structural tier,
+	// which judges what the stream says rather than how big it is. So the gate
+	// refuses oversized input rather than everything. Any over-bound code here
+	// would mean the gate fired on admissible input.
 	t.Run("exactly at the bounds the shape gate stands aside", func(t *testing.T) {
 		st := forged(predictioneval.MaxOrderedRulesCandidates)
 		st.Qualifications = make([]string, predictioneval.MaxOrderedRulesQualifications)
@@ -994,12 +1000,17 @@ func TestOrderedRulesOversizedInputIsRefusedBeforeItIsRead(t *testing.T) {
 			predictioneval.MaxOrderedRulesSourceReferences)
 		ev := predictioneval.EvaluateOrderedRules(st, cfg,
 			orDraws(make([]uint64, predictioneval.MaxOrderedRulesDrawWords)...))
-		if ev.Reason != predictioneval.ReasonStreamDigestMismatch {
+		if ev.Reason != predictioneval.ReasonStreamInvariantViolated {
 			t.Fatalf("reason %q, want %s: an input at its bounds is admissible and must be judged "+
-				"on its contents", ev.Reason, predictioneval.ReasonStreamDigestMismatch)
+				"on its contents", ev.Reason, predictioneval.ReasonStreamInvariantViolated)
 		}
-		if ev.StreamDigest == "" {
-			t.Fatal("an input that passed the shape gate WAS read, so it must carry its digest")
+		// And it carries NO digest. Passing the gate used to mean the input had
+		// been read, because the digest was computed next; the structural tier
+		// now decides first and computes nothing, so a refusal from it attests
+		// to nothing — the same rule the gate itself follows one step earlier.
+		if ev.StreamDigest != "" {
+			t.Fatalf("a structural refusal carried a stream digest %q. It was decided before one "+
+				"was computed, so it witnesses an input this call never hashed.", ev.StreamDigest)
 		}
 	})
 }
@@ -1060,14 +1071,33 @@ func TestOrderedRulesAMatchingDigestIsNotProofOfProjection(t *testing.T) {
 
 	// selfConsistent runs the oracle: take the digest the evaluator publishes
 	// on refusal, put it back, and hand the same stream in again.
+	//
+	// Two routes end here now, and the difference is worth keeping rather than
+	// flattening. A forgery the STRUCTURAL tier can see is refused before a
+	// digest is ever computed, so the oracle gets no turn at all — a stronger
+	// result than this case asks for, and the reason those probes stopped
+	// reporting a digest mismatch. Everything the structural tier admits — a
+	// repeated identity, a duplicated outcome, unencodable text — still needs
+	// the oracle to reach the pass that judges it. Both routes are counted
+	// below, so neither can quietly become the only one.
+	var viaStructure, viaOracle int
 	selfConsistent := func(t *testing.T, st predictioneval.OrderedRulesStream) predictioneval.OrderedRulesEvaluation {
 		t.Helper()
 		st.SelectionDigest = "deliberately wrong"
 		first := predictioneval.EvaluateOrderedRules(st, cfg, orDraws())
-		if first.Reason != predictioneval.ReasonStreamDigestMismatch || first.StreamDigest == "" {
-			t.Fatalf("the probe must reach the digest comparison and be refused by it; got reason %q",
-				first.Reason)
+		if first.Reason == predictioneval.ReasonStreamInvariantViolated {
+			if first.StreamDigest != "" {
+				t.Fatalf("a structural refusal decided before the digest carried one anyway (%q); "+
+					"it computed nothing and must attest to nothing", first.StreamDigest)
+			}
+			viaStructure++
+			return first
 		}
+		if first.Reason != predictioneval.ReasonStreamDigestMismatch || first.StreamDigest == "" {
+			t.Fatalf("the probe must be refused either by the structural tier or by the digest "+
+				"comparison; got reason %q", first.Reason)
+		}
+		viaOracle++
 		st.SelectionDigest = first.StreamDigest
 		return predictioneval.EvaluateOrderedRules(st, cfg, orDraws())
 	}
@@ -1285,6 +1315,18 @@ func TestOrderedRulesAMatchingDigestIsNotProofOfProjection(t *testing.T) {
 				ev.Status, ev.Reason)
 		}
 	})
+
+	// And both routes really were taken. Without this a change that moved every
+	// check into one tier would leave the other path untested while every case
+	// above still passed.
+	switch {
+	case viaStructure == 0:
+		t.Error("no probe was refused by the structural tier before the digest, so this case no " +
+			"longer covers the cheaper of the two routes")
+	case viaOracle == 0:
+		t.Error("no probe reached the digest comparison, so the two-call oracle — the thing this " +
+			"case is named for — is not exercised at all")
+	}
 }
 
 // TestOrderedRulesAProjectedStreamIsAlwaysAdmissible pins the invariant the
@@ -3984,6 +4026,63 @@ func TestOrderedRulesACheapRefusalIsNotPaidForWithTheWholePayload(t *testing.T) 
 		}
 	})
 
+	// The NESTED presence words are closed sets too, and leaving the outcomes
+	// out of the vocabulary tier meant a last outcome's invalid word waited on
+	// every earlier candidate's payload text.
+	t.Run("a later outcome's presence word beats an earlier payload scan", func(t *testing.T) {
+		payload := orCandidate("c1", 10, orKnownBalance(1000), orOutcome("A", 4), orOutcome("B", 6))
+		payload.Provenance = "prov-\xff"
+		voc := orCandidate("c2", 20, orKnownBalance(1000), orOutcome("A", 4), orOutcome("B", 6))
+		voc.Outcomes[1].Points.Presence = "NOT-A-PRESENCE"
+
+		// The premise: each fault really is raised on its own.
+		if _, err := predictioneval.ProjectOrderedRulesStream(
+			orSource([]predictioneval.OrderedRulesCandidate{payload}, nil),
+			orAdmission()); !errors.Is(err, predictioneval.ErrOrderedRulesNotEncodable) {
+			t.Fatalf("premise: the provenance alone must be refused as unencodable; got %v", err)
+		}
+		if _, err := predictioneval.ProjectOrderedRulesStream(
+			orSource([]predictioneval.OrderedRulesCandidate{voc}, nil),
+			orAdmission()); !errors.Is(err, predictioneval.ErrOrderedRulesVocabulary) {
+			t.Fatalf("premise: the presence word alone must be refused for its vocabulary; got %v", err)
+		}
+
+		if _, err := predictioneval.ProjectOrderedRulesStream(
+			orSource([]predictioneval.OrderedRulesCandidate{payload, voc}, nil),
+			orAdmission()); !errors.Is(err, predictioneval.ErrOrderedRulesVocabulary) {
+			t.Fatalf("a source whose first candidate carries unencodable provenance and whose "+
+				"second holds an outcome with a presence word outside its set was refused %v. "+
+				"A presence word is short and closed; it must not wait behind payload text.", err)
+		}
+	})
+
+	// An intervention's kind and relevance are closed sets that depend on
+	// neither the admission's references nor any identity.
+	t.Run("intervention vocabulary is settled before unrelated source text", func(t *testing.T) {
+		bad := []predictioneval.OrderedRulesIntervention{
+			orIntervention("call-1", 100, "NOT-A-KIND", predictioneval.RelevanceProven, "boundary"),
+		}
+		poisoned := orAdmission()
+		poisoned.SourceReferences = []string{"ref-\xff"}
+
+		// The premise: each fault really is raised on its own.
+		if _, err := predictioneval.ProjectOrderedRulesStream(orSource(cs, bad),
+			orAdmission()); !errors.Is(err, predictioneval.ErrOrderedRulesVocabulary) {
+			t.Fatalf("premise: the kind alone must be refused for its vocabulary; got %v", err)
+		}
+		if _, err := predictioneval.ProjectOrderedRulesStream(orSource(cs, nil),
+			poisoned); !errors.Is(err, predictioneval.ErrOrderedRulesNotEncodable) {
+			t.Fatalf("premise: the reference alone must be refused as unencodable; got %v", err)
+		}
+
+		if _, err := predictioneval.ProjectOrderedRulesStream(orSource(cs, bad),
+			poisoned); !errors.Is(err, predictioneval.ErrOrderedRulesVocabulary) {
+			t.Fatalf("an intervention whose kind is outside its vocabulary, beside an unencodable "+
+				"admission reference, was refused %v. Two short closed-set fields do not depend "+
+				"on the references or on any identity, and must not wait behind them.", err)
+		}
+	})
+
 	// An unusable config is arithmetic over a rule count already bounded above.
 	// The invariant pass is bounded but not cheap: on a well-formed stream it
 	// walks the scope, the admission references and every retained candidate to
@@ -4051,25 +4150,22 @@ func TestOrderedRulesACheapRefusalIsNotPaidForWithTheWholePayload(t *testing.T) 
 func TestOrderedRulesAMismatchRefusalReExportsNothingItDidNotRead(t *testing.T) {
 	cfg := orConfig([]predictioneval.OrderedRule{
 		orRule(predictioneval.ComparatorLe, 40, 100, 0, 10)}, 95, 100, 0, 10)
-	cs := []predictioneval.OrderedRulesCandidate{
-		orCandidate("c1", 10, orKnownBalance(1000), orOutcome("A", 4), orOutcome("B", 6)),
-	}
 
 	t.Run("a mismatch carries the recomputed digest and nothing else", func(t *testing.T) {
-		st := orProject(t, cs, nil)
-		// Both fields filled with values the projection would never derive, at
-		// the widest shape the gate admits.
-		st.Qualifications = make([]string, predictioneval.MaxOrderedRulesQualifications)
-		for i := range st.Qualifications {
-			st.Qualifications[i] = strings.Repeat("Q", predictioneval.MaxOrderedRulesIdentifierBytes)
-		}
-		st.Cutoff = predictioneval.OrderedRulesCutoff{
-			Established:      true,
-			Position:         7,
-			Kind:             predictioneval.InterventionAutoCallStarted,
-			Identity:         "invented-boundary",
-			Basis:            predictioneval.CutoffFactualIntervention,
-			DroppedAtOrAfter: 3,
+		// A GENUINELY projected stream with a real boundary, so its cutoff and
+		// its qualifications are derived rather than invented. That matters
+		// more than it used to: an invented cutoff is now refused by the
+		// structural tier before the digest is computed at all, so a probe
+		// built that way would never reach the comparison this case is about.
+		st := orProject(t, []predictioneval.OrderedRulesCandidate{
+			orCandidate("c1", 1, orKnownBalance(1000), orOutcome("A", 4), orOutcome("B", 6)),
+			orCandidate("c2", 10, orKnownBalance(1000), orOutcome("A", 4), orOutcome("B", 6)),
+		}, []predictioneval.OrderedRulesIntervention{
+			orIntervention("call-1", 5, predictioneval.InterventionAutoCallStarted,
+				predictioneval.RelevanceProven, "a real call")})
+		if !st.Cutoff.Established || st.Cutoff.DroppedAtOrAfter == 0 || len(st.Qualifications) == 0 {
+			t.Fatalf("premise: the fixture must project a boundary, a removal and qualifications; "+
+				"got %+v / %v", st.Cutoff, st.Qualifications)
 		}
 		st.SelectionDigest = strings.Repeat("0", 64)
 
@@ -4081,11 +4177,11 @@ func TestOrderedRulesAMismatchRefusalReExportsNothingItDidNotRead(t *testing.T) 
 			t.Fatal("the mismatch refusal stopped carrying the recomputed stream digest, which " +
 				"the documented oracle and several cases in this file depend on")
 		case len(got.Qualifications) != 0:
-			t.Fatalf("a digest mismatch handed back %d qualifications totalling %d bytes. They are "+
-				"caller text at this point — the derivation check runs below the mismatch and "+
-				"never sees them — so this re-exports a limitation list the evidence never "+
-				"implied, inside a field whose contract is that it was derived.",
-				len(got.Qualifications), len(got.Qualifications)*predictioneval.MaxOrderedRulesIdentifierBytes)
+			t.Fatalf("a digest mismatch handed back %d qualifications. A mismatch means this is not "+
+				"the stream the projection produced, so they are caller text — the derivation "+
+				"check runs below the mismatch and never sees them — and re-exporting them puts "+
+				"a limitation list the evidence never implied inside a derived field.",
+				len(got.Qualifications))
 		case got.Cutoff != (predictioneval.OrderedRulesCutoff{}):
 			t.Fatalf("a digest mismatch handed back cutoff %+v. No intervention established it and "+
 				"orderedRulesCutoffImpossible never ran, so it is supplied text wearing a "+
@@ -4169,6 +4265,7 @@ func TestOrderedRulesARefusalDecidedBeforeTheTraversalAttestsToNothing(t *testin
 		cfg    predictioneval.OrderedRulesConfig
 		words  int
 		reason string
+		digest bool
 	}{
 		// DRAW_WORDS_OVER_BOUND and RULE_COUNT_OVER_BOUND are deliberately not
 		// in this table. The evaluator has cases for both, but the shape gate
@@ -4178,10 +4275,15 @@ func TestOrderedRulesARefusalDecidedBeforeTheTraversalAttestsToNothing(t *testin
 		// is what a caller sees. The case below pins that instead, and this
 		// table would have asserted a contract that does not exist: the first
 		// draft of it did, and failed.
+		// CONFIG_DEFAULT_NOT_SUPPLIED is decided BEFORE the stream digest — an
+		// unusable config is refused whatever stream came with it — so it
+		// carries nothing at all, and `digest` says so.
 		{"config carries no default", orProject(t, cs, nil), noDefault, 0,
-			predictioneval.ReasonConfigDefaultNotSupplied},
+			predictioneval.ReasonConfigDefaultNotSupplied, false},
+		// The invariant pass runs after the comparison, so this one verified a
+		// digest to get where it was refused and reports it.
 		{"stream invariants broken", forge(t), cfg, 0,
-			predictioneval.ReasonStreamInvariantViolated},
+			predictioneval.ReasonStreamInvariantViolated, true},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			got := predictioneval.EvaluateOrderedRules(c.stream, c.cfg,
@@ -4190,10 +4292,12 @@ func TestOrderedRulesARefusalDecidedBeforeTheTraversalAttestsToNothing(t *testin
 			case got.Status != predictioneval.StatusRefused || got.Reason != c.reason:
 				t.Fatalf("premise: this input must be refused %q; got %q / %q",
 					c.reason, got.Status, got.Reason)
-			// The one it DID compute, and the one that got it this far.
-			case got.StreamDigest == "":
+			case c.digest && got.StreamDigest == "":
 				t.Fatal("a refusal reached past the digest comparison stopped carrying the " +
 					"stream digest it verified to get there")
+			case !c.digest && got.StreamDigest != "":
+				t.Fatalf("a refusal decided BEFORE the digest carried one anyway (%q). It computed "+
+					"no digest, so it can attest to none.", got.StreamDigest)
 			case got.ConfigDigest != "", got.EntropyDigest != "":
 				t.Fatalf("a refusal decided before the traversal carried a config or entropy "+
 					"digest (config %q, entropy %q). Each hashes a whole input this call "+
@@ -4218,16 +4322,25 @@ func TestOrderedRulesARefusalDecidedBeforeTheTraversalAttestsToNothing(t *testin
 	// and a refusal hands the recomputed value back, so the two-call oracle
 	// reaches both refusals below carrying any boundary the caller likes.
 	t.Run("a pre-traversal refusal carries no derived cutoff or qualifications", func(t *testing.T) {
-		st := orProject(t, cs, nil)
-		st.Cutoff = predictioneval.OrderedRulesCutoff{
-			Established:      true,
-			Position:         7,
-			Kind:             predictioneval.InterventionAutoCallStarted,
-			Identity:         "INVENTED-BOUNDARY",
-			Basis:            predictioneval.CutoffFactualIntervention,
-			DroppedAtOrAfter: 3,
+		// A GENUINELY projected boundary, so the cutoff and the qualifications
+		// this refusal must not hand back are real rather than invented. An
+		// invented cutoff would be refused by the structural tier before either
+		// refusal below is reached, which is why the first draft of this case
+		// built one and stopped testing what it names.
+		st := orProject(t, []predictioneval.OrderedRulesCandidate{
+			orCandidate("c1", 1, orKnownBalance(1000), orOutcome("A", 4), orOutcome("B", 6)),
+			orCandidate("c2", 10, orKnownBalance(1000), orOutcome("A", 4), orOutcome("B", 6)),
+		}, []predictioneval.OrderedRulesIntervention{
+			orIntervention("call-1", 5, predictioneval.InterventionAutoCallStarted,
+				predictioneval.RelevanceProven, "a real call")})
+		if !st.Cutoff.Established || len(st.Qualifications) == 0 {
+			t.Fatalf("premise: the fixture must project a boundary and qualifications; got %+v / %v",
+				st.Cutoff, st.Qualifications)
 		}
-		st.Qualifications = []string{"FABRICATED-A", "FABRICATED-B"}
+		// One fabricated qualification, which the DERIVATION check refuses —
+		// that check lives in the invariant pass, below the digest, so the
+		// stream still passes the structural tier and both routes are reachable.
+		st.Qualifications = append(st.Qualifications, "FABRICATED")
 		st.SelectionDigest = predictioneval.EvaluateOrderedRules(st, cfg, orDraws()).StreamDigest
 
 		for _, c := range []struct {
@@ -4244,9 +4357,10 @@ func TestOrderedRulesARefusalDecidedBeforeTheTraversalAttestsToNothing(t *testin
 				case got.Reason != c.reason:
 					t.Fatalf("premise: this input must be refused %q; got %q", c.reason, got.Reason)
 				case got.Cutoff != (predictioneval.OrderedRulesCutoff{}):
-					t.Fatalf("a refusal decided before the traversal handed back cutoff %+v. No "+
-						"intervention established it and the projection never produced it; a "+
-						"matching digest says only that the stream has not CHANGED.", got.Cutoff)
+					t.Fatalf("a refusal decided before the traversal handed back cutoff %+v. It is "+
+						"a DERIVED field and nothing here has established that this stream was "+
+						"derived — a matching digest says only that it has not CHANGED — so it "+
+						"must not be populated until the invariant pass has passed.", got.Cutoff)
 				case len(got.Qualifications) != 0:
 					t.Fatalf("a refusal decided before the traversal handed back qualifications %v "+
 						"— a limitation list the evidence never implied, in a field whose "+

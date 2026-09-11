@@ -512,9 +512,13 @@ func orderedRulesQualificationsNotDerived(s OrderedRulesStream) bool {
 // and every retained candidate and outcome.
 //
 // It is a function of its own because TWO callers need it at two different
-// points. EvaluateOrderedRules runs it before computing the stream digest, and
+// points: EvaluateOrderedRules runs it before computing the stream digest, and
 // orderedRulesStreamInvariantsBroken runs it again ahead of its own text pass.
 // One definition, so the rules cannot drift between them.
+//
+// An earlier revision said exactly that while the evaluator's call did not
+// exist — the reorder had been reverted and this comment was left describing
+// it. A reviewer found it by grepping the call sites. It is true now.
 //
 // Every check here is one the invariant pass below already makes. Nothing is
 // added, and both callers answer yes or no.
@@ -800,34 +804,44 @@ func EvaluateOrderedRules(stream OrderedRulesStream, rules OrderedRulesConfig, d
 	// comparison. Its cost is proportional to the stream being judged, which is
 	// the one input a mismatch refusal is about, and the gate above has already
 	// bounded it.
-	// THE DIGEST IS NOT DEFERRED BEHIND THE STREAM'S STRUCTURE, and the reason
-	// is a measured trade rather than an oversight. A previous revision of this
-	// comment said the digest was a floor no ordering could defer because it IS
-	// the comparison. The first half is true and the second does not follow: a
-	// stream that could not have been projected is refused whatever its digest
-	// says, so its digest need never be computed. Deferring it was implemented
-	// and measured — for a 128x64 stream with 2,500-byte provenance whose final
-	// KNOWN balance omits its availability declaration, the lane that found it
-	// measured 98.6 ms against 8.2 ms, and 122.4 against 7.2 once the two-call
-	// oracle is counted.
+	// THE STREAM'S STRUCTURE AND THE CONFIG BEFORE THE DIGEST.
 	//
-	// It is not kept, because of what it costs on the other side.
-	// TestOrderedRulesSuppliedDigestBindsEveryFieldThatCouldChangeADecision
-	// walks SuppliedInt64 by reflection, strips one field at a time and
-	// requires the DIGEST to move; that walk is what caught
-	// HasAvailableAtPosition being unbound, a P1 in this PR. With the structure
-	// decided first, every structural field is refused before the digest is
-	// computed, so the walk can no longer tell "the digest binds this field"
-	// from "the structural tier refused it" — the test says so in its own
-	// words, failing with "the probe stream must be readable, or this test
-	// compares nothing". The same applies to the availability-binding case and
-	// to the nine forged streams that reach the invariant pass through the
-	// oracle.
+	// A stream that could not have been projected is refused whatever its
+	// digest says, and an unusable config is refused whatever stream came with
+	// it. Neither decision needs the hash, so neither should pay for it: the
+	// digest traverses every retained candidate and outcome, up to the whole
+	// retained-text ceiling.
 	//
-	// So the ordering stands: a proven guard against an unbound digest field,
-	// kept, against a constant-factor refusal cost on an API this repository
-	// has no runtime caller for. If that trade is ever wrong, what changes is
-	// the guard's design, not this line alone.
+	// This was declined once, on a trade that no longer holds, and the history
+	// is worth keeping because the trade was real. The guard against an unbound
+	// digest field — the reflection walk that caught HasAvailableAtPosition, a
+	// P1 on this change — took its digest off EvaluateOrderedRules' result, so
+	// deciding the structure first made every structural field refuse before a
+	// digest existed and the walk could no longer tell "the digest binds this
+	// field" from "the structure refused it". The reviewer who raised the
+	// ordering supplied the missing half: the walk belongs in an internal test
+	// calling orderedRulesStreamDigest directly, where the probe need not be a
+	// stream anything would admit. It is now
+	// TestSuppliedDigestBindsEveryFieldThatCouldChangeADecision, in
+	// ordered_rules_bindings_internal_test.go; it still fails by name when the
+	// flag is unbound, and the coupling that blocked this reorder is gone.
+	//
+	// What a caller sees changes, deliberately. A structurally impossible
+	// stream, or one presented with an unusable config, used to be refused for
+	// its digest first, and that refusal handed back the recomputed value — so
+	// the documented two-call oracle worked on it. Both are now refused
+	// carrying nothing, and the oracle does not function for either. That is
+	// strictly narrower: two classes of forgery lose a published route. The
+	// oracle still works for everything these two tiers admit, which is what
+	// the cases exercising it depend on.
+	if orderedRulesStreamStructureBroken(stream) {
+		return orderedRulesUnreadRefusal(ReasonStreamInvariantViolated)
+	}
+	cfg, configReason := normalizeOrderedRulesConfig(rules)
+	if configReason != "" {
+		return orderedRulesUnreadRefusal(configReason)
+	}
+
 	streamDigest := orderedRulesStreamDigest(stream)
 	if stream.SelectionDigest != streamDigest {
 		refused := orderedRulesUnreadRefusal(ReasonStreamDigestMismatch)
@@ -880,7 +894,7 @@ func EvaluateOrderedRules(stream OrderedRulesStream, rules OrderedRulesConfig, d
 	refuse := func(reason string, candidatesConsumed, wordsConsumed int) OrderedRulesEvaluation {
 		out.Status = StatusRefused
 		out.Reason = reason
-		out.ConsumedInputDigest = orderedRulesConsumedDigest(stream, rules, draws,
+		out.ConsumedInputDigest = orderedRulesConsumedDigest(stream, out.ConfigDigest, draws,
 			candidatesConsumed, wordsConsumed, false)
 		return out
 	}
@@ -930,25 +944,6 @@ func EvaluateOrderedRules(stream OrderedRulesStream, rules OrderedRulesConfig, d
 		return refuseUnread(ReasonRuleCountOverBound)
 	}
 
-	// THE CONFIG BEFORE THE STREAM'S INVARIANTS, which is the same rule as the
-	// two cases above rather than a new one: this switch already decides the
-	// two over-bound refusals ahead of the invariant pass, so the file has
-	// chosen cheapest-sufficient-evidence over most-fundamental-first here.
-	//
-	// normalizeOrderedRulesConfig reads a config already bounded in rule count
-	// by the case above and does arithmetic on it — no supplied text is
-	// scanned. The invariant pass is bounded but not cheap: on a stream that is
-	// perfectly well formed it walks the scope, the admission's references and
-	// every retained candidate to say so. An unusable config was therefore
-	// reported only after re-validating a stream the run was never going to
-	// read. Measured on the identical input, a 1,024-reference admission:
-	// 7.26947 ms to 4.054034 ms for CONFIG_DEFAULT_NOT_SUPPLIED. As above the
-	// residue is the stream digest the comparison already required; what this
-	// removes is the walk that used to follow it.
-	cfg, configReason := normalizeOrderedRulesConfig(rules)
-	if configReason != "" {
-		return refuseUnread(configReason)
-	}
 	if orderedRulesStreamInvariantsBroken(stream) {
 		// A matching digest says the stream has not CHANGED. It does not say
 		// where it came from, and it never could: the digest is unkeyed and
@@ -1068,7 +1063,7 @@ func EvaluateOrderedRules(stream OrderedRulesStream, rules OrderedRulesConfig, d
 			out.Visits = append(out.Visits, visit)
 			out.Status = StatusUnknownInput
 			out.Reason = ReasonOutcomeVectorNotKnown
-			out.ConsumedInputDigest = orderedRulesConsumedDigest(stream, rules, draws, ci+1, cursor, false)
+			out.ConsumedInputDigest = orderedRulesConsumedDigest(stream, out.ConfigDigest, draws, ci+1, cursor, false)
 			return out
 		}
 
@@ -1088,7 +1083,7 @@ func EvaluateOrderedRules(stream OrderedRulesStream, rules OrderedRulesConfig, d
 			out.Visits = append(out.Visits, visit)
 			out.Status = StatusUnknownInput
 			out.Reason = poolReason
-			out.ConsumedInputDigest = orderedRulesConsumedDigest(stream, rules, draws, ci+1, cursor, false)
+			out.ConsumedInputDigest = orderedRulesConsumedDigest(stream, out.ConfigDigest, draws, ci+1, cursor, false)
 			return out
 		}
 		visit.PoolTotalKnown = true
@@ -1159,7 +1154,7 @@ func EvaluateOrderedRules(stream OrderedRulesStream, rules OrderedRulesConfig, d
 						out.RawWordsConsumed = cursor
 						out.Status = StatusUnknownInput
 						out.Reason = ReasonEntropyExhausted
-						out.ConsumedInputDigest = orderedRulesConsumedDigest(stream, rules, draws, ci+1, cursor, false)
+						out.ConsumedInputDigest = orderedRulesConsumedDigest(stream, out.ConfigDigest, draws, ci+1, cursor, false)
 						return out
 					}
 					rawIndex = cursor
@@ -1219,7 +1214,7 @@ func EvaluateOrderedRules(stream OrderedRulesStream, rules OrderedRulesConfig, d
 
 	out.Status = StatusNoAttemptInSuppliedPrefix
 	out.RawWordsConsumed = cursor
-	out.ConsumedInputDigest = orderedRulesConsumedDigest(stream, rules, draws,
+	out.ConsumedInputDigest = orderedRulesConsumedDigest(stream, out.ConfigDigest, draws,
 		len(stream.Candidates), cursor, true)
 	return out
 }
@@ -1279,7 +1274,7 @@ func admitOrderedRules(out *OrderedRulesEvaluation, visit *OrderedRulesCandidate
 	}
 
 	out.Visits = append(out.Visits, *visit)
-	out.ConsumedInputDigest = orderedRulesConsumedDigest(stream, rules, draws, ci+1, cursor, false)
+	out.ConsumedInputDigest = orderedRulesConsumedDigest(stream, out.ConfigDigest, draws, ci+1, cursor, false)
 }
 
 func balanceReason(b SuppliedInt64, fallback string) string {

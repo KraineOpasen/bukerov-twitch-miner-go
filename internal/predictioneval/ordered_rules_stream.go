@@ -347,6 +347,24 @@ func ProjectOrderedRulesStream(source OrderedRulesSource, admission CommonAdmiss
 					"; a caller must say whether it recovered the ordered vector whole, because a short "+
 					"vector the donor declines and a vector nobody could recover are different facts"))
 		}
+		// The NESTED presence words belong to this tier for the same reason.
+		// Each is a short closed-set field whose validity depends on no
+		// payload, and leaving the outcomes out meant a last outcome's invalid
+		// word was reached only after every earlier candidate's provenance and
+		// reason had been scanned.
+		if err := checkPresenceVocabulary(c.Balance, where+" balance"); err != nil {
+			return OrderedRulesStream{}, err
+		}
+		for j := range c.Outcomes {
+			if err := checkPresenceVocabulary(c.Outcomes[j].Points,
+				where+" outcome "+strconv.Itoa(j)+" points"); err != nil {
+				return OrderedRulesStream{}, err
+			}
+		}
+	}
+
+	if err := checkInterventionVocabulary(source); err != nil {
+		return OrderedRulesStream{}, err
 	}
 
 	if err := validateScope(source.Scope); err != nil {
@@ -560,6 +578,9 @@ func establishCutoff(source OrderedRulesSource) (OrderedRulesCutoff, error) {
 	// The interval endpoints are settled before this: validateScope runs above
 	// establishCutoff and refuses a scope that omits them.
 	if err := checkInterventionStructure(source); err != nil {
+		return OrderedRulesCutoff{}, err
+	}
+	if err := checkInterventionVocabulary(source); err != nil {
 		return OrderedRulesCutoff{}, err
 	}
 
@@ -889,15 +910,34 @@ func checkPresence(v SuppliedInt64, where string, candidatePosition int64) error
 	if err := checkFreeText(v.Reason, where+" reason"); err != nil {
 		return err
 	}
-	switch v.Presence {
-	case SuppliedMissing, SuppliedInvalid:
+	if err := checkPresenceVocabulary(v, where); err != nil {
+		return err
+	}
+	if v.Presence != SuppliedKnown {
 		return nil
-	case SuppliedKnown:
+	}
+	return checkPresenceShape(v, where, candidatePosition)
+}
+
+// checkPresenceVocabulary bounds a supplied value's presence word and then
+// compares it against its closed set.
+//
+// Split out so the projection can settle every nested presence — a candidate's
+// balance AND every outcome's points — in one early pass, rather than reaching
+// the last outcome's word only after every earlier candidate's provenance and
+// reason have been scanned. The length bound comes first because the refusal
+// quotes the value, which is also why this cannot join the zero-byte tier.
+func checkPresenceVocabulary(v SuppliedInt64, where string) error {
+	if err := checkFreeText(string(v.Presence), where+" presence vocabulary"); err != nil {
+		return err
+	}
+	switch v.Presence {
+	case SuppliedKnown, SuppliedMissing, SuppliedInvalid:
+		return nil
 	default:
 		return errors.Join(ErrOrderedRulesVocabulary,
 			errors.New("predictioneval: "+where+" has presence "+strconv.Quote(string(v.Presence))))
 	}
-	return checkPresenceShape(v, where, candidatePosition)
 }
 
 // checkPresenceShape is the half of checkPresence that reads no supplied byte.
@@ -912,6 +952,41 @@ func checkPresence(v SuppliedInt64, where string, candidatePosition int64) error
 // an enormous supplied presence falls out of the KNOWN branch in constant time
 // rather than being read here; the vocabulary that refuses it lives in
 // checkPresence, after the bound.
+// checkInterventionVocabulary bounds and validates the interventions' two
+// closed-set fields.
+//
+// Same shape as checkInterventionStructure: one definition, two callers. The
+// projection runs it in the vocabulary tier, before the admission references
+// and before any identity is scanned or hashed, because a kind or a relevance
+// outside its set depends on neither — a last intervention with a short invalid
+// Kind used to be reached only after roughly 4 MiB of references and another
+// 4 MiB of identities. establishCutoff runs it again because it quotes these
+// values in its own refusals.
+func checkInterventionVocabulary(source OrderedRulesSource) error {
+	for i := range source.Interventions {
+		in := &source.Interventions[i]
+		where := "intervention " + strconv.Itoa(i)
+		for _, v := range [...]string{string(in.Kind), string(in.Relevance)} {
+			if err := checkFreeText(v, where+" vocabulary"); err != nil {
+				return err
+			}
+		}
+		switch in.Kind {
+		case InterventionAutoCallStarted, InterventionManualCallStarted:
+		default:
+			return errors.Join(ErrOrderedRulesVocabulary,
+				errors.New("predictioneval: "+where+" has kind "+strconv.Quote(string(in.Kind))))
+		}
+		switch in.Relevance {
+		case RelevanceExcluded, RelevanceProven, RelevanceAmbiguous:
+		default:
+			return errors.Join(ErrOrderedRulesVocabulary,
+				errors.New("predictioneval: "+where+" has relevance "+strconv.Quote(string(in.Relevance))))
+		}
+	}
+	return nil
+}
+
 // checkInterventionStructure is the interventions' zero-byte tier: a declared
 // position and the declared interval, integer work quoting only integers.
 //
