@@ -284,7 +284,7 @@ func ProjectOrderedRulesStream(source OrderedRulesSource, admission CommonAdmiss
 	if err := checkFreeText(string(admission.ViewKind), "admission view kind"); err != nil {
 		return OrderedRulesStream{}, err
 	}
-	// THE CANDIDATE VOCABULARY NEXT, ahead of every other text in the source.
+	// THE CANDIDATE VOCABULARY NEXT.
 	//
 	// Four closed-set fields per candidate. Each is length-bounded first —
 	// their refusals quote the value, which is why they cannot join the
@@ -292,11 +292,18 @@ func ProjectOrderedRulesStream(source OrderedRulesSource, admission CommonAdmiss
 	// reads at most MaxOrderedRulesCandidates x 4 x MaxOrderedRulesIdentifierBytes
 	// and in practice a few words per candidate.
 	//
-	// It runs before the scope and admission text, before the interventions,
-	// and before any identity, because those are larger and a candidate whose
-	// source kind is outside its vocabulary does not depend on any of them: a
-	// first candidate with a short invalid SourceKind was reached only after
-	// roughly 12 MB of unrelated text had been scanned.
+	// It runs before validateScope and validateAdmission, before the
+	// interventions, and before any identity, because those carry the large
+	// text and a candidate whose source kind is outside its vocabulary depends
+	// on none of them: such a candidate used to be reached only after roughly
+	// 12 MB of unrelated text — the intervention detail scan and the candidate
+	// identity and payload passes further down.
+	//
+	// It does NOT run before the three vocabulary checks immediately above, and
+	// an earlier version of this comment said it did. Those three are each
+	// bounded to MaxOrderedRulesIdentifierBytes before anything quotes them, so
+	// they are small on either side of this loop and moving them would buy
+	// nothing: the error was in the description, not in the order.
 	//
 	// This does NOT close the ordering axis, and the previous revision claimed
 	// it did. See the note above the text tier.

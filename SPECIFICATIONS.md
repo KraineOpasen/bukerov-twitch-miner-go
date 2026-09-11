@@ -3598,10 +3598,15 @@ an empty identity went from 20.344244 milliseconds to 488.369 microseconds,
 matching the same refusal with one-byte provenance.
 
 And a candidate's VOCABULARY — four closed-set fields, length-bounded first
-because their refusals quote the value — is now settled before the scope and
-admission text, before the interventions, and before any identity is scanned or
-hashed, none of which bear on it: a first candidate with a short invalid source
-kind went from 10.093146 milliseconds to 49.724 microseconds.
+because their refusals quote the value — is now settled before `validateScope`
+and `validateAdmission`, before the interventions, and before any identity is
+scanned or hashed, none of which bear on it: a first candidate with a short
+invalid source kind went from 10.093146 milliseconds to 49.724 microseconds. It
+does NOT precede the three scope and admission vocabulary checks that open the
+text tier, and an earlier revision of this paragraph said it did; those three
+are each bounded to `MaxOrderedRulesIdentifierBytes` before anything quotes
+them, so they are small on either side and the inaccuracy was in the
+description rather than the order.
 
 The ordering inside the text tier is therefore by how much text a tier reads,
 as far as that has been taken. It is not proven exhaustive and is not claimed
