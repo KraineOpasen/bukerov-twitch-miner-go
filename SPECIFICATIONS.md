@@ -4357,15 +4357,25 @@ First, the affected set is four fields, not one: `SuppliedDrawTrace.Words`
 (input), `OrderedRulesSelection.ShareBits`, `OrderedRulesTraceEntry.ShareBits`
 and `OrderedRulesTraceEntry.RawWordValue` (output).
 
-Second, the output side is unconditionally affected where the input side is
-conditional. A raw entropy word is at risk only above 2^53. `ShareBits` is
-`math.Float64bits` of a pool share, and the bit pattern of ANY normal double is
-above that line — 0.5 is 4602678819172646912, and even 1e-300 is
-118622047889322841. Reproduced: 0.5 and the next representable double above it
-have adjacent bit patterns and collapse to the same integer through a float64
-parser. So the field whose own documentation says it is *"recorded as bits so a
-report cannot round two distinguishable shares into one printed number"* is
-rounded by its own wire format, on every value it can hold.
+Second, the output side is affected far more broadly than the input side. A raw
+entropy word is at risk only above 2^53. `ShareBits` is `math.Float64bits` of a
+pool share, and a share's bit pattern stays above that line all the way down to
+a value as small as 1e-300, whose pattern is 118622047889322841. Reproduced: 0.5
+and the next representable double above it have adjacent bit patterns and
+collapse to the same integer through a float64 parser. So the field whose own
+documentation says it is *"recorded as bits so a report cannot round two
+distinguishable shares into one printed number"* is rounded by its own wire
+format.
+
+That paragraph said "the bit pattern of ANY normal double is above that line …
+on every value it can hold" until a reviewer checked the bottom of the range,
+and the universal was false. The smallest normal double is `0x0010000000000000`
+— that is 2^52 — and the whole biased-exponent-1 bin and every subnormal sit
+under 2^53 with it. The sharpest counterexample is one this package produces on
+purpose: an all-zero pool yields a share of exactly zero, whose pattern is
+`0x0000000000000000`, and there is a test for that pool. The format is still
+required across the whole domain, because which bin a share lands in is not
+known before it is computed. The need was right; the universal was not.
 
 Third, the escape route that would have made this a narrow fix does not exist,
 and that was established mechanically rather than assumed. Go's `,string` tag
@@ -4522,11 +4532,54 @@ four rows by name, so the relay is doing the work rather than the fixture.
 
 **It is NOT repaired, and the reason is the boundary rather than the difficulty.**
 The owner decision enumerated four fields. Extending a public wire contract to
-ten more, or refusing supplied values outside the exact IEEE-754 integer range
+the rest, or refusing supplied values outside the exact IEEE-754 integer range
 at ingestion — which would narrow the admitted domain the model currently
 accepts — are both larger changes than were authorized, and neither is a thing
 a comment or a test gets to decide. The finding is carried to the owner with
 the measurements above.
+
+**A seventh round, on the correction itself, and all four of its findings hold.**
+Two reviewers read the repair within the hour. What they found is recorded here
+because three of the four are faults in claims this section had just made.
+
+*The exclusion list said "ten" and there are TWELVE.* The missed pair is
+`OrderedRulesCandidateVisit.CandidatePosition` and
+`OrderedRulesCandidateVisit.PoolTotal`. They were missed because they are
+declared in `ordered_rules.go` while the enumeration that produced "ten" read
+`ordered_rules_types.go` alone — a sibling-site miss of exactly the kind this
+package keeps a rule against, committed in the paragraph that was correcting an
+earlier overstatement. `PoolTotal` is the sharpest of the twelve: it is the
+exact `int64` pool sum the share is then computed from. All twelve are now
+listed by name in the header rather than summarized.
+
+*The share claim was still a false universal,* corrected above.
+
+*The consumed-prefix digest pin was green under a mutant it should have caught,*
+and this is the one worth the most. `orWireFixture` led with a word of ZERO. The
+first rule matches at fifty percent and its draw succeeds immediately, so
+exactly ONE word is ever consumed — so `ConsumedInputDigest` covered only that
+zero, and every risky word after it was an unconsumed suffix that only the
+SEPARATE entropy digest covered. Zero survives a float64 round trip, so a
+regression confined to `orderedRulesConsumedDigest` left the pin passing. The
+fixture now leads with 2^53+1, which is under the half-rate threshold of 2^63
+and so still admits, and does not survive a float64. Both pinned digests were
+re-captured on `a3187b2` for the new fixture:
+`EntropyDigest ef5d3511…`, `ConsumedInputDigest e8ae4efe…`.
+
+The repair is demonstrated rather than asserted. Hashing
+`uint64(float64(d.Words[i]))` in the consumed-prefix digest is **KILLED** under
+the new fixture and **SURVIVES** under the old one — run both ways, and that
+pair is the evidence that the word ordering was the gap. Two further digest
+mutants (the consumed prefix dropping a word's low 32 bits, the entropy digest
+rounding through a float64) are killed by the same case and nothing else.
+
+*The residual case required only ONE lossy result path where it documents four.*
+`len(found) == 0` would have stayed green with three of the four repaired, which
+is the opposite of what the case promises. It now asserts
+`.selected.candidatePosition`, `.stoppedAtPosition`, `.trace[].candidatePosition`
+and `.visits[].candidatePosition` individually. Giving
+`OrderedRulesCandidateVisit.CandidatePosition` a `,string` tag — precisely the
+widening the case promises to fail on — now kills it by name.
 
 **A sixth review round, and five of its findings are worth more than their
 labels.** The audit above declared no gap in family A. A reviewer then filed

@@ -440,7 +440,7 @@ func TestOrderedRulesEvaluationCarriesHexOnTheWire(t *testing.T) {
 	}
 	encoded := mustMarshal(t, ev)
 	for _, want := range []string{
-		`"shareBits":"3fd999999999999a"`, `"rawWordValue":"0000000000000000"`,
+		`"shareBits":"3fd999999999999a"`, `"rawWordValue":"0020000000000001"`,
 	} {
 		if !strings.Contains(encoded, want) {
 			t.Fatalf("the encoded evaluation does not carry %s: %s", want, encoded)
@@ -523,8 +523,8 @@ func TestOrderedRulesTransportChangeMovedNoDigest(t *testing.T) {
 	for _, d := range []struct{ name, want, got string }{
 		{"StreamDigest", "1d70c59897450fc359532b99e3ad7100663c3ad9790d28688baafebde291cf6e", ev.StreamDigest},
 		{"ConfigDigest", "2e754165964654803883c5d512ce4e56c64dd7cedbb3307372d1e1d31ab9bf07", ev.ConfigDigest},
-		{"EntropyDigest", "f5f4ca98f248a03c59c03013d4cbce2874df6fefa0753f82e664352dc82ab04a", ev.EntropyDigest},
-		{"ConsumedInputDigest", "65a524a26e72de79687f399d3b36c54e396805069d4389c5c49d8c1fa2198d5b", ev.ConsumedInputDigest},
+		{"EntropyDigest", "ef5d3511ae0f1ea6df8554ebac7fb375ff582a856679a67f0a3329079b21ba0f", ev.EntropyDigest},
+		{"ConsumedInputDigest", "e8ae4efe52245e2419f7ee3e73cff563fcb939ecaa0c88a3ca448379a38826df", ev.ConsumedInputDigest},
 	} {
 		if len(d.got) != 64 {
 			t.Fatalf("%s is %q, which is not a SHA-256; pinning it would be vacuous", d.name, d.got)
@@ -670,20 +670,32 @@ func TestOrderedRulesInt64JSONFieldsStillCollapseAndAreOutsideThisRepair(t *test
 		}, cfg)
 		var generic any
 		mustUnmarshal(t, mustMarshal(t, ev), &generic)
-		found := []string{}
+		found := map[string]bool{}
 		walkJSON(generic, func(path string, node any) {
 			if n, ok := node.(float64); ok && (n >= 1<<53 || n <= -(1<<53)) {
-				found = append(found, path)
+				found[path] = true
 			}
 		})
-		if len(found) == 0 {
-			t.Fatal("no number past 2^53 appears in a result built from a position past 2^53. " +
-				"Either the positions are now carried losslessly — in which case update this " +
-				"case and the header of ordered_rules_hexword.go — or the walk cannot fire, " +
-				"which would make the assertion in TestOrderedRulesEvaluationCarriesHexOnTheWire " +
-				"vacuous")
+		// EVERY documented path, individually. Requiring merely one would stay
+		// green if three of the four were repaired, which is the opposite of
+		// what this case promises: it is supposed to fail the moment the policy
+		// reaches any one of them. A reviewer pointed out that it did not.
+		for _, want := range []string{
+			".selected.candidatePosition",
+			".stoppedAtPosition",
+			".trace[].candidatePosition",
+			".visits[].candidatePosition",
+		} {
+			if !found[want] {
+				t.Fatalf("%s does not carry a number past 2^53 in a result built from a "+
+					"position past 2^53. Either it is now carried losslessly — in which case "+
+					"update this case, the table in SPECIFICATIONS.md and the header of "+
+					"ordered_rules_hexword.go together — or the walk cannot see it, which "+
+					"would make the assertion in TestOrderedRulesEvaluationCarriesHexOnTheWire "+
+					"vacuous. Found: %v", want, sortedSet(found))
+			}
 		}
-		t.Logf("still numbers past 2^53 on a result: %v", found)
+		t.Logf("still numbers past 2^53 on a result: %v", sortedSet(found))
 	})
 }
 
@@ -712,6 +724,17 @@ func evaluateSource(t *testing.T, src predictioneval.OrderedRulesSource,
 // orWireFixture is the one fixture the two cases above share: a run that
 // admits, traces, and supplies words on both sides of 2^53 plus MaxUint64, so
 // the entropy digest covers exactly the values the transport change touches.
+//
+// THE FIRST WORD IS THE LOSSY ONE, and that ordering is the whole point of this
+// helper rather than a detail of it. The first rule matches at fifty percent
+// and its draw succeeds immediately, so exactly ONE word is ever consumed and
+// the consumed-prefix digest covers exactly that word. An earlier version led
+// with zero: the run consumed it, succeeded, and every risky word after it was
+// an unconsumed suffix that only the SEPARATE entropy digest covered. A
+// regression confined to orderedRulesConsumedDigest — hashing uint64(float64(w)),
+// say — left the pin below green, because zero survives that round trip. A
+// reviewer found it. 2^53+1 is under the half-rate threshold of 2^63, so it
+// still admits, and it does not survive a float64.
 func orWireFixture(t *testing.T) predictioneval.OrderedRulesEvaluation {
 	t.Helper()
 	cs := []predictioneval.OrderedRulesCandidate{
@@ -721,7 +744,7 @@ func orWireFixture(t *testing.T) predictioneval.OrderedRulesEvaluation {
 		orRule(predictioneval.ComparatorLe, 50, 50, 0, 10),
 	}, 95, 100, 0, 10)
 	return predictioneval.EvaluateOrderedRules(orProject(t, cs, nil), cfg,
-		orDraws(0, 0x7fffffffffffffff, math.MaxUint64, 1<<53, 1<<53+1))
+		orDraws(1<<53+1, 0, 0x7fffffffffffffff, math.MaxUint64, 1<<53))
 }
 
 // walkJSON visits every node of a decoded JSON document, naming each by a path
@@ -742,6 +765,17 @@ func walkJSON(node any, visit func(path string, node any)) {
 		}
 	}
 	walk("", node)
+}
+
+// sortedSet names a set of paths in a stable order, so a failure reads the same
+// on every run.
+func sortedSet(m map[string]bool) []string {
+	ks := make([]string, 0, len(m))
+	for k := range m {
+		ks = append(ks, k)
+	}
+	sort.Strings(ks)
+	return ks
 }
 
 func sortedKeys(m map[string]any) []string {

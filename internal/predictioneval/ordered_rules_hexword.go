@@ -10,23 +10,48 @@ package predictioneval
 //
 // WHAT THIS TYPE DOES NOT COVER, said here because an earlier draft of this
 // comment claimed "every exported 64-bit value" and a reviewer was right to
-// call that false. The model also carries ten exported int64 JSON fields that
-// are QUANTITIES — supplied point values, availability positions, the declared
-// interval endpoints, candidate and intervention positions, and the positions
-// re-exported on a result. They still travel as JSON numbers and they are not
-// repaired here: the owner decision that authorized this change enumerated the
-// four bit-pattern fields, and widening a public wire contract past what was
-// authorized is not a thing a comment gets to do. The cost is measured rather
-// than guessed, in
+// call that false. The model also carries TWELVE exported int64 JSON fields
+// that are QUANTITIES, and they are listed rather than summarized because the
+// first correction of this paragraph said "ten" and a second reviewer found the
+// two it had missed:
+//
+//	SuppliedInt64.Value                          SuppliedInt64.AvailableAtPosition
+//	OrderedRulesScope.IntervalFromPosition       OrderedRulesScope.IntervalToPosition
+//	OrderedRulesCandidate.Position               OrderedRulesIntervention.Position
+//	OrderedRulesCutoff.Position                  OrderedRulesSelection.CandidatePosition
+//	OrderedRulesTraceEntry.CandidatePosition     OrderedRulesEvaluation.StoppedAtPosition
+//	OrderedRulesCandidateVisit.CandidatePosition OrderedRulesCandidateVisit.PoolTotal
+//
+// The last two were missed because they are declared in ordered_rules.go rather
+// than in ordered_rules_types.go, and the enumeration that produced "ten" read
+// the types file alone — a sibling-site miss of exactly the kind this package
+// keeps a rule against. PoolTotal is the sharpest of the twelve: it is the
+// exact int64 pool sum that the share is then computed from.
+//
+// They still travel as JSON numbers and they are not repaired here: the owner
+// decision that authorized this change enumerated the four bit-pattern fields,
+// and widening a public wire contract past what was authorized is not a thing
+// a comment gets to do. The cost is measured rather than guessed, in
 // TestOrderedRulesInt64JSONFieldsStillCollapseAndAreOutsideThisRepair.
 //
 // That was not hypothetical. Reproduced before this type existed:
 // 9223372036854788153 and 9223372036854788154 both became 9223372036854788096
 // through a float64 parser, and math.Float64bits(0.5) against the next
 // representable double — 4602678819172646912 and 4602678819172646913 — became
-// the same integer. The share field is the sharper case: a bit pattern of any
-// normal double is past 2^53, even for a value as small as 1e-300, so EVERY
-// value of it was at risk rather than only the large ones.
+// the same integer. The share field is the sharper case: a bit pattern stays
+// past 2^53 all the way down to a value as small as 1e-300, whose pattern is
+// 0x01a56e1fc2f8f359, so the risk is not confined to large shares the way it is
+// for a raw word.
+//
+// NOT "every value of it", which is what this said until a reviewer checked the
+// bottom of the range. Bit patterns below 2^53 do exist: the smallest normal
+// double is 0x0010000000000000, which is 2^52, and the whole biased-exponent-1
+// bin and every subnormal sit under the line with it. The sharpest
+// counterexample is one this package produces on purpose — an all-zero pool
+// yields a share of exactly zero, and math.Float64bits(0) is 0x0000000000000000.
+// The format is still required across the whole domain, because which bin a
+// share lands in is not known before it is computed; the false part was the
+// universal, not the need.
 //
 // The package already said so and already acted on it in one place: hex64's own
 // documentation warns that "a raw word pushed through a double-precision JSON
