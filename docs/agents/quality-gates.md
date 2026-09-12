@@ -20,10 +20,10 @@ changes, the equivalent self-test passes (e.g. `python3 .claude/hooks/governance
 
 The oracle and golden-check distinctions below hold for any Q1 evidence; the classified-failure and
 reached-case distinctions hold wherever a mutation proof is claimed. Each distinction that bears on a claim
-must hold for the claim to be evidentiary rather than merely plausible. Mutation/harness proof keeps the
-scope `GOVERNANCE_V3.md` §12 gives it — *where applicable*, proportional to the risk carried by the code
-being changed, never a mandate to mutate the code behind every test or every change — and where a
-**disposable mutation** proof is claimed, §12's invariant
+must hold for the claim to be evidentiary rather than merely plausible. `GOVERNANCE_V3.md` §12 requires
+mutation/harness proof *where applicable*; this elaboration reads that scope as proportional to the risk
+carried by the code being changed, and never as a mandate to mutate the code behind every test or every
+change. Where a **disposable mutation** proof is claimed, §12's invariant
 (`baseline PASS → mutation → expected FAIL → byte-identical restore → PASS → clean`) is the authority.
 
 - **Independent oracle.** The expected behaviour or value comes from an approved requirement/spec, an
@@ -31,13 +31,17 @@ being changed, never a mandate to mutate the code behind every test or every cha
   under test. A golden regenerated from the implementation it checks is that implementation, not an
   independent oracle.
 - **Classified failure.** The expected FAIL is a behavioural failure attributable to the intended property —
-  an assertion failure, or a race, panic or liveness signal where that is the property's detection
-  mechanism. A build or compile failure, an incidental timeout, no matching test, an unreached or
-  inaccessible path, an unrelated earlier refusal/failure, and tooling that is unavailable are each reported
-  as themselves (§6); a build break is not behavioural proof, so a mutation that fails to build establishes
-  nothing and is replaced rather than counted. Survival alone classifies nothing: only a mutant argued to
-  preserve behaviour over the reachable input domain is **equivalent**, its survival is then not evidence of
-  a weak test, and the argument is recorded with it.
+  an assertion failure, or race-detector, panic or explicit property-failure evidence attributed to the
+  intended fault; a harness timeout panic is a timeout, not a panic. A compile or build failure, a timeout
+  or non-completion, no matching test, an unreached or inaccessible path, an unrelated earlier
+  refusal/failure, and tooling that is unavailable are each reported as themselves (§6) and none of them is
+  a behavioural kill; a build break is not behavioural proof, so a mutation that fails to build establishes
+  no behavioural test protection and is replaced rather than counted. A timeout or non-completion is never
+  itself the kill: a liveness claim names the property and records evidence of the case that exercises it,
+  the detection mechanism, and the property violation attributable to the intended fault — declaring a
+  timeout to be a liveness signal is not that evidence. Survival alone classifies nothing: only a mutant
+  argued to preserve behaviour over the reachable input domain is **equivalent**, its survival is then not
+  evidence of a weak test, and the argument is recorded with it.
 - **Reached case, named assertion.** A test that merely ran proves nothing about the claimed case or
   dimension. Evidence shows the intended case reached the mutation site, and the assertion/property claimed
   to protect it is named among those observed to fail for a relevant *compiling* fault — a guard that stays
