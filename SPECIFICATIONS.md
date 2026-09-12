@@ -4485,6 +4485,49 @@ and closed vocabularies, and `Words` is bounded by COUNT
 encoded width moves no ceiling. `TestOrderedRulesStructuralOverheadFitsItsReserve`
 measures the projected stream, which carries none of the four fields.
 
+**And the header of the repair claimed more than the repair does — a reviewer
+caught it within the hour.** The first line of `ordered_rules_hexword.go` said
+"Every exported 64-bit value this model carries across a wire is an exact bit
+pattern, not a quantity". That is FALSE. Ten exported `int64` JSON fields are
+quantities and still travel as JSON numbers: `SuppliedInt64.Value`,
+`SuppliedInt64.AvailableAtPosition`, `OrderedRulesScope.IntervalFromPosition`
+and `IntervalToPosition`, candidate and intervention `Position`, and the four
+positions a result re-exports. The sentence was written about the four fields
+that were being repaired and generalized to a claim the change does not support,
+which is the same class of overstatement this section already records twice.
+The header now names the exclusion and its reason.
+
+**The residual is measured, and two of its three input paths turn out to be
+DETECTED rather than silent.** That distinction is the difference between a
+recorded limitation and a vague warning, so it was established by running the
+real types through a consumer that has only float64 numbers:
+
+| path | outcome |
+| --- | --- |
+| a SOURCE relayed before projection, points `2^53+1` | **SILENT.** The recorded share moves from `0x3feffffffffffffe` to `0x3ff0000000000000` — exactly 1.0, reporting an outcome as holding the whole pool when it holds all but one point. Same status, same chosen outcome. |
+| a projected STREAM relayed | **DETECTED.** `STATUS_REFUSED` / `STREAM_SELECTION_DIGEST_MISMATCH`: the selection digest was computed over the exact values. |
+| positions `2^53` and `2^53+1` relayed in a source | **DETECTED** when the collapse creates a tie — strictly increasing causal order is already a projection rule. Not a general guarantee: one candidate has nothing to tie with. |
+| the RESULT read by a float64 consumer | **still numbers past 2^53** at `.selected.candidatePosition`, `.stoppedAtPosition`, `.trace[].candidatePosition` and `.visits[].candidatePosition`. |
+
+`TestOrderedRulesInt64JSONFieldsStillCollapseAndAreOutsideThisRepair` pins all
+four rows. Its last row does a second job: it proves the whole-document walk in
+`TestOrderedRulesEvaluationCarriesHexOnTheWire` can actually fire, so the
+"no number past 2^53" assertion there is a live detector and not a check that
+passes because nothing could ever trip it. That assertion's comment was also
+corrected — it is a statement about that one artifact, whose positions and
+points are small, and never was a property of the types.
+
+Mutating `relayThroughFloat64` into a lossless pass-through kills three of the
+four rows by name, so the relay is doing the work rather than the fixture.
+
+**It is NOT repaired, and the reason is the boundary rather than the difficulty.**
+The owner decision enumerated four fields. Extending a public wire contract to
+ten more, or refusing supplied values outside the exact IEEE-754 integer range
+at ingestion — which would narrow the admitted domain the model currently
+accepts — are both larger changes than were authorized, and neither is a thing
+a comment or a test gets to decide. The finding is carried to the owner with
+the measurements above.
+
 **A sixth review round, and five of its findings are worth more than their
 labels.** The audit above declared no gap in family A. A reviewer then filed
 five P2s across two heads, and every one of them was real. Recording that

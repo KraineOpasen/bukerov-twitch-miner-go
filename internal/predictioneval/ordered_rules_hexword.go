@@ -1,12 +1,24 @@
 package predictioneval
 
-// THE ORDERED-RULES CORE: lossless 64-bit transport.
+// THE ORDERED-RULES CORE: lossless 64-bit transport, for four fields.
 //
-// Every exported 64-bit value this model carries across a wire is an exact bit
-// pattern, not a quantity — a raw entropy word, or math.Float64bits of a pool
+// FOUR exported values this model carries across a wire are exact bit patterns
+// rather than quantities — a raw entropy word, or math.Float64bits of a pool
 // share. JSON numbers cannot carry one. An IEEE-754 consumer rounds anything
 // past 2^53, so two words the strict Bernoulli comparison distinguishes can
 // arrive equal, and two shares one ulp apart collapse into one.
+//
+// WHAT THIS TYPE DOES NOT COVER, said here because an earlier draft of this
+// comment claimed "every exported 64-bit value" and a reviewer was right to
+// call that false. The model also carries ten exported int64 JSON fields that
+// are QUANTITIES — supplied point values, availability positions, the declared
+// interval endpoints, candidate and intervention positions, and the positions
+// re-exported on a result. They still travel as JSON numbers and they are not
+// repaired here: the owner decision that authorized this change enumerated the
+// four bit-pattern fields, and widening a public wire contract past what was
+// authorized is not a thing a comment gets to do. The cost is measured rather
+// than guessed, in
+// TestOrderedRulesInt64JSONFieldsStillCollapseAndAreOutsideThisRepair.
 //
 // That was not hypothetical. Reproduced before this type existed:
 // 9223372036854788153 and 9223372036854788154 both became 9223372036854788096
