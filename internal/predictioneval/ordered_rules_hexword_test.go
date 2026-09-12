@@ -541,9 +541,11 @@ func TestOrderedRulesTransportChangeMovedNoDigest(t *testing.T) {
 // discover.
 //
 // A reviewer read the header of ordered_rules_hexword.go, which claimed "every
-// exported 64-bit value", and pointed out that ten exported int64 JSON fields
-// are quantities that still travel as numbers. That was correct, and the header
-// now says so. This case is the evidence behind it: it runs the real types
+// exported 64-bit value", and pointed out that exported int64 JSON fields are
+// quantities that still travel as numbers. That was correct. A second reviewer
+// then found that the corrected list said "ten" and the true figure is TWELVE;
+// the header enumerates all twelve by name rather than counting them here,
+// because this comment having its own copy of the figure is how it went stale. This case is the evidence behind it: it runs the real types
 // through a consumer that has only float64 numbers and records what each path
 // actually does. Two of the three paths turn out to be DETECTED rather than
 // silent, and saying which is the difference between a recorded limitation and

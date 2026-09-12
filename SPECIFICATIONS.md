@@ -4455,13 +4455,20 @@ load-bearing rather than self-satisfying.
 before the change.** The conversions at the six production call sites are
 reinterpretations of the same bits, so the four digests must be unchanged.
 `TestOrderedRulesTransportChangeMovedNoDigest` evaluates a fixture whose words
-span 0, 2^63-1, `MaxUint64`, 2^53 and 2^53+1, and pins
-`StreamDigest 1d70c598…`, `ConfigDigest 2e754165…`, `EntropyDigest f5f4ca98…`
-and `ConsumedInputDigest 65a524a2…` — captured by running that same fixture on
+lead with 2^53+1 and then span 0, 2^63-1, `MaxUint64` and 2^53, and pins
+`StreamDigest 1d70c598…`, `ConfigDigest 2e754165…`, `EntropyDigest ef5d3511…`
+and `ConsumedInputDigest e8ae4efe…` — captured by running that same fixture on
 `a3187b2`, the commit before the transport change, in a separate worktree. It
 first requires the run to have reached `WOULD_ATTEMPT`, because an unread
 refusal carries EMPTY digests and pinning four empty strings would pass
 vacuously.
+
+Those are the values as they stand. The first version of this paragraph named
+`EntropyDigest f5f4ca98…` and `ConsumedInputDigest 65a524a2…`, from the fixture
+whose leading word was zero, and left them in place when the fixture changed —
+so this document briefly carried two incompatible baselines for one test, which
+is the same class of stale claim it has been recording all along, committed in
+the paragraph that pins against staleness. A reviewer found it.
 
 **Eleven mutants, all killed, each by the case that should kill it.** Decimal
 encoding, a dropped length check, upper case accepted, a write before the
