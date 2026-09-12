@@ -3195,6 +3195,1889 @@ and read back through the real reader, and against real decisions driven through
 the real pool. It has **not** been validated against a production observation
 dataset; collection and empirical replay are separate work.
 
+#### Ordered-rules reference core (supplied data)
+
+`internal/predictioneval` carries a SECOND, separate pure model beside the
+baseline replay: a re-derivation of a donor project's ordered odds-rules
+mechanism — ordered detailed rules with a per-rule participation rate, a
+per-outcome default, and a percentage stake. Two exported functions,
+`ProjectOrderedRulesStream` and `EvaluateOrderedRules`, are the whole surface.
+There is no collector, no schema change, no reader, no HTTP or settings
+contract, no runtime caller and no new dependency; the package's existing
+dependency fence and its allowlist are unchanged.
+
+The two models do not meet. The ordered-rules core reads no persisted fact,
+feeds nothing back into the four seams and cannot change a baseline result. It
+carries its own versions — `predictioneval-orderedrules/v1`, the stream contract
+`pe-ors/v1`, the raw-config basis `pe-orc-raw/v1` and the entropy semantics
+`rand-0.8.5-bernoulli/v1` — none of which is `predictioneval/v1` or `pe-cid/v1`,
+because attaching a claim about verified database rows to numbers passed in as
+arguments is exactly the confusion these versions exist to prevent.
+
+**Supplied is not proven.** Every value reaches the model because a caller
+passed it in, and a pure function cannot authenticate a number it is handed. So
+presence is a first-class part of the input types rather than a nil pointer
+someone can read as a zero, provenance travels with each field, and every result
+carries the label `CORE_MECHANISM_COMMON_ADMITTED_DATA` — the mechanism,
+evaluated over the declared common-admitted data, and nothing more. The
+admission manifest is DATA, not a callback: admission is fixed before evaluation
+and cannot be chosen for producing a better answer.
+
+That rule covers the MANDATORY scalars too, and it has to, because the input
+types carry JSON tags: decoding a caller's document is a supported way to build
+them, and there an omitted field is silent. A candidate's causal position, an
+intervention's position, the scope's interval endpoints and the config's default
+each decode to a zero that is ALSO a legitimate value, so each carries an
+explicit declaration that it was supplied and is refused without one. The cost
+of leaving any of them implicit is not abstract: an omitted candidate position
+decodes to zero, is admitted as the EARLIEST candidate whenever the declared
+interval contains zero, and takes the opportunity from whichever candidate
+really was first; an omitted intervention position cuts the stream at zero and
+removes every candidate; omitted endpoints decode to the interval [0,0], which
+is a real interval; and an omitted default decodes to a USABLE [0,0] rule that
+admits any zero-share outcome and reports a stake of zero with presence KNOWN —
+a fabricated value presented as known, from a configuration that was never
+supplied. Treating all-zero as absent would not fix it, because the donor's own
+`small` preset really does ship bounds of exactly zero.
+
+The outcome VECTOR carries a presence of its own, not only its scalars. A pool
+holding fewer than two outcomes is a pool the donor declines and the traversal
+walks on; a pool whose vector the caller could not recover looks identical — a
+short slice — and is the opposite fact, because walking past it hands every
+later candidate an opportunity that exists only because this one was skipped. A
+short vector is the donor's decline only when the caller vouches for it as
+whole; anything else stops the traversal. A partially recovered vector must be
+declared invalid rather than passed off as complete, since the pool total feeds
+every share and one missing entry moves all of them.
+
+The same rule reaches the AVAILABILITY of a supplied value. A KNOWN value
+carries the causal position at which it became knowable, so that back-dating is
+checkable rather than trusted — a value that only became available AFTER the
+candidate it is attached to is refused outright, since a note would not stop the
+arithmetic from using it. That position is an integer whose zero is a legitimate
+position, so it is accompanied by its own declaration flag: an omitted position
+decoded as a zero would otherwise clear the check for every candidate at
+position zero or later, which is the whole interval of any stream starting at
+zero, and the guard would read as enforced while enforcing nothing. A KNOWN
+value that does not declare its availability is refused, exactly as one carrying
+no provenance is.
+
+Supplied COLLECTIONS are bounded by count before their bytes are charged —
+candidates, outcomes, interventions, rules, entropy words and the admission
+manifest's source references alike. The aggregate byte budget charges payload,
+and payload is not a bound on cardinality: elements with no payload cost nothing
+to admit and still have to be retained, copied and digested.
+
+Those bounds are checked BEFORE the work they bound. The evaluator is exported
+and takes the projected stream by value, so it can be handed one the projection
+never produced; it already refuses such a stream on a digest mismatch, but that
+comparison is circular, because detecting a forgery requires digesting the
+forgery first. What can be bounded is the COST of a forgery, so a shape gate
+runs ahead of every digest and every allocation, using counts and string lengths
+only — each of them a single length read over a number of elements the preceding
+check has already bounded. It mirrors the projection's own limits field for
+field, the per-string limit included, so an input the projection would have
+admitted is not refused there and one it would have refused is not hashed there.
+The aggregate itself bounds the ENCODED width of that text, not its raw length,
+and the two differ by up to six: the stream carries JSON tags because it is
+meant to be serialized, and the encoder writes a byte below 0x20, one of < > &,
+or anything that is not valid UTF-8 as a six-byte escape. Bounding the raw total
+bounded the wrong quantity — a source could sit inside the declared 128 MiB and
+still encode to roughly 768 MiB — so the projection charges every supplied byte
+at its worst-case encoded width. That is a deliberate over-charge for ordinary
+ASCII, taken because computing the exact width means decoding UTF-8 and the
+production files import from a six-entry allowlist with no unicode/utf8 in it; a
+bound that is provably never exceeded is worth more in budget code than a tight
+one. Charging the text is still not the whole ceiling, because JSON syntax —
+the quotes around each string, the field names beside it, the braces and commas
+holding the document together — is charged to nobody and lands on top of a
+budget the caller has already filled: measured at the widest shape the counts
+allow, just over a megabyte of pure structure, which put an ADMITTED stream
+762,930 bytes past the ceiling it was supposed to sit inside. So a fixed reserve
+is held back from the aggregate for it, sized from that measurement and re-taken
+by a test rather than assumed, since assuming it is what went wrong. The
+per-string limit is what keeps the reserve sufficient: without it a single
+unbounded field could fill the remaining charge byte-exactly and leave the
+structure to land past the ceiling, and four scope strings and three admission
+strings really were unbounded — checked for being non-empty and nothing more —
+so an 8 MiB admission population was admitted outright. The evaluator's shape gate
+applies the SAME charge and the same reserve, and for a while it did not: it
+compared the RAW total, and the two differ by a factor of six. That gap was not
+one-sided safety. A forged stream carrying 32 MiB of perfectly valid
+provenance — inside every count, inside every per-string bound, inside the raw
+aggregate — passed the gate and every semantic invariant while the projection
+refused that same source outright, and a stream the gate admits can still be
+serialized, which is the cost the charged width exists to bound. The per-string
+limit went the same way: the seven strings above gained a bound in the
+projection before the gate had one, so a namespace just under the aggregate was
+hashed by all three whole-input digests before the invariant pass refused it —
+646 ms and 251 MB allocated to say no, which is precisely the length-before-work
+protection the gate exists to provide. Both sides now apply the same condition,
+so "admitted by the projection" implies "admitted here" by construction rather
+than by a margin.
+
+Mirroring means the mirror is exact in both directions: text the projection
+DERIVES rather than receives — the qualifications it generates, the boundary's
+kind and basis, the stream's own contract version — is length-bounded but never
+charged, because the projection never charged it, and the config and the trace
+carry a ceiling of their own, because the projection never saw them at all. Two
+inputs, two ceilings, and the derived fields on neither; otherwise a source
+filling the projection's budget would project successfully and then be refused
+here for bytes, which is the invariant backwards.
+
+The boundary's IDENTITY is the exception, and calling the whole boundary derived
+was wrong. Kind and basis are labels the projection computes; the identity it
+COPIES from a supplied intervention identity, and charges those bytes against
+the source budget. Excluding it from the ingest charge let a forged stream carry
+text no source could have supplied — a stream declaring an established cutoff
+had at least the one intervention whose identity it names. Charging it stays
+inside the projection's own total, since the projection charged every
+intervention, so the mirror tightens without the invariant moving.
+
+The boundary's REMOVAL COUNT is the same argument one step further. A stream
+declaring that the boundary removed candidates asserts a source holding that
+many more of them, and the projection charged every one: its validate-and-charge
+loop runs before the cut, so a removed candidate cost it exactly what a retained
+one cost. The ingest gate cannot see that text, but it does not need to, because
+the vocabulary the projection forces puts a floor under it — the cheapest
+candidate it will admit spends a one-byte identity, the only accepted
+membership, the shortest outcome-vector presence and a KNOWN balance with the
+single provenance byte that then becomes mandatory, plus the source kind. That
+last part is per VIEW rather than per model, and treating it as though it were
+not undercharged one of the two: the projection couples view and source kind
+strictly, so a CALCULATE_ONLY stream's cheapest candidate is 36 bytes
+(CALCULATE_SNAPSHOT) and a CHANNEL_CANDIDATE_STREAM's is 32 (CHANNEL_UPDATE),
+216 and 192 charged. Because the coupling is strict, each is the EXACT cost in
+its view and not merely a bound; charging the cheaper of the two everywhere let
+a forged calculate-only stream sit 24 charged bytes a removal past what any
+source could have projected. Leaving the claim free let a forgery sit within that much
+per claimed removal of the ceiling and pass a gate whose whole purpose is to
+refuse what the projection refuses. The floor is a LOWER bound by construction,
+which is the direction that keeps the mirror one-sided: charging less than the
+projection charged can only admit streams it would also have admitted. The count
+is read only when positive and is clamped to the candidate ceiling before the
+multiplication, because this gate runs ahead of the invariant pass that bounds
+it — unclamped, a negative count would subtract from the budget and a count near
+the integer maximum would overflow into one, so the reserve would become a
+discount.
+
+Two version comparisons — the stream's contract version and the entropy
+semantics version — are decided BEFORE the whole-input digests, for the reason
+the gate exists at all. Each is one string against a constant and each settles
+that the input is not evaluable; computing three digests first does the work the
+check governs. Measured with a 125 MiB config identifier beside a wrong contract
+version, that refusal cost 1.23 seconds and 251,662,352 bytes to compare two
+short strings.
+
+The same rule governs every other refusal, and two more places were paying the
+caller's price for a decision that did not need the caller's data. The evaluator
+compares the stream against its own digest BEFORE reading the config or the
+trace: a mismatch means nothing was consumed, so a config, entropy or
+consumed-prefix digest would witness an input the call never read — and each of
+them traverses identifiers that may legitimately approach their own ceiling.
+Measured with a small stream and a 64 MiB identifier, that refusal took 582.770
+milliseconds; it now takes 15.484 microseconds, against 14.049 for the same
+refusal with a short identifier. The recomputed stream digest still travels
+back, since it is the documented oracle and withholding it would raise a
+forgery's cost from one extra call to reading this repository. In the
+projection, the boundary is established from the interventions — already bounded
+in count and in text — BEFORE the candidate walk that is the bulk of the
+admitted budget, so an intervention rejectable on its shape alone no longer
+costs a full validation pass over every candidate and outcome first: 44
+microseconds rather than 5.011 milliseconds on a fixture well short of the
+ceiling. Neither reordering changes which inputs are admitted; both change only
+what a refusal can be made to cost, and both are pinned by the ORDER they imply
+rather than by timing, which this repository's deterministic-test contract bars.
+
+A sweep of the same axis found four more places where attacker-controlled work
+preceded a cheaper decision, and each was reordered on the same rule. The
+projection now decides the two source COUNTS — candidates and interventions,
+each a slice length against a constant — before any content scan at all, where
+they used to follow validateAdmission's walk over up to 1,024 references of
+4,096 bytes: 3.140461 milliseconds to 220 nanoseconds on the identical input.
+It also establishes the boundary before the intervention DETAIL is scanned,
+detail being free text no decision reads: 3.2537 milliseconds to 21.686
+microseconds. That second move is a reordering rather than a free win, and the
+specification says so — where the detail itself is what is wrong and every
+intervention is otherwise well shaped, the scan now follows a full
+establishCutoff pass instead of preceding it, at most one extra pass over the
+same bounded envelope. The evaluator decides an unusable CONFIG — arithmetic
+over a rule count already bounded — before re-establishing the stream's
+invariants, which on a well-formed stream walks the scope, the references and
+every retained candidate to say so: 7.26947 milliseconds to 4.054034
+milliseconds. Inside that invariant pass the DERIVED checks, a boundary against
+the declared interval and a qualification list against the five conditions that
+imply it, now precede the same scope and admission walks: 7.027512 milliseconds
+to 3.938983 milliseconds. In both of the last two figures the residue is the
+stream digest, computed because it IS the comparison that admitted the stream;
+no ordering avoids it, and only the second traversal was ever avoidable. The
+first three are pinned by which of two faults wins. The fourth is NOT pinned and
+cannot be: orderedRulesStreamInvariantsBroken answers yes or no, both faults
+produce the identical STREAM_INVARIANT_VIOLATED, and timing is barred — the
+ordering is held by a comment at the call site, which is stated here rather than
+left to look like coverage.
+
+A fifth place on the same axis needed a second PASS rather than a move, and it
+is the largest of them. Within one candidate the projection already checked the
+cheap things first; across candidates it did not, so a last candidate declaring
+no causal position was refused only after every earlier candidate's outcome
+identities, provenance notes and presence reasons had been walked and charged —
+and that prefix is the bulk of what the aggregate ceiling admits. The candidate
+walk is now two passes: the SHAPE of every candidate (identity, uniqueness,
+declared position, causal order, the declared interval, the four vocabulary
+fields, membership, source kind, view agreement and the outcome COUNT), and then
+the PAYLOAD of each (provenance, outcomes reason, every outcome and its points,
+the balance, and the running aggregate). Measured on the identical input, 128
+candidates of 64 outcomes each carrying a 512-byte identity: 5.533517
+milliseconds to 24.191 microseconds, and with tiny identities the same refusal
+costs 23.92 microseconds — the same figure, which is the second way of saying
+the refusal is now decided by shape rather than scaled by payload. The split
+adds NO rule: every check was already performed in this order on the same
+values, nothing crossed the cut, and the invariant pass in the evaluator
+therefore needs no matching change. What it changes is which refusal a
+doubly-faulty source gets — a shape fault in a later candidate now wins over a
+payload fault in an earlier one — and, for near-ceiling sources, where the
+aggregate refusal fires: the vocabulary charges of every candidate are counted
+before the first payload check, so the running total is never lower than before
+at the same point and is identical at the end. Which sources are ADMITTED is
+therefore unchanged, and a case at MaxOrderedRulesCandidates times
+MaxOrderedRulesOutcomes pins that alongside the one pinning the new order.
+
+The same rule then reached the four refusals decided AFTER the stream verifies
+but BEFORE a single candidate is read: draw words over bound, rule count over
+bound, an unusable config, and broken stream invariants. Each carried all four
+digests, and three of them witness inputs the call never traversed —
+`ConfigDigest` hashes the whole config, `EntropyDigest` hashes every draw word,
+and `ConsumedInputDigest` binds an EMPTY prefix to which config and which run
+produced it, which traverses `ConfigID` and `RunID` in full. Those two ride the
+config-and-trace ceiling and carry no per-string bound, so all three were bought
+at the caller's price for a run that read nothing. This is the shape gate's own
+rule one layer in: a function that declined to read an input can attest to
+nothing about it. The two whole-input digests are now computed where the
+traversal begins, the pre-traversal refusals carry no consumed-prefix digest at
+all, and the ENCODABILITY scan moved down beside the two digests it exists to
+protect — it is a precondition of hashing those strings, not of evaluating.
+Three steps, each of which looked like the whole repair until the next was
+measured, on a broken stream invariant beside a 64 MiB `ConfigID`: 200.890391
+milliseconds, then 130.908043, then 73.639716, then 4.109 microseconds — against
+4.052 microseconds for the identical refusal with a SHORT identifier, the same
+figure, which is how one knows the identifier is no longer read. The entropy
+side needed only the first step: an unusable config beside 1,048,576 draw words
+went from 90.380221 milliseconds to 5.928 microseconds, the consumed digest
+hashing only the words actually spent. What these refusals still carry is the
+stream digest they genuinely computed, and the counterweight is pinned beside
+them: an ADMITTED run must still report all four.
+
+Two of those four cases are UNREACHABLE and the specification says so rather
+than describing a path that cannot execute. `orderedRulesInputShapeReason` tests
+the draw-word count and the rule count against the same two constants and
+returns the same two reasons, so the gate always answers first and the
+evaluator's own cases for them are a second path only. They are kept rather than
+deleted, on the reasoning the invariant pass already uses — a bound enforced in
+one place moves when that place changes — but the two answers are NOT
+equivalent: a gate refusal carries nothing whatever, not even a stream digest,
+while the evaluator's version would carry the stream digest but NOT the cutoff,
+which is assigned only after the invariant pass that both of those cases
+precede. This sentence promised the cutoff too until the claim was checked. It
+was written while that assignment still sat at the top of the evaluator, and
+moving it down to the line that earns it falsified the promise silently, because
+an unreachable path has no test to break. Reproduced by neutralising the gate's
+rule-count case: the refusal returned a stream digest and an empty
+`Cutoff.Identity`, against a stream whose projected identity was `call-1`. The
+behaviour a caller observes is the gate's, and that is what the suite pins; the
+first draft of that case asserted the unreachable contract instead and failed.
+
+A further review pass found four more, and two of them corrected claims made
+above rather than only code. They are recorded here in the same form, since the
+pattern — a repair that stops one layer short of its own reasoning — is the one
+this model keeps producing.
+
+The candidate walk is **three** passes, not two. The two-way split claimed the
+shape of every candidate preceded the payload of any, and counted a candidate
+IDENTITY as shape. An identity is bytes: `checkIdentifier` scans up to
+`MaxOrderedRulesIdentifierBytes` of it and the duplicate map hashes the same
+bytes, so a last candidate declaring no position still waited on 127 identity
+scans — measured with 4,000-byte identities, 429.551 microseconds against 22.586
+microseconds. The tiers are now what costs nothing (a declared position, the
+causal order, the declared interval, the outcome count — integer work whose
+messages quote only integers), what costs a bounded scan (identity, uniqueness,
+the four vocabulary fields, membership, source kind, view agreement,
+outcome-vector presence), and what costs the budget (provenance, outcomes
+reason, every outcome and its points, the balance, the running aggregate).
+`establishCutoff` acquired the same first tier for the same reason: a last
+intervention declaring no position waited on 1,023 identity scans, 3.57799
+milliseconds against 163.451 microseconds.
+
+`validateAdmission` decides its mandatory scalars — a manifest id, a population,
+an order basis, and the view kind against its closed set — before walking the
+source references, which cannot bear on any of them: 2.997708 milliseconds to
+377 nanoseconds.
+
+And the derived fields are populated only once they are earned. `Cutoff` and
+`Qualifications` were set in the result literal at the top of the evaluator, so
+the config refusal and the invariant refusal returned them unchanged — an
+invented boundary and a fabricated limitation list, handed back inside fields
+whose contract says the projection derived them. The mismatch path had been
+repaired for exactly this, and the repair stopped one layer short on the
+reasoning that a MATCHING digest makes the values self-consistent. That
+reasoning is wrong, and this document already says why: a matching digest says
+the stream has not CHANGED, never that the projection produced it, and the
+digest is unkeyed with the recomputed value handed back on refusal. Reproduced
+through that oracle, both refusals returned identity `INVENTED-BOUNDARY`,
+`DroppedAtOrAfter` 3 and two qualifications the evidence never implied. They are
+now assigned after the invariant pass succeeds rather than cleared on each
+refusal, so a path added later cannot forget to clear them.
+
+The axis then terminated, and how it terminated is the part worth recording. It
+had produced fourteen findings across five review rounds, each one correct and
+each one revealing the next: a scope walk before a candidate's declared
+position, an identity hash before an interval test, a provenance scan before an
+availability flag. Every repair moved one cheap decision ahead of one expensive
+scan, and the iteration did not converge because the function was organised by
+what a check is ABOUT rather than by what it COSTS.
+
+`ProjectOrderedRulesStream` is now split on cost. The whole constant-bounded tier runs
+first: the two source counts, the emptiness and interval halves of the scope and
+admission validators (`validateScopeShape`, `validateAdmissionShape`), the
+interventions' declared positions against the declared interval
+(`checkInterventionStructure`), every candidate's declared position, causal
+order, interval membership and outcome count, every nested value's presence
+declaration (`checkPresenceShape` — a KNOWN value's provenance, its declared
+availability position, and the back-dating comparison), and the ENTIRE aggregate
+charge, which is a sum of `chargedWidth` over `len()` and therefore computable
+without reading anything. Then the ceiling. Only then does any text get scanned.
+
+Three consequences. An over-ceiling source is refused for its SIZE before a byte
+is read, rather than scanning its way up to the limit. A nested declaration is
+settled without the payload: a last candidate's balance omitting its
+availability position went from 20.07073 milliseconds to 250.373 microseconds,
+the latter matching the same refusal with one-byte provenance. And the last pair
+found — an admission of 1,024 references beside a candidate declaring no
+position — went from 3.062608 milliseconds to 951 nanoseconds. Across every
+reproduction in this section the refusal now costs the same with a large payload
+as with a tiny one, which is the observation that says the payload is not read.
+
+**That was claimed to close the axis, and it does not.** The claim was
+structural: after that ceiling every remaining check is a bounded scan over a
+source whose total encoded width is already known to fit, so no further
+reordering could change an asymptotic cost. The statement is true and beside the
+point, and the next review round said so. This axis has never been about
+asymptotics — every finding on it has been a constant factor between 100x and
+20,000x — and the text tier still holds a cost gradient: four short vocabulary
+words per candidate, against 4 MiB of admission references, against 8 MiB of
+intervention text, against the outcome payload. Three further orderings were
+repaired on that gradient (below), and no claim is now made that it is
+exhausted. The three halves — `validateScopeShape`, `validateAdmissionShape`,
+`checkPresenceShape` — are called BY their full validators rather than copied
+beside them, so the invariant pass in the evaluator re-establishes exactly these
+rules through one definition; `checkInterventionStructure` is likewise called
+twice from one definition, by the projection and by `establishCutoff` which
+depends on it. What does NOT move into the constant-bounded tier is anything whose
+refusal quotes a supplied value — `SourceContractVersion`, the admission view
+kind — since quoting requires the per-string bound to have run.
+
+Two costs are stated rather than elided. Splitting on cost changes which refusal
+a doubly-faulty source receives in many more combinations than before: a
+structural fault anywhere now beats a text fault anywhere. And the emptiness
+tests now precede the per-string bounds within each validator, so an empty
+namespace beside an over-long one reports the emptiness. Neither changes which
+sources are ADMITTED — the aggregate is the same sum over the same fields, and a
+case at `MaxOrderedRulesCandidates` x `MaxOrderedRulesOutcomes` holds that.
+
+Three orderings on that gradient followed, and one of them was the INGEST pass
+rather than the projection — the sixth time a rule or an ordering has existed on
+one of the two paths and not the other. `orderedRulesStreamInvariantsBroken` had
+been left walking retained candidates sequentially, scanning each one's
+provenance, reason and presence text before reaching the next one's flags, so a
+forged stream whose last candidate omits the position its KNOWN balance became
+available at was refused only after roughly 20 MB of earlier payload — reached
+over the two-call digest oracle at no cost to the caller. It now carries the
+same constant-bounded tier, built from the same shape helpers the projection calls:
+44.199912 milliseconds to 27.434148, against a floor of 27.675032 measured on a
+stream failing that pass's FIRST check. The fix reaches the floor; what remains
+is the stream digest, which is the comparison that admitted the stream and which
+no ordering can defer.
+
+An identity's PRESENCE joined the constant-bounded tier for candidates, outcomes and
+interventions alike — it is an emptiness test whose message quotes nothing,
+while only its ENCODING and its uniqueness need bytes read. A last outcome with
+an empty identity went from 20.344244 milliseconds to 488.369 microseconds,
+matching the same refusal with one-byte provenance.
+
+And a candidate's VOCABULARY — four closed-set fields, length-bounded first
+because their refusals quote the value — is now settled before `validateScope`
+and `validateAdmission`, before the interventions, and before any identity is
+scanned or hashed, none of which bear on it: a first candidate with a short
+invalid source kind went from 10.093146 milliseconds to 49.724 microseconds. It
+does NOT precede the three scope and admission vocabulary checks that open the
+text tier, and an earlier revision of this paragraph said it did; those three
+are each bounded to `MaxOrderedRulesIdentifierBytes` before anything quotes
+them, so they are small on either side and the inaccuracy was in the
+description rather than the order.
+
+The ordering inside the text tier is therefore by how much text a tier reads,
+as far as that has been taken. It is not proven exhaustive and is not claimed
+to be.
+
+Three smaller orderings followed on the same gradient. An outcome's PRESENCE
+word joined the vocabulary tier beside the candidate's balance — both are short
+closed sets, and leaving the outcomes out meant a last outcome's invalid word
+waited on every earlier candidate's payload text. An intervention's KIND and
+RELEVANCE joined it too, ahead of the admission references and every identity,
+neither of which bears on them. And `orderedRulesConsumedDigest` stopped
+recomputing the config digest: that binding has always been the config's DIGEST
+rather than its fields, and the caller has already computed exactly that value,
+so passing it in traverses `ConfigID` once instead of twice and no digest value
+moves.
+
+One further ordering on the same axis was implemented, measured, **reverted, and
+then taken after all** — and the round trip is the useful part. The evaluator
+computed the whole-stream digest before re-establishing the stream's invariants
+and before normalising the config, so a structurally impossible stream, or any
+stream presented with an unusable config, was hashed in full before being
+refused. An earlier revision of this document said the digest was a floor no
+ordering could defer, because it IS the comparison. The first half is true and
+the second does not follow: such a stream is refused whatever its digest says.
+
+The first attempt was reverted because of what it cost.
+`TestOrderedRulesSuppliedDigestBindsEveryFieldThatCouldChangeADecision` walked
+`SuppliedInt64` by reflection, stripped one field at a time and required THE
+DIGEST to move — and that walk is what caught `HasAvailableAtPosition` being
+unbound, a P1 in this pull request. It took its digest off
+`EvaluateOrderedRules`' result, so deciding the structure first made every
+structural field refuse before a digest existed, and the walk could no longer
+distinguish "the digest binds this field" from "the structural tier refused it".
+It failed in its own words: *the probe stream must be readable, or this test
+compares nothing.*
+
+The reviewing lane then supplied the half that was missing: the walk belongs in
+an INTERNAL test calling `orderedRulesStreamDigest` directly, where the probe
+need not be a stream anything would admit. It is now
+`TestSuppliedDigestBindsEveryFieldThatCouldChangeADecision` in
+`ordered_rules_bindings_internal_test.go`, it still fails by name when the flag
+is unbound, and it is a better test for having lost the dependency — the
+coupling was never part of the property. With that gone the reorder is free, and
+both the structural tier and the config normalisation now precede the digest: a
+128x64 stream with 2,500-byte provenance and a final undeclared availability
+went from 25.589455 milliseconds to 130.161 microseconds, and the same stream
+beside a config with no default from 27.130597 milliseconds to 127.621
+microseconds. Both now match their one-byte-provenance controls.
+
+What a caller sees changes, deliberately. Both refusals used to be decided by
+the digest first, and that refusal handed the recomputed value back, so the
+documented two-call oracle worked on them. Both now carry nothing and the oracle
+does not function for either. That is strictly narrower: two classes of forgery
+lose a published route, and the forgery case in the suite counts BOTH routes so
+that neither can quietly become the only one.
+
+That reorder also made two digest-binding guards VACUOUS, and both were caught
+by the reviewing lane rather than by the author — which is why they are recorded
+here at the same weight as the repair that caused them.
+
+`TestOrderedRulesDigestsBindTheMandatoryFieldDeclarations` asserted that
+stripping a candidate's `HasPosition`, a scope's `HasInterval` or a config's
+`HasDefault` MOVES the digest, and took that digest off the evaluator's result.
+Once the structural tier and the config normalisation ran first, a stripped
+declaration is refused with an EMPTY digest — and an empty string differs from
+the baseline whatever the digest binds. Verified: with all three bindings
+deleted, every case still passed. Its own comment had said *"Only the digest
+value proves the field is bound"*, which is exactly what stopped being true.
+
+The reflection walk had a second, independent version of the same fault.
+`digestSupplied` hashes the presence word and then BRANCHES on it — a KNOWN
+value binds its value, provenance and availability, a non-KNOWN one binds its
+reason — so mutating `KNOWN` by appending to it crossed that branch and moved
+the digest because a different set of fields was hashed. Verified: deleting
+`digestPart(h, string(v.Presence))` left the whole walk green. The presence case
+now compares MISSING against INVALID with the reason held equal, which stays on
+one side of the branch, so only the word itself can move the digest.
+
+Both now live in `ordered_rules_bindings_internal_test.go` and call
+`orderedRulesStreamDigest` and `orderedRulesConfigDigest` directly. Nothing
+about any of these properties ever needed an evaluation, and the dependency was
+what made them fragile.
+
+One refusal also stopped re-exporting what it never read. A stream whose
+SelectionDigest does not match is not what the projection produced, so its
+Cutoff and its Qualifications are supplied text that the checks judging them —
+both of which run below the mismatch — never see. The refusal carried them out
+anyway, into two fields whose contract is that they were derived: a limitation
+list the evidence never implied, and a boundary no intervention established. At
+the widest shape the gate admits, 64 qualifications of 4,096 bytes, that was
+262,144 measured bytes copied out of a refusal that read nothing and written
+again six-fold by whoever encodes it. The recomputed stream digest is now the
+only thing a mismatch carries, and the counterweight is pinned beside it: an
+ADMITTED run must still report the derived cutoff and qualifications, so
+"carry nothing" cannot degenerate into never producing them.
+
+Continuing:
+the per-string limit is not implied by the aggregate, since one 64 MiB note sits
+well inside a 128 MiB budget while being a value the projection refuses outright.
+Re-establishing those invariants means ALL of them, and the mandatory
+declarations are the easy ones to forget: enforcing a candidate's declared
+position only in the projection left the ingest path comparing a position the
+caller never declared, so the projection refused an input the evaluator admitted
+— reached over the same two-call digest oracle, since a refusal hands back the
+value it wanted. A declaration that gates admission is exactly the kind of field
+worth stripping from a forged stream, so it is checked here as well as there,
+and before the comparisons that read the value it declares.
+
+A refusal from that gate carries no whole-input digest: the model declined to
+read the input, so it attests to nothing about it, and for the same reason the
+gate outranks the contract and digest mismatches — an input too large to read
+cannot be checked for anything else. It re-exports none of the supplied TEXT
+either, and that is the same rule rather than a second one. The gate stops at
+the FIRST condition that trips and most of them never look at the boundary, so
+the cutoff's three text fields can reach the refusal having passed no per-string
+bound at all; carrying them back out would move the cost from the gate to
+whoever encodes the result — which the JSON tags say is the intended use — and a
+refusal decided in constant time would still write a gigabyte of supplied text,
+six-fold once JSON escaping is counted. Refusing cheaply and RETURNING cheaply
+are one guarantee, not two.
+
+The selection digest detects CHANGE, never ORIGIN, and the difference decides
+what has to happen on ingest. The digest is unkeyed, deterministic and computed
+over exported fields, so any caller able to construct the stream can compute the
+matching value; worse, a refusal returns the recomputed digest, so copying it
+back takes one extra call and no cryptography. None of that is fixed by hiding
+the value or the algorithm — the stream carries JSON tags because a projected
+one is MEANT to be serialized and read back, and a check a legitimate reader can
+repeat is a check anyone can repeat. So a matching digest is read as what it is,
+evidence that the stream has not changed since the digest was taken, and the
+evaluator re-establishes the projection's invariants over the stream it is
+handed before traversing it: scope and admission completeness, identity,
+uniqueness, strict causal order, the declared interval, proven membership,
+source/view compatibility, and the presence and availability of every supplied
+value. SOME of those checks are the projection's own, called rather than
+restated — `checkIdentifier`, `checkPresence`, `checkFreeText`, `validateScope`
+and `validateAdmission` — and for those a stream the projection would have
+produced passes the ingest pass by construction.
+
+**It does not follow that the two paths cannot drift, and this paragraph said it
+did.** Candidate identity uniqueness, strict causal ordering, episode
+membership, source/view compatibility, outcome-vector presence and the boundary
+comparison are inline copies on the ingest side of rules the projection also
+has. Copies drift, and these already did: this work has found NINE separate
+instances of a rule or a documented claim enforced at one of the two seams and
+absent at the other. Every one was found by a reviewer or by an audit built to
+look for exactly that.
+
+The invariant is therefore a **maintenance obligation, not a construction
+guarantee**: a change to `ProjectOrderedRulesStream`'s rules requires a matching
+audit of `orderedRulesStreamInvariantsBroken`, and the reverse. Stating it the
+other way round was worse than imprecise — it told a reader the sibling path
+needed no checking, which is the precise mistake that produced all nine.
+
+The DERIVED fields need a different treatment, because the stream no longer
+carries what they were derived from. A boundary is computed from interventions
+the projection did not retain, so a caller handing one in is asserting a fact
+that can no longer be recomputed; what remains checkable is that the assertion
+is internally possible — an unestablished boundary names no intervention and
+removed nothing, an established one carries a real intervention kind, a
+non-empty identity and a position inside the declared interval, and a removal
+count is never negative. The qualifications are stronger than that: they follow
+deterministically from coverage, boundary basis, view kind and removal count, so
+they are re-derived and compared as a whole. Equality, not containment — a
+missing limitation would let a result read as though the absence of an earlier
+intervention were established, and an added one asserts a limitation the
+evidence does not support, both silently, because qualifications travel verbatim
+into every result computed from the stream.
+
+**The mechanism.** The outcome vector is the OUTER loop and the rule list the
+inner one. A pool share is `1/(total/points)` — two divisions, never collapsed
+into `points/total`, because in binary64 they differ: for the pool `[9,1]` the
+donor's value is one ulp below the double a raw threshold of 90 normalizes to,
+so a `Ge 90` rule separates the two formulations. Comparators are inclusive; a
+matched comparator whose participation draw FAILS falls through to later
+overlapping rules rather than ending the scan; and when no rule admits, the
+CURRENT outcome's default is checked — inclusive on both bounds, never reordered
+when the minimum exceeds the maximum — before the next outcome's rules. Raw
+percentages in 0..100 are divided by one hundred exactly once, privately: the
+exported contract accepts the raw form only, so an already-normalized config
+cannot be normalized again. Stakes are sized as the donor sizes them — multiply
+in float64, truncate to `u32`, then cap, with a cap of zero meaning NO cap — and
+a computed stake of zero stays an attempt rather than becoming a skip.
+
+**Entropy is supplied, never generated.** The donor drew from a thread-local
+generator whose realization was never recorded, so the historical entropy is
+UNAVAILABLE and is not reconstructed. What is reproduced exactly is the
+CONSUMPTION rule pinned from `rand` 0.8.5: a participation rate of exactly one
+succeeds consuming NO word, a rate of exactly zero consumes one word and then
+fails, and anything between compares `raw < uint64(rate * 2^64)` strictly. A
+comparator that did not match never reaches the draw, and a default admission
+adds none. Words are consumed in order across the whole run and never restart.
+An exhausted trace is an explicit unknown — never a default draw, never a skip.
+The baseline's `ObservedRealization` is structurally excluded: it is a recorded
+draw from a different mechanism, conditioned on a decision that already happened.
+
+**Identity conflicts are refused, never reconciled.** A candidate identity is
+unique within a source and an intervention identity within the boundary scan,
+because two things carrying one identity are an input conflict where neither
+dropping one nor keeping both is a safe reading. Outcome identities were the
+exception until a reviewer noticed, so a pool could name the same outcome twice
+while the model computed shares over it and reached a decision — a pool that
+cannot exist in the source domain. They are unique within their candidate now,
+on both the projection and the ingest path. The selection was never ambiguous,
+since it carries the outcome INDEX beside the identity; what was wrong is that
+the model answered at all.
+
+**The factual boundary.** A stream is bounded by the first relevant placement
+call in the declared episode, automatic or manual. Manual calls carry no attempt
+discriminator and may carry a different or empty round incarnation, so they are
+supplied as first-class interventions rather than discovered by attempt
+grouping — grouping is what would miss them. A call that FAILED is still a
+boundary, and the intervention type has no field for a result at all. Where an
+association cannot be established, the earlier, conservative boundary is taken
+and labelled rather than skipped. Coverage must be declared: an unstated
+coverage is refused, because it makes "no intervention was supplied"
+indistinguishable from "the intervention was never collected". A declared gap is
+evaluable and its qualification travels into every result.
+
+The boundary travels onto the result, not only the stream. Without it a
+traversal that found nothing because the boundary removed EVERY candidate would
+be field-for-field identical — counters and consumed-prefix digest included — to
+one over a source that never held any, and those are opposite pieces of
+evidence. A boundary that excluded supplied candidates is reported with its
+count.
+
+**Stops, and what they are not.** The traversal ends at the earliest of: the
+first admission with a computable stake; the first admission whose stake is not
+computable; the boundary; a required input it reached and could not read; or a
+resource bound. After an admission it stops rather than continuing — there is no
+counterfactual placement success, retry, pool mutation or balance update, none
+of which is established by anything this repository persists. A stop with an
+unknown stake is neither a zero nor an abstention: the model knows WHICH outcome
+it would have bet and does not know HOW MUCH, and those are reported as separate
+fields. A missing balance is never converted to zero and never borrowed from
+another candidate. `NO_ATTEMPT_IN_SUPPLIED_PREFIX` is a statement about the
+supplied prefix alone — not a full-round skip and not a financial zero.
+
+**Bounds and bindings.** Offline resource limits — 128 candidates, 64 outcomes,
+128 rules, 4 KiB per identifier and per retained free-text string — a presence
+reason, a provenance note, a coverage detail — 2^20 draw words and 2^18
+predicate slots — are
+refusal boundaries, never truncation boundaries: an oversized input is rejected
+whole, because a silently shortened candidate list changes which opportunities
+exist. The slot ceiling is the tightest of them for a reason: every evaluated
+slot also appends one trace entry, so the ceiling and the retained trace are the
+same quantity, and it is set where that trace still fits the declared 128 MiB
+aggregate budget rather than where a slot count alone would allow. That budget
+binds under BOTH measures, because the result carries JSON tags: in memory two
+identifiers are two headers pointing at bytes the stream already owns, but
+encoded, every entry writes them out in full — so repeating a candidate and an
+outcome identity on each slot turns a 22 MiB retained trace into 2 GiB of JSON,
+before escaping, from an input inside every other declared bound. A trace entry
+therefore ADDRESSES its slot rather than naming it, by the candidate and outcome
+indices the stream digest already binds, and its encoded size does not move with
+the caller's identifier lengths at all. Four domain-separated digests bind a result to its inputs: the whole
+stream, the raw config, the whole supplied entropy, and — separately — only the
+prefix actually consumed. That last one deliberately excludes metadata about the
+full supplied set, so that appending facts beyond the boundary provably cannot
+move it. What it must NOT exclude is any mandatory declaration the source could
+not exist without, and for a while it excluded three of them: the scope's
+association evidence and the admission's population and order basis. Binding the
+account context without the association evidence bound the claim and not its
+warrant, so two prefixes read under different evidence — one solid, one only
+just admissible — carried the same consumed-prefix binding, and a result
+computed under either could be presented as a result computed under the other.
+That is the recombination these four exist to prevent. The declared interval's
+UPPER endpoint is the one mandatory declaration still excluded, and
+deliberately: it is the source's extent, and appending a fact past the boundary
+can legitimately widen it, so binding it would break the stability the digest is
+for. Its LOWER endpoint looks like half of the same value and is not — no append
+lowers it, so binding it costs that stability nothing, and it carries evidence
+the upper endpoint does not. Two sources holding the same candidate and no
+intervention, one declaring complete coverage over [0,100] and the other over
+[-100,100], read the same prefix; only the second also asserts that nothing
+intervened over the hundred positions before it, which is a stronger claim about
+the absence of an earlier intervention. It is bound; the pair is asserted in
+both directions, so binding the upper endpoint as well fails the suite rather
+than passing as a tidier-looking symmetry.
+
+The upper endpoint has one exception, and excluding it outright was one
+distinction too coarse. It must stay out while an unconsumed suffix can still
+legitimately grow — that is what the stability is about. But when END OF STREAM
+is itself what established the result, there is no such suffix, and the endpoint
+stops being extent and becomes evidence: two empty COMPLETE_DECLARED sources
+over [0,10] and [0,100] both answer NO_ATTEMPT_IN_SUPPLIED_PREFIX, and only the
+second also claims nothing existed through position 100. So the consumed digest
+binds it exactly when the traversal ran out of retained stream without deciding
+AND no boundary was established — a stream with a boundary has an unconsumed
+suffix by construction, the candidates the boundary removed, and appending more
+of them raises the removal count without changing what was read. Exhaustion is
+reported by the one call site that reaches it rather than inferred from
+"consumed equals supplied": an admission on the LAST candidate satisfies that
+comparison too, and inferring it there would let a candidate the traversal never
+reached move a digest that must not move.
+
+Retained text must also SURVIVE the encoding the stream is meant to travel in.
+Go's JSON encoder does not fail on a byte that is not valid UTF-8; it
+substitutes U+FFFD. A stream holding one therefore projected, digested over the
+original bytes, and came back from its own round trip holding different bytes
+and a digest that no longer matched — an admitted stream refused as a forgery,
+with nothing forged (measured: a namespace of `ns-\xff-tail` evaluated to
+WOULD_ATTEMPT, and the same stream after a marshal and unmarshal evaluated to
+STREAM_SELECTION_DIGEST_MISMATCH). Such text is refused rather than
+canonicalized before hashing, because a digest taken over bytes the stream does
+not carry witnesses something the caller never supplied. The check lives in the
+two validators every retained string passes through, so the projection and the
+ingest pass acquire it together rather than one path at a time — but that claim
+was made before it was true, and the gap it left is worth recording because it
+is the fifth of its kind here and the first introduced by the repair for the
+fourth. `Scope.CoverageDetail` and each `Admission.SourceReferences` entry were
+validated at the projection's own call site and not inside `validateScope` or
+`validateAdmission`, which are the only validators the invariant pass calls, so
+a forged stream carrying an invalid byte in either reached WOULD_ATTEMPT through
+the two-call digest oracle. Both now live in those validators, with the
+reference COUNT bounded ahead of the element loop rather than beside it, so the
+loop cannot be unbounded on the path that reaches it first. The rule is no
+longer asserted to be complete: a reflection walk over the scope and admission
+structs requires every retained string field to be refused on ingest, so the
+next one added without validation fails without anyone remembering a list. That
+walk had its own version of the same defect for one round, and it is recorded
+here rather than quietly corrected. It selected fields by exact TYPE — `string`
+and `[]string` — and skipped every NAMED string type on the reasoning that a
+named string type is a closed vocabulary refused by its own switch. Go supports
+no such inference: a named string type is a string with a name, nothing obliges
+it to have a switch, and a `type OrderedRulesNote string` field added to the
+scope was reproduced reaching WOULD_ATTEMPT through the digest oracle while the
+guard reported success. The walk now selects on string KIND, so named types and
+slices of them are probed like any other, and the two genuine vocabularies —
+`Scope.Coverage` and `Admission.ViewKind` — are exempted by an explicit list
+whose entries are themselves checked: each must be reached, and each must refuse
+a word outside its set. The config identifier and the run identifier are the
+exception that proves where the rule lives: neither type is part of the stream,
+so the projection never sees them and no validator reads them — the evaluator
+refuses them directly instead. They carry no per-string LENGTH bound, and that
+stays true: inventing a limit no other rule applies would refuse input nothing
+else refuses. Encodability is a different axis, and without it the same logical
+run digested differently before and after its own round trip while both
+evaluations returned WOULD_ATTEMPT.
+
+WHERE that check sits is the whole subtlety, and the first placement was wrong.
+Putting it in the shape gate put it ahead of the two version comparisons, and
+those identifiers may legitimately approach the aggregate ceiling — so it
+reintroduced attacker-controlled linear work on exactly the early-refusal path
+the digest-ordering repair had made constant-time: measured, a wrong contract
+version beside a 64 MiB valid identifier went from 1.834 microseconds to
+44.7 milliseconds. The scan now runs AFTER both version comparisons and before
+any digest, while the ceilings stay first in the gate — so a string past its
+budget is refused for size rather than read, a wrong version is still settled by
+two string comparisons, and only a run that is otherwise evaluable pays for the
+scan. The check adds no import: ranging over a string is the language's own UTF-8 decode, and a
+genuine U+FFFD — which remains admissible — is distinguished from an invalid
+byte by occupying the three bytes EF BF BD at that index. Like the
+baseline's, these are unkeyed hashes over supplied data: they prevent
+recombination and authenticate nothing.
+
+**Candidate uniqueness precedes the payload scans.** Two candidates repeating a
+three-byte identity are refused on the identities alone, and nothing else is
+consulted to establish it — not the admission, not the boundary, not a byte of
+intervention detail. That pass used to run after all three, so the refusal was
+reached only once attacker-supplied text the decision never reads had been
+walked: measured on the identical input, 1,024 admission references of 4 KiB
+beside 1,024 interventions carrying 4 KiB of identity and 4 KiB of detail each,
+7.981383 ms against 127.186 µs after the move. It is a reordering and not a free
+win. An ADMISSION fault beside well-formed candidates now runs after a full
+identity pass — 67.3 µs became 675.213 µs with 128 near-ceiling identities — and
+the trade is taken only because the envelopes differ in size: what the identity
+pass can be made to read is capped at `MaxOrderedRulesCandidates` x
+`MaxOrderedRulesIdentifierBytes`, half a megabyte, while the three scans it now
+precedes are three times the intervention envelope between them. It does NOT
+move ahead of the vocabulary tier, and a case pins that a closed-set word is
+still refused first.
+
+**The pre-digest tier was checking shapes and not vocabularies.** A presence
+word outside the closed set is a constant-size fault, and `checkPresenceShape`
+structurally cannot see one: it returns immediately for every non-`KNOWN` value,
+because the availability rules it enforces only apply to a value that is
+present. An `INVALID` word therefore passed the whole structural tier and was
+caught only by the invariant pass, with the entire stream already hashed —
+9.038 µs on two candidates against 3.555366 ms on 128 holding 4 KiB each, for a
+five-byte fault. The same hole covered the scope coverage, the admission view
+kind and the derived cutoff basis. All four are now settled before the hash, as
+bare comparisons against short constants rather than through the quoting
+validators: the error messages in the invariant pass QUOTE the offending value
+and so must bound it first, and that scan is proportional to a string the caller
+chose, while the structural tier answers only yes or no and a comparison against
+`KNOWN` fails on length. The refusal costs 649 ns and
+7.092 µs on those same two inputs. The derived cutoff contributes its ZERO-BYTE HALF,
+`orderedRulesCutoffShapeImpossible`, and the first version of this got that
+wrong: it hoisted the whole `orderedRulesCutoffImpossible` predicate and claimed
+here and in the source that the predicate compares only counts and constants and
+reads no supplied text at any length. It does not. An established boundary runs
+`checkIdentifier` on its identity, and that reaches `invalidUTF8`, which scans.
+The claim was published on the strength of reading the predicate's first dozen
+lines instead of all of it, and a reviewer found it by following the call. The
+per-string bound kept it small — one identifier capped at
+`MaxOrderedRulesIdentifierBytes`, never an aggregate-scale traversal — but a
+tier whose contract holds "except for one field" will acquire a second
+exception. So the identity's emptiness and its length stay in the tier, both
+O(1), while the UTF-8 scan stays in the invariant pass; a case pins that by
+requiring an unencodable cutoff identity to be refused WITH a stream digest,
+which is only possible after the hash. The objection originally raised against
+splitting — that a subset becomes a second place to keep in step with the first
+— is answered by the shape being one definition with two callers, exactly as
+`validateScopeShape` and `checkPresenceShape` already relate to theirs. One thing a caller sees changes:
+these refusals no longer carry the recomputed stream digest, so the two-call
+oracle does not function for them. That is the same narrowing the structural
+tier already made, and narrower is the safe direction.
+
+**The projection was missing two closed-set comparisons the evaluator already
+made.** A four-byte unsupported `ViewKind` was bounded in the vocabulary tier and
+then settled only by `validateAdmission`, which runs after the candidate
+vocabulary pass AND the identity pass — so a constant-size fault paid for a walk
+of every candidate: 3.28 µs on two candidates against 459.124 µs on 128 holding
+4 KiB each, and 15.646 µs once the comparison moved to its bound. `Coverage` was
+the same defect one step earlier, at 1.527 µs against 75.238 µs and 15.9 µs now;
+its gap is smaller only because `validateScope` precedes the identity pass and
+`validateAdmission` does not. Both are `checkCoverageVocabulary` and
+`checkViewKindVocabulary` now — one definition, two callers, the shape every
+other vocabulary check in this package already had. The bound must still come
+first, because both refusals quote the value.
+
+This is the SIXTH time a rule has been present on one of the two ingest paths and
+absent from the other, and the first where the projection was the one missing it:
+the previous five went the other way. Every one was found by a reviewer. The
+count is the useful part — a rule added to one path is not a rule added, and this
+model has now produced that defect six times across six different rules.
+
+**The tier was never zero-byte, and the name outlived the truth by three
+commits.** Emptiness tests and declared flags really do read nothing, and that
+is what the name described when it was coined. The closed-set comparisons that
+moved in later do not: when a supplied word happens to match a constant's
+LENGTH, Go compares the bytes, up to that constant's own length — 36 at the
+widest here. The work is still capped by this repository rather than by the
+caller, since anything longer fails on length, and that is the property the tier
+exists for; but "reads no supplied byte" was an overstatement, repeated in the
+source, in this document and in every review request for several rounds. It is
+now the CONSTANT-BOUNDED tier, and the distinction is not pedantry: a false
+invariant is precisely what let a UTF-8 scan of the cutoff identity sit inside it
+for a commit, and the reviewer who raised this said so in those terms. Where a
+helper genuinely reads nothing — `validateScopeShape`, `checkIdentifierPresent`,
+`checkInterventionStructure` — it is still described that way, because there the
+claim is true.
+
+That correction was made on the evaluator and NOT on the projection, which is
+the fifth time in this work a rule has been fixed on one of those two paths and
+left standing on the other — this time in the documentation rather than the
+code. `ProjectOrderedRulesStream` kept describing its own first block as reading
+no supplied byte while calling `checkPresenceShape`, whose `!= SuppliedKnown` is
+the same five-byte comparison. A reviewer found it one commit after the
+evaluator's version was corrected, and the claim that each helper had been
+"checked individually" was the overconfident part: three of them compare only
+against the empty string, which is a length test, and the fourth compares
+against a word. Both tiers are now named for what they actually guarantee — which took THREE
+attempts to state, each corrected by a reviewer rather than by me. The first
+claim was that the tiers read no supplied byte; the closed-set comparisons
+falsified it. The second was that nothing in them grows with what the caller
+supplies; the iteration falsified that, because both tiers walk every supplied
+reference, intervention, candidate and outcome, so a caller does choose how many
+times each check runs. The guarantee that survives is narrower and is the one
+that matters for this axis: **no caller can increase the per-element work by
+supplying a longer string**, because longer fails on length — while the number
+of elements is bounded separately, by this repository's own count ceilings. Per-
+element cost is ours; element count is capped. Stating a property loosely is
+what this package keeps getting wrong, and this paragraph is the third draft of
+one sentence.
+
+**Three more constant-size faults were being charged for the whole payload, and
+one of them was a projection/ingest divergence.** A stream declaring an
+unsupported `SourceContractVersion`, one carrying a fabricated qualification,
+and two candidates repeating an identity were each settled only after the stream
+was hashed: measured against 128 candidates holding 4 KiB each, 2.314278 ms,
+2.297362 ms and 3.549091 ms respectively, for faults of four bytes, one string
+and three bytes. They are 4.457 µs, 4.575 µs and 31.909 µs now. The contract
+comparison joins the constant-bounded tier, since that tier quotes nothing and
+`validateScope`'s own refusal — which does quote, and is why the check is absent
+from `validateScopeShape` — is not the constraint here.
+
+The other two do not join it, and the reasons differ. The qualification
+derivation is cheap enough to, but putting it there made a stream fault beat an
+unusable config, inverting a precedence this model had already established and
+pinned; cost and precedence are different questions, and moving a check for the
+first silently answered the second. It sits below the config and above the hash.
+Candidate uniqueness cannot join it at all: hashing an identity into a map reads
+its bytes, so it is a BOUNDED tier of its own —
+`MaxOrderedRulesCandidates` x `MaxOrderedRulesIdentifierBytes`, half a megabyte
+against a digest that traverses the whole retained ceiling. Folding it into the
+constant-bounded tier would have repeated the cutoff mistake above exactly one commit
+later, and the first arrangement put it AHEAD of that tier, which made every
+constant-bounded fault pay half a megabyte before a comparison against a constant could
+answer — 4.457 µs became 36.151 µs on the same input. Cheapest decision first,
+at every tier.
+
+Uniqueness is the fourth instance of one recurring defect in this work: a rule
+present on one of the two paths and not the other. `ProjectOrderedRulesStream`
+refused repeated identities before its own payload scans; `EvaluateOrderedRules`
+is a separate ingest that a caller reaches without the projection ever running,
+and the repair had not been mirrored there. A valid stream now walks its
+identities twice, once in that tier and once in the invariant pass, both inside
+the same bounded envelope, and that cost is stated rather than hidden.
+
+**And that repair was itself half a repair.** The bounded identity tier covered
+CANDIDATE identities only. Outcome identities are unique per candidate on both
+paths — the projection refuses a repeat before its own payload scans, the
+evaluator's invariant pass refuses one after the whole stream is hashed — so a
+forged stream repeating two SHORT outcome identities inside its last candidate
+still bought the digest first: 35.97074 ms on 128 candidates each holding 64
+outcomes with 2,400-byte provenance, against 69.413 µs for a constant-bounded
+fault on that identical payload, and the refusal handed back a stream digest it
+had computed over an input it was about to reject. It is 286.824 µs now and
+carries no digest. This is the SIXTH instance of the divergence defect and the
+sixth found by a reviewer rather than here; more to the point it is the second
+time the same defect class was repaired on one level and left standing one level
+down. Fixing a path is not fixing the class.
+
+**The direction none of the thirty-five findings argued is now a test.** Every
+refusal-ordering repair on this work was defended in one direction — a refusal
+got cheaper — and each was safe in the other by an argument rather than by a
+case. The other direction is the one that matters for correctness: hoisting a
+check above a ceiling, a budget or a hash must never make `EvaluateOrderedRules`
+refuse a stream `ProjectOrderedRulesStream` legitimately produced. Two moves in
+this work already inverted a pinned precedence and were caught only because some
+unrelated case happened to cover them.
+
+`TestOrderedRulesEverythingTheProjectionAdmitsTheEvaluatorAdmits` asserts the
+property those cases were instances of. It enumerates a space over the exact
+dimensions the reorderings touched — candidate and outcome counts, free-text
+lengths, the three balance presence words, the three coverages, whether a
+boundary exists, and WHICH FIELD CLASS carries a string at the per-string bound —
+projects each source, and requires that a stream the projection ADMITTED never
+meets an **ingest-validation** refusal: contract or semantics mismatch, shape,
+bytes, text, invariant or digest mismatch. **1,296 sources project, 648 with a
+boundary, 864 with a non-KNOWN balance, 648 under each of the two views and 648
+at each free-text length.**
+
+Those figures are current, and the sentence they replaced was not. It said 324,
+which was true of the head it was written on and false one dimension later —
+the twelfth stale sibling on this work, and the first found by a reviewer doing
+arithmetic on the loop bounds rather than reading the prose. Every figure in
+this section is now the test's own logged output on the current head.
+
+**The bound dimension is a correction, and the counter that was supposed to
+protect it was the thing at fault.** The first version of this case padded three
+FREE-TEXT fields — a candidate's provenance, its outcomes reason, an
+intervention's detail — and counted "text at the bound" if any of them reached
+`MaxOrderedRulesIdentifierBytes`. That counter was green. It was also satisfied
+without a single IDENTIFIER or admission SOURCE REFERENCE ever reaching the
+bound, and those are precisely the fields whose validation this round moved
+between tiers: the two identity passes and `checkTextLength` in the charging
+loops. The property went untested exactly where it was most likely to break,
+behind a non-vacuity guard that said otherwise. A reviewer read the padding
+rather than the counter. This is the tenth finding of the same shape as the nine
+below — a claim true of one instance and asserted of a class — and the first one
+where the false claim was made by a guard written to prevent it.
+
+The repair rotates the bound across five field classes one at a time —
+`candidateIdentity`, `outcomeIdentity`, `scopeNamespace`, `sourceReference`,
+`interventionIdentity` — each built as a 4096-byte string ending in a
+distinguishing suffix so identities that must stay UNIQUE still are at the bound,
+and gives each class its own counter. The counters read the PROJECTED STREAM,
+not the case name: counting on the loop variable would have reproduced the same
+defect one level up, since deleting the line that builds the bounded string
+leaves a name-keyed counter green.
+
+Mutation record, three outcomes and two of them not what a reader would guess.
+Neutering each bounded string in turn — five mutants — fails on that class's
+counter and names it; on the unmutated tree the classes reach the bound 54, 54,
+54, 54 and 27 times, the last halved because only the cutoff cases carry an
+intervention. Widening an EVALUATOR-ONLY bound so it refuses a value the
+projection admits — `len(c.Identity) >= MaxOrderedRulesIdentifierBytes` on the
+cutoff identity — fails on the PROPERTY, 27 cases, all of them the
+`interventionIdentity` rotation, with `STREAM_INVARIANT_VIOLATED`. Widening the
+SHARED validator the same way — `checkIdentifier` — does NOT fail on the
+property: the projection refuses first, the case is skipped, and the failure
+lands on the `candidateIdentity` counter instead. That is correct and it is
+structural. Candidate and outcome identities have no evaluator-only length bound
+that could diverge, because both paths call the same helper; the counters are
+what covers those classes, and the property covers the fields checked twice.
+
+Two things it deliberately does not claim. It is not a claim that the paths agree
+on everything — they do not, and the invariant pass now says so. And refusals
+about the MECHANISM are excluded by name rather than by omission: entropy
+exhaustion, an unsupplied balance, a pool that cannot be summed, a config outside
+its domain are ANSWERS a projected stream may legitimately receive, not
+rejections of the stream.
+
+The space is enumerated rather than randomised because a seeded generator whose
+failures cannot be replayed from the source alone would breach this repository's
+deterministic-test contract. Non-vacuity is asserted rather than assumed: the
+case fails if fewer than fifty sources project, if no projected stream carried a
+boundary or a non-KNOWN balance, or if ANY of the five field classes never
+reached the bound — the guard that three cases on this work turned out to need,
+and that a fourth turned out to need per class rather than in aggregate.
+Mutation-verified by making the evaluator reject `GAPS_PRESENT`, a coverage the
+projection admits: the case fails naming that dimension and the reason code.
+
+**A convergence audit, because the round of five was itself a symptom.** Nine of
+the last ten findings have been one shape: a rule or a CLAIM fixed at one seam
+and left standing at its sibling. So before calling the implementation finished,
+the two ingest paths were compared field by field rather than reviewer by
+reviewer.
+
+*Closed vocabularies* are aligned, and this was checked by enumerating the
+switches on both sides rather than by reading the comments that assert it:
+`Scope.Coverage`, `Admission.ViewKind`, `Candidate.SourceKind`,
+`Candidate.OutcomesPresence`, `SuppliedInt64.Presence` and
+`Candidate.EpisodeMembership` each have a comparison on both paths against the
+same members, and where the projection admits an extra case
+(`CoverageUnknown` and the empty string, refused with a specific error) the
+evaluator refuses it too by falling through. Narrower on the ingest side is the
+safe direction. `Intervention.Kind`/`Relevance` are projection-only because
+interventions are not retained in the stream, and `Cutoff.Kind`/`Basis` are
+evaluator-only because the projection derives them; both asymmetries are
+structural rather than gaps.
+
+*What the audit did find* was two more stale claims, both siblings of claims
+corrected one commit earlier at the other seam — which is the same defect the
+audit exists to catch, caught this time before a reviewer had to:
+
+- the projection's identity tier still stated an envelope of
+  `MaxOrderedRulesCandidates` x `MaxOrderedRulesIdentifierBytes`, half a
+  megabyte. The outcome pass added below it multiplies that by the outcome
+  ceiling, and what caps the two together is the text aggregate — about 21 MiB.
+  The identical stale figure had just been corrected on the evaluator side;
+- the cost-gradient paragraph above the shape tier described the candidate
+  vocabulary as "four short vocabulary words per candidate", the same undercount
+  that made the wrong tier order look right, in a second comment that survived
+  the repair of the first. It is about 8,704 comparisons at the ceilings, not
+  512, which makes that tier four times the intervention one rather than a
+  fraction of it.
+
+*What the audit did not find* is any rule enforced on one path and absent on the
+other. That is stated as the result of the enumeration above and not as a
+guarantee: the enumeration covers closed vocabularies, identity uniqueness,
+required-presence declarations and the per-string bounds, and nothing claims it
+is exhaustive over every future field.
+
+**The completed symmetry pass, and why its silence is weaker evidence than a
+reviewer's finding.** The enumeration was finished afterwards over all three
+copies of the ingest rules — the projection's structural, vocabulary, identity
+and payload passes; the evaluator's constant-bounded structural tier; and the
+evaluator's invariant pass — as a table of thirty-five rules. Every rule the
+projection applies to RETAINED state has a counterpart on the evaluator side,
+including the ones no reviewer has raised: the declared-position flags, strict
+causal ordering, the declared interval, episode membership, source-kind/view
+compatibility, the nested presence words and the back-dating comparison. The
+ceilings were checked by arithmetic rather than by reading: `chargedWidth` is
+`n * orderedRulesMaxJSONExpansion` with no constant term, so the projection's
+grouped charge and the evaluator's per-string charge are equal sums, and both
+sides compare strictly past `orderedRulesTextCeiling`. Where the evaluator
+charges less — a derived cutoff identity, the removed-candidate floor — it is
+bounded above by what the projection charged for the same source, which is the
+safe direction. No gap was found, and that sentence is worth exactly what an
+audit designed by the person who wrote the code is worth.
+
+**The attestation audit found one, and it is the same shape as the ten.** The
+reordering work moved refusals above the stream hash, which changes what a
+refusal can attest to — so the tests that assert through the two-call digest
+oracle were re-checked for vacuity rather than assumed still sound.
+
+`TestOrderedRulesEveryRetainedScopeAndAdmissionStringIsRevalidatedOnIngest`
+walks every retained string in the scope and the admission by reflection and
+requires a forged one to be refused. Its `Scope.Coverage` case could not observe
+the rule it names. On a `COMPLETE_DECLARED` base, substituting any other
+coverage makes `qualCoverageNotComplete` required where the stream carries none,
+so `orderedRulesQualificationsNotDerived` refuses it — a different rule, which
+fires first. Proven twice rather than argued: with the coverage vocabulary
+deleted from BOTH the structural tier and `validateScope` the case still passed,
+and a perfectly VALID `GAPS_PRESENT` substituted into a `COMPLETE_DECLARED`
+stream was refused identically. The sibling entry `Admission.ViewKind` does
+discriminate — the same both-paths deletion fails there, naming it — which is
+why this is one case's fixture and not a fault in the walk.
+
+The case now forges from a `GAPS_PRESENT` base, so every value it can substitute
+is also not complete, the derived qualification list is unchanged, and the
+vocabulary rule is the only one left with an opinion. A premise subtest asserts
+that directly: on that base a substitution of a VALID `TRUNCATED_PREFIX` must
+reach `WOULD_ATTEMPT`. After the repair the both-paths deletion FAILS naming
+`Scope.Coverage`, and deleting only the structural-tier copy still passes —
+through `validateScope` below the hash, which is the oracle mechanism the case
+names.
+
+The same audit falsified a second claim, this one in a comment.
+`TestOrderedRulesTheGateRefusesBytesTheProjectionWouldHaveRefused` described
+itself as running the oracle — *"a refusal publishes the digest it wanted, so
+copying that back is two calls and no cryptography"*. `STREAM_BYTES_OVER_BOUND`
+is an unread refusal and carries no digest at all, so `first.StreamDigest` is
+`""` and the assignment is a no-op. The true property is stronger than the
+described one and is now asserted as itself: the refusal must carry NO digest,
+and the byte rule must hold for any `SelectionDigest` the caller writes,
+including one invented outright. Mutation-verified by making the unread refusal
+hand back a digest — the new guard fails, quoting it.
+
+Both repairs are test-only. The reflection-based digest-binding guards needed no
+change: they were moved to call `orderedRulesStreamDigest` directly in an
+earlier commit, precisely so no reordering could make them vacuous, and that
+still holds.
+
+**The equivalent-mutant pass, stated as which cases do NOT discriminate.** A
+falsifier that names a rule and is killed by a different one is the defect the
+two repairs above were instances of, so the reflection walk was classified
+mechanically rather than by reading: `invalidUTF8` was deleted from
+`checkFreeText` and the surviving cases counted.
+
+Nine of the twelve cases fail — `Scope.Namespace`, `Scope.EpisodeID`,
+`Scope.AccountContext`, `Scope.AssociationEvidence`, `Scope.CoverageDetail`,
+`Admission.ManifestID`, `Admission.Population`, `Admission.OrderBasis`,
+`Admission.SourceReferences`. Three pass. Two of those three are the closed
+vocabularies, probed with an out-of-set word by design and already declared as
+such. The third was not declared: `Scope.SourceContractVersion` is probed with
+an invalid byte, intending the encodability rule, and the **version comparison**
+kills it first — appending any byte makes the value unequal to the constant.
+
+That is not a hole. Equality against a fixed constant SUBSUMES encodability,
+because an invalid byte is a difference. It is recorded because the case would
+otherwise have been counted as encodability coverage it does not provide, which
+is the same bookkeeping error as the coverage case above. The exemption is now
+written down with its reason and CHECKED rather than trusted: a subtest changes
+the field to a DIFFERENT but perfectly encodable value and requires refusal.
+That guard is killed only by removing **all three** copies of the comparison —
+the pre-tier check in `EvaluateOrderedRules`, the structural tier's, and
+`checkSourceContractVersion` in `validateScope` — so any single-copy mutant is
+equivalent for it, and that is stated rather than left to be discovered.
+
+One equivalent-mutant class remains, unchanged and still without a test: the
+order of `orderedRulesCutoffImpossible` against `orderedRulesQualificationsNotDerived`
+inside the invariant pass. Both produce the identical `StatusRefused` /
+`ReasonStreamInvariantViolated`, so no observation distinguishes the two orders,
+and the repository's deterministic-test contract rules out pinning one by
+elapsed time. The comment holds that order, not the suite, and reversing the two
+blocks breaks nothing and loses the 3.09 ms the swap measured.
+
+**Serialization exactness, reverified on the final design — and the defect is
+wider than it was filed.** A reviewer's P2 on `364f009` said entropy words
+encoded as JSON numbers do not survive an IEEE-754 consumer. That finding was
+recorded as owner-gated and NOT implemented, because every correct repair
+changes the JSON representation of an exported type. It was re-checked here
+rather than carried forward on trust, and three things changed.
+
+First, the affected set is four fields, not one: `SuppliedDrawTrace.Words`
+(input), `OrderedRulesSelection.ShareBits`, `OrderedRulesTraceEntry.ShareBits`
+and `OrderedRulesTraceEntry.RawWordValue` (output).
+
+Second, the output side is affected far more broadly than the input side. A raw
+entropy word is at risk only above 2^53. `ShareBits` is `math.Float64bits` of a
+pool share, and a share's bit pattern stays above that line all the way down to
+a value as small as 1e-300, whose pattern is 118622047889322841. Reproduced: 0.5
+and the next representable double above it have adjacent bit patterns and
+collapse to the same integer through a float64 parser. So the field whose own
+documentation says it is *"recorded as bits so a report cannot round two
+distinguishable shares into one printed number"* is rounded by its own wire
+format.
+
+That paragraph said "the bit pattern of ANY normal double is above that line …
+on every value it can hold" until a reviewer checked the bottom of the range,
+and the universal was false. The smallest normal double is `0x0010000000000000`
+— that is 2^52 — and the whole biased-exponent-1 bin and every subnormal sit
+under 2^53 with it. The sharpest counterexample is one this package produces on
+purpose: an all-zero pool yields a share of exactly zero, whose pattern is
+`0x0000000000000000`, and there is a test for that pool. The format is still
+required across the whole domain, because which bin a share lands in is not
+known before it is computed. The need was right; the universal was not.
+
+Third, the escape route that would have made this a narrow fix does not exist,
+and that was established mechanically rather than assumed. Go's `,string` tag
+option is **ignored on a `[]uint64` field**, so it cannot quote the elements of
+`Words`; and `,string` decoding is strict in both directions — a bare number
+into a `,string` field is an error, and a quoted value into a plain field is an
+error — so any change here is a hard wire break rather than a widening.
+
+What the change would cost today was also established rather than argued: there
+is **no non-test caller of this package anywhere in the repository**, and **no
+pinned JSON baseline under `testdata/ordered_rules/` contains any of the four
+fields**. So the compatibility cost of changing the encoding now is zero
+persisted artifacts, zero runtime callers and zero baselines to regenerate.
+
+**RETRACTED, and the retraction is the point of the paragraph that used to be
+here.** This section previously ended "It is still not implemented. The hazard
+is recorded at each of the four field sites ... and the decision is carried to
+the owner." The owner returned the decision, approving the contained wire
+repair, and it is implemented. The sentence above is kept in quotation rather
+than deleted because a specification that silently swaps a "not done" for a
+"done" cannot be used to check what was true when an earlier artifact was
+produced.
+
+**What the owner authorized, stated as the boundary it is.** All four fields
+encode as canonical fixed-width sixteen-character lower-case hexadecimal
+strings; decoding is strict; there is no decimal-number compatibility shim, no
+lossy IEEE-754-compatible fallback and no partial Option C behaviour;
+`OrderedRulesEntropySemanticsVersion` is NOT bumped and
+`OrderedRulesStreamContractVersion` is NOT bumped for a transport change; and
+no runtime integration, collector, persistence, settings or P3b scope is
+touched. The exact uint64 bit patterns and the existing mechanism semantics are
+preserved.
+
+**The repair reuses the package's convention instead of adding one.**
+`OrderedRulesHex64` is a `uint64` in memory and a hex string on the wire. Its
+`MarshalText` CALLS `hex64` — the function the digests have used since they
+were written, whose own documentation already warned that "a raw word pushed
+through a double-precision JSON number loses its low bits silently" — rather
+than restating the format, so the wire and the digests cannot drift apart.
+`UnmarshalText` is that function's exact inverse and refuses everything else:
+wrong width, upper case, a `0x` prefix, a sign, padding, any byte that is not a
+lower-case hex digit. `TestOrderedRulesHexWordIsExactlyTheDigestRendering` and
+`TestOrderedRulesHexWordDecodeInvertsHex64` pin both halves, the second over
+every single-bit value so a per-nibble fault cannot hide in a hand-picked table.
+
+Two mechanical facts made this shape the only one available, and both were
+established by measurement rather than assumed. Go's `,string` tag option is
+ignored on a `[]uint64` field, so it cannot quote the elements of `Words`; and
+`encoding/json` refuses to hand a JSON **number** to a `TextUnmarshaler` at all,
+which is what closes the decimal form off at the type level rather than by a
+check this package would have to keep writing — so "no compatibility shim" is a
+property of the type and not a promise in a comment.
+`TestOrderedRulesHexWordRefusesAJSONNumberAtTheTypeLevel` pins it, including the
+fact that such a refusal arrives as a `*json.UnmarshalTypeError` and does NOT
+wrap `ErrOrderedRulesHexWordMalformed`, which a caller classifying malformed
+input has to know.
+
+**The loss is demonstrated, not argued.**
+`TestOrderedRulesNumericJSONWouldLoseTheDistinctionTheHexFormKeeps` builds both
+representations and reads both through the same IEEE-754 consumer. Measured:
+
+| the two values | as JSON numbers, after the consumer |
+| --- | --- |
+| `0x3fe0000000000000`, `0x3fe0000000000001` (0.5 and one ulp above) | both `4.602678819172647e+18` |
+| `0x0020000000000000`, `0x0020000000000001` (2^53, 2^53+1) | both `9.007199254740992e+15` |
+| `0xffffffffffffffff`, `0xfffffffffffffffe` | both `1.8446744073709552e+19` |
+| `0x8000000000003039`, `0x800000000000303a` | both `9.223372036854788e+18` |
+
+Each row first asserts that the two numeric encodings differ AS TEXT, so the
+collapse is shown to be the reader's and not the writer's, and the same vectors
+through the repaired form stay distinct and decode back bit-exact. Replacing
+the legacy mirror in that case with the repaired type makes it fail with "the
+numeric form survived this consumer", which is how the proof is known to be
+load-bearing rather than self-satisfying.
+
+**Nothing that is hashed moved, and that is pinned with numbers taken from
+before the change.** The conversions at the six production call sites are
+reinterpretations of the same bits, so the four digests must be unchanged.
+`TestOrderedRulesTransportChangeMovedNoDigest` evaluates a fixture whose words
+lead with 2^53+1 and then span 0, 2^63-1, `MaxUint64` and 2^53, and pins
+`StreamDigest 1d70c598…`, `ConfigDigest 2e754165…`, `EntropyDigest ef5d3511…`
+and `ConsumedInputDigest e8ae4efe…` — captured by running that same fixture on
+`a3187b2`, the commit before the transport change, in a separate worktree. It
+first requires the run to have reached `WOULD_ATTEMPT`, because an unread
+refusal carries EMPTY digests and pinning four empty strings would pass
+vacuously.
+
+Those are the values as they stand. The first version of this paragraph named
+`EntropyDigest f5f4ca98…` and `ConsumedInputDigest 65a524a2…`, from the fixture
+whose leading word was zero, and left them in place when the fixture changed —
+so this document briefly carried two incompatible baselines for one test, which
+is the same class of stale claim it has been recording all along, committed in
+the paragraph that pins against staleness. A reviewer found it.
+
+**Eleven mutants, all killed, each by the case that should kill it.** Decimal
+encoding, a dropped length check, upper case accepted, a write before the
+refusal returns, a shift of eight instead of four, `RawWordValue` and `Words`
+reverted to plain integers with every test call site fixed up so the kill is
+behavioural rather than a compile error, two perturbations of the entropy
+digest, and the substitution of the repaired type into the legacy mirror
+described above. The partial-write mutant is killed by
+`TestOrderedRulesHexWordRefusalLeavesTheDestinationUntouched` and by nothing
+else, and the digest mutants by `TestOrderedRulesTransportChangeMovedNoDigest`
+and nothing else.
+
+**Two things are recorded as NOT repaired, because they are not this repair's
+to make.** First, a sixteen-character all-decimal spelling is a well-formed hex
+word and is read as its HEXADECIMAL value — every decimal digit is also a hex
+digit, so width is the only defence and it catches every decimal spelling
+except one of exactly that length.
+`TestOrderedRulesHexWordReadsAnAllDigitWordAsHexAndNotAsDecimal` pins the
+reading and the re-encoding, so the limit of the refusal table is stated where
+a reader would otherwise infer it covers decimals. Second, `encoding/json`
+treats a JSON `null` as "leave the destination alone", so `{"shareBits":null}`
+into a fresh struct yields a share of exactly zero with no error. That is
+unchanged by this repair — it was equally true when the field was a plain
+`uint64` — and repairing it means a presence flag or a pointer, which is a wire
+change outside what was authorized. `TestOrderedRulesHexWordNullIsANoOpAndNotAZero`
+pins both halves of the behaviour rather than leaving it implicit.
+
+The aggregate byte budget is untouched by all of this: it charges supplied TEXT
+and closed vocabularies, and `Words` is bounded by COUNT
+(`MaxOrderedRulesDrawWords`) and charged to no total, so changing a word's
+encoded width moves no ceiling. `TestOrderedRulesStructuralOverheadFitsItsReserve`
+measures the projected stream, which carries none of the four fields.
+
+**And the header of the repair claimed more than the repair does — a reviewer
+caught it within the hour.** The first line of `ordered_rules_hexword.go` said
+"Every exported 64-bit value this model carries across a wire is an exact bit
+pattern, not a quantity". That is FALSE. Ten exported `int64` JSON fields are
+quantities and still travel as JSON numbers: `SuppliedInt64.Value`,
+`SuppliedInt64.AvailableAtPosition`, `OrderedRulesScope.IntervalFromPosition`
+and `IntervalToPosition`, candidate and intervention `Position`, and the four
+positions a result re-exports. The sentence was written about the four fields
+that were being repaired and generalized to a claim the change does not support,
+which is the same class of overstatement this section already records twice.
+The header now names the exclusion and its reason.
+
+**The residual is measured, and two of its three input paths turn out to be
+DETECTED rather than silent.** That distinction is the difference between a
+recorded limitation and a vague warning, so it was established by running the
+real types through a consumer that has only float64 numbers:
+
+| path | outcome |
+| --- | --- |
+| a SOURCE relayed before projection, points `2^53+1` | **SILENT.** The recorded share moves from `0x3feffffffffffffe` to `0x3ff0000000000000` — exactly 1.0, reporting an outcome as holding the whole pool when it holds all but one point. Same status, same chosen outcome. |
+| a projected STREAM relayed | **DETECTED.** `STATUS_REFUSED` / `STREAM_SELECTION_DIGEST_MISMATCH`: the selection digest was computed over the exact values. |
+| positions `2^53` and `2^53+1` relayed in a source | **DETECTED** when the collapse creates a tie — strictly increasing causal order is already a projection rule. Not a general guarantee: one candidate has nothing to tie with. |
+| the RESULT read by a float64 consumer | **still numbers past 2^53** at `.selected.candidatePosition`, `.stoppedAtPosition`, `.trace[].candidatePosition` and `.visits[].candidatePosition`. |
+
+**Everything from here to the end of this subsection is HISTORY as of the
+twelve-field repair recorded below.** The owner subsequently approved extending
+lossless transport to all twelve `int64` fields, so the residual described here
+no longer exists and the test named in the next paragraph no longer exists
+either. The measurements are kept because they are what the decision was made
+on, and because a reader checking an artifact produced before that repair needs
+to know what was true then.
+
+`TestOrderedRulesInt64JSONFieldsStillCollapseAndAreOutsideThisRepair` pinned all
+four rows. Its last row did a second job: it proved the whole-document walk in
+`TestOrderedRulesEvaluationCarriesHexOnTheWire` can actually fire, so the
+"no number past 2^53" assertion there is a live detector and not a check that
+passes because nothing could ever trip it. That assertion's comment was also
+corrected — it is a statement about that one artifact, whose positions and
+points are small, and never was a property of the types.
+
+Mutating `relayThroughFloat64` into a lossless pass-through kills three of the
+four rows by name, so the relay is doing the work rather than the fixture.
+
+**It was NOT repaired in that round, and the reason was the boundary rather
+than the difficulty.** That owner decision enumerated four fields. Extending a public wire contract to
+the rest, or refusing supplied values outside the exact IEEE-754 integer range
+at ingestion — which would narrow the admitted domain the model currently
+accepts — are both larger changes than were authorized, and neither is a thing
+a comment or a test gets to decide. The finding is carried to the owner with
+the measurements above.
+
+**A seventh round, on the correction itself, and all four of its findings hold.**
+Two reviewers read the repair within the hour. What they found is recorded here
+because three of the four are faults in claims this section had just made.
+
+*The exclusion list said "ten" and there are TWELVE.* The missed pair is
+`OrderedRulesCandidateVisit.CandidatePosition` and
+`OrderedRulesCandidateVisit.PoolTotal`. They were missed because they are
+declared in `ordered_rules.go` while the enumeration that produced "ten" read
+`ordered_rules_types.go` alone — a sibling-site miss of exactly the kind this
+package keeps a rule against, committed in the paragraph that was correcting an
+earlier overstatement. `PoolTotal` is the sharpest of the twelve: it is the
+exact `int64` pool sum the share is then computed from. All twelve are now
+listed by name in the header rather than summarized.
+
+*The share claim was still a false universal,* corrected above.
+
+*The consumed-prefix digest pin was green under a mutant it should have caught,*
+and this is the one worth the most. `orWireFixture` led with a word of ZERO. The
+first rule matches at fifty percent and its draw succeeds immediately, so
+exactly ONE word is ever consumed — so `ConsumedInputDigest` covered only that
+zero, and every risky word after it was an unconsumed suffix that only the
+SEPARATE entropy digest covered. Zero survives a float64 round trip, so a
+regression confined to `orderedRulesConsumedDigest` left the pin passing. The
+fixture now leads with 2^53+1, which is under the half-rate threshold of 2^63
+and so still admits, and does not survive a float64. Both pinned digests were
+re-captured on `a3187b2` for the new fixture:
+`EntropyDigest ef5d3511…`, `ConsumedInputDigest e8ae4efe…`.
+
+The repair is demonstrated rather than asserted. Hashing
+`uint64(float64(d.Words[i]))` in the consumed-prefix digest is **KILLED** under
+the new fixture and **SURVIVES** under the old one — run both ways, and that
+pair is the evidence that the word ordering was the gap. Two further digest
+mutants (the consumed prefix dropping a word's low 32 bits, the entropy digest
+rounding through a float64) are killed by the same case and nothing else.
+
+*The residual case required only ONE lossy result path where it documents four.*
+`len(found) == 0` would have stayed green with three of the four repaired, which
+is the opposite of what the case promises. It now asserts
+`.selected.candidatePosition`, `.stoppedAtPosition`, `.trace[].candidatePosition`
+and `.visits[].candidatePosition` individually. Giving
+`OrderedRulesCandidateVisit.CandidatePosition` a `,string` tag — precisely the
+widening the case promises to fail on — now kills it by name.
+
+**The owner then approved the wider repair, and all twelve travel losslessly.**
+The alternative — refusing supplied values outside the IEEE-754 safe integer
+range at ingestion — was rejected explicitly: the model's `int64` domain is not
+narrowed to fit a consumer's limitation. So the twelve now encode as canonical
+base-ten JSON STRINGS through one shared type, `OrderedRulesInt64`.
+
+**Two wire rules, and the split is the point.** `OrderedRulesHex64` carries the
+four values whose identity is their BITS — a raw entropy word, or
+`math.Float64bits` of a share — as fixed-width hexadecimal, because that is the
+form the digests have always used and a bit pattern has no sign.
+`OrderedRulesInt64` carries the twelve whose identity is their MAGNITUDE: they
+are signed, compared and summed as numbers, and a reader should see the number
+rather than its encoding. One shared type per rule, not twelve hand-written
+serializers — the history of this very subsection is a sequence of corrections
+to claims that drifted out of step with each other, and twelve serializers would
+be twelve more places for that to happen.
+
+**Canonicality is checked by inversion rather than by a list.** `MarshalText` is
+`strconv.AppendInt` base ten; `UnmarshalText` parses and then requires
+`FormatInt(parsed, 10)` to equal the input byte for byte. That makes the decoder
+the encoder's inverse BY CONSTRUCTION, so `"+1"`, `"01"`, `"-0"`, `"1_000"`,
+`"0x10"`, `"1e3"`, `" 1"` and every other alternate spelling of a representable
+value are refused without anyone maintaining a table of them. There is no
+numeric compatibility shim and no float64 fallback, and that is a property of
+the type: `encoding/json` will not hand a JSON **number** to a
+`TextUnmarshaler` at all.
+
+**One equivalent mutant, classified rather than left surviving.** Changing the
+parse base from 10 to 0 — which admits `0x` prefixes, underscores and
+leading-zero octal — kills nothing, and a mutation run confirmed it. Base 0
+accepts a strict superset of base 10, and every spelling in that difference
+carries a prefix, an underscore or a leading zero, none of which `FormatInt`
+ever writes, so all of them fail canonicality instead. The base argument is
+therefore NOT what makes this decoder strict, and the code now says so where a
+reader would otherwise assume it.
+
+**The corruption this repair exists to remove is now impossible, and the proof
+carries its own control.** A relay that had quietly become lossless would make
+every assertion pass while proving nothing, so
+`TestOrderedRulesAFloat64RelayCanNoLongerCorruptASource` FIRST shows the same
+helper still destroying a bare `int64` (2^53+1 arrives as 2^53), and only then
+puts the repaired carriers through it. Measured after the repair: supplied
+points of 2^53+1 survive, the exact `int64` pool sum survives at 2^53+2, the
+recorded share stays `0x3feffffffffffffe` instead of becoming exactly 1.0, all
+four digests are unchanged across the relay, a relayed STREAM verifies against
+its own selection digest instead of being refused, and positions one apart no
+longer collapse.
+
+**Nothing that is hashed moved, pinned against values captured before the
+change.** `TestOrderedRulesInt64TransportMovedNoDigest` evaluates a fixture whose
+positions and points are past 2^53 in both signs and pins
+`StreamDigest 01e34dc2…`, `ConfigDigest 2e754165…`, `EntropyDigest cd65d700…`
+and `ConsumedInputDigest fd5e601a…`, captured by running that same fixture on
+`38d0ff5` in a detached worktree. It first requires `WOULD_ATTEMPT`, because an
+unread refusal carries EMPTY digests and pinning four empty strings would pass
+vacuously, and it separately pins that the fixture's selected position and pool
+total really are past 2^53 so a later edit cannot shrink it back inside the
+exact range.
+
+**The type graph is audited reflectively, so a thirteenth field cannot be
+missed the way the eleventh and twelfth were.**
+`TestOrderedRulesExportedGraphCarriesNoBare64BitJSONField` walks every exported
+type reachable from the five roots of the public surface and requires any
+JSON-tagged 64-bit field to be one of the two wire types. It finds SIXTEEN — the
+twelve and the four — and fails on a bare one. The paired
+`TestOrderedRulesAllTwelveInt64FieldsRoundTripExactly` names the twelve
+explicitly and walks each through `MinInt64`, `-2^53-1`, `-2^53`, `-2^53+1`,
+`-1`, `0`, `1`, `2^53-1`, `2^53`, `2^53+1` and `MaxInt64` in its real carrier,
+asserting the encoded TEXT as well as the decoded value. The two halves are
+deliberately different in kind: a reflective loop agrees with the code whatever
+the code covers, and a hand-written list is what the documentation claims.
+
+**The fifteen platform-width `int` fields are measured, not waved through.**
+The audit reports them, and `TestOrderedRulesIntWidthFieldsAreStructurallyBounded`
+establishes that none can reach a result past 2^53: the counters and indices are
+bounded by declared ceilings, and the one caller-supplied count,
+`OrderedRulesCutoff.DroppedAtOrAfter`, is refused above the candidate ceiling
+with `STREAM_INVARIANT_VIOLATED` and is NOT re-exported by the refusal —
+probed directly at 2^53, 2^60 and `MaxInt`.
+
+**Thirteen mutants this round, twelve killed at the exact seam and one
+classified.** Hexadecimal encoding, a dropped canonicality check, a write before
+the refusal returns, a 32-bit parse, `PoolTotal` reverted with every call site
+fixed up so the kill is behavioural, two digest perturbations, and four fields
+dropped off the wire one at a time. The partial-write mutant is killed by
+`TestOrderedRulesInt64RefusalLeavesTheDestinationUntouched` and nothing else;
+the 32-bit parse by the boundary table, the sweep and the digest-rendering
+identity, which is the seam itself rather than an unrelated earlier refusal.
+Reverting `SuppliedInt64.Value` or `OrderedRulesCutoff.Position` to a plain
+`int64` does not compile against the suite — a real guard but a weak one, since
+it is a statement about Go rather than about an artifact — which is why the same
+class was also killed behaviourally by dropping those fields off the wire.
+
+**No property-based-testing library was added.** This PR commits to leaving
+`go.mod` untouched, so the domain coverage is deterministic instead: every power
+of two and its neighbours in both signs, plus a fixed spread. Adding `rapid` or
+similar is a dependency decision that belongs to the owner, and is not taken
+here.
+
+**No version constant is bumped.** `OrderedRulesEntropySemanticsVersion` is
+untouched because the entropy semantics did not change, and
+`OrderedRulesStreamContractVersion` is untouched because this is a transport
+representation change with no semantic content: the same values, the same
+comparisons, the same arithmetic and — pinned above — the same digests. The PR
+is Draft with no production runtime caller, so no artifact exists that a version
+bump would help a reader distinguish.
+
+**A sixth review round, and five of its findings are worth more than their
+labels.** The audit above declared no gap in family A. A reviewer then filed
+five P2s across two heads, and every one of them was real. Recording that
+plainly is the point: an audit designed by the author of the code found nothing
+in the area the reviewer then found five things in.
+
+*The charging-pass class, and it is five times wider than it was filed.* The
+reviewer named a candidate's `Provenance` and `OutcomesReason`: their lengths
+are already read to charge them, and the per-string bound is applied much later,
+so a one-byte-over-limit fault is amplified into a traversal of nearly all
+retained text. Reproduced on a 128 x 64 source with 2,400-byte provenance,
+one byte past the limit, against a 38.384156 ms control for the admissible
+source:
+
+| charged string, one byte over the per-string limit | before | after |
+| --- | ---: | ---: |
+| candidate `Provenance` | 13.363578 ms | 1.177698 ms |
+| candidate `OutcomesReason` | 14.103507 ms | 1.266311 ms |
+| candidate `Balance.Provenance` | 15.446561 ms | 1.274968 ms |
+| outcome `Points.Provenance` | 14.323082 ms | 1.277651 ms |
+| admission `Population` | 1.414274 ms | 202 ns |
+| scope `Namespace` | 909.374 µs | 200 ns |
+
+Only the first two were filed. The other four were found by enumerating every
+site where a `len()` is read for the charge, which is the rule that replaces the
+enumeration: **if a loop reads a length to charge a string, it settles that
+string's bound on the same line.** Deliberately `checkTextLength` and not
+`checkFreeText` — the UTF-8 scan of an ADMISSIBLE string is correctly deferred.
+
+**And the residual is named rather than rounded away, including a regression.**
+The five candidate and outcome faults now sit at the structural pass's own
+floor: a LAST candidate that merely declares no position — a flag test, no text
+at all — costs 1.248567 ms, while the same fault in the FIRST candidate costs
+209 ns. So ~1.25 ms is what reaching candidate 127 costs, not residue from the
+repair. The cost of that floor went UP: adding roughly 34,000 length
+comparisons raised the structural pass from about 0.9 ms to about 1.25 ms, which
+is paid by every refusal decided in or after that loop. A duplicate candidate
+identity was 920.277 µs before and is at the floor now. That is the trade — about
+0.35 ms added to one pass to remove 12–14 ms from five others — and it is stated
+with both numbers.
+
+*The intervention identity pass* sat below the outcome identity walk (up to
+`MaxOrderedRulesCandidates` x `MaxOrderedRulesOutcomes` identities) and below the
+admission references. Two short duplicate identities cost 2.507047 ms; the pass
+is now between the two candidate passes, at 1.584997 ms against a 1.880291 ms
+floor set by the sibling pass directly above it. It is one definition with two
+callers, like the vocabulary check beside it.
+
+*A post-digest refusal that impersonated a pre-read one.* The unencodable
+`ConfigID`/`RunID` refusal used the package-level `orderedRulesUnreadRefusal`,
+which builds a FRESH result — so a refusal reached only after the stream digest
+was computed AND matched, the invariant pass passed, and the derived fields were
+assigned came back with an empty `StreamDigest` and an empty `Cutoff`. Measured
+across the tier: a shape-gate refusal carries no stream digest because it really
+did read nothing, while `STREAM_SELECTION_DIGEST_MISMATCH` and
+`STREAM_INVARIANT_VIOLATED` both carry one. This refusal was the only
+post-digest one withholding it.
+
+Its test asserted the opposite — *"nothing was hashed at all before saying no"* —
+and that assertion was a stale pin. It was true when the scan lived in the shape
+gate; the scan has moved twice since, and the sentence outlived the arrangement
+it described. Returning an empty digest never meant nothing was hashed; it meant
+the evidence was computed and discarded. The case now requires the stream digest
+to be PRESENT and to equal an admissible run's, and the config, entropy and
+consumed-prefix digests to be ABSENT — which is what this check actually guards.
+
+*The parity property failed OPEN on the case it was built for.* Its
+`ingestRefusal` map was an allowlist of the seven ingest reasons known when it
+was written, so a newly named stream refusal would be silently accepted — the
+property built to catch the next divergence would have ignored it. It now
+enumerates the twelve MECHANISM answers a projected stream may legitimately
+receive and fails on every other `StatusRefused`. Mutation-verified with a
+brand-new reason code: 216 cases fail, naming it. The config-and-trace refusals
+are deliberately absent because the fixed valid config and draws make them
+unreachable; the cost is that a genuinely new mechanism answer also fails until
+someone looks at it, which is the right way round.
+
+*And it never evaluated half the model.* Every candidate was a channel update
+and every admission a channel candidate stream, so the
+`CALCULATE_ONLY`/`CALCULATE_SNAPSHOT` pair was projected by a separate case and
+never evaluated at all — while source-kind/view compatibility is one of the six
+rules the evaluator copies inline. The space now crosses both valid pairs, with
+a counter per view: 1,296 projected streams, 648 under each. Mutation-verified
+with the reviewer's own named mutant — an evaluator rejecting every
+calculate-only stream with the existing invariant reason — which used to leave
+the case green and now fails every calculate-only case.
+
+**And a dimension of this case was dead, which the same reviewer's arithmetic
+exposed without quite naming.** It counted 1,296 constructed combinations
+against a logged 648 and asked which condition accounted for the gap. The
+answer: `textLens` was `{0, 64}`, and **every one of the 648 textLen-0 cases was
+refused by the projection** — `pad(0)` is the empty string, and
+`checkPresenceShape` requires a KNOWN value to carry provenance. Measured over
+the whole space: 1,296 constructed, 648 refused, all 648 of them that half, all
+with *"points is KNOWN but carries no provenance"*.
+
+So the dimension documented as free-text length had exactly one live value.
+Every stream this property ever evaluated carried 64 bytes of it. The dimension
+doubled the loop count and contributed nothing — and it survived because the
+only non-vacuity guard counted PROJECTIONS, of which there were 648.
+
+That is the same shape as the two findings this case was already repaired for:
+something that looks like coverage and is not. It is now `{1, 64}`, one byte
+being the smallest provenance the projection admits, with a per-length counter
+that fails naming the dead value. Mutation-verified by restoring 0: the guard
+fires. The space genuinely doubles as a result — 648 evaluated streams to
+1,296 — which is the measure of what the dead value was costing.
+
+**Three dimensions of one case turned out smaller than they looked, so the
+remedy is now general rather than a fourth patch.** The bound-field classes, the
+views and the free-text lengths were each found by someone asking, never by a
+guard, and the aggregate counters could not have seen any of them: `projected`
+was in the hundreds throughout. Every dimension therefore carries a per-value
+counter and a guard, and a value that stops projecting fails by name.
+
+Measured when those were added, and the space is exactly balanced — 432
+projections for each candidate/outcome shape, each balance presence word and
+each coverage; 648 with and 648 without a boundary; 216 per bound field
+including `none`; 648 per view and per free-text length. **No remaining value is
+dead.** Mutation-verified on the coverage dimension by making the projection
+refuse `TRUNCATED_PREFIX`: the guard fires naming that coverage.
+
+**That claim was too broad when it was first written, and a reviewer said so in
+the same breath as the gap.** *"The current claims that every dimension value has
+a guard and that no value is dead are otherwise too broad."* They were: one value
+of one dimension still had no counter — `boundFields`'s `none`, which is the
+ORDINARY path, a stream with nothing at the per-string limit. It had been
+excluded from the accounting and again from the guard, on the reasoning that
+there was no bound to count.
+
+The consequence is the one that makes it worth a finding rather than a tidy-up:
+a projection change rejecting every `none` case leaves all five bound counters
+nonzero, and every shape, balance, coverage, cutoff, view and free-text counter
+nonzero too, because the other five values keep projecting. The ordinary path
+disappears in silence. `none` now has a counter derived from the stream like the
+others — it counts only when NO tracked class is at the bound, so a case
+secretly carrying one cannot satisfy it — and a guard of its own.
+Mutation-verified with the exact scenario filed: making the projection reject
+every `none` case fails the guard, naming it.
+
+This is the thirteenth claim on this work falsified after being written, and the
+first where the reviewer falsified the CLAIM and the GAP together. The lesson is
+recorded rather than smoothed over: an exemption inside a guard is a hole in the
+guard, and "every value is covered" is exactly the sentence to distrust when one
+value is sitting under an `if ... continue`.
+
+One honest qualification on that balance. The evaluator's STATUS distribution is
+identical across all three coverages — 288 stake-unknown and 144 would-attempt
+each — so coverage never moves the outcome in this space. It is still real
+coverage of a real rule rather than decoration: coverage drives
+`qualCoverageNotComplete`, the evaluator re-derives it in
+`orderedRulesQualificationsNotDerived`, and that derivation is an ingest check
+this property would catch the two paths disagreeing on. The dimension earns its
+place through the qualification comparison, not through the status.
+
+**What the parity property still does NOT cover, stated rather than left to be
+discovered.** The second reviewer, asked directly whether the rotation has gaps,
+named one and it is real: the case rotates **one** bound-length field class at a
+time, so a divergence that requires **two** of those fields at their bound
+*simultaneously* is outside its reach. Covering that is combinatorial — five
+classes pairwise across the existing six dimensions — and the cost was judged
+not worth paying for a defect shape nothing has yet exhibited. It is recorded
+here beside the other honestly-scoped exemptions rather than described as
+covered, which is the distinction this work keeps having to relearn.
+
+The same reviewer declined to re-verify the family-A table independently and
+said so, which is the right answer: *"a self-audit of one's own three code
+copies is weaker evidence than a reviewer's finding — treat the 'no gap found'
+claim as provisional, not confirmed."* It is recorded that way above and stays
+that way.
+
+It did confirm two things by reading the code rather than the comments: the
+qualification-derivation interference is closed for the reflection walk's scope,
+because the only two qualification-driving fields that walk touches are
+`Scope.Coverage` (repaired) and `Admission.ViewKind` (which discriminates, since
+the fixture's base view is not `CALCULATE_ONLY`, so `qualCalculateOnlyView` is
+absent either way); and the `Scope.SourceContractVersion` subsumption claim
+holds, because `checkSourceContractVersion` is a plain equality against a fixed
+constant and any invalid byte is a difference.
+
+**A round of five, and the shape of them is the finding.** One reviewer pass
+produced five separate orderings on one head, and every one was the same
+question asked at a different seam: does a refusal whose truth depends on a
+count, a flag or one short word wait behind work the caller sized? Taken
+together rather than one at a time:
+
+| refusal | before | after | floor |
+| --- | ---: | ---: | ---: |
+| evaluator: unsupported `Scope.SourceContractVersion` | 58.568 µs | 104 ns | 78 ns |
+| evaluator: config declaring no default | 115.046 µs | 69.14 µs | 78 ns |
+| evaluator: unencodable cutoff identity | 22.223546 ms | 115.041 µs | 78 ns |
+| projection: over-bound admission source reference | 1.338851 ms | 191 ns | 150 ns |
+| projection: over-bound intervention identity or detail | 1.226244 ms | 236 ns | 150 ns |
+| projection: invalid intervention `Kind` | 783.914 µs | 429.638 µs | 150 ns |
+
+Three of them reach their floor and three do not, and the three that do not are
+stated rather than rounded: the config and the cutoff scan sit below the
+evaluator's text budget, and the intervention vocabulary sits below the
+projection's count-and-length budget. Those walks have to run — they are what
+refuse an over-ceiling input for its SIZE — so they are real floors where the
+original figures were not.
+
+Four structural changes carry it. The evaluator's shape gate is **split in two**,
+counts and text, so the three comparisons against package constants can sit
+between them; the three fields those comparisons read are length-bounded first,
+individually, because the package's rule is that an over-long value is refused
+for its size and a case pins it — the first attempt at this hoist skipped that
+and inverted the precedence. `normalizeOrderedRulesConfig` moves **above** the
+structural tier, which strengthens the config-beats-stream precedence already
+pinned rather than inverting one. The cutoff's UTF-8 scan becomes a
+**bounded-text tier of its own** above the identity walk and the hash, which is
+where a ≤4 KiB scan belongs; it had been left in the invariant pass on the
+correct observation that it reads caller-chosen text and the incorrect
+conclusion that this put it below a whole-stream hash. And the projection's
+charging loops now enforce the per-string **length** they already read, for
+references and interventions alike — the deferral had been justified by a scan
+that `checkFreeText` never reaches for an over-bound value.
+
+**Three consequences that were not asked for and are recorded because they are
+the interesting part.**
+
+The cutoff row in `TestOrderedRulesARefusalDecidedBeforeTheTraversalAttestsToNothing`
+was the table's ONLY post-digest case and is now `digest=false`. A table that
+only ever expects an empty digest cannot fail in the other direction, so a
+candidate's PROVENANCE — genuinely below the hash, one per candidate, so
+hoisting its scan would cost the whole retained ceiling rather than 4 KiB —
+takes that row instead.
+
+Two identity-ordering cases used an over-bound admission reference as the
+expensive companion fault. The length repair moved that refusal ABOVE the
+identity passes, so those cases stopped pinning what they claim. They now use an
+unencodable reference of admissible length, which is what `validateAdmission`
+still owns below the identities.
+
+And `forged()`, the builder behind the whole oversized-input suite, left `Scope`
+entirely zero — so every case in it carried a second, unintended fault that
+merely never got the chance to fire. The cases passed for a reason none of them
+names. A fixture must carry exactly the fault under test; that one did not, and
+only a reordering exposed it.
+
+**The EIGHTH was the outcome identities, on the projection side, and it is the
+third time this same defect class has been repaired one level at a time.**
+`ProjectOrderedRulesStream` had its candidate-uniqueness pass hoisted above the
+admission references, the boundary and the intervention details one round
+earlier; per-candidate OUTCOME uniqueness stayed in the payload loop far below.
+So a duplicate in the last candidate was reached only after all of that
+auxiliary text had been scanned — measured on the identical source, 1,024
+references of 4 KiB beside 1,024 interventions carrying 4 KiB of identity and
+4 KiB of detail: **8.341694 ms**, against **133.339 µs** for a repeated
+*candidate* identity on that very source, and 8.497 µs for the same outcome
+fault with the auxiliary text removed. The gap was the auxiliary text, entire.
+It is **139.747 µs** now, which is the candidate control's own figure — that
+equality is the evidence the text is no longer read.
+
+It is a SECOND walk beside the candidate pass rather than folded into it, mirroring
+`orderedRulesStreamIdentitiesAmbiguous` on the evaluator side, and for the
+measured reason given there: folded, a repeated candidate identity pays for
+every preceding candidate's outcomes first. `checkIdentifier` stays ahead of the
+map on both passes, so a length bound precedes anything that hashes or quotes.
+
+**Two claims of this document and of the source were falsified by reviewers on
+the same head and are corrected rather than edited away.**
+
+The first said that no supplied length could raise the cost of the
+`SourceContractVersion` comparison. Go compares string lengths first, so a value
+shorter than `OrderedRulesStreamContractVersion` is settled without reading a
+byte — but one of exactly that length is compared byte for byte, so growing a
+supplied value from one byte to nine does raise the work. It is bounded above by
+the length of a constant this package defines, and the check runs once per
+stream; that is the whole of what holds. The sentence was written inside the
+comment that exists to warn against this exact conflation, which is the third
+time it has appeared here.
+
+The second said the bounded identity tier reads no more than
+`orderedRulesStreamDigest` would have read anyway. A map hit hashes the probe
+**and** compares its bytes against the stored key, so the duplicate that ends
+the tier is read about three times over where the digest would hash each
+occurrence once. On a stream that is nothing but two maximum-length equal
+identities the tier reads more than the digest it precedes. What survives is
+that the tier is bounded by the aggregate the shape gate already charged, and
+that the refusal costs that bounded pass INSTEAD OF a whole-stream hash followed
+by the same pass.
+
+**The SEVENTH instance was the same word on the other path.** `ProjectOrderedRulesStream`
+bounded its `SourceContractVersion` at the top and compared it only in
+`validateScope`, which runs BELOW the candidate and intervention vocabulary
+tiers — so a four-byte unsupported contract paid for every candidate, outcome
+and intervention the caller chose to send, plus `validateScope`'s own five scope
+scans. The evaluator's tier had compared that same word since the commit before.
+Measured at the widest admitted counts, 128 candidates x 64 outcomes and 1024
+interventions: 1.024333 ms, against 479.662 µs with the comparison moved up
+beside its length bound, as `checkSourceContractVersion` — one definition, two
+callers, because a second copy is how a rule comes to stand on one path and not
+the other.
+
+**And the paragraph that stood here was wrong, which is the part worth keeping.**
+It said the move was two-fold rather than fifty-fold, and that the ~480 µs left
+over was the count-and-length budget tier — count-bounded, obliged to run first,
+therefore the floor for an input of that shape. A reviewer falsified it on the
+very head that shipped it. The tier below the comparison does not only do length
+arithmetic: it walks every intervention and every candidate, checking positions,
+causal order, interval membership, outcome counts and nested presence
+declarations, and building a diagnostic label per candidate. None of that is
+free and none of it is evidence for or against an unsupported contract.
+
+The comparison now sits above every loop in the function, third after the two
+global count checks. The same four-byte fault on the same widest source is
+**222 ns**, against a measured floor of 160 ns — those two count checks, which
+really are the floor. The three figures for one refusal, in the order this PR
+produced them: 1.024333 ms, 479.662 µs, 222 ns.
+
+A source declaring a contract this package does not project is not a source
+whose candidates, interventions or byte total mean anything, so there is no
+precedence being sacrificed for speed here; the whole suite passes unchanged.
+Pinned by two cases rather than one, and only the second discriminates the
+second move: an unsupported contract beside a candidate outside its source-kind
+vocabulary was already refused for the contract at the first placement, while an
+unsupported contract beside a candidate outside the declared interval was not —
+that one fails by name if the comparison goes back.
+
+The lesson is the one this file keeps paying for. A cost claim is a claim, and
+"what remains is inherent" is the easiest kind to assert and the hardest to
+notice being wrong. This is the second time a claim of mine about this axis has
+been retracted after a reviewer measured it.
+
+The outcome pass is a SECOND walk inside that tier rather than one loop doing
+both, and the split is measured rather than assumed: folded together, a repeated
+CANDIDATE identity pays for every preceding candidate's outcomes first —
+59.849 µs against 698.095 µs with 64 candidates holding 64 outcomes on
+2,400-byte identities, and 120.089 µs against 345.477 µs on the
+outcome-provenance payload. The tier's envelope is no longer half a megabyte:
+the candidate pass keeps that bound, while the outcome pass is
+`MaxOrderedRulesCandidates` x `MaxOrderedRulesOutcomes` x
+`MaxOrderedRulesIdentifierBytes`, 32 MiB nominally. What actually caps it is the
+shape gate above, which already charges every supplied stream string against
+`orderedRulesTextCeiling` at its worst-case encoded width — about 21 MiB of raw
+text for the whole stream. That is the honest bound, stated in place of the
+half-megabyte figure the tier inherited.
+
+This paragraph originally ended by adding that it was "the same text the digest
+below would have read anyway", and that clause is **false** — see the retraction
+below, which a reviewer had to make twice because the first retraction corrected
+the source comment and left this copy standing. Fixing one instance of a claim is
+not fixing the claim, which is the same lesson this package keeps relearning
+about rules on paired paths.
+
+**Two published claims about the evaluator's order were false, and both are
+retracted here.** The first said the stream digest "is not deferred and cannot
+be: it IS the comparison". The comparison cannot precede its own hash, but that
+never made the hash undeferrable, and the structural and config refusals were
+moved ahead of it precisely because neither depends on the comparison. The
+second said a mismatch is decided without the config being "consulted, not
+traversed and not attested to". The config is normalised BEFORE the hash, so a
+stream carrying a forged `SelectionDigest` beside a config declaring no default
+is refused `CONFIG_DEFAULT_NOT_SUPPLIED`, not `STREAM_SELECTION_DIGEST_MISMATCH`
+— only "not attested to" survives. Both sentences were left standing when the
+reordering that falsified them was made, one of them directly above the code
+that contradicts it, and the test suite had recorded the correct order in a
+comment the whole time. The ordering each denied is now pinned by a case rather
+than asserted by prose.
+
+**What this is not.** It is NOT a faithful replay of the donor's full runtime
+policy, and no result may be described as one. The donor branches on lock/end
+timestamps, refreshes its balance against a live API before each attempt,
+re-enters on every round update until a placement succeeds and may retry after a
+failure; none of that is established by anything persisted here, so none is
+modelled. It says nothing about profitability or about whether either mechanism
+is better. Automatic extraction of a full donor-candidate stream from the
+existing rows is NOT possible — the wire projection already lost distinctions a
+reader cannot restore, such as an outcome holding zero points against one whose
+points were never recorded — and remains separate work. The donor is Apache-2.0
+and this repository GPL-3.0, a permitted direction of inclusion; no donor source
+bytes were copied, and the pins, blob hashes and licence disposition are recorded
+in `internal/predictioneval/testdata/ordered_rules/PROVENANCE.md`.
+
 ### Event Types for Series
 
 Reasons tagged on balance-timeline samples (`points.event_type`, display form

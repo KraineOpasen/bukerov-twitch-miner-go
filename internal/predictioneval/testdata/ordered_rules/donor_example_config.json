@@ -1,0 +1,53 @@
+{
+  "fixtureId": "donor-example-config/v1",
+  "purpose": "Pins the correspondence between a donor configuration AS WRITTEN and the fully resolved raw values this package accepts, plus the normalized values a single division by one hundred must produce. The exported contract accepts RAW percentages only; the normalized column is what the private normalization must arrive at, recorded as float64 bits so no rounding can hide a discrepancy.",
+  "source": {
+    "repository": "t348575/twitch-points-miner",
+    "commit": "ae9d39d3d10ff8240f24e2529fe7cf6dd701db66",
+    "tree": "5e781ae8b1e4f28427dcd8ca790c8e9a7afbcf49",
+    "path": "example.config.yaml",
+    "blobSha1": "0e5889816fd9dda591deb7a09aeac444c43ff6a2",
+    "note": "The donor's own comments annotate the first rule as 'bets placed when odds >= 90%, 100% of the time' and the second as 'odds <= 10%, 1% of the time'. That is the direct evidence that attempt_rate is a RAW percentage: a written 1.0 means one percent, not one hundred."
+  },
+  "cases": [
+    {
+      "name": "streamer_a",
+      "yamlPath": "streamers.streamer_a.prediction.strategy.detailed",
+      "rawConfig": {
+        "hasDefault": true,
+        "configId": "donor-example-streamer-a",
+        "detailed": [
+          {"comparator": "Ge", "rawThresholdPercent": 90.0, "rawAttemptRatePercent": 100.0, "points": {"maxValue": 1000, "rawPercent": 1.0}},
+          {"comparator": "Le", "rawThresholdPercent": 10.0, "rawAttemptRatePercent": 1.0, "points": {"maxValue": 1000, "rawPercent": 1.0}},
+          {"comparator": "Ge", "rawThresholdPercent": 70.0, "rawAttemptRatePercent": 100.0, "points": {"maxValue": 5000, "rawPercent": 5.0}},
+          {"comparator": "Le", "rawThresholdPercent": 30.0, "rawAttemptRatePercent": 3.0, "points": {"maxValue": 5000, "rawPercent": 5.0}}
+        ],
+        "default": {"rawMinPercent": 45.0, "rawMaxPercent": 55.0, "points": {"maxValue": 100000, "rawPercent": 25.0}}
+      },
+      "normalizedExpectations": {
+        "detailed": [
+          {"thresholdBits": "0x3feccccccccccccd", "attemptRateBits": "0x3ff0000000000000", "bernoulliWord": "ALWAYS_TRUE", "pointsPercentBits": "0x3f847ae147ae147b"},
+          {"thresholdBits": "0x3fb999999999999a", "attemptRateBits": "0x3f847ae147ae147b", "bernoulliWord": "0x028f5c28f5c28f60", "pointsPercentBits": "0x3f847ae147ae147b"},
+          {"thresholdBits": "0x3fe6666666666666", "attemptRateBits": "0x3ff0000000000000", "bernoulliWord": "ALWAYS_TRUE", "pointsPercentBits": "0x3fa999999999999a"},
+          {"thresholdBits": "0x3fd3333333333333", "attemptRateBits": "0x3f9eb851eb851eb8", "bernoulliWord": "0x07ae147ae147ae00", "pointsPercentBits": "0x3fa999999999999a"}
+        ],
+        "default": {"minBits": "0x3fdccccccccccccd", "maxBits": "0x3fe199999999999a", "pointsPercentBits": "0x3fd0000000000000"}
+      }
+    },
+    {
+      "name": "preset_small",
+      "yamlPath": "presets.small.prediction.strategy.detailed",
+      "note": "The donor ships a preset whose default bounds and points are EXPLICITLY zero. It is the live counterexample to substituting the 40/60 serde defaults: those fill in a MISSING key while deserializing, and nothing is missing here. A model that replaced these zeros would give this preset a betting range its author never wrote.",
+      "rawConfig": {
+        "hasDefault": true,
+        "configId": "donor-example-preset-small",
+        "detailed": null,
+        "default": {"rawMinPercent": 0.0, "rawMaxPercent": 0.0, "points": {"maxValue": 0, "rawPercent": 0.0}}
+      },
+      "normalizedExpectations": {
+        "detailed": [],
+        "default": {"minBits": "0x0000000000000000", "maxBits": "0x0000000000000000", "pointsPercentBits": "0x0000000000000000"}
+      }
+    }
+  ]
+}
