@@ -36,23 +36,25 @@ narrowed here and not a mandate to mutate the code behind every test or every ch
   derived, so the independence can be audited rather than taken on trust.
 - **Classified failure.** The expected FAIL is a behavioural failure attributable to the intended property —
   an assertion failure, or race-detector, panic or explicit property-failure evidence attributed to the
-  intended fault; a harness timeout panic is a timeout, not a panic. A compile or build failure, a timeout or
-  non-completion, no matching test, an unreached or inaccessible path, an unrelated earlier refusal/failure,
-  and tooling that is unavailable are each reported as themselves (§6) and none of them is a behavioural kill
-  or a valid RED; a build break is not behavioural proof, so a mutation that fails to build establishes no
-  behavioural test protection and is replaced rather than counted. A timeout or non-completion is never
-  itself the kill: a liveness claim names the property and records evidence of the case that exercises it,
-  the detection mechanism, and the property violation attributable to the intended fault — declaring a
-  timeout to be a liveness signal is not that evidence. Survival alone classifies nothing: a mutant is
-  **equivalent** only where the recorded argument shows it preserves behaviour over the reachable input
-  domain and satisfies every applicable approved structural or security requirement — a required
-  defence-in-depth barrier whose removal another barrier currently masks is not preserved — and its survival
-  is then not evidence of a weak test.
+  intended fault; a harness timeout panic is a timeout, not a panic. A compile, build or parse failure, a
+  timeout or non-completion, no matching test, an unreached or inaccessible path, an unrelated earlier
+  refusal/failure, and tooling that is unavailable are each reported as themselves (§6) and none of them is a
+  behavioural kill or a valid RED; a build or parse break is not behavioural proof, so a mutation its target
+  refuses as malformed establishes no behavioural test protection and is replaced rather than counted. A
+  timeout or non-completion is never itself the kill: a liveness claim names the property and records
+  evidence of the case that exercises it, the detection mechanism, and the property violation attributable to
+  the intended fault — declaring a timeout to be a liveness signal is not that evidence. Survival alone
+  classifies nothing: a mutant is **equivalent** only where the recorded argument shows it preserves
+  behaviour over the reachable input domain and satisfies every applicable approved structural or security
+  requirement — a required defence-in-depth barrier whose removal another barrier currently masks is not
+  preserved — and its survival is then not evidence of a weak test.
 - **Reached case, named assertion.** A test that merely ran proves nothing about the claimed case or
   dimension. Evidence names the site the claim is about — the mutation site where a mutation proof is
-  claimed — and shows the intended case reached it, with the assertion/property claimed to protect it named
-  among those observed to fail for a relevant *compiling* fault; a guard that stays green either way is
-  vacuous for the claim.
+  claimed — and shows the intended case reached it in the execution that produced the expected FAIL, with
+  the assertion/property claimed to protect it named among those observed to fail in that same execution;
+  reachability shown by one run does not combine with a failure observed in another. The fault it fails for
+  is one its target accepts as well-formed — compiling where the target is compiled, parsing or loading
+  where it is not — and a guard that stays green either way is vacuous for the claim.
 - **Golden checks cover the affected case.** A self-consistent encoder/decoder round trip does not establish
   the required wire representation. Where representation behaviour is affected, the evidence includes an
   independent exact/golden-format oracle over each affected case: a new case needs its own rather than an
