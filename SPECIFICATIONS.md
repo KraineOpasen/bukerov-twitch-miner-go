@@ -4526,8 +4526,16 @@ real types through a consumer that has only float64 numbers:
 | positions `2^53` and `2^53+1` relayed in a source | **DETECTED** when the collapse creates a tie — strictly increasing causal order is already a projection rule. Not a general guarantee: one candidate has nothing to tie with. |
 | the RESULT read by a float64 consumer | **still numbers past 2^53** at `.selected.candidatePosition`, `.stoppedAtPosition`, `.trace[].candidatePosition` and `.visits[].candidatePosition`. |
 
-`TestOrderedRulesInt64JSONFieldsStillCollapseAndAreOutsideThisRepair` pins all
-four rows. Its last row does a second job: it proves the whole-document walk in
+**Everything from here to the end of this subsection is HISTORY as of the
+twelve-field repair recorded below.** The owner subsequently approved extending
+lossless transport to all twelve `int64` fields, so the residual described here
+no longer exists and the test named in the next paragraph no longer exists
+either. The measurements are kept because they are what the decision was made
+on, and because a reader checking an artifact produced before that repair needs
+to know what was true then.
+
+`TestOrderedRulesInt64JSONFieldsStillCollapseAndAreOutsideThisRepair` pinned all
+four rows. Its last row did a second job: it proved the whole-document walk in
 `TestOrderedRulesEvaluationCarriesHexOnTheWire` can actually fire, so the
 "no number past 2^53" assertion there is a live detector and not a check that
 passes because nothing could ever trip it. That assertion's comment was also
@@ -4537,8 +4545,8 @@ points are small, and never was a property of the types.
 Mutating `relayThroughFloat64` into a lossless pass-through kills three of the
 four rows by name, so the relay is doing the work rather than the fixture.
 
-**It is NOT repaired, and the reason is the boundary rather than the difficulty.**
-The owner decision enumerated four fields. Extending a public wire contract to
+**It was NOT repaired in that round, and the reason was the boundary rather
+than the difficulty.** That owner decision enumerated four fields. Extending a public wire contract to
 the rest, or refusing supplied values outside the exact IEEE-754 integer range
 at ingestion — which would narrow the admitted domain the model currently
 accepts — are both larger changes than were authorized, and neither is a thing
@@ -4587,6 +4595,113 @@ is the opposite of what the case promises. It now asserts
 and `.visits[].candidatePosition` individually. Giving
 `OrderedRulesCandidateVisit.CandidatePosition` a `,string` tag — precisely the
 widening the case promises to fail on — now kills it by name.
+
+**The owner then approved the wider repair, and all twelve travel losslessly.**
+The alternative — refusing supplied values outside the IEEE-754 safe integer
+range at ingestion — was rejected explicitly: the model's `int64` domain is not
+narrowed to fit a consumer's limitation. So the twelve now encode as canonical
+base-ten JSON STRINGS through one shared type, `OrderedRulesInt64`.
+
+**Two wire rules, and the split is the point.** `OrderedRulesHex64` carries the
+four values whose identity is their BITS — a raw entropy word, or
+`math.Float64bits` of a share — as fixed-width hexadecimal, because that is the
+form the digests have always used and a bit pattern has no sign.
+`OrderedRulesInt64` carries the twelve whose identity is their MAGNITUDE: they
+are signed, compared and summed as numbers, and a reader should see the number
+rather than its encoding. One shared type per rule, not twelve hand-written
+serializers — the history of this very subsection is a sequence of corrections
+to claims that drifted out of step with each other, and twelve serializers would
+be twelve more places for that to happen.
+
+**Canonicality is checked by inversion rather than by a list.** `MarshalText` is
+`strconv.AppendInt` base ten; `UnmarshalText` parses and then requires
+`FormatInt(parsed, 10)` to equal the input byte for byte. That makes the decoder
+the encoder's inverse BY CONSTRUCTION, so `"+1"`, `"01"`, `"-0"`, `"1_000"`,
+`"0x10"`, `"1e3"`, `" 1"` and every other alternate spelling of a representable
+value are refused without anyone maintaining a table of them. There is no
+numeric compatibility shim and no float64 fallback, and that is a property of
+the type: `encoding/json` will not hand a JSON **number** to a
+`TextUnmarshaler` at all.
+
+**One equivalent mutant, classified rather than left surviving.** Changing the
+parse base from 10 to 0 — which admits `0x` prefixes, underscores and
+leading-zero octal — kills nothing, and a mutation run confirmed it. Base 0
+accepts a strict superset of base 10, and every spelling in that difference
+carries a prefix, an underscore or a leading zero, none of which `FormatInt`
+ever writes, so all of them fail canonicality instead. The base argument is
+therefore NOT what makes this decoder strict, and the code now says so where a
+reader would otherwise assume it.
+
+**The corruption this repair exists to remove is now impossible, and the proof
+carries its own control.** A relay that had quietly become lossless would make
+every assertion pass while proving nothing, so
+`TestOrderedRulesAFloat64RelayCanNoLongerCorruptASource` FIRST shows the same
+helper still destroying a bare `int64` (2^53+1 arrives as 2^53), and only then
+puts the repaired carriers through it. Measured after the repair: supplied
+points of 2^53+1 survive, the exact `int64` pool sum survives at 2^53+2, the
+recorded share stays `0x3feffffffffffffe` instead of becoming exactly 1.0, all
+four digests are unchanged across the relay, a relayed STREAM verifies against
+its own selection digest instead of being refused, and positions one apart no
+longer collapse.
+
+**Nothing that is hashed moved, pinned against values captured before the
+change.** `TestOrderedRulesInt64TransportMovedNoDigest` evaluates a fixture whose
+positions and points are past 2^53 in both signs and pins
+`StreamDigest 01e34dc2…`, `ConfigDigest 2e754165…`, `EntropyDigest cd65d700…`
+and `ConsumedInputDigest fd5e601a…`, captured by running that same fixture on
+`38d0ff5` in a detached worktree. It first requires `WOULD_ATTEMPT`, because an
+unread refusal carries EMPTY digests and pinning four empty strings would pass
+vacuously, and it separately pins that the fixture's selected position and pool
+total really are past 2^53 so a later edit cannot shrink it back inside the
+exact range.
+
+**The type graph is audited reflectively, so a thirteenth field cannot be
+missed the way the eleventh and twelfth were.**
+`TestOrderedRulesExportedGraphCarriesNoBare64BitJSONField` walks every exported
+type reachable from the five roots of the public surface and requires any
+JSON-tagged 64-bit field to be one of the two wire types. It finds SIXTEEN — the
+twelve and the four — and fails on a bare one. The paired
+`TestOrderedRulesAllTwelveInt64FieldsRoundTripExactly` names the twelve
+explicitly and walks each through `MinInt64`, `-2^53-1`, `-2^53`, `-2^53+1`,
+`-1`, `0`, `1`, `2^53-1`, `2^53`, `2^53+1` and `MaxInt64` in its real carrier,
+asserting the encoded TEXT as well as the decoded value. The two halves are
+deliberately different in kind: a reflective loop agrees with the code whatever
+the code covers, and a hand-written list is what the documentation claims.
+
+**The fifteen platform-width `int` fields are measured, not waved through.**
+The audit reports them, and `TestOrderedRulesIntWidthFieldsAreStructurallyBounded`
+establishes that none can reach a result past 2^53: the counters and indices are
+bounded by declared ceilings, and the one caller-supplied count,
+`OrderedRulesCutoff.DroppedAtOrAfter`, is refused above the candidate ceiling
+with `STREAM_INVARIANT_VIOLATED` and is NOT re-exported by the refusal —
+probed directly at 2^53, 2^60 and `MaxInt`.
+
+**Thirteen mutants this round, twelve killed at the exact seam and one
+classified.** Hexadecimal encoding, a dropped canonicality check, a write before
+the refusal returns, a 32-bit parse, `PoolTotal` reverted with every call site
+fixed up so the kill is behavioural, two digest perturbations, and four fields
+dropped off the wire one at a time. The partial-write mutant is killed by
+`TestOrderedRulesInt64RefusalLeavesTheDestinationUntouched` and nothing else;
+the 32-bit parse by the boundary table, the sweep and the digest-rendering
+identity, which is the seam itself rather than an unrelated earlier refusal.
+Reverting `SuppliedInt64.Value` or `OrderedRulesCutoff.Position` to a plain
+`int64` does not compile against the suite — a real guard but a weak one, since
+it is a statement about Go rather than about an artifact — which is why the same
+class was also killed behaviourally by dropping those fields off the wire.
+
+**No property-based-testing library was added.** This PR commits to leaving
+`go.mod` untouched, so the domain coverage is deterministic instead: every power
+of two and its neighbours in both signs, plus a fixed spread. Adding `rapid` or
+similar is a dependency decision that belongs to the owner, and is not taken
+here.
+
+**No version constant is bumped.** `OrderedRulesEntropySemanticsVersion` is
+untouched because the entropy semantics did not change, and
+`OrderedRulesStreamContractVersion` is untouched because this is a transport
+representation change with no semantic content: the same values, the same
+comparisons, the same arithmetic and — pinned above — the same digests. The PR
+is Draft with no production runtime caller, so no artifact exists that a version
+bump would help a reader distinguish.
 
 **A sixth review round, and five of its findings are worth more than their
 labels.** The audit above declared no gap in family A. A reviewer then filed

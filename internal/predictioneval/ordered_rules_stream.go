@@ -335,7 +335,7 @@ func ProjectOrderedRulesStream(source OrderedRulesSource, admission CommonAdmiss
 	// identity as shape; an identity is bytes, and the split it needed is this
 	// one. Three passes now: what costs nothing, what costs a bounded scan,
 	// and what costs the budget.
-	var lastPosition int64
+	var lastPosition OrderedRulesInt64
 	for i := range source.Candidates {
 		c := &source.Candidates[i]
 		where := "candidate " + strconv.Itoa(i)
@@ -350,14 +350,14 @@ func ProjectOrderedRulesStream(source OrderedRulesSource, admission CommonAdmiss
 		}
 		if i > 0 && c.Position <= lastPosition {
 			return OrderedRulesStream{}, errors.Join(ErrOrderedRulesAmbiguousOrder,
-				errors.New("predictioneval: "+where+" is at position "+strconv.FormatInt(c.Position, 10)+
-					" after position "+strconv.FormatInt(lastPosition, 10)+
+				errors.New("predictioneval: "+where+" is at position "+strconv.FormatInt(int64(c.Position), 10)+
+					" after position "+strconv.FormatInt(int64(lastPosition), 10)+
 					"; equal or decreasing positions mean the causal order is not known and must not be sorted away"))
 		}
 		lastPosition = c.Position
 		if c.Position < source.Scope.IntervalFromPosition || c.Position > source.Scope.IntervalToPosition {
 			return OrderedRulesStream{}, errors.Join(ErrOrderedRulesOutsideDeclaredInterval,
-				errors.New("predictioneval: "+where+" at position "+strconv.FormatInt(c.Position, 10)+
+				errors.New("predictioneval: "+where+" at position "+strconv.FormatInt(int64(c.Position), 10)+
 					" lies outside the declared interval"))
 		}
 		if len(c.Outcomes) > MaxOrderedRulesOutcomes {
@@ -1264,7 +1264,7 @@ func checkIdentifier(id, where string) error {
 // is the shape a borrowed balance takes — a later schedule read, a manual
 // validation, a decision-time envelope — and reading one as if the candidate had
 // had it is how a replay silently acquires information the original never held.
-func checkPresence(v SuppliedInt64, where string, candidatePosition int64) error {
+func checkPresence(v SuppliedInt64, where string, candidatePosition OrderedRulesInt64) error {
 	if err := checkFreeText(v.Provenance, where+" provenance"); err != nil {
 		return err
 	}
@@ -1388,7 +1388,7 @@ func checkInterventionStructure(source OrderedRulesSource) error {
 		}
 		if in.Position < source.Scope.IntervalFromPosition || in.Position > source.Scope.IntervalToPosition {
 			return errors.Join(ErrOrderedRulesOutsideDeclaredInterval,
-				errors.New("predictioneval: "+where+" at position "+strconv.FormatInt(in.Position, 10)+
+				errors.New("predictioneval: "+where+" at position "+strconv.FormatInt(int64(in.Position), 10)+
 					" lies outside the declared interval"))
 		}
 	}
@@ -1465,7 +1465,7 @@ func validateAdmissionShape(a CommonAdmission) error {
 // bytes at most, fixed by this file rather than by the caller. That is the
 // property worth claiming, and the vocabulary that refuses an invalid word
 // still lives in checkPresence, after the bound.
-func checkPresenceShape(v SuppliedInt64, where string, candidatePosition int64) error {
+func checkPresenceShape(v SuppliedInt64, where string, candidatePosition OrderedRulesInt64) error {
 	if v.Presence != SuppliedKnown {
 		return nil
 	}
@@ -1485,8 +1485,8 @@ func checkPresenceShape(v SuppliedInt64, where string, candidatePosition int64) 
 	if v.AvailableAtPosition > candidatePosition {
 		return errors.Join(ErrOrderedRulesBackdatedValue,
 			errors.New("predictioneval: "+where+" became available at position "+
-				strconv.FormatInt(v.AvailableAtPosition, 10)+" but is attached to a candidate at position "+
-				strconv.FormatInt(candidatePosition, 10)+
+				strconv.FormatInt(int64(v.AvailableAtPosition), 10)+" but is attached to a candidate at position "+
+				strconv.FormatInt(int64(candidatePosition), 10)+
 				"; declare it MISSING rather than back-dating a value the candidate could not have read"))
 	}
 	return nil

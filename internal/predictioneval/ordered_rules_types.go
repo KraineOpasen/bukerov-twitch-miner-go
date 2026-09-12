@@ -213,8 +213,8 @@ const (
 // refuses it instead of quietly using it. See
 // TestOrderedRulesLaterBalanceCannotRepairEarlierCandidate.
 type SuppliedInt64 struct {
-	Presence SuppliedPresence `json:"presence"`
-	Value    int64            `json:"value"`
+	Presence SuppliedPresence  `json:"presence"`
+	Value    OrderedRulesInt64 `json:"value"`
 	// Reason is the caller's closed explanation of a non-KNOWN presence. It is
 	// carried into the result verbatim so a stop can say WHY, not just that.
 	Reason string `json:"reason,omitempty"`
@@ -231,8 +231,8 @@ type SuppliedInt64 struct {
 	// the fabricated-input failure [SuppliedPresence] exists to prevent, one
 	// level down. A KNOWN value that does not set the flag is refused, the same
 	// way a KNOWN value carrying no provenance is.
-	AvailableAtPosition    int64 `json:"availableAtPosition"`
-	HasAvailableAtPosition bool  `json:"hasAvailableAtPosition"`
+	AvailableAtPosition    OrderedRulesInt64 `json:"availableAtPosition"`
+	HasAvailableAtPosition bool              `json:"hasAvailableAtPosition"`
 }
 
 // SuppliedUint32 is a stake-shaped result value with its own presence.
@@ -356,8 +356,8 @@ type OrderedRulesScope struct {
 	// inclusive. Every supplied candidate and intervention must lie inside it:
 	// a fact outside the interval the caller declared is a contradiction in the
 	// input, not a fact to silently include.
-	IntervalFromPosition int64 `json:"intervalFromPosition"`
-	IntervalToPosition   int64 `json:"intervalToPosition"`
+	IntervalFromPosition OrderedRulesInt64 `json:"intervalFromPosition"`
+	IntervalToPosition   OrderedRulesInt64 `json:"intervalToPosition"`
 	// HasInterval declares that both endpoints above were supplied. They are
 	// one flag rather than two because they are meaningless apart: an omitted
 	// pair decodes to the interval [0,0], which admits exactly the candidates
@@ -387,7 +387,7 @@ type OrderedRulesCandidate struct {
 	// increasing across the supplied slice; equal positions mean the caller
 	// does not actually know the order, and an arbitrary tie-break would hide
 	// that. See TestOrderedRulesAmbiguousCausalPositionsAreNotSortedAway.
-	Position int64 `json:"position"`
+	Position OrderedRulesInt64 `json:"position"`
 	// HasPosition declares that Position was actually supplied.
 	//
 	// Zero is a legitimate position, so an omitted one is indistinguishable
@@ -434,8 +434,8 @@ type OrderedRulesCandidate struct {
 // acted, and after a real action that world no longer exists. Even a call that
 // FAILED is a boundary — see TestOrderedRulesFailedFactualCallStillCutsOff.
 type OrderedRulesIntervention struct {
-	Identity string `json:"identity"`
-	Position int64  `json:"position"`
+	Identity string            `json:"identity"`
+	Position OrderedRulesInt64 `json:"position"`
 	// HasPosition declares that Position was supplied, for the same reason as
 	// [OrderedRulesCandidate.HasPosition]: an intervention silently at zero
 	// would cut the stream at its very start and remove every candidate.
@@ -617,7 +617,7 @@ type OrderedRulesCutoff struct {
 	Established bool `json:"established"`
 	// Position is EXCLUSIVE: candidates strictly before it survive, candidates
 	// at or after it are not part of the stream at all.
-	Position int64                        `json:"position"`
+	Position OrderedRulesInt64            `json:"position"`
 	Kind     OrderedRulesInterventionKind `json:"kind,omitempty"`
 	Identity string                       `json:"identity,omitempty"`
 	Basis    OrderedRulesCutoffBasis      `json:"basis"`
@@ -766,7 +766,7 @@ const (
 // OrderedRulesSelection is what the mechanism chose.
 type OrderedRulesSelection struct {
 	CandidateIdentity string                     `json:"candidateIdentity"`
-	CandidatePosition int64                      `json:"candidatePosition"`
+	CandidatePosition OrderedRulesInt64          `json:"candidatePosition"`
 	CandidateIndex    int                        `json:"candidateIndex"`
 	OutcomeIndex      int                        `json:"outcomeIndex"`
 	OutcomeIdentity   string                     `json:"outcomeIdentity"`
@@ -818,9 +818,9 @@ type OrderedRulesTraceEntry struct {
 	// [MaxOrderedRulesWork] entries, so two 4 KiB identifiers per entry encode
 	// to 2 GiB of JSON from an input inside every other declared bound, before
 	// escaping. An index costs the same however long the identifier is.
-	CandidateIndex    int   `json:"candidateIndex"`
-	CandidatePosition int64 `json:"candidatePosition"`
-	OutcomeIndex      int   `json:"outcomeIndex"`
+	CandidateIndex    int               `json:"candidateIndex"`
+	CandidatePosition OrderedRulesInt64 `json:"candidatePosition"`
+	OutcomeIndex      int               `json:"outcomeIndex"`
 	// ShareBits is math.Float64bits of the pool share, for the same reason as
 	// [OrderedRulesSelection.ShareBits], and travels the same way.
 	ShareBits OrderedRulesHex64 `json:"shareBits"`
@@ -858,9 +858,9 @@ type OrderedRulesEvaluation struct {
 
 	// StoppedAtCandidate / StoppedAtPosition are the causal position of the
 	// stop, present whenever the traversal actually reached a candidate.
-	StoppedAtCandidate string `json:"stoppedAtCandidate,omitempty"`
-	StoppedAtPosition  int64  `json:"stoppedAtPosition,omitempty"`
-	HasStopPosition    bool   `json:"hasStopPosition"`
+	StoppedAtCandidate string            `json:"stoppedAtCandidate,omitempty"`
+	StoppedAtPosition  OrderedRulesInt64 `json:"stoppedAtPosition,omitempty"`
+	HasStopPosition    bool              `json:"hasStopPosition"`
 
 	// Selected is nil unless the mechanism admitted.
 	Selected *OrderedRulesSelection `json:"selected,omitempty"`

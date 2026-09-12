@@ -33,7 +33,7 @@ func orOutcome(id string, points int64) predictioneval.OrderedRulesOutcome {
 		Identity: id,
 		Points: predictioneval.SuppliedInt64{
 			Presence:   predictioneval.SuppliedKnown,
-			Value:      points,
+			Value:      predictioneval.OrderedRulesInt64(points),
 			Provenance: "acceptance fixture",
 			// Declared, not left to the zero value: the fixture interval starts
 			// at position 0, so these really are available from the start — but
@@ -67,7 +67,7 @@ func orMissingBalance() predictioneval.SuppliedInt64 {
 func orKnownBalance(v int64) predictioneval.SuppliedInt64 {
 	return predictioneval.SuppliedInt64{
 		Presence:               predictioneval.SuppliedKnown,
-		Value:                  v,
+		Value:                  predictioneval.OrderedRulesInt64(v),
 		Provenance:             "acceptance fixture",
 		HasAvailableAtPosition: true,
 	}
@@ -77,7 +77,7 @@ func orCandidate(id string, pos int64, balance predictioneval.SuppliedInt64,
 	outs ...predictioneval.OrderedRulesOutcome) predictioneval.OrderedRulesCandidate {
 	return predictioneval.OrderedRulesCandidate{
 		Identity: id,
-		Position: pos,
+		Position: predictioneval.OrderedRulesInt64(pos),
 		// Declared, not left to the zero value: every fixture says explicitly
 		// that its causal position is supplied, because an omitted one is now a
 		// refusal and this suite is about what the model does ADMIT.

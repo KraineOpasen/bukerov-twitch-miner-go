@@ -19,7 +19,7 @@ import (
 	"testing"
 )
 
-func internalProbeBalance(value int64) SuppliedInt64 {
+func internalProbeBalance(value OrderedRulesInt64) SuppliedInt64 {
 	return SuppliedInt64{
 		Presence:               SuppliedKnown,
 		Value:                  value,

@@ -22,7 +22,8 @@ import (
 func orIntervention(id string, pos int64, kind predictioneval.OrderedRulesInterventionKind,
 	rel predictioneval.OrderedRulesRelevance, detail string) predictioneval.OrderedRulesIntervention {
 	return predictioneval.OrderedRulesIntervention{
-		Identity: id, Position: pos, HasPosition: true, Kind: kind, Relevance: rel, Detail: detail,
+		Identity: id, Position: predictioneval.OrderedRulesInt64(pos), HasPosition: true,
+		Kind: kind, Relevance: rel, Detail: detail,
 	}
 }
 
@@ -252,7 +253,7 @@ func TestOrderedRulesKnownValueMustDeclareItsAvailability(t *testing.T) {
 	// The exact shape a wire projection leaves behind: the field is absent.
 	var decoded predictioneval.SuppliedInt64
 	if err := json.Unmarshal([]byte(
-		`{"presence":"KNOWN","value":1000,"provenance":"wire row"}`), &decoded); err != nil {
+		`{"presence":"KNOWN","value":"1000","provenance":"wire row"}`), &decoded); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
 	if decoded.HasAvailableAtPosition || decoded.AvailableAtPosition != 0 {
@@ -1941,14 +1942,14 @@ func TestOrderedRulesAnOmittedMandatoryFieldIsNotAnExplicitZero(t *testing.T) {
 
 	sourceJSON := `{"scope":{"namespace":"ns","episodeId":"e1","accountContext":"ac",
 	  "associationEvidence":"ae","sourceContractVersion":"` + predictioneval.OrderedRulesStreamContractVersion + `",
-	  "coverage":"COMPLETE_DECLARED","intervalFromPosition":0,"intervalToPosition":10000,` + scopeFlag + `
+	  "coverage":"COMPLETE_DECLARED","intervalFromPosition":"0","intervalToPosition":"10000",` + scopeFlag + `
 	  "hasNothingElse":0},
-	 "candidates":[{"identity":"c1","position":10,` + candFlag + `:"CHANNEL_UPDATE",
+	 "candidates":[{"identity":"c1","position":"10",` + candFlag + `:"CHANNEL_UPDATE",
 	   "episodeMembership":"PROVEN","outcomesPresence":"KNOWN","provenance":"p","outcomes":[
-	     {"identity":"A","points":{"presence":"KNOWN","value":4,"provenance":"p","hasAvailableAtPosition":true}},
-	     {"identity":"B","points":{"presence":"KNOWN","value":6,"provenance":"p","hasAvailableAtPosition":true}}],
-	   "balance":{"presence":"KNOWN","value":1000,"provenance":"p","hasAvailableAtPosition":true}}],
-	 "interventions":[{"identity":"call-1","position":9000,` + invFlag + `:"AUTO_CALL_STARTED",
+	     {"identity":"A","points":{"presence":"KNOWN","value":"4","provenance":"p","hasAvailableAtPosition":true}},
+	     {"identity":"B","points":{"presence":"KNOWN","value":"6","provenance":"p","hasAvailableAtPosition":true}}],
+	   "balance":{"presence":"KNOWN","value":"1000","provenance":"p","hasAvailableAtPosition":true}}],
+	 "interventions":[{"identity":"call-1","position":"9000",` + invFlag + `:"AUTO_CALL_STARTED",
 	   "relevance":"PROVEN_RELEVANT","detail":"d"}]}`
 	configJSON := `{"configId":"cfg",` + defFlag + `
 	  "detailed":[{"comparator":"Le","rawThresholdPercent":100,"rawAttemptRatePercent":100,
@@ -2270,7 +2271,7 @@ func TestOrderedRulesTheGateDoesNotChargeTextItDidNotReceive(t *testing.T) {
 				})
 			}
 			cs = append(cs, predictioneval.OrderedRulesCandidate{
-				Identity: "c" + itoaTest(i), Position: int64(i + 1), HasPosition: true,
+				Identity: "c" + itoaTest(i), Position: predictioneval.OrderedRulesInt64(i + 1), HasPosition: true,
 				Outcomes: outs,
 			})
 		}
@@ -2540,7 +2541,7 @@ func TestOrderedRulesTheCutoffIdentityIsChargedLikeTheTextItCameFrom(t *testing.
 				outs = append(outs, predictioneval.OrderedRulesOutcome{Identity: buf[:bulkID]})
 			}
 			cs = append(cs, predictioneval.OrderedRulesCandidate{
-				Identity: "c" + itoaTest(i), Position: int64(i + 1), HasPosition: true, Outcomes: outs,
+				Identity: "c" + itoaTest(i), Position: predictioneval.OrderedRulesInt64(i + 1), HasPosition: true, Outcomes: outs,
 			})
 		}
 		// The fine dimension is spread over several strings because one caps
@@ -2857,7 +2858,7 @@ func TestOrderedRulesAClaimedRemovalIsChargedForTheSourceItImplies(t *testing.T)
 				})
 			}
 			cs = append(cs, predictioneval.OrderedRulesCandidate{
-				Identity: "c" + itoaTest(i), Position: int64(i + 1), HasPosition: true,
+				Identity: "c" + itoaTest(i), Position: predictioneval.OrderedRulesInt64(i + 1), HasPosition: true,
 				SourceKind:        kind,
 				EpisodeMembership: predictioneval.MembershipProven,
 				OutcomesPresence:  predictioneval.SuppliedKnown,
@@ -2976,7 +2977,7 @@ func TestOrderedRulesAClaimedRemovalIsChargedForTheSourceItImplies(t *testing.T)
 					cs := fill(n, v.kind)
 					for i := 0; i < dropped; i++ {
 						cs = append(cs, predictioneval.OrderedRulesCandidate{
-							Identity: alphabet[i : i+1], Position: int64(5001 + i), HasPosition: true,
+							Identity: alphabet[i : i+1], Position: predictioneval.OrderedRulesInt64(5001 + i), HasPosition: true,
 							SourceKind:        v.kind,
 							EpisodeMembership: predictioneval.MembershipProven,
 							OutcomesPresence:  predictioneval.SuppliedKnown,
@@ -3194,7 +3195,7 @@ func TestOrderedRulesAWindowExhaustedToItsEndIsBoundToThatEnd(t *testing.T) {
 		ins []predictioneval.OrderedRulesIntervention) predictioneval.OrderedRulesEvaluation {
 		t.Helper()
 		src, adm := orSource(cs, ins), orAdmission()
-		src.Scope.IntervalToPosition = to
+		src.Scope.IntervalToPosition = predictioneval.OrderedRulesInt64(to)
 		st, err := predictioneval.ProjectOrderedRulesStream(src, adm)
 		if err != nil {
 			t.Fatalf("projecting over [0,%d] failed: %v", to, err)

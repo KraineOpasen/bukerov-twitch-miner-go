@@ -70,9 +70,9 @@ func digestSupplied(h hash.Hash, v SuppliedInt64) {
 	// behind a MISSING presence would make "absent" and "absent, with a
 	// leftover zero" produce different digests for the same evidence.
 	if v.Presence == SuppliedKnown {
-		digestInt(h, v.Value)
+		digestInt(h, int64(v.Value))
 		digestPart(h, v.Provenance)
-		digestInt(h, v.AvailableAtPosition)
+		digestInt(h, int64(v.AvailableAtPosition))
 		// The DECLARATION as well as the position. Inside a projected stream
 		// the flag is always set, since the projection refuses a KNOWN value
 		// without it — which is exactly why leaving it unhashed looked like
@@ -92,7 +92,7 @@ func digestSupplied(h hash.Hash, v SuppliedInt64) {
 
 func digestCandidate(h hash.Hash, c *OrderedRulesCandidate) {
 	digestPart(h, c.Identity)
-	digestInt(h, c.Position)
+	digestInt(h, int64(c.Position))
 	digestBool(h, c.HasPosition)
 	digestPart(h, string(c.SourceKind))
 	digestPart(h, string(c.EpisodeMembership))
@@ -126,8 +126,8 @@ func orderedRulesStreamDigest(s OrderedRulesStream) string {
 	digestPart(h, s.Scope.SourceContractVersion)
 	digestPart(h, string(s.Scope.Coverage))
 	digestPart(h, s.Scope.CoverageDetail)
-	digestInt(h, s.Scope.IntervalFromPosition)
-	digestInt(h, s.Scope.IntervalToPosition)
+	digestInt(h, int64(s.Scope.IntervalFromPosition))
+	digestInt(h, int64(s.Scope.IntervalToPosition))
 	digestBool(h, s.Scope.HasInterval)
 
 	digestPart(h, s.Admission.ManifestID)
@@ -140,7 +140,7 @@ func orderedRulesStreamDigest(s OrderedRulesStream) string {
 	}
 
 	digestBool(h, s.Cutoff.Established)
-	digestInt(h, s.Cutoff.Position)
+	digestInt(h, int64(s.Cutoff.Position))
 	digestPart(h, string(s.Cutoff.Kind))
 	digestPart(h, s.Cutoff.Identity)
 	digestPart(h, string(s.Cutoff.Basis))
@@ -276,7 +276,7 @@ func orderedRulesConsumedDigest(s OrderedRulesStream, configDigest string, d Sup
 	// validateScope refuses a stream that omits it, so no ADMITTED prefix can
 	// differ by it; hashing it here would separate two refusals from each
 	// other and nothing else.
-	digestInt(h, s.Scope.IntervalFromPosition)
+	digestInt(h, int64(s.Scope.IntervalFromPosition))
 	// And the END of the declared window, but ONLY when the traversal stopped
 	// because it ran out of stream.
 	//
@@ -310,7 +310,7 @@ func orderedRulesConsumedDigest(s OrderedRulesStream, configDigest string, d Sup
 	terminal := exhausted && !s.Cutoff.Established
 	digestBool(h, terminal)
 	if terminal {
-		digestInt(h, s.Scope.IntervalToPosition)
+		digestInt(h, int64(s.Scope.IntervalToPosition))
 	}
 	digestPart(h, s.Admission.ManifestID)
 	digestPart(h, string(s.Admission.ViewKind))
@@ -326,7 +326,7 @@ func orderedRulesConsumedDigest(s OrderedRulesStream, configDigest string, d Sup
 	// Its DroppedAtOrAfter count is not: that is a fact about candidates the
 	// traversal never reached.
 	digestBool(h, s.Cutoff.Established)
-	digestInt(h, s.Cutoff.Position)
+	digestInt(h, int64(s.Cutoff.Position))
 	digestPart(h, string(s.Cutoff.Kind))
 	digestPart(h, s.Cutoff.Identity)
 	digestPart(h, string(s.Cutoff.Basis))

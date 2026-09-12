@@ -8,31 +8,26 @@ package predictioneval
 // past 2^53, so two words the strict Bernoulli comparison distinguishes can
 // arrive equal, and two shares one ulp apart collapse into one.
 //
-// WHAT THIS TYPE DOES NOT COVER, said here because an earlier draft of this
-// comment claimed "every exported 64-bit value" and a reviewer was right to
-// call that false. The model also carries TWELVE exported int64 JSON fields
-// that are QUANTITIES, and they are listed rather than summarized because the
-// first correction of this paragraph said "ten" and a second reviewer found the
-// two it had missed:
+// THE OTHER WIRE RULE, and why this one is not it. The model also carries
+// twelve exported int64 JSON fields that are QUANTITIES and POSITIONS rather
+// than bit patterns — supplied values and availability positions, the declared
+// interval endpoints, candidate, intervention and cutoff positions, the
+// positions re-exported on a result, and the exact pool sum. They are signed,
+// they are compared and summed as numbers, and they travel as canonical
+// base-ten strings through [OrderedRulesInt64]. Hexadecimal is for values whose
+// identity is their bits; decimal is for values whose identity is their
+// magnitude, and mixing the two would make one of the two artifacts unreadable
+// for no gain.
 //
-//	SuppliedInt64.Value                          SuppliedInt64.AvailableAtPosition
-//	OrderedRulesScope.IntervalFromPosition       OrderedRulesScope.IntervalToPosition
-//	OrderedRulesCandidate.Position               OrderedRulesIntervention.Position
-//	OrderedRulesCutoff.Position                  OrderedRulesSelection.CandidatePosition
-//	OrderedRulesTraceEntry.CandidatePosition     OrderedRulesEvaluation.StoppedAtPosition
-//	OrderedRulesCandidateVisit.CandidatePosition OrderedRulesCandidateVisit.PoolTotal
-//
-// The last two were missed because they are declared in ordered_rules.go rather
-// than in ordered_rules_types.go, and the enumeration that produced "ten" read
-// the types file alone — a sibling-site miss of exactly the kind this package
-// keeps a rule against. PoolTotal is the sharpest of the twelve: it is the
-// exact int64 pool sum that the share is then computed from.
-//
-// They still travel as JSON numbers and they are not repaired here: the owner
-// decision that authorized this change enumerated the four bit-pattern fields,
-// and widening a public wire contract past what was authorized is not a thing
-// a comment gets to do. The cost is measured rather than guessed, in
-// TestOrderedRulesInt64JSONFieldsStillCollapseAndAreOutsideThisRepair.
+// That split is a later decision than this type. An earlier draft of this
+// comment claimed "every exported 64-bit value this model carries across a wire
+// is an exact bit pattern", which was false twice over: the int64 fields are
+// quantities, and a first correction of the list said "ten" when there were
+// twelve. Both were found by reviewers. The list now lives in
+// ordered_rules_int64.go beside the type that owns it, and
+// TestOrderedRulesExportedGraphCarriesNoBare64BitJSONField walks the exported
+// graph reflectively so that a thirteenth field of either kind fails a test
+// rather than waiting for a third reviewer.
 //
 // That was not hypothetical. Reproduced before this type existed:
 // 9223372036854788153 and 9223372036854788154 both became 9223372036854788096

@@ -153,13 +153,13 @@ const (
 type OrderedRulesCandidateVisit struct {
 	CandidateIndex    int                          `json:"candidateIndex"`
 	CandidateIdentity string                       `json:"candidateIdentity"`
-	CandidatePosition int64                        `json:"candidatePosition"`
+	CandidatePosition OrderedRulesInt64            `json:"candidatePosition"`
 	Verdict           OrderedRulesCandidateVerdict `json:"verdict"`
 	BalanceUse        OrderedRulesBalanceUse       `json:"balanceUse"`
 	// PoolTotalKnown separates a pool that summed to zero from one that could
 	// not be summed at all.
-	PoolTotalKnown bool  `json:"poolTotalKnown"`
-	PoolTotal      int64 `json:"poolTotal"`
+	PoolTotalKnown bool              `json:"poolTotalKnown"`
+	PoolTotal      OrderedRulesInt64 `json:"poolTotal"`
 	// RawWordsConsumedHere is how much entropy this candidate alone spent.
 	RawWordsConsumedHere int `json:"rawWordsConsumedHere"`
 }
@@ -792,7 +792,7 @@ func orderedRulesStreamStructureBroken(s OrderedRulesStream) bool {
 	if orderedRulesCutoffShapeImpossible(s) {
 		return true
 	}
-	var structuralLast int64
+	var structuralLast OrderedRulesInt64
 	for i := range s.Candidates {
 		c := &s.Candidates[i]
 		switch {
@@ -907,7 +907,7 @@ func orderedRulesStreamInvariantsBroken(s OrderedRulesStream) bool {
 		return true
 	}
 	seen := make(map[string]bool, len(s.Candidates))
-	var lastPosition int64
+	var lastPosition OrderedRulesInt64
 	for i := range s.Candidates {
 		c := &s.Candidates[i]
 		// The message argument is discarded: this pass answers yes or no, and
@@ -1580,11 +1580,11 @@ func EvaluateOrderedRules(stream OrderedRulesStream, rules OrderedRulesConfig, d
 			return out
 		}
 		visit.PoolTotalKnown = true
-		visit.PoolTotal = total
+		visit.PoolTotal = OrderedRulesInt64(total)
 
 		for oi := range c.Outcomes {
 			out.OutcomesConsidered++
-			share := donorShare(total, c.Outcomes[oi].Points.Value)
+			share := donorShare(total, int64(c.Outcomes[oi].Points.Value))
 			shareBits := math.Float64bits(share)
 
 			admittedRule := -1
@@ -1896,10 +1896,10 @@ func checkedPoolSum(outcomes []OrderedRulesOutcome) (int64, string) {
 		if v.Value < 0 {
 			return 0, ReasonOutcomePointsOutOfDomain
 		}
-		if total > math.MaxInt64-v.Value {
+		if total > math.MaxInt64-int64(v.Value) {
 			return 0, ReasonPoolSumOverflow
 		}
-		total += v.Value
+		total += int64(v.Value)
 	}
 	return total, ""
 }

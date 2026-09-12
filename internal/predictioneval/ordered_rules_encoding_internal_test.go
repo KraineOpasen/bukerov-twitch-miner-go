@@ -88,14 +88,14 @@ func TestOrderedRulesStructuralOverheadFitsItsReserve(t *testing.T) {
 				// this case measures untouched.
 				Identity: count("o" + itoaInternal(j)),
 				Points: SuppliedInt64{
-					Presence: SuppliedKnown, Value: int64(j + 1),
+					Presence: SuppliedKnown, Value: OrderedRulesInt64(j + 1),
 					Provenance: count("p"), HasAvailableAtPosition: true,
 				},
 			})
 			text += len(SuppliedKnown)
 		}
 		cs = append(cs, OrderedRulesCandidate{
-			Identity: count("c" + itoaInternal(i)), Position: int64(i + 1), HasPosition: true,
+			Identity: count("c" + itoaInternal(i)), Position: OrderedRulesInt64(i + 1), HasPosition: true,
 			SourceKind: SourceKindChannelUpdate, EpisodeMembership: MembershipProven,
 			OutcomesPresence: SuppliedKnown, Outcomes: outs, Provenance: count("p"),
 			Balance: SuppliedInt64{
