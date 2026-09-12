@@ -215,7 +215,7 @@ func TestOrderedRulesReciprocalRatioGe90Boundary(t *testing.T) {
 	if len(ev.Trace) == 0 {
 		t.Fatal("the traversal recorded no steps")
 	}
-	if got := ev.Trace[0].ShareBits; got != math.Float64bits(donor) {
+	if got := uint64(ev.Trace[0].ShareBits); got != math.Float64bits(donor) {
 		t.Fatalf("the recorded share is %#016x, want the donor's %#016x (the shortcut would be %#016x)",
 			got, math.Float64bits(donor), math.Float64bits(shortcut))
 	}

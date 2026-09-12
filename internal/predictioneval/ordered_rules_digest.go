@@ -199,7 +199,9 @@ func orderedRulesEntropyDigest(d SuppliedDrawTrace) string {
 	digestPart(h, d.RunID)
 	digestInt(h, int64(len(d.Words)))
 	for _, w := range d.Words {
-		digestUint(h, w)
+		// uint64(w) is the same bits the field always held, so changing the
+		// WIRE form of a word did not move a single digest. A test pins that.
+		digestUint(h, uint64(w))
 	}
 	return hexEncode(h.Sum(nil))
 }
@@ -346,7 +348,7 @@ func orderedRulesConsumedDigest(s OrderedRulesStream, configDigest string, d Sup
 	}
 	digestInt(h, int64(wordsConsumed))
 	for i := 0; i < wordsConsumed && i < len(d.Words); i++ {
-		digestUint(h, d.Words[i])
+		digestUint(h, uint64(d.Words[i]))
 	}
 	return hexEncode(h.Sum(nil))
 }

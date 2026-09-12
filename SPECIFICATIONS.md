@@ -4380,9 +4380,110 @@ pinned JSON baseline under `testdata/ordered_rules/` contains any of the four
 fields**. So the compatibility cost of changing the encoding now is zero
 persisted artifacts, zero runtime callers and zero baselines to regenerate.
 
-It is still not implemented. The hazard is recorded at each of the four field
-sites, naming the contradiction with `hex64`'s own documentation, and the
-decision is carried to the owner.
+**RETRACTED, and the retraction is the point of the paragraph that used to be
+here.** This section previously ended "It is still not implemented. The hazard
+is recorded at each of the four field sites ... and the decision is carried to
+the owner." The owner returned the decision, approving the contained wire
+repair, and it is implemented. The sentence above is kept in quotation rather
+than deleted because a specification that silently swaps a "not done" for a
+"done" cannot be used to check what was true when an earlier artifact was
+produced.
+
+**What the owner authorized, stated as the boundary it is.** All four fields
+encode as canonical fixed-width sixteen-character lower-case hexadecimal
+strings; decoding is strict; there is no decimal-number compatibility shim, no
+lossy IEEE-754-compatible fallback and no partial Option C behaviour;
+`OrderedRulesEntropySemanticsVersion` is NOT bumped and
+`OrderedRulesStreamContractVersion` is NOT bumped for a transport change; and
+no runtime integration, collector, persistence, settings or P3b scope is
+touched. The exact uint64 bit patterns and the existing mechanism semantics are
+preserved.
+
+**The repair reuses the package's convention instead of adding one.**
+`OrderedRulesHex64` is a `uint64` in memory and a hex string on the wire. Its
+`MarshalText` CALLS `hex64` — the function the digests have used since they
+were written, whose own documentation already warned that "a raw word pushed
+through a double-precision JSON number loses its low bits silently" — rather
+than restating the format, so the wire and the digests cannot drift apart.
+`UnmarshalText` is that function's exact inverse and refuses everything else:
+wrong width, upper case, a `0x` prefix, a sign, padding, any byte that is not a
+lower-case hex digit. `TestOrderedRulesHexWordIsExactlyTheDigestRendering` and
+`TestOrderedRulesHexWordDecodeInvertsHex64` pin both halves, the second over
+every single-bit value so a per-nibble fault cannot hide in a hand-picked table.
+
+Two mechanical facts made this shape the only one available, and both were
+established by measurement rather than assumed. Go's `,string` tag option is
+ignored on a `[]uint64` field, so it cannot quote the elements of `Words`; and
+`encoding/json` refuses to hand a JSON **number** to a `TextUnmarshaler` at all,
+which is what closes the decimal form off at the type level rather than by a
+check this package would have to keep writing — so "no compatibility shim" is a
+property of the type and not a promise in a comment.
+`TestOrderedRulesHexWordRefusesAJSONNumberAtTheTypeLevel` pins it, including the
+fact that such a refusal arrives as a `*json.UnmarshalTypeError` and does NOT
+wrap `ErrOrderedRulesHexWordMalformed`, which a caller classifying malformed
+input has to know.
+
+**The loss is demonstrated, not argued.**
+`TestOrderedRulesNumericJSONWouldLoseTheDistinctionTheHexFormKeeps` builds both
+representations and reads both through the same IEEE-754 consumer. Measured:
+
+| the two values | as JSON numbers, after the consumer |
+| --- | --- |
+| `0x3fe0000000000000`, `0x3fe0000000000001` (0.5 and one ulp above) | both `4.602678819172647e+18` |
+| `0x0020000000000000`, `0x0020000000000001` (2^53, 2^53+1) | both `9.007199254740992e+15` |
+| `0xffffffffffffffff`, `0xfffffffffffffffe` | both `1.8446744073709552e+19` |
+| `0x8000000000003039`, `0x800000000000303a` | both `9.223372036854788e+18` |
+
+Each row first asserts that the two numeric encodings differ AS TEXT, so the
+collapse is shown to be the reader's and not the writer's, and the same vectors
+through the repaired form stay distinct and decode back bit-exact. Replacing
+the legacy mirror in that case with the repaired type makes it fail with "the
+numeric form survived this consumer", which is how the proof is known to be
+load-bearing rather than self-satisfying.
+
+**Nothing that is hashed moved, and that is pinned with numbers taken from
+before the change.** The conversions at the six production call sites are
+reinterpretations of the same bits, so the four digests must be unchanged.
+`TestOrderedRulesTransportChangeMovedNoDigest` evaluates a fixture whose words
+span 0, 2^63-1, `MaxUint64`, 2^53 and 2^53+1, and pins
+`StreamDigest 1d70c598…`, `ConfigDigest 2e754165…`, `EntropyDigest f5f4ca98…`
+and `ConsumedInputDigest 65a524a2…` — captured by running that same fixture on
+`a3187b2`, the commit before the transport change, in a separate worktree. It
+first requires the run to have reached `WOULD_ATTEMPT`, because an unread
+refusal carries EMPTY digests and pinning four empty strings would pass
+vacuously.
+
+**Eleven mutants, all killed, each by the case that should kill it.** Decimal
+encoding, a dropped length check, upper case accepted, a write before the
+refusal returns, a shift of eight instead of four, `RawWordValue` and `Words`
+reverted to plain integers with every test call site fixed up so the kill is
+behavioural rather than a compile error, two perturbations of the entropy
+digest, and the substitution of the repaired type into the legacy mirror
+described above. The partial-write mutant is killed by
+`TestOrderedRulesHexWordRefusalLeavesTheDestinationUntouched` and by nothing
+else, and the digest mutants by `TestOrderedRulesTransportChangeMovedNoDigest`
+and nothing else.
+
+**Two things are recorded as NOT repaired, because they are not this repair's
+to make.** First, a sixteen-character all-decimal spelling is a well-formed hex
+word and is read as its HEXADECIMAL value — every decimal digit is also a hex
+digit, so width is the only defence and it catches every decimal spelling
+except one of exactly that length.
+`TestOrderedRulesHexWordReadsAnAllDigitWordAsHexAndNotAsDecimal` pins the
+reading and the re-encoding, so the limit of the refusal table is stated where
+a reader would otherwise infer it covers decimals. Second, `encoding/json`
+treats a JSON `null` as "leave the destination alone", so `{"shareBits":null}`
+into a fresh struct yields a share of exactly zero with no error. That is
+unchanged by this repair — it was equally true when the field was a plain
+`uint64` — and repairing it means a presence flag or a pointer, which is a wire
+change outside what was authorized. `TestOrderedRulesHexWordNullIsANoOpAndNotAZero`
+pins both halves of the behaviour rather than leaving it implicit.
+
+The aggregate byte budget is untouched by all of this: it charges supplied TEXT
+and closed vocabularies, and `Words` is bounded by COUNT
+(`MaxOrderedRulesDrawWords`) and charged to no total, so changing a word's
+encoded width moves no ceiling. `TestOrderedRulesStructuralOverheadFitsItsReserve`
+measures the projected stream, which carries none of the four fields.
 
 **A sixth review round, and five of its findings are worth more than their
 labels.** The audit above declared no gap in family A. A reviewer then filed

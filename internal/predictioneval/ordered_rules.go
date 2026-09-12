@@ -1651,7 +1651,10 @@ func EvaluateOrderedRules(stream OrderedRulesStream, rules OrderedRulesConfig, d
 						return out
 					}
 					rawIndex = cursor
-					rawValue = words[cursor]
+					// The conversion is a reinterpretation of the same bits, never a
+					// numeric change: the comparison below is the donor's, on the
+					// word exactly as supplied.
+					rawValue = uint64(words[cursor])
 					cursor++
 					// Rate of exactly zero reaches here too: its threshold is 0,
 					// so it consumes a word and then fails on `raw < 0`.
@@ -1733,7 +1736,7 @@ func admitOrderedRules(out *OrderedRulesEvaluation, visit *OrderedRulesCandidate
 		OutcomeIdentity:   c.Outcomes[oi].Identity,
 		Basis:             basis,
 		RuleIndex:         ruleIndex,
-		ShareBits:         shareBits,
+		ShareBits:         OrderedRulesHex64(shareBits),
 	}
 
 	b := c.Balance
@@ -1794,13 +1797,13 @@ func traceEntry(step OrderedRulesTraceStep, ci int, c *OrderedRulesCandidate, oi
 		CandidateIndex:     ci,
 		CandidatePosition:  c.Position,
 		OutcomeIndex:       oi,
-		ShareBits:          shareBits,
+		ShareBits:          OrderedRulesHex64(shareBits),
 		RuleIndex:          ruleIndex,
 		ComparatorMatched:  comparatorMatched,
 		BernoulliEvaluated: bernoulliEvaluated,
 		BernoulliResult:    bernoulliResult,
 		RawWordIndex:       rawIndex,
-		RawWordValue:       rawValue,
+		RawWordValue:       OrderedRulesHex64(rawValue),
 		Admitted:           admitted,
 	}
 }

@@ -114,11 +114,19 @@ func orAdmission() predictioneval.CommonAdmission {
 	}
 }
 
+// orDraws still takes plain uint64 words, because a case that writes
+// 0x8000000000000000 is naming a BIT PATTERN and the transport type it travels
+// in is not that case's subject. The conversion here is a reinterpretation; the
+// cases that do care about the wire form assert on it directly.
 func orDraws(words ...uint64) predictioneval.SuppliedDrawTrace {
+	carried := make([]predictioneval.OrderedRulesHex64, len(words))
+	for i, w := range words {
+		carried[i] = predictioneval.OrderedRulesHex64(w)
+	}
 	return predictioneval.SuppliedDrawTrace{
 		RunID:                   "acceptance-run-1",
 		EntropySemanticsVersion: predictioneval.OrderedRulesEntropySemanticsVersion,
-		Words:                   words,
+		Words:                   carried,
 	}
 }
 

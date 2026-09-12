@@ -248,12 +248,13 @@ func TestOrderedRulesAllZeroPoolProducesZeroSharesNotNaN(t *testing.T) {
 	if sel.OutcomeIdentity != "A" {
 		t.Fatalf("selected %q, want \"A\"", sel.OutcomeIdentity)
 	}
-	if math.IsNaN(math.Float64frombits(sel.ShareBits)) || sel.ShareBits != math.Float64bits(0) {
+	if math.IsNaN(math.Float64frombits(uint64(sel.ShareBits))) ||
+		uint64(sel.ShareBits) != math.Float64bits(0) {
 		t.Fatalf("the recorded share is %#016x, want an exact zero; an all-zero pool must not divide "+
-			"zero by zero", sel.ShareBits)
+			"zero by zero", uint64(sel.ShareBits))
 	}
 	for _, e := range ev.Trace {
-		if math.IsNaN(math.Float64frombits(e.ShareBits)) {
+		if math.IsNaN(math.Float64frombits(uint64(e.ShareBits))) {
 			t.Fatalf("a NaN share reached the trace at outcome %d", e.OutcomeIndex)
 		}
 	}

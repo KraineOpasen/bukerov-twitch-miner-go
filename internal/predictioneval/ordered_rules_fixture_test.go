@@ -237,7 +237,7 @@ func TestOrderedRulesDonorExampleConfigDrivesTheMechanism(t *testing.T) {
 		// SHORTCUT's value. Writing the expectation that way would assert the
 		// very collapse this case exists to detect.
 		var total, points float64 = 10, 9
-		if got := sel.ShareBits; got != math.Float64bits(1.0/(total/points)) {
+		if got := uint64(sel.ShareBits); got != math.Float64bits(1.0/(total/points)) {
 			t.Fatalf("outcome B's recorded share is %#016x, want the donor's reciprocal %#016x",
 				got, math.Float64bits(1.0/(total/points)))
 		}

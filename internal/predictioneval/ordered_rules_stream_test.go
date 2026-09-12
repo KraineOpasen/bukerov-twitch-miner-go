@@ -597,7 +597,7 @@ func TestOrderedRulesInputsAndTraceDoNotAliasCallerValues(t *testing.T) {
 	cs[0].Balance = orKnownBalance(7)
 	cs[0].Outcomes[0].Identity = "MUTATED"
 	cfg.Detailed[0].RawThresholdPercent = 1
-	draws.Words[0] = orWordRefuse
+	draws.Words[0] = predictioneval.OrderedRulesHex64(orWordRefuse)
 
 	after := predictioneval.EvaluateOrderedRules(stream, orConfig([]predictioneval.OrderedRule{
 		orRule(predictioneval.ComparatorLe, 50, 100, 0, 10),
@@ -1854,7 +1854,8 @@ func TestOrderedRulesAShapeRefusalReExportsNoneOfTheInput(t *testing.T) {
 		draws: predictioneval.SuppliedDrawTrace{
 			RunID:                   "r",
 			EntropySemanticsVersion: predictioneval.OrderedRulesEntropySemanticsVersion,
-			Words:                   make([]uint64, predictioneval.MaxOrderedRulesDrawWords+1),
+			Words: make([]predictioneval.OrderedRulesHex64,
+				predictioneval.MaxOrderedRulesDrawWords+1),
 		},
 		reason: predictioneval.ReasonDrawWordsOverBound,
 	}, {
