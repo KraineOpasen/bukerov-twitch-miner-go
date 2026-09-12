@@ -18,6 +18,34 @@ Tests for the touched package(s) pass: `go test -v -race ./internal/<pkg>/...`. 
 changes, the equivalent self-test passes (e.g. `python3 .claude/hooks/governance-policy.py --self-test`,
 `python3 scripts/validate-agent-governance.py --application-scope generic`).
 
+The oracle and golden-check distinctions below hold for any Q1 evidence; the classified-failure and
+reached-case distinctions hold wherever a mutation proof is claimed. Each distinction that bears on a claim
+must hold for the claim to be evidentiary rather than merely plausible. Mutation/harness proof keeps the
+scope `GOVERNANCE_V3.md` §12 gives it — *where applicable*, proportional to the risk carried by the code
+being changed, never a mandate to mutate the code behind every test or every change — and where a
+**disposable mutation** proof is claimed, §12's invariant
+(`baseline PASS → mutation → expected FAIL → byte-identical restore → PASS → clean`) is the authority.
+
+- **Independent oracle.** The expected behaviour or value comes from an approved requirement/spec, an
+  exact/golden artifact, or an independently derived calculation or model — never from the implementation
+  under test. A golden regenerated from the implementation it checks is that implementation, not an
+  independent oracle.
+- **Classified failure.** The expected FAIL is a behavioural failure attributable to the intended property —
+  an assertion failure, or a race, panic or liveness signal where that is the property's detection
+  mechanism. A build or compile failure, an incidental timeout, no matching test, an unreached or
+  inaccessible path, an unrelated earlier refusal/failure, and tooling that is unavailable are each reported
+  as themselves (§6); a build break is not behavioural proof, so a mutation that fails to build establishes
+  nothing and is replaced rather than counted. Survival alone classifies nothing: only a mutant argued to
+  preserve behaviour over the reachable input domain is **equivalent**, its survival is then not evidence of
+  a weak test, and the argument is recorded with it.
+- **Reached case, named assertion.** A test that merely ran proves nothing about the claimed case or
+  dimension. Evidence shows the intended case reached the mutation site, and the assertion/property claimed
+  to protect it is named among those observed to fail for a relevant *compiling* fault — a guard that stays
+  green either way is vacuous for the claim.
+- **Golden checks survive round-trips.** A self-consistent encoder/decoder round trip does not establish the
+  required wire representation. Added round-trip coverage keeps the independent exact/golden-format checks
+  for the same representation, wherever they live.
+
 ## Q2 — Full regression
 
 Runs on the final candidate only, on the integrated tree, at the SHA being published (`GOVERNANCE_V3.md`
