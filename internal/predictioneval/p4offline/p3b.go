@@ -1,0 +1,620 @@
+package p4offline
+
+import (
+	"bytes"
+	"encoding/json"
+	"errors"
+	"math"
+	"strconv"
+
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/predictioneval"
+)
+
+// SEAM 6 and the P3b plumbing.
+//
+// The P3b ruleset is SUPPLIED — raw bytes, their SHA-256, the typed config
+// and the core's own config digest — and every one of those is verified
+// against the others before a ruleset is used. Nothing here names a default
+// ruleset: no candidate is hard-coded, ranked, tuned or chosen.
+//
+// The projection feeds the core exactly ONE candidate, built from the
+// outcome-free common factset: the ordered points vector and the balance at
+// the cutoff position, and nothing P2-only (no strategy, filter, users, top
+// stake, odds, health, risk). The stream is declared what it is — a
+// decision-time CALCULATE snapshot in a CALCULATE_ONLY view — and its
+// coverage is COMPLETE_DECLARED only because seam 1 proved C < F first: the
+// projection refuses a factset that did not come through that proof.
+//
+// Every evaluation entry point takes the FACTSET and projects it itself, so
+// no caller can hand in a stream that names one factset and carries another;
+// and the entropy coordinates must name the factset's own round and the
+// verified ruleset, so no round is ever drawn under another round's words.
+
+// Ruleset and P3b refusals.
+var (
+	// ErrRulesetIdentity is a ruleset whose identity is empty or differs from
+	// its config's identity.
+	ErrRulesetIdentity = errors.New("p4offline: ruleset identity is missing or does not match its config")
+	// ErrRulesetRawHash is a ruleset whose raw bytes are absent or do not hash
+	// to the declared SHA-256.
+	ErrRulesetRawHash = errors.New("p4offline: raw ruleset bytes do not match the declared SHA-256")
+	// ErrRulesetRawDecode is a raw document that is not exactly one ordered-
+	// rules config spelled the way the contract spells it.
+	ErrRulesetRawDecode = errors.New("p4offline: raw ruleset bytes do not decode to exactly one ordered-rules config")
+	// ErrRulesetConfigMismatch is a typed config that is not what the raw
+	// bytes decode to.
+	ErrRulesetConfigMismatch = errors.New("p4offline: raw ruleset bytes decode to a config that differs from the supplied one")
+	// ErrRulesetConfigUnusable is a config the P3b core itself refuses.
+	ErrRulesetConfigUnusable = errors.New("p4offline: the P3b core refuses this ruleset")
+	// ErrRulesetNativeDigest is a declared native digest that is not the one
+	// the core reports for the config.
+	ErrRulesetNativeDigest = errors.New("p4offline: the P3b core's config digest does not match the declared one")
+	// ErrRulesetNotVerified is a VerifiedP3bRuleset that was not produced by
+	// VerifyP3bRuleset, or was altered afterwards.
+	ErrRulesetNotVerified = errors.New("p4offline: ruleset was not verified by this package or was altered after verification")
+	// ErrP3bProjectionRefused is a factset the native projection refuses.
+	ErrP3bProjectionRefused = errors.New("p4offline: the P3b projection refused the common factset")
+	// ErrP3bBinding is an evaluation whose coordinates, stream or config are
+	// not bound to the factset and ruleset it claims.
+	ErrP3bBinding = errors.New("p4offline: the P3b evaluation is not bound to its inputs")
+)
+
+// P3bRuleset is the explicitly supplied ruleset with its hashes.
+type P3bRuleset struct {
+	// RulesetID names the ruleset and must equal Config.ConfigID.
+	RulesetID string `json:"rulesetId"`
+	// RawBytes is the ruleset document exactly as supplied.
+	RawBytes []byte `json:"rawBytes"`
+	// RawSHA256 is the declared lower-case hex SHA-256 of RawBytes.
+	RawSHA256 string `json:"rawSha256"`
+	// Config is the typed form the caller decoded from RawBytes.
+	Config predictioneval.OrderedRulesConfig `json:"config"`
+	// NativeConfigDigest is the declared pe-ors-config/v1 digest the core
+	// reports for Config.
+	NativeConfigDigest string `json:"nativeConfigDigest"`
+}
+
+// VerifiedP3bRuleset is a ruleset every binding of which has been checked.
+// Only [VerifyP3bRuleset] produces a usable value: the witness it carries is
+// unexported, is recomputed over the identity fields at every use, and does
+// not survive a JSON round trip — a stored ruleset is re-verified from its
+// raw bytes, never trusted from its typed form.
+type VerifiedP3bRuleset struct {
+	RulesetID          string                            `json:"rulesetId"`
+	RawSHA256          string                            `json:"rawSha256"`
+	NativeConfigDigest string                            `json:"nativeConfigDigest"`
+	Config             predictioneval.OrderedRulesConfig `json:"config"`
+	witness            string
+}
+
+// Rules is the number of ordered detailed rules.
+func (r VerifiedP3bRuleset) Rules() int { return len(r.Config.Detailed) }
+
+// check refuses a value that VerifyP3bRuleset did not produce as it is: the
+// identity fields must match the witness, and the config must still digest
+// — in the core's own terms — to the verified native digest. The probe runs
+// again here so a config mutated after verification into a shape the core
+// refuses (which reports no digest at all) is caught as firmly as one
+// mutated into a shape it accepts.
+func (r VerifiedP3bRuleset) check() error {
+	if r.witness == "" || r.witness != rulesetWitness(r.RulesetID, r.RawSHA256, r.NativeConfigDigest) {
+		return ErrRulesetNotVerified
+	}
+	digest, err := nativeConfigDigest(r.Config)
+	if err != nil || digest != r.NativeConfigDigest {
+		return errors.Join(ErrRulesetNotVerified, errors.New("p4offline: the config no longer digests to the verified native digest"))
+	}
+	return nil
+}
+
+// nativeConfigDigest reads the core's own digest of a config through the
+// fixed probe. A config the core refuses before the traversal has none.
+func nativeConfigDigest(cfg predictioneval.OrderedRulesConfig) (string, error) {
+	probe, err := p3bProbeStream()
+	if err != nil {
+		return "", err
+	}
+	ev := predictioneval.EvaluateOrderedRules(probe, cfg, predictioneval.SuppliedDrawTrace{
+		RunID:                   "p4offline-ruleset-probe",
+		EntropySemanticsVersion: predictioneval.OrderedRulesEntropySemanticsVersion,
+	})
+	if ev.ConfigDigest == "" {
+		return "", errors.Join(ErrRulesetConfigUnusable,
+			errors.New("p4offline: core status "+string(ev.Status)+" reason "+ev.Reason))
+	}
+	return ev.ConfigDigest, nil
+}
+
+func rulesetWitness(id, rawSHA256, nativeDigest string) string {
+	var c canonical
+	c.str("p4offline-verified-ruleset-witness")
+	c.str(id)
+	c.str(rawSHA256)
+	c.str(nativeDigest)
+	return c.digest()
+}
+
+// P3bProjection is the one-candidate stream projected from a factset.
+type P3bProjection struct {
+	Mode              string                            `json:"mode"`
+	FactsetDigest     string                            `json:"factsetDigest"`
+	EventID           string                            `json:"eventId"`
+	CutoffPosition    int64                             `json:"cutoffPosition"`
+	CandidateIdentity string                            `json:"candidateIdentity"`
+	OutcomeCount      int                               `json:"outcomeCount"`
+	Stream            predictioneval.OrderedRulesStream `json:"stream"`
+}
+
+// EntropyTraceBinding is the trace one P3b evaluation consumed, bound to its
+// coordinates and to the core's own entropy digest.
+type EntropyTraceBinding struct {
+	Coordinates   EntropyCoordinates `json:"coordinates"`
+	RunID         string             `json:"runId"`
+	WordsSupplied int                `json:"wordsSupplied"`
+	WordsConsumed int                `json:"wordsConsumed"`
+	EntropyDigest string             `json:"entropyDigest"`
+}
+
+// P3bCaseResult is the P3b side of one case, for one trajectory.
+type P3bCaseResult struct {
+	Policy             string                                `json:"policy"`
+	FactsetDigest      string                                `json:"factsetDigest"`
+	RulesetID          string                                `json:"rulesetId"`
+	RulesetRawSHA256   string                                `json:"rulesetRawSha256"`
+	NativeConfigDigest string                                `json:"nativeConfigDigest"`
+	Projection         P3bProjection                         `json:"projection"`
+	ProjectionRefusal  string                                `json:"projectionRefusal,omitempty"`
+	Trace              EntropyTraceBinding                   `json:"trace"`
+	Evaluation         predictioneval.OrderedRulesEvaluation `json:"evaluation"`
+	Action             ActionMapping                         `json:"action"`
+	Choice             PolicyChoice                          `json:"choice"`
+	Stake              Int64Fact                             `json:"stake"`
+}
+
+// NativeActionP4ProjectionRefused is the pseudo-native action a P3b result
+// carries when the projection itself refused the factset.
+const NativeActionP4ProjectionRefused = "P4_PROJECTION_REFUSED"
+
+// rulesetKeySets is the exact key spelling of the ordered-rules config
+// document at every object path. The raw document must use these spellings
+// and no key twice, and may hold objects only at these paths: encoding/json
+// alone would accept a case-folded or a duplicated key and silently read a
+// different config than a strict parser. The spelling is checked on the
+// DECODED key, so a JSON escape of the same characters is the same key; the
+// raw hash still pins the exact bytes for the audit.
+var rulesetKeySets = map[string][]string{
+	"":                {"configId", "hasDefault", "detailed", "default"},
+	"detailed":        {"comparator", "rawThresholdPercent", "rawAttemptRatePercent", "points"},
+	"detailed.points": {"maxValue", "rawPercent"},
+	"default":         {"rawMinPercent", "rawMaxPercent", "points"},
+	"default.points":  {"maxValue", "rawPercent"},
+}
+
+// VerifyP3bRuleset checks every binding of a supplied ruleset.
+func VerifyP3bRuleset(r P3bRuleset) (VerifiedP3bRuleset, error) {
+	if r.RulesetID == "" || r.Config.ConfigID != r.RulesetID {
+		return VerifiedP3bRuleset{}, errors.Join(ErrRulesetIdentity,
+			errors.New("p4offline: ruleset id "+strconv.Quote(r.RulesetID)+", config id "+strconv.Quote(r.Config.ConfigID)))
+	}
+	if len(r.RawBytes) == 0 {
+		return VerifiedP3bRuleset{}, errors.Join(ErrRulesetRawHash, errors.New("p4offline: no raw ruleset bytes supplied"))
+	}
+	if !isCanonicalHex(r.RawSHA256, 64) {
+		return VerifiedP3bRuleset{}, errors.Join(ErrRulesetRawHash,
+			errors.New("p4offline: declared raw hash is not 64 lower-case hex digits"))
+	}
+	if got := sha256Hex(r.RawBytes); got != r.RawSHA256 {
+		return VerifiedP3bRuleset{}, errors.Join(ErrRulesetRawHash,
+			errors.New("p4offline: raw bytes hash to "+got+", declared "+r.RawSHA256))
+	}
+	if err := checkRulesetKeys(r.RawBytes); err != nil {
+		return VerifiedP3bRuleset{}, errors.Join(ErrRulesetRawDecode, err)
+	}
+	dec := json.NewDecoder(bytes.NewReader(r.RawBytes))
+	dec.DisallowUnknownFields()
+	var decoded predictioneval.OrderedRulesConfig
+	if err := dec.Decode(&decoded); err != nil {
+		return VerifiedP3bRuleset{}, errors.Join(ErrRulesetRawDecode, err)
+	}
+	if rest := bytes.TrimSpace(r.RawBytes[dec.InputOffset():]); len(rest) != 0 {
+		return VerifiedP3bRuleset{}, errors.Join(ErrRulesetRawDecode,
+			errors.New("p4offline: raw bytes continue after the first document"))
+	}
+	if !configsEqual(decoded, r.Config) {
+		return VerifiedP3bRuleset{}, ErrRulesetConfigMismatch
+	}
+	if !isCanonicalHex(r.NativeConfigDigest, 64) {
+		return VerifiedP3bRuleset{}, errors.Join(ErrRulesetNativeDigest,
+			errors.New("p4offline: declared native digest is not 64 lower-case hex digits"))
+	}
+	// The core's own digest is observable only through an evaluation, so a
+	// tiny fixed probe — two equal outcomes, a zero balance, no entropy — is
+	// evaluated to obtain it. The probe's answer is discarded; only the
+	// config digest it reports is used. A config the core refuses before it
+	// reaches the traversal reports none and is unusable. The probe runs over
+	// BOTH the typed config and the decoded one, so a field the hand-written
+	// comparison does not know about cannot slip between them.
+	digest, err := nativeConfigDigest(r.Config)
+	if err != nil {
+		return VerifiedP3bRuleset{}, err
+	}
+	if digest != r.NativeConfigDigest {
+		return VerifiedP3bRuleset{}, errors.Join(ErrRulesetNativeDigest,
+			errors.New("p4offline: core reports "+digest+", declared "+r.NativeConfigDigest))
+	}
+	if decodedDigest, err := nativeConfigDigest(decoded); err != nil || decodedDigest != digest {
+		return VerifiedP3bRuleset{}, errors.Join(ErrRulesetConfigMismatch,
+			errors.New("p4offline: the core digests the decoded document differently from the supplied config"))
+	}
+	return VerifiedP3bRuleset{
+		RulesetID:          r.RulesetID,
+		RawSHA256:          r.RawSHA256,
+		NativeConfigDigest: r.NativeConfigDigest,
+		Config:             detachConfig(r.Config),
+		witness:            rulesetWitness(r.RulesetID, r.RawSHA256, r.NativeConfigDigest),
+	}, nil
+}
+
+// checkRulesetKeys walks the raw document token by token and refuses a
+// duplicated key or a key not spelled exactly as the contract spells it.
+func checkRulesetKeys(raw []byte) error {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	tok, err := dec.Token()
+	if err != nil {
+		return err
+	}
+	if d, ok := tok.(json.Delim); !ok || d != '{' {
+		return errors.New("p4offline: raw ruleset document is not a JSON object")
+	}
+	return walkRulesetObject(dec, "")
+}
+
+func walkRulesetObject(dec *json.Decoder, path string) error {
+	allowed, known := rulesetKeySets[path]
+	if !known {
+		return errors.New("p4offline: an object at " + pathName(path) + " has no place in the contract")
+	}
+	seen := map[string]bool{}
+	for {
+		tok, err := dec.Token()
+		if err != nil {
+			return err
+		}
+		if d, ok := tok.(json.Delim); ok {
+			if d == '}' {
+				return nil
+			}
+			return errors.New("p4offline: unexpected " + d.String() + " in object at " + pathName(path))
+		}
+		key, ok := tok.(string)
+		if !ok {
+			return errors.New("p4offline: object key at " + pathName(path) + " is not a string")
+		}
+		if seen[key] {
+			return errors.New("p4offline: key " + strconv.Quote(key) + " appears twice at " + pathName(path))
+		}
+		seen[key] = true
+		if !containsID(allowed, key) {
+			return errors.New("p4offline: key " + strconv.Quote(key) + " at " + pathName(path) + " is not spelled as the contract spells it")
+		}
+		child := key
+		if path != "" {
+			child = path + "." + key
+		}
+		if err := walkRulesetValue(dec, child); err != nil {
+			return err
+		}
+	}
+}
+
+func walkRulesetValue(dec *json.Decoder, path string) error {
+	tok, err := dec.Token()
+	if err != nil {
+		return err
+	}
+	d, ok := tok.(json.Delim)
+	if !ok {
+		return nil
+	}
+	switch d {
+	case '{':
+		return walkRulesetObject(dec, path)
+	case '[':
+		for dec.More() {
+			if err := walkRulesetValue(dec, path); err != nil {
+				return err
+			}
+		}
+		_, err := dec.Token()
+		return err
+	}
+	return errors.New("p4offline: unexpected " + d.String() + " at " + pathName(path))
+}
+
+func pathName(path string) string {
+	if path == "" {
+		return "the document root"
+	}
+	return strconv.Quote(path)
+}
+
+// configsEqual compares two configs exactly: floats by bits, an absent
+// detailed list equal to an empty one (the core treats them alike).
+func configsEqual(a, b predictioneval.OrderedRulesConfig) bool {
+	if a.ConfigID != b.ConfigID || a.HasDefault != b.HasDefault || len(a.Detailed) != len(b.Detailed) {
+		return false
+	}
+	for i := range a.Detailed {
+		x, y := a.Detailed[i], b.Detailed[i]
+		if x.Comparator != y.Comparator ||
+			math.Float64bits(x.RawThresholdPercent) != math.Float64bits(y.RawThresholdPercent) ||
+			math.Float64bits(x.RawAttemptRatePercent) != math.Float64bits(y.RawAttemptRatePercent) ||
+			x.Points.MaxValue != y.Points.MaxValue ||
+			math.Float64bits(x.Points.RawPercent) != math.Float64bits(y.Points.RawPercent) {
+			return false
+		}
+	}
+	return math.Float64bits(a.Default.RawMinPercent) == math.Float64bits(b.Default.RawMinPercent) &&
+		math.Float64bits(a.Default.RawMaxPercent) == math.Float64bits(b.Default.RawMaxPercent) &&
+		a.Default.Points.MaxValue == b.Default.Points.MaxValue &&
+		math.Float64bits(a.Default.Points.RawPercent) == math.Float64bits(b.Default.Points.RawPercent)
+}
+
+func detachConfig(c predictioneval.OrderedRulesConfig) predictioneval.OrderedRulesConfig {
+	out := c
+	if c.Detailed != nil {
+		out.Detailed = append([]predictioneval.OrderedRule(nil), c.Detailed...)
+	}
+	return out
+}
+
+func knownAt(v int64, provenance string, position int64) predictioneval.SuppliedInt64 {
+	return predictioneval.SuppliedInt64{
+		Presence:               predictioneval.SuppliedKnown,
+		Value:                  predictioneval.OrderedRulesInt64(v),
+		Provenance:             provenance,
+		AvailableAtPosition:    predictioneval.OrderedRulesInt64(position),
+		HasAvailableAtPosition: true,
+	}
+}
+
+// p3bProbeStream is the fixed probe used only to read a config's native
+// digest. It is not evidence and its answer is never reported.
+func p3bProbeStream() (predictioneval.OrderedRulesStream, error) {
+	const p = "p4offline-ruleset-probe"
+	stream, err := predictioneval.ProjectOrderedRulesStream(predictioneval.OrderedRulesSource{
+		Scope: predictioneval.OrderedRulesScope{
+			Namespace: p, EpisodeID: p, AccountContext: p, AssociationEvidence: p,
+			SourceContractVersion: predictioneval.OrderedRulesStreamContractVersion,
+			Coverage:              predictioneval.CoverageCompleteDeclared, HasInterval: true,
+		},
+		Candidates: []predictioneval.OrderedRulesCandidate{{
+			Identity: p, HasPosition: true,
+			SourceKind:        predictioneval.SourceKindCalculateSnapshot,
+			EpisodeMembership: predictioneval.MembershipProven,
+			OutcomesPresence:  predictioneval.SuppliedKnown,
+			Outcomes: []predictioneval.OrderedRulesOutcome{
+				{Identity: "a", Points: knownAt(1, p, 0)},
+				{Identity: "b", Points: knownAt(1, p, 0)},
+			},
+			Balance: knownAt(0, p, 0),
+		}},
+	}, predictioneval.CommonAdmission{ManifestID: p, ViewKind: predictioneval.ViewCalculateOnly, Population: p, OrderBasis: p})
+	if err != nil {
+		return predictioneval.OrderedRulesStream{}, errors.Join(ErrRulesetConfigUnusable, err)
+	}
+	return stream, nil
+}
+
+// ProjectP3bSingleCandidate is seam 6: the one-candidate common-data
+// projection of a COMPLETE factset.
+func ProjectP3bSingleCandidate(fs CommonFactset) (P3bProjection, error) {
+	if err := VerifyCommonFactset(fs); err != nil {
+		return P3bProjection{}, err
+	}
+	if fs.Completeness != FactsetComplete || !fs.ReachedDecision {
+		return P3bProjection{}, errors.Join(ErrFactsetNotEvaluable, errors.New("p4offline: factset is "+string(fs.Completeness)))
+	}
+	position := fs.CutoffPosition
+	provenance := "p4-common-factset:" + fs.Digest
+	identity := "attempt-" + strconv.FormatUint(fs.Attempt.AttemptID, 10)
+	cand := predictioneval.OrderedRulesCandidate{
+		Identity:          identity,
+		Position:          predictioneval.OrderedRulesInt64(position),
+		HasPosition:       true,
+		SourceKind:        predictioneval.SourceKindCalculateSnapshot,
+		EpisodeMembership: predictioneval.MembershipProven,
+		OutcomesPresence:  predictioneval.SuppliedKnown,
+		Provenance:        provenance,
+	}
+	for _, o := range fs.Outcomes {
+		points := knownAt(int64(o.TotalPoints), provenance, position)
+		if !o.Present {
+			// A hole is not a zero-point outcome, and a vector with a hole
+			// is not a whole vector.
+			points = predictioneval.SuppliedInt64{Presence: predictioneval.SuppliedMissing, Reason: "P2_MODEL_VECTOR_HOLE"}
+			cand.OutcomesPresence = predictioneval.SuppliedInvalid
+			cand.OutcomesReason = "P2_MODEL_VECTOR_HOLE"
+		}
+		cand.Outcomes = append(cand.Outcomes, predictioneval.OrderedRulesOutcome{Identity: o.ID, Points: points})
+	}
+	if fs.BalancePresent {
+		cand.Balance = knownAt(fs.Balance, provenance, position)
+	} else {
+		cand.Balance = predictioneval.SuppliedInt64{Presence: predictioneval.SuppliedMissing, Reason: predictioneval.IneligibleMissingBalance}
+	}
+	scope := predictioneval.OrderedRulesScope{
+		Namespace: "p4offline",
+		// The framed identity: a component containing a delimiter cannot
+		// alias another episode.
+		EpisodeID:             fs.Episode.String(),
+		AccountContext:        "collector-session:" + fs.Episode.CollectorSessionID,
+		AssociationEvidence:   "terminal-decision-envelope:" + fs.TerminalObservationID,
+		SourceContractVersion: predictioneval.OrderedRulesStreamContractVersion,
+		Coverage:              predictioneval.CoverageCompleteDeclared,
+		CoverageDetail:        "COMMON_CUTOFF boundary C<F proven by p4offline.SelectEpisodes over a COMPLETE AS_FINALIZED session",
+		IntervalFromPosition:  predictioneval.OrderedRulesInt64(position),
+		IntervalToPosition:    predictioneval.OrderedRulesInt64(position),
+		HasInterval:           true,
+	}
+	admission := predictioneval.CommonAdmission{
+		ManifestID:       P3bProjectionManifestID,
+		ViewKind:         predictioneval.ViewCalculateOnly,
+		Population:       "the selected first automated opportunity's decision-time calculate input",
+		OrderBasis:       "collector sequence of the terminal decision envelope",
+		SourceReferences: []string{fs.TerminalObservationID},
+	}
+	stream, err := predictioneval.ProjectOrderedRulesStream(
+		predictioneval.OrderedRulesSource{Scope: scope, Candidates: []predictioneval.OrderedRulesCandidate{cand}}, admission)
+	if err != nil {
+		return P3bProjection{}, errors.Join(ErrP3bProjectionRefused, err)
+	}
+	return P3bProjection{
+		Mode:              P3bProjectionMode,
+		FactsetDigest:     fs.Digest,
+		EventID:           fs.Episode.EventID,
+		CutoffPosition:    fs.CutoffPosition,
+		CandidateIdentity: identity,
+		OutcomeCount:      len(fs.Outcomes),
+		Stream:            stream,
+	}, nil
+}
+
+// traceWordCount is the number of words a one-candidate traversal can
+// consume at most — one per rule per outcome — with the bounds checked
+// BEFORE the product is formed.
+func traceWordCount(rules, outcomes int) (int, error) {
+	if rules < 0 || rules > predictioneval.MaxOrderedRulesRules {
+		return 0, errors.Join(ErrEntropyCount, errors.New("p4offline: "+strconv.Itoa(rules)+" rules is outside the P3b bound"))
+	}
+	if outcomes < 0 || outcomes > predictioneval.MaxOrderedRulesOutcomes {
+		return 0, errors.Join(ErrEntropyCount, errors.New("p4offline: "+strconv.Itoa(outcomes)+" outcomes is outside the P3b bound"))
+	}
+	return rules * outcomes, nil
+}
+
+// EvaluateP3bWithTrace evaluates one factset under a verified ruleset with a
+// SUPPLIED trace: the factset is projected here, the coordinates must name
+// the factset's own round and the ruleset, the trace must be exactly what the
+// algorithm produces for those coordinates, and every binding the core
+// reports afterwards is checked.
+func EvaluateP3bWithTrace(fs CommonFactset, rs VerifiedP3bRuleset, key string,
+	coords EntropyCoordinates, trace predictioneval.SuppliedDrawTrace) (P3bCaseResult, error) {
+	if err := rs.check(); err != nil {
+		return P3bCaseResult{}, err
+	}
+	proj, err := ProjectP3bSingleCandidate(fs)
+	if err != nil {
+		return P3bCaseResult{}, err
+	}
+	return evaluateProjected(fs, proj, rs, key, coords, trace)
+}
+
+func evaluateProjected(fs CommonFactset, proj P3bProjection, rs VerifiedP3bRuleset, key string,
+	coords EntropyCoordinates, trace predictioneval.SuppliedDrawTrace) (P3bCaseResult, error) {
+	if coords.SourceRoundID != fs.Episode.EventID {
+		return P3bCaseResult{}, errors.Join(ErrP3bBinding,
+			errors.New("p4offline: entropy round "+strconv.Quote(coords.SourceRoundID)+" is not the factset's round "+strconv.Quote(fs.Episode.EventID)))
+	}
+	if coords.PolicyID != rs.RulesetID {
+		return P3bCaseResult{}, errors.Join(ErrP3bBinding,
+			errors.New("p4offline: entropy policy "+strconv.Quote(coords.PolicyID)+" is not the ruleset "+strconv.Quote(rs.RulesetID)))
+	}
+	if err := ValidateDrawTrace(key, coords, trace); err != nil {
+		return P3bCaseResult{}, err
+	}
+	ev := predictioneval.EvaluateOrderedRules(proj.Stream, rs.Config, trace)
+	action := MapP3bAction(ev)
+	admitted := action.Legal && determinate(action.Class)
+	if admitted && (ev.StreamDigest == "" || ev.ConfigDigest == "") {
+		return P3bCaseResult{}, errors.Join(ErrP3bBinding, errors.New("p4offline: core reported "+string(ev.Status)+" without its digests"))
+	}
+	if ev.StreamDigest != "" && ev.StreamDigest != proj.Stream.SelectionDigest {
+		return P3bCaseResult{}, errors.Join(ErrP3bBinding, errors.New("p4offline: core stream digest differs from the projection"))
+	}
+	if ev.ConfigDigest != "" && ev.ConfigDigest != rs.NativeConfigDigest {
+		return P3bCaseResult{}, errors.Join(ErrP3bBinding, errors.New("p4offline: core config digest differs from the verified ruleset"))
+	}
+	res := P3bCaseResult{
+		Policy:             PolicyP3b,
+		FactsetDigest:      fs.Digest,
+		RulesetID:          rs.RulesetID,
+		RulesetRawSHA256:   rs.RawSHA256,
+		NativeConfigDigest: rs.NativeConfigDigest,
+		Projection:         proj,
+		Trace: EntropyTraceBinding{
+			Coordinates:   coords,
+			RunID:         trace.RunID,
+			WordsSupplied: len(trace.Words),
+			WordsConsumed: ev.RawWordsConsumed,
+			EntropyDigest: ev.EntropyDigest,
+		},
+		Evaluation: ev,
+		Action:     action,
+	}
+	if ev.Selected != nil && madeAChoice(action.Class) {
+		res.Choice = PolicyChoice{Present: true, Index: ev.Selected.OutcomeIndex, OutcomeID: ev.Selected.OutcomeIdentity}
+	}
+	switch action.Class {
+	case ActionWouldAttempt:
+		// A known stake, INCLUDING zero: zero is an amount, not an abstention.
+		res.Stake = KnownInt64(int64(ev.Stake.Value))
+	case ActionParticipationAdmittedStakeUnknown:
+		res.Stake = UnknownInt64(ev.Reason)
+	case ActionNoAttemptInSuppliedPrefix:
+		// A statement about the supplied prefix only: no financial zero.
+		res.Stake = UnknownInt64(string(predictioneval.StatusNoAttemptInSuppliedPrefix))
+	case ActionUnknownInput, ActionRefused:
+		res.Stake = UnknownInt64(ev.Reason)
+	default:
+		res.Stake = UnknownInt64(StakeReasonUnsupportedShape)
+	}
+	return res, nil
+}
+
+// EvaluateP3bCase is the P3b plumbing for one factset and one trajectory:
+// project, generate exactly enough entropy for the candidate, evaluate.
+//
+// The trace supplies one word per rule per outcome — the most a traversal of
+// one verified candidate can consume — so exhaustion cannot occur by
+// construction and every word is reproducible from the coordinates alone.
+func EvaluateP3bCase(fs CommonFactset, rs VerifiedP3bRuleset, key string, trajectory uint32) (P3bCaseResult, error) {
+	if err := rs.check(); err != nil {
+		return P3bCaseResult{}, err
+	}
+	proj, err := ProjectP3bSingleCandidate(fs)
+	if errors.Is(err, ErrP3bProjectionRefused) {
+		return P3bCaseResult{
+			Policy:             PolicyP3b,
+			FactsetDigest:      fs.Digest,
+			RulesetID:          rs.RulesetID,
+			RulesetRawSHA256:   rs.RawSHA256,
+			NativeConfigDigest: rs.NativeConfigDigest,
+			ProjectionRefusal:  err.Error(),
+			Action: ActionMapping{
+				MapVersion: NativeActionMapVersion, Policy: PolicyP3b,
+				NativeAction: NativeActionP4ProjectionRefused, Class: ActionRefused, Legal: true,
+			},
+			Stake: UnknownInt64(NativeActionP4ProjectionRefused),
+		}, nil
+	}
+	if err != nil {
+		return P3bCaseResult{}, err
+	}
+	count, err := traceWordCount(rs.Rules(), len(fs.Outcomes))
+	if err != nil {
+		return P3bCaseResult{}, err
+	}
+	coords := EntropyCoordinates{Trajectory: trajectory, SourceRoundID: fs.Episode.EventID, PolicyID: rs.RulesetID}
+	trace, err := BuildDrawTrace(key, coords, count)
+	if err != nil {
+		return P3bCaseResult{}, err
+	}
+	return evaluateProjected(fs, proj, rs, key, coords, trace)
+}
+
+// Decision binds a P3b result to its case as a policy decision. The factset
+// must be the one the result was evaluated over.
+func (r P3bCaseResult) Decision(fs CommonFactset) (PolicyDecision, error) {
+	return decisionOf(PolicyP3b, fs, r.FactsetDigest, r.Action, r.Choice, r.Stake)
+}

@@ -1,0 +1,171 @@
+{
+  "algorithm": "p4-hmac-sha256-u64/v1",
+  "protocol": "p4-offline/v1",
+  "framing": "u64 big-endian byte-length prefix per part, parts: algorithm, protocol, decimal trajectory, source round id, policy id, decimal word index",
+  "vectors": [
+    {
+      "key": "p4-synthetic-key-01",
+      "trajectory": 0,
+      "sourceRoundId": "event-round-0001",
+      "policyId": "ruleset-alpha",
+      "index": 0,
+      "messageHex": "000000000000001570342d686d61632d7368613235362d7536342f7631000000000000000d70342d6f66666c696e652f763100000000000000013000000000000000106576656e742d726f756e642d30303031000000000000000d72756c657365742d616c706861000000000000000130",
+      "macHex": "53e2c5bfd2925142071dbb831d6d0be675c99a471e2e3ad9da733ab3bbb4188d",
+      "word": "53e2c5bfd2925142"
+    },
+    {
+      "key": "p4-synthetic-key-01",
+      "trajectory": 0,
+      "sourceRoundId": "event-round-0001",
+      "policyId": "ruleset-alpha",
+      "index": 1,
+      "messageHex": "000000000000001570342d686d61632d7368613235362d7536342f7631000000000000000d70342d6f66666c696e652f763100000000000000013000000000000000106576656e742d726f756e642d30303031000000000000000d72756c657365742d616c706861000000000000000131",
+      "macHex": "384303af56d31ab36db13ed43eccd7ceebfc05ccbfb2cdb2e98d5b14f4be926d",
+      "word": "384303af56d31ab3"
+    },
+    {
+      "key": "p4-synthetic-key-01",
+      "trajectory": 0,
+      "sourceRoundId": "event-round-0001",
+      "policyId": "ruleset-alpha",
+      "index": 2,
+      "messageHex": "000000000000001570342d686d61632d7368613235362d7536342f7631000000000000000d70342d6f66666c696e652f763100000000000000013000000000000000106576656e742d726f756e642d30303031000000000000000d72756c657365742d616c706861000000000000000132",
+      "macHex": "b0f32999df445d1b00dba419ad6909081dd33f5e0a67b21f8dd81dffdda5c7c3",
+      "word": "b0f32999df445d1b"
+    },
+    {
+      "key": "p4-synthetic-key-01",
+      "trajectory": 0,
+      "sourceRoundId": "event-round-0001",
+      "policyId": "ruleset-alpha",
+      "index": 3,
+      "messageHex": "000000000000001570342d686d61632d7368613235362d7536342f7631000000000000000d70342d6f66666c696e652f763100000000000000013000000000000000106576656e742d726f756e642d30303031000000000000000d72756c657365742d616c706861000000000000000133",
+      "macHex": "a6b1f60514ddf651e0a9f54b5b0924d65fb7d260b90857cf0e228ce2a444d009",
+      "word": "a6b1f60514ddf651"
+    },
+    {
+      "key": "p4-synthetic-key-01",
+      "trajectory": 16383,
+      "sourceRoundId": "event-round-0001",
+      "policyId": "ruleset-alpha",
+      "index": 0,
+      "messageHex": "000000000000001570342d686d61632d7368613235362d7536342f7631000000000000000d70342d6f66666c696e652f76310000000000000005313633383300000000000000106576656e742d726f756e642d30303031000000000000000d72756c657365742d616c706861000000000000000130",
+      "macHex": "9fbd70f600f7aee743f3ad2de352fb793ba08533ee27c92c5eb055df0a420297",
+      "word": "9fbd70f600f7aee7"
+    },
+    {
+      "key": "p4-synthetic-key-01",
+      "trajectory": 7,
+      "sourceRoundId": "event-round-0002",
+      "policyId": "ruleset-alpha",
+      "index": 0,
+      "messageHex": "000000000000001570342d686d61632d7368613235362d7536342f7631000000000000000d70342d6f66666c696e652f763100000000000000013700000000000000106576656e742d726f756e642d30303032000000000000000d72756c657365742d616c706861000000000000000130",
+      "macHex": "5d4aaa1b6f1cdd54a9e7330a5a71fc2ad93b5df6f183cc27c0bc46720e26fb82",
+      "word": "5d4aaa1b6f1cdd54"
+    },
+    {
+      "key": "p4-synthetic-key-01",
+      "trajectory": 7,
+      "sourceRoundId": "event-round-0002",
+      "policyId": "ruleset-alpha",
+      "index": 1,
+      "messageHex": "000000000000001570342d686d61632d7368613235362d7536342f7631000000000000000d70342d6f66666c696e652f763100000000000000013700000000000000106576656e742d726f756e642d30303032000000000000000d72756c657365742d616c706861000000000000000131",
+      "macHex": "7b6565f571bf0582c053970b060173858b7d5ee818b8b3b821973e973e7e7fdf",
+      "word": "7b6565f571bf0582"
+    },
+    {
+      "key": "p4-synthetic-key-01",
+      "trajectory": 7,
+      "sourceRoundId": "event-round-0002",
+      "policyId": "ruleset-beta",
+      "index": 0,
+      "messageHex": "000000000000001570342d686d61632d7368613235362d7536342f7631000000000000000d70342d6f66666c696e652f763100000000000000013700000000000000106576656e742d726f756e642d30303032000000000000000c72756c657365742d62657461000000000000000130",
+      "macHex": "a066095d32e7bb635007f01674d33ef3f312b2b09394385d57344e333eaa1ee6",
+      "word": "a066095d32e7bb63"
+    },
+    {
+      "key": "κλειδί",
+      "trajectory": 42,
+      "sourceRoundId": "раунд-№7",
+      "policyId": "règle-ß",
+      "index": 0,
+      "messageHex": "000000000000001570342d686d61632d7368613235362d7536342f7631000000000000000d70342d6f66666c696e652f763100000000000000023432000000000000000fd180d0b0d183d0bdd0b42de2849637000000000000000972c3a8676c652dc39f000000000000000130",
+      "macHex": "65d62ae6f99ecc9cbf974d8457a041e44b027bea502a780acf8a03c801e45638",
+      "word": "65d62ae6f99ecc9c"
+    },
+    {
+      "key": "κλειδί",
+      "trajectory": 42,
+      "sourceRoundId": "раунд-№7",
+      "policyId": "règle-ß",
+      "index": 1,
+      "messageHex": "000000000000001570342d686d61632d7368613235362d7536342f7631000000000000000d70342d6f66666c696e652f763100000000000000023432000000000000000fd180d0b0d183d0bdd0b42de2849637000000000000000972c3a8676c652dc39f000000000000000131",
+      "macHex": "cdf01f64cb49a8225b54e6a24c5e841dce1c1be3459911c5192f18e86bfd4d23",
+      "word": "cdf01f64cb49a822"
+    },
+    {
+      "key": "another key",
+      "trajectory": 1,
+      "sourceRoundId": "e",
+      "policyId": "p",
+      "index": 0,
+      "messageHex": "000000000000001570342d686d61632d7368613235362d7536342f7631000000000000000d70342d6f66666c696e652f7631000000000000000131000000000000000165000000000000000170000000000000000130",
+      "macHex": "b91cb37b1797133de344927fc40d9e7c139f5f3e74fd4704aa9e450524fb4196",
+      "word": "b91cb37b1797133d"
+    },
+    {
+      "key": "another key",
+      "trajectory": 1,
+      "sourceRoundId": "e",
+      "policyId": "p",
+      "index": 5,
+      "messageHex": "000000000000001570342d686d61632d7368613235362d7536342f7631000000000000000d70342d6f66666c696e652f7631000000000000000131000000000000000165000000000000000170000000000000000135",
+      "macHex": "6fda8981e53aa59c9a1a3ee336172a0552a960ea40a5d4f79c9e823ecff3c478",
+      "word": "6fda8981e53aa59c"
+    },
+    {
+      "key": "another key",
+      "trajectory": 1,
+      "sourceRoundId": "e",
+      "policyId": "p",
+      "index": 4096,
+      "messageHex": "000000000000001570342d686d61632d7368613235362d7536342f7631000000000000000d70342d6f66666c696e652f7631000000000000000131000000000000000165000000000000000170000000000000000434303936",
+      "macHex": "9b5adc90abde8a5b1310a33e790ac92bd6223c90785e5b8c0dff4d924f511b8e",
+      "word": "9b5adc90abde8a5b"
+    }
+  ],
+  "sequences": [
+    {
+      "key": "p4-synthetic-key-01",
+      "trajectory": 0,
+      "sourceRoundId": "event-round-0001",
+      "policyId": "ruleset-alpha",
+      "words": [
+        "53e2c5bfd2925142",
+        "384303af56d31ab3",
+        "b0f32999df445d1b",
+        "a6b1f60514ddf651"
+      ]
+    },
+    {
+      "key": "p4-synthetic-key-01",
+      "trajectory": 7,
+      "sourceRoundId": "event-round-0002",
+      "policyId": "ruleset-alpha",
+      "words": [
+        "5d4aaa1b6f1cdd54",
+        "7b6565f571bf0582"
+      ]
+    },
+    {
+      "key": "κλειδί",
+      "trajectory": 42,
+      "sourceRoundId": "раунд-№7",
+      "policyId": "règle-ß",
+      "words": [
+        "65d62ae6f99ecc9c",
+        "cdf01f64cb49a822"
+      ]
+    }
+  ]
+}
