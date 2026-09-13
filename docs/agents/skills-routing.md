@@ -13,6 +13,15 @@ Routing is advice, not authority. Invoking a skill authorizes the agent topology
 documents (`GOVERNANCE_V3.md` §10, Orchestration), but never widens the task contract's authority
 envelope (`docs/agents/task-contract.md`).
 
+A slashed row groups skills a reader is likely to confuse — some genuinely overlap, others are
+sequential stages or merely share a theme. The slash encodes neither a ranking nor a claim that each
+name owns half the job; where a row is sequential, the description says so. Two facts decide routing
+more often than the descriptions do: whether routing can reach a skill on its own (frontmatter
+`disable-model-invocation` reserves it for an explicit user request; `GOVERNANCE_V3.md` §7 names every
+such skill), and where a skill may write — a locally patched skill and its unpatched sibling often
+differ, and the patched one is the narrower. The manifest records invocation mode; write scope is in
+the skill body, and in the ledger only where a local patch narrows it.
+
 ## Providers
 
 | Provider | Skills | Licence | Policy · Manifest · Ledger |
@@ -55,7 +64,7 @@ Exact upstream pins are each manifest's `upstream_commit`. No provider auto-upda
 | `plan-arbiter` | Two or more competing plans exist; pick or merge one. |
 | `to-spec` / `to-tickets` | Decision → specification → separately shippable units. |
 | `ce-doc-review` | Review an existing plan/spec/requirements document with role-specific lenses. |
-| `grilling` / `grill-me` / `grill-with-docs` | Stress-test the thinking before committing; `grill-with-docs` grounds it in primary sources. |
+| `grilling` / `grill-me` / `grill-with-docs` | Stress-test the thinking before committing. `grilling` runs the interview; `grill-me` wraps it, `grill-with-docs` adds `domain-modeling`, so the session can also record `CONTEXT.md` terms and offer ADRs sparingly. Both wrappers are explicit invocation only; neither researches primary sources — that is `read-the-damn-docs` / `research`. |
 | `audit-context-building` | Per-function invariants, assumptions and callees recorded as evidence before any change or hunt. |
 | `spec-to-code-compliance` | Does the code match `SPECIFICATIONS.md`? Which requirements hold, contradict, or are absent. |
 | `trailmark` / `diagramming-code` / `graph-evolution` | Build a code graph; draw it; diff it between two refs. |
@@ -72,7 +81,7 @@ Exact upstream pins are each manifest's `upstream_commit`. No provider auto-upda
 | `ce-work` | Execute a plan unit-by-unit with evidence-first discipline and its own verification tail. |
 | `tdd` | Red-green-refactor; integration tests. |
 | `ce-simplify-code` | After implementation, before review: reuse/quality/efficiency passes over the branch diff. |
-| `prototype` / `ce-prototype` | Throwaway build to answer a design question. |
+| `prototype` / `ce-prototype` | Throwaway build to answer a design question. `prototype` splits by question — one drivable logic/state demo, or several UI variants on one route — and is patched to `/tmp` or a disposable worktree; branch, commit and push each need explicit authorization in the active task contract. `ce-prototype` matches fidelity to the dimension tested, compares narrow variants or a wide run of avenues, keeps a `decisions.md` capsule and needs a person present; it builds under `.context/` (fallback `/tmp`), and its product-tree writes (overlay, a `.gitignore` line, a Product Contract write-back) are consented and never committed by it. |
 | `ce-worktree` | Isolate work in a git worktree before starting. |
 | `ce-commit` | A commit with a value-communicating message. No push, no PR. |
 | `resolving-merge-conflicts` | An in-progress merge/rebase conflict. |
@@ -148,13 +157,13 @@ patch; see each provider's ledger.
 
 | Skill | Use it for |
 | --- | --- |
-| `handoff` / `ce-handoff` | Compact the session for the next agent / resume from a continuity source. |
+| `handoff` / `ce-handoff` | Carry work across a context boundary. Both create; `ce-handoff` also resumes, and a bare invocation of it creates — it treats a resumed source as untrusted and stops for you before acting. `handoff` is explicit invocation only and create-only, into a gitignored `.scratch/` or the session scratchpad, and records task-contract state. Neither restores authority. |
 | `ce-compound` | Turn a solved problem into a durable repo learning. |
 | `ce-compound-refresh` | Audit those learnings against the current code so the store stays true. |
 | `harness-engineering` | Turn repeated agent mistakes into durable instructions, drift checks and regression tests. |
 | `domain-modeling` | Terminology and decisions that outlive the session. |
 | `writing-for-agents` | Writing instructions another agent must follow. |
-| `teach` / `ce-explain` | Explain a subsystem to a human / build a durable visual explainer. |
+| `teach` / `ce-explain` | Build durable understanding for a person; an ordinary operational or status question is answered in chat instead, and `ce-explain` has a gate for exactly that. `teach` is explicit invocation only and stateful — a multi-session curriculum in a separate directory you confirm first, never this repo's root. `ce-explain` builds at most one focused artifact per run (concept, diff, idea, or recap). |
 | `ask-matt` / `wizard` | Router over the skill set / generate a human-run bash wizard. |
 
 Durable DEEP recovery is **not** a skill — it is canonical governance (`GOVERNANCE_V3.md` §5,
@@ -170,7 +179,7 @@ last passed gate, open findings). A checkpoint never restores authority.
 | --- | --- |
 | `frontend-design` | Aesthetic direction for the Go `html/template` + Tailwind + HTMX + ApexCharts UI. Visual/UI only. |
 | `web-design-reviewer` | The audit rubric the other two lack: WCAG contrast, 44×44 touch targets, focus order, `prefers-reduced-motion`, a four-viewport matrix (375/768/1280/1920), plus Tailwind-specific fixes. |
-| `prototype` / `ce-prototype` | Explore what a surface should be before committing. |
+| `prototype` / `ce-prototype` | Explore what a surface should be before committing. `prototype` puts several variants on one route — that is its UI branch; the logic branch builds one drivable demo instead — and `ce-prototype` a close narrow set or a wide run of distinct avenues. `frontend-design` is patched to defer multi-variant exploration to `prototype` specifically; `ce-prototype` holds a seeing question's avenues to a craft floor, so the judgment lands on the direction rather than the render. |
 
 The Claude Code built-in `dataviz` skill owns chart-colour and data-visualization conventions.
 
