@@ -179,7 +179,7 @@ last passed gate, open findings). A checkpoint never restores authority.
 | --- | --- |
 | `frontend-design` | Aesthetic direction for the Go `html/template` + Tailwind + HTMX + ApexCharts UI. Visual/UI only. |
 | `web-design-reviewer` | The audit rubric the other two lack: WCAG contrast, 44×44 touch targets, focus order, `prefers-reduced-motion`, a four-viewport matrix (375/768/1280/1920), plus Tailwind-specific fixes. |
-| `prototype` / `ce-prototype` | Explore what a surface should be before committing. Both compare several contrasting directions — `prototype` as variants on one route, `ce-prototype` as narrow variants or a wide run of distinct avenues. `frontend-design` is patched to defer multi-variant exploration to `prototype` specifically; `ce-prototype` holds a seeing question's avenues to a craft floor, so the judgment lands on the direction rather than the render. |
+| `prototype` / `ce-prototype` | Explore what a surface should be before committing. `prototype` puts several variants on one route — that is its UI branch; the logic branch builds one drivable demo instead — and `ce-prototype` a close narrow set or a wide run of distinct avenues. `frontend-design` is patched to defer multi-variant exploration to `prototype` specifically; `ce-prototype` holds a seeing question's avenues to a craft floor, so the judgment lands on the direction rather than the render. |
 
 The Claude Code built-in `dataviz` skill owns chart-colour and data-visualization conventions.
 
