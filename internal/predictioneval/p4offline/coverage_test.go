@@ -128,13 +128,13 @@ func TestDigestedArtifactsSurviveTheirOwnJSONRoundTrip(t *testing.T) {
 		t.Fatalf("resolution after round trip: %v", err)
 	}
 	rs := mustVerify(t, rulesetFrom(t, cfgWithRule("rt", predictioneval.ComparatorGe, 50, 100)))
-	coords := p4offline.EntropyCoordinates{Trajectory: 0, SourceRoundID: "e1", PolicyID: "rt"}
-	trace, _ := p4offline.BuildDrawTrace("key", coords, 2)
-	a, err := p4offline.EvaluateP3bWithTrace(fs, rs, "key", coords, trace)
+	coords := synthCoords(fs, 0)
+	trace, _ := p4offline.BuildDrawTrace(coords, 2)
+	a, err := p4offline.EvaluateP3bWithTrace(fs, rs, coords, trace)
 	if err != nil {
 		t.Fatal(err)
 	}
-	b, err := p4offline.EvaluateP3bWithTrace(fs2, rs, "key", coords, trace)
+	b, err := p4offline.EvaluateP3bWithTrace(fs2, rs, coords, trace)
 	if err != nil {
 		t.Fatalf("the round-tripped factset must still be projected and accepted by the core: %v", err)
 	}

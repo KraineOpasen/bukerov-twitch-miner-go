@@ -34,7 +34,49 @@ type P2CaseResult struct {
 	Choice        PolicyChoice              `json:"choice"`
 	// Stake is the policy's stake: exact zero for a POLICY_SKIP, the
 	// post-clamp final for an attempt, otherwise not a number.
-	Stake Int64Fact `json:"stake"`
+	Stake   Int64Fact `json:"stake"`
+	witness string
+}
+
+// derived reports whether the value is exactly what EvaluateP2Case produced.
+func (r P2CaseResult) derived() bool {
+	return r.witness != "" && r.witness == p2ResultWitness(r)
+}
+
+// p2ResultWitness frames every field a decision is minted from — the action,
+// the choice, the stake — and the policy, the factset digest, the binding's
+// contract version and digest, and the native evaluation's common-input
+// digest, action and action reason.
+//
+// NOT framed, exactly: the binding's Model, Settings, RiskPresent,
+// RiskMaxStakePercent, RiskReservePoints and MinimumStake (Binding.Digest,
+// which BindP2Config computes over all of them, is framed; it is not
+// recomputed here) and, of the native evaluation, Model, Choice, BaseStake,
+// Stealth, Filter, Health, StakeGate, Clamp, Minimum, PolicyAmount,
+// PolicyAmountKnown, LegacyFailure and Limitations. The common-input digest
+// binds the run's INPUTS, not its stages; the stages are bound only through
+// the framed action, choice and stake, so an edit confined to the unframed
+// fields is not detected here. A stored result is re-evaluated, never
+// trusted.
+func p2ResultWitness(r P2CaseResult) string {
+	var c canonical
+	c.str("p4offline-p2-result-witness")
+	c.str(r.Policy)
+	c.str(r.FactsetDigest)
+	c.str(r.Binding.ContractVersion)
+	c.str(r.Binding.Digest)
+	c.str(r.Evaluation.CommonInputDigest)
+	c.str(r.Evaluation.Action)
+	c.str(r.Evaluation.ActionReason)
+	frameAction(&c, r.Action)
+	frameChoice(&c, r.Choice)
+	frameFact(&c, r.Stake)
+	return c.digest()
+}
+
+// p2Derivation is the P2 decision's derivation: the per-case config binding.
+func p2Derivation(bindingDigest string) string {
+	return PolicyP2 + ":binding=" + bindingDigest
 }
 
 // Stake reasons.
@@ -115,11 +157,21 @@ func EvaluateP2Case(fs CommonFactset) (P2CaseResult, error) {
 	default:
 		res.Stake = UnknownInt64(StakeReasonUnsupportedShape)
 	}
+	res.witness = p2ResultWitness(res)
 	return res, nil
 }
 
 // Decision binds a P2 result to its case as a policy decision. The factset
-// must be the one the result was evaluated over.
+// must be the one the result was evaluated over, and the result must be
+// exactly what [EvaluateP2Case] produced: a binding contradiction is named
+// first, an underived result second.
 func (r P2CaseResult) Decision(fs CommonFactset) (PolicyDecision, error) {
-	return decisionOf(PolicyP2, fs, r.FactsetDigest, r.Action, r.Choice, r.Stake)
+	d, err := decisionOf(PolicyP2, fs, r.FactsetDigest, r.Action, r.Choice, r.Stake, p2Derivation(r.Binding.Digest))
+	if err != nil {
+		return PolicyDecision{}, err
+	}
+	if !r.derived() {
+		return PolicyDecision{}, ErrResultNotDerived
+	}
+	return d, nil
 }

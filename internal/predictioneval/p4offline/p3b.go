@@ -27,8 +27,12 @@ import (
 //
 // Every evaluation entry point takes the FACTSET and projects it itself, so
 // no caller can hand in a stream that names one factset and carries another;
-// and the entropy coordinates must name the factset's own round and the
-// verified ruleset, so no round is ever drawn under another round's words.
+// and the entropy coordinates must name the factset's own digest and its own
+// round as the paired opportunity, so no opportunity is ever drawn under
+// another opportunity's words. The ruleset is not an entropy coordinate — the
+// approved framing draws per paired opportunity and run under the fixed
+// P3B_ORDERED_RULES label — so every candidate ruleset of one comparison sees
+// the same words; the ruleset is bound through the core's own config digest.
 
 // Ruleset and P3b refusals.
 var (
@@ -76,7 +80,8 @@ type P3bRuleset struct {
 
 // VerifiedP3bRuleset is a ruleset every binding of which has been checked.
 // Only [VerifyP3bRuleset] produces a usable value: the witness it carries is
-// unexported, is recomputed over the identity fields at every use, and does
+// unexported, is recomputed over the identity fields at every evaluation
+// (the Rules count is read without it and settles nothing), and does
 // not survive a JSON round trip — a stored ruleset is re-verified from its
 // raw bytes, never trusted from its typed form.
 type VerifiedP3bRuleset struct {
@@ -146,7 +151,13 @@ type P3bProjection struct {
 }
 
 // EntropyTraceBinding is the trace one P3b evaluation consumed, bound to its
-// coordinates and to the core's own entropy digest.
+// coordinates and to the core's own entropy digest. A refused projection
+// draws no trace: its binding carries the coordinates and the identity of
+// the EMPTY trace for them, with no words supplied or consumed and no
+// entropy digest — a non-empty [P3bCaseResult.ProjectionRefusal] and an
+// empty EntropyDigest, not the run identity, are what mark a projection
+// refusal (the core's own REFUSED status maps to the same ActionRefused
+// class on a path where a trace WAS consumed).
 type EntropyTraceBinding struct {
 	Coordinates   EntropyCoordinates `json:"coordinates"`
 	RunID         string             `json:"runId"`
@@ -169,6 +180,71 @@ type P3bCaseResult struct {
 	Action             ActionMapping                         `json:"action"`
 	Choice             PolicyChoice                          `json:"choice"`
 	Stake              Int64Fact                             `json:"stake"`
+	witness            string
+}
+
+// derived reports whether the value is exactly what the P3b evaluator
+// produced.
+func (r P3bCaseResult) derived() bool {
+	return r.witness != "" && r.witness == p3bResultWitness(r)
+}
+
+// p3bResultWitness frames every field a decision is minted from — the
+// action, the choice, the stake — and these fields an audit reads: the
+// policy and factset digest; the ruleset's id, raw hash and native digest;
+// the refusal text; the whole trace binding; the projection's mode, factset
+// digest, event, cutoff position, candidate identity, outcome count and
+// selection digest; the native evaluation's status, reason, stream, config,
+// entropy and consumed-input digests, raw words consumed and Bernoulli
+// evaluations.
+//
+// NOT framed, exactly: the projection's stream body (only its selection
+// digest is framed; an edit to the body that leaves that digest untouched is
+// not detected here) and, of the native evaluation, EvidenceLabel,
+// ModelVersion, DonorRevision, EntropySemanticsVersion, StoppedAtCandidate,
+// StoppedAtPosition, HasStopPosition, Selected, Participation, Stake,
+// CandidatesConsumed, OutcomesConsidered, RulesConsidered, Cutoff, Trace,
+// Visits and Qualifications. The framed digests bind the run's INPUTS, not
+// its verdict; the verdict is bound only through the framed action, choice,
+// stake, status and reason, so an edit confined to the unframed fields is
+// not detected here. A stored result is re-evaluated, never trusted.
+func p3bResultWitness(r P3bCaseResult) string {
+	var c canonical
+	c.str("p4offline-p3b-result-witness")
+	c.str(r.Policy)
+	c.str(r.FactsetDigest)
+	c.str(r.RulesetID)
+	c.str(r.RulesetRawSHA256)
+	c.str(r.NativeConfigDigest)
+	c.str(r.ProjectionRefusal)
+	c.str(r.Trace.Coordinates.DatasetID)
+	c.str(r.Trace.Coordinates.DatasetVersion)
+	c.str(r.Trace.Coordinates.CommonFactsetDigest)
+	c.str(r.Trace.Coordinates.PairedOpportunityID)
+	c.u64(uint64(r.Trace.Coordinates.Trajectory))
+	c.str(r.Trace.RunID)
+	c.i64(int64(r.Trace.WordsSupplied))
+	c.i64(int64(r.Trace.WordsConsumed))
+	c.str(r.Trace.EntropyDigest)
+	c.str(r.Projection.Mode)
+	c.str(r.Projection.FactsetDigest)
+	c.str(r.Projection.EventID)
+	c.i64(r.Projection.CutoffPosition)
+	c.str(r.Projection.CandidateIdentity)
+	c.i64(int64(r.Projection.OutcomeCount))
+	c.str(r.Projection.Stream.SelectionDigest)
+	c.str(string(r.Evaluation.Status))
+	c.str(r.Evaluation.Reason)
+	c.str(r.Evaluation.StreamDigest)
+	c.str(r.Evaluation.ConfigDigest)
+	c.str(r.Evaluation.EntropyDigest)
+	c.str(r.Evaluation.ConsumedInputDigest)
+	c.i64(int64(r.Evaluation.RawWordsConsumed))
+	c.i64(int64(r.Evaluation.BernoulliEvaluations))
+	frameAction(&c, r.Action)
+	frameChoice(&c, r.Choice)
+	frameFact(&c, r.Stake)
+	return c.digest()
 }
 
 // NativeActionP4ProjectionRefused is the pseudo-native action a P3b result
@@ -495,32 +571,58 @@ func traceWordCount(rules, outcomes int) (int, error) {
 
 // EvaluateP3bWithTrace evaluates one factset under a verified ruleset with a
 // SUPPLIED trace: the factset is projected here, the coordinates must name
-// the factset's own round and the ruleset, the trace must be exactly what the
+// the factset's own digest and round, the trace must be exactly what the
 // algorithm produces for those coordinates, and every binding the core
 // reports afterwards is checked.
-func EvaluateP3bWithTrace(fs CommonFactset, rs VerifiedP3bRuleset, key string,
+func EvaluateP3bWithTrace(fs CommonFactset, rs VerifiedP3bRuleset,
 	coords EntropyCoordinates, trace predictioneval.SuppliedDrawTrace) (P3bCaseResult, error) {
 	if err := rs.check(); err != nil {
+		return P3bCaseResult{}, err
+	}
+	// The protocol's domain is checked before anything is projected, so an
+	// out-of-protocol coordinate is refused as exactly that on every path.
+	if err := checkEntropyCoordinates(coords); err != nil {
 		return P3bCaseResult{}, err
 	}
 	proj, err := ProjectP3bSingleCandidate(fs)
 	if err != nil {
 		return P3bCaseResult{}, err
 	}
-	return evaluateProjected(fs, proj, rs, key, coords, trace)
+	if err := bindEntropyCoordinates(coords, fs); err != nil {
+		return P3bCaseResult{}, err
+	}
+	return evaluateProjected(fs, proj, rs, coords, trace)
 }
 
-func evaluateProjected(fs CommonFactset, proj P3bProjection, rs VerifiedP3bRuleset, key string,
+// bindEntropyCoordinates refuses coordinates outside the protocol and
+// coordinates that do not name this factset: the digest reference must be
+// the factset's own digest and the paired opportunity must be the factset's
+// own round. The dataset identity and version are the caller's binding and
+// are carried, not checked beyond the protocol's form. It runs on EVERY
+// evaluation path, including the one that refuses the projection, so the
+// closed domain does not depend on which factset was passed.
+func bindEntropyCoordinates(coords EntropyCoordinates, fs CommonFactset) error {
+	if err := checkEntropyCoordinates(coords); err != nil {
+		return err
+	}
+	if want := DigestReference(fs.Digest); coords.CommonFactsetDigest != want {
+		return errors.Join(ErrP3bBinding,
+			errors.New("p4offline: entropy factset digest "+strconv.Quote(coords.CommonFactsetDigest)+" is not this factset's "+strconv.Quote(want)))
+	}
+	if coords.PairedOpportunityID != fs.Episode.EventID {
+		return errors.Join(ErrP3bBinding,
+			errors.New("p4offline: entropy paired opportunity "+strconv.Quote(coords.PairedOpportunityID)+" is not the factset's round "+strconv.Quote(fs.Episode.EventID)))
+	}
+	return nil
+}
+
+func evaluateProjected(fs CommonFactset, proj P3bProjection, rs VerifiedP3bRuleset,
 	coords EntropyCoordinates, trace predictioneval.SuppliedDrawTrace) (P3bCaseResult, error) {
-	if coords.SourceRoundID != fs.Episode.EventID {
-		return P3bCaseResult{}, errors.Join(ErrP3bBinding,
-			errors.New("p4offline: entropy round "+strconv.Quote(coords.SourceRoundID)+" is not the factset's round "+strconv.Quote(fs.Episode.EventID)))
-	}
-	if coords.PolicyID != rs.RulesetID {
-		return P3bCaseResult{}, errors.Join(ErrP3bBinding,
-			errors.New("p4offline: entropy policy "+strconv.Quote(coords.PolicyID)+" is not the ruleset "+strconv.Quote(rs.RulesetID)))
-	}
-	if err := ValidateDrawTrace(key, coords, trace); err != nil {
+	// The core consumes the words it is handed without copying, so the words
+	// are detached from the caller's array FIRST and only the detached copy
+	// is validated and consumed: nothing the caller holds is read twice.
+	trace.Words = append([]predictioneval.OrderedRulesHex64(nil), trace.Words...)
+	if err := ValidateDrawTrace(coords, trace); err != nil {
 		return P3bCaseResult{}, err
 	}
 	ev := predictioneval.EvaluateOrderedRules(proj.Stream, rs.Config, trace)
@@ -552,7 +654,7 @@ func evaluateProjected(fs CommonFactset, proj P3bProjection, rs VerifiedP3bRules
 		Evaluation: ev,
 		Action:     action,
 	}
-	if ev.Selected != nil && madeAChoice(action.Class) {
+	if ev.Selected != nil && carriesChoice(action.Class) {
 		res.Choice = PolicyChoice{Present: true, Index: ev.Selected.OutcomeIndex, OutcomeID: ev.Selected.OutcomeIdentity}
 	}
 	switch action.Class {
@@ -569,52 +671,90 @@ func evaluateProjected(fs CommonFactset, proj P3bProjection, rs VerifiedP3bRules
 	default:
 		res.Stake = UnknownInt64(StakeReasonUnsupportedShape)
 	}
+	res.witness = p3bResultWitness(res)
 	return res, nil
 }
 
-// EvaluateP3bCase is the P3b plumbing for one factset and one trajectory:
-// project, generate exactly enough entropy for the candidate, evaluate.
+// EvaluateP3bCase is the P3b plumbing for one factset under one set of
+// entropy coordinates: project, generate exactly enough entropy for the
+// candidate, evaluate. The coordinates carry the owner's dataset binding and
+// the run index; their digest and opportunity must be this factset's.
 //
 // The trace supplies one word per rule per outcome — the most a traversal of
 // one verified candidate can consume — so exhaustion cannot occur by
 // construction and every word is reproducible from the coordinates alone.
-func EvaluateP3bCase(fs CommonFactset, rs VerifiedP3bRuleset, key string, trajectory uint32) (P3bCaseResult, error) {
+func EvaluateP3bCase(fs CommonFactset, rs VerifiedP3bRuleset, coords EntropyCoordinates) (P3bCaseResult, error) {
 	if err := rs.check(); err != nil {
+		return P3bCaseResult{}, err
+	}
+	if err := checkEntropyCoordinates(coords); err != nil {
 		return P3bCaseResult{}, err
 	}
 	proj, err := ProjectP3bSingleCandidate(fs)
 	if errors.Is(err, ErrP3bProjectionRefused) {
-		return P3bCaseResult{
+		if berr := bindEntropyCoordinates(coords, fs); berr != nil {
+			return P3bCaseResult{}, berr
+		}
+		refused := P3bCaseResult{
 			Policy:             PolicyP3b,
 			FactsetDigest:      fs.Digest,
 			RulesetID:          rs.RulesetID,
 			RulesetRawSHA256:   rs.RawSHA256,
 			NativeConfigDigest: rs.NativeConfigDigest,
 			ProjectionRefusal:  err.Error(),
+			// No trace was drawn; the result still names the run it was
+			// produced under, by its coordinates and by the identity of the
+			// empty trace for those coordinates.
+			Trace: EntropyTraceBinding{Coordinates: coords, RunID: entropyRunID(coords, 0)},
 			Action: ActionMapping{
 				MapVersion: NativeActionMapVersion, Policy: PolicyP3b,
 				NativeAction: NativeActionP4ProjectionRefused, Class: ActionRefused, Legal: true,
 			},
 			Stake: UnknownInt64(NativeActionP4ProjectionRefused),
-		}, nil
+		}
+		refused.witness = p3bResultWitness(refused)
+		return refused, nil
 	}
 	if err != nil {
+		return P3bCaseResult{}, err
+	}
+	if err := bindEntropyCoordinates(coords, fs); err != nil {
 		return P3bCaseResult{}, err
 	}
 	count, err := traceWordCount(rs.Rules(), len(fs.Outcomes))
 	if err != nil {
 		return P3bCaseResult{}, err
 	}
-	coords := EntropyCoordinates{Trajectory: trajectory, SourceRoundID: fs.Episode.EventID, PolicyID: rs.RulesetID}
-	trace, err := BuildDrawTrace(key, coords, count)
+	trace, err := BuildDrawTrace(coords, count)
 	if err != nil {
 		return P3bCaseResult{}, err
 	}
-	return evaluateProjected(fs, proj, rs, key, coords, trace)
+	return evaluateProjected(fs, proj, rs, coords, trace)
 }
 
 // Decision binds a P3b result to its case as a policy decision. The factset
-// must be the one the result was evaluated over.
+// must be the one the result was evaluated over, and the result must be
+// exactly what the evaluator produced (a binding contradiction is named
+// first, an underived result second). The decision's derivation names the
+// verified ruleset by id, raw-bytes hash and native digest, the entropy run
+// identity and the core's entropy digest, so decisions of different
+// rulesets or runs on one case are distinguishable.
 func (r P3bCaseResult) Decision(fs CommonFactset) (PolicyDecision, error) {
-	return decisionOf(PolicyP3b, fs, r.FactsetDigest, r.Action, r.Choice, r.Stake)
+	d, err := decisionOf(PolicyP3b, fs, r.FactsetDigest, r.Action, r.Choice, r.Stake,
+		PolicyP3b+":ruleset="+strconv.Quote(r.RulesetID)+":raw="+r.RulesetRawSHA256+":native="+r.NativeConfigDigest+
+			":run="+strconv.Quote(r.Trace.RunID)+":entropy="+r.Trace.EntropyDigest)
+	if err != nil {
+		return PolicyDecision{}, err
+	}
+	if !r.derived() {
+		return PolicyDecision{}, ErrResultNotDerived
+	}
+	return d, nil
+}
+
+// carriesChoice reports whether a P3b class is one under which the core
+// chose an outcome to bet on, so that the result carries its choice. A
+// NO_ATTEMPT_IN_SUPPLIED_PREFIX is a determinate answer that bet on nothing.
+func carriesChoice(c ActionClass) bool {
+	return c == ActionWouldAttempt || c == ActionParticipationAdmittedStakeUnknown
 }

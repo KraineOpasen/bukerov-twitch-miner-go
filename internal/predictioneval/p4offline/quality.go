@@ -73,11 +73,16 @@ type Quality string
 
 // Quality values.
 const (
-	// QualityPrimaryScorable — the case can contribute to the primary metric:
-	// its evidence is complete, its boundary is proven, both policies are
-	// derived decisions mapping to a determinate native action, both MADE A
-	// CHOICE inside the resolution's outcome set, and the resolution names a
-	// winner.
+	// QualityPrimaryScorable — the case is admitted for COUNTING: its
+	// evidence is complete, its boundary is proven, both policies are
+	// derived decisions mapping to a determinate native action, any choice
+	// made lies inside the resolution's outcome set, and the resolution
+	// names a winner. It is the only quality any denominator counts
+	// ([AssessDenominatorMembership]). Whether EACH policy's decision then
+	// enters a denominator is a per-policy fact stated by the payout seam:
+	// a POLICY_SKIP or a NO_ATTEMPT_IN_SUPPLIED_PREFIX is a visible
+	// non-member of a scorable case, never a reason to drop the case or to
+	// count the policy wrong.
 	QualityPrimaryScorable Quality = "PRIMARY_SCORABLE"
 	// QualityDescriptiveOnly — the case is admitted evidence but cannot
 	// contribute to the primary metric; it is described, never counted.
@@ -181,7 +186,6 @@ const (
 	QualityReasonFactsetPrefix                = "FACTSET_"
 	QualityReasonPolicyBindingMismatch        = "POLICY_BINDING_MISMATCH"
 	QualityReasonNotDeterminateSuffix         = "_NOT_DETERMINATE:"
-	QualityReasonNoChoiceSuffix               = "_NO_CHOICE:"
 	QualityReasonChoiceOutsideSetSuffix       = "_CHOICE_NOT_IN_RESOLUTION_OUTCOME_SET"
 	QualityReasonPolicyDecisionNotDerived     = "POLICY_DECISION_NOT_DERIVED"
 	QualityReasonDecisionOnNonEvaluable       = "POLICY_DECISION_ON_NON_EVALUABLE_FACTSET"
@@ -204,13 +208,6 @@ func determinate(c ActionClass) bool {
 	return false
 }
 
-// madeAChoice reports whether a class is one under which the policy chose an
-// outcome to bet on. A POLICY_SKIP and a NO_ATTEMPT_IN_SUPPLIED_PREFIX are
-// determinate answers that bet on nothing.
-func madeAChoice(c ActionClass) bool {
-	return c == ActionWouldAttempt || c == ActionParticipationAdmittedStakeUnknown
-}
-
 // AssessCaseQuality is seam 12: the case's quality as the MINIMUM over every
 // seam's verdict. It only ever lowers.
 //
@@ -219,13 +216,14 @@ func madeAChoice(c ActionClass) bool {
 // exactly what the dataset derives for its episode. A selection is an
 // exported value anyone can build; its flags are never trusted.
 //
-// ASSUMPTION, stated for the owner: the primary metric is the accuracy of a
-// policy's CHOICE, so a case where either policy made no choice — a
-// POLICY_SKIP or a NO_ATTEMPT_IN_SUPPLIED_PREFIX — is DESCRIPTIVE_ONLY here,
-// whatever choice the policy computed on the way to skipping. Whether a skip
-// enters the primary denominator under D01–D16 is a question this session
-// could not settle from the contract text it had; the conservative reading
-// is applied and named.
+// The approved denominator semantics are per policy: the primary
+// POLICY_CHOICE_ACCURACY denominator is the resolved WOULD_ATTEMPT decisions
+// of each policy, so a case in which one policy skipped and the other
+// attempted is PRIMARY_SCORABLE — the attempt counts for its policy, the skip
+// is a visible non-member ([PayoutEvidence.PrimaryDenominatorMember]) and is
+// never counted wrong. This function therefore judges the CASE: whether its
+// evidence, its boundary, both decisions and the resolution are what the
+// primary metric may read at all.
 func AssessCaseQuality(ds predictioneval.SourceDataset, fs CommonFactset, p2, p3b PolicyDecision, res ResolutionArtifact) QualityRecord {
 	episode := NewQualityRecord()
 	ep, found, err := lookupEpisode(ds, fs.Episode)
@@ -237,7 +235,8 @@ func AssessCaseQuality(ds predictioneval.SourceDataset, fs CommonFactset, p2, p3
 	}
 
 	factset := NewQualityRecord()
-	if verr := VerifyCommonFactset(fs); verr != nil {
+	verr := VerifyCommonFactset(fs)
+	if verr != nil {
 		factset = factset.Downgrade(QualityExcluded, QualityReasonFactsetDigestMismatch)
 	} else if err == nil {
 		rebuilt, berr := buildFactset(ep)
@@ -245,7 +244,10 @@ func AssessCaseQuality(ds predictioneval.SourceDataset, fs CommonFactset, p2, p3
 			factset = factset.Downgrade(QualityExcluded, QualityReasonFactsetBindingMismatch)
 		}
 	}
-	if fs.Completeness != FactsetComplete {
+	// The completeness label is read only from a VERIFIED factset, whose
+	// labels were re-derived from its values; an unverifiable factset's
+	// label is not this package's and never reaches the reasons.
+	if verr == nil && fs.Completeness != FactsetComplete {
 		factset = factset.Downgrade(QualityDescriptiveOnly, QualityReasonFactsetPrefix+string(fs.Completeness))
 	}
 
@@ -284,13 +286,15 @@ func AssessCaseQuality(ds predictioneval.SourceDataset, fs CommonFactset, p2, p3
 		return episode.Merge(factset).Merge(resolution).Merge(policies)
 	}
 	// P2 is a pure function of the factset, so the P2 decision handed in must
-	// be exactly what evaluating this factset yields. (P3b needs a ruleset,
-	// a key and a trajectory the quality seam does not hold; its derivation
-	// is attested by the decision's witness, which only a Decision method
-	// over a genuine result sets, and by EvaluateP3bCase's own bindings.)
+	// be exactly what evaluating this factset yields — action, choice, stake
+	// and the binding it names. (P3b needs a ruleset and entropy coordinates
+	// the quality seam does not hold; its derivation is attested by the
+	// result's own witness, which only the evaluator sets, and by the
+	// decision's witness, which only a Decision method over such a result
+	// sets.)
 	if factset.Quality != QualityExcluded {
 		if re, err := EvaluateP2Case(fs); err != nil || !sameMapping(re.Action, p2.Action) ||
-			re.Choice != p2.Choice || re.Stake != p2.Stake {
+			re.Choice != p2.Choice || re.Stake != p2.Stake || p2.Derivation != p2Derivation(re.Binding.Digest) {
 			policies = policies.Downgrade(QualityExcluded, QualityReasonPolicyDecisionNotDerived)
 		}
 	}
@@ -318,15 +322,139 @@ func AssessCaseQuality(ds predictioneval.SourceDataset, fs CommonFactset, p2, p3
 			policies = policies.Downgrade(QualityDescriptiveOnly, d.want+QualityReasonNotDeterminateSuffix+string(m.Class))
 			continue
 		}
-		if !madeAChoice(m.Class) || !d.got.Choice.Present {
-			policies = policies.Downgrade(QualityDescriptiveOnly, d.want+QualityReasonNoChoiceSuffix+string(m.Class))
-			continue
-		}
-		if resolved && !containsID(res.OrderedOutcomeIDs, d.got.Choice.OutcomeID) {
+		// A choice, when one was made, must lie in the resolution's set. A
+		// determinate decision that made none is a per-policy non-member of
+		// the denominator, not a case downgrade.
+		if resolved && d.got.Choice.Present && !containsID(res.OrderedOutcomeIDs, d.got.Choice.OutcomeID) {
 			policies = policies.Downgrade(QualityDescriptiveOnly, d.want+QualityReasonChoiceOutsideSetSuffix)
 		}
 	}
 	return episode.Merge(factset).Merge(resolution).Merge(policies)
+}
+
+// DenominatorMembership is the composed, case-bound denominator verdict for
+// one policy's decision on one case: the only place the payout seam's
+// membership conditions and seam 12's case verdict meet.
+type DenominatorMembership struct {
+	// Policy is the payout evidence's policy, set only once the evidence has
+	// been accepted as derived and named a policy of the protocol.
+	Policy string `json:"policy"`
+	// Quality is the case's quality, re-derived from the dataset.
+	Quality Quality `json:"quality"`
+	// Derivation and CounterpartDerivation name the decision this verdict is
+	// about and the other policy's decision it was judged beside — the
+	// PAIRING, recorded so an audit can check that the counterpart is the
+	// one the comparison pairs (the same dataset binding and run).
+	// Derivation is set once the evidence is bound to its own decision;
+	// CounterpartDerivation only when the counterpart is itself a usable
+	// (derived, legal) decision of THIS case by the OTHER policy — an
+	// unusable, foreign or same-policy counterpart is named by the quality
+	// reasons, never echoed.
+	Derivation            string `json:"derivation,omitempty"`
+	CounterpartDerivation string `json:"counterpartDerivation,omitempty"`
+	// Primary is true exactly when the decision counts in the
+	// POLICY_CHOICE_ACCURACY denominator: the case is PRIMARY_SCORABLE and
+	// the payout evidence is a resolved WOULD_ATTEMPT.
+	Primary bool `json:"primary"`
+	// PlacedBet is true exactly when the decision counts in the
+	// PLACED_BET_WIN_RATE denominator: the case is PRIMARY_SCORABLE and the
+	// payout evidence is a platform-proven bet that settled WIN or LOSE.
+	// Gating the placed-bet denominator on PRIMARY_SCORABLE — and so on the
+	// counterpart's determinacy — is this package's NARROWING of the
+	// approved "proven accepted WIN+LOSE" rule: a DESCRIPTIVE_ONLY case is
+	// described, never counted, in either denominator. A narrowing can only
+	// withhold; the reasons say why.
+	PlacedBet bool `json:"placedBet"`
+	// Reasons carries every reason the case was lowered and every reason the
+	// payout evidence could not be read.
+	Reasons []string `json:"reasons,omitempty"`
+}
+
+// Membership reasons. Closed vocabulary; the quality reasons are carried too.
+const (
+	MembershipReasonPayoutNotDerived        = "PAYOUT_NOT_DERIVED"
+	MembershipReasonPayoutBindingMismatch   = "PAYOUT_BINDING_MISMATCH"
+	MembershipReasonPayoutDecisionMismatch  = "PAYOUT_DECISION_MISMATCH"
+	MembershipReasonPayoutResolutionUnbound = "PAYOUT_RESOLUTION_UNBOUND"
+	MembershipReasonResolutionMismatch      = "PAYOUT_RESOLUTION_MISMATCH"
+	MembershipReasonCaseNotPrimary          = "CASE_NOT_PRIMARY_SCORABLE"
+)
+
+// AssessDenominatorMembership composes seam 12 with seam 10 for one policy's
+// decision on one case. The case quality is re-derived from the DATASET by
+// [AssessCaseQuality] — never read from a supplied record — and the payout
+// evidence must be [DerivePayout]'s own (its witness), bound to this case
+// (attempt, factset digest, round), to the very decision it was derived
+// from (that decision's own witness and derivation, so a payout of one
+// P3b decision is never judged as another's), and to the resolution the
+// case was assessed against. Only then are the payout seam's membership
+// conditions read, and only for a PRIMARY_SCORABLE case.
+//
+// The pairing is the CALLER's and is recorded, not inferred: the counterpart
+// decision is the one handed in the other slot, and both derivations are
+// returned so an audit can check that the counterpart is the decision the
+// comparison actually pairs. What the case gate guarantees is narrower: a
+// policy is never counted beside a counterpart that is not derived or not
+// determinate.
+//
+// Each call re-derives the case from the whole dataset (seams 1–3 run
+// again); that is the trusted path's cost, paid once per verdict.
+func AssessDenominatorMembership(ds predictioneval.SourceDataset, fs CommonFactset, p2, p3b PolicyDecision,
+	res ResolutionArtifact, pe PayoutEvidence) DenominatorMembership {
+	q := AssessCaseQuality(ds, fs, p2, p3b, res)
+	out := DenominatorMembership{Quality: q.Quality, Reasons: cloneStrings(q.Reasons)}
+	reason := func(r string) { out.Reasons = appendOnce(out.Reasons, r) }
+	if !pe.derived() {
+		reason(MembershipReasonPayoutNotDerived)
+		return out
+	}
+	var decision, counterpart PolicyDecision
+	switch pe.Policy {
+	case PolicyP2:
+		decision, counterpart = p2, p3b
+	case PolicyP3b:
+		decision, counterpart = p3b, p2
+	default:
+		reason(MembershipReasonPayoutBindingMismatch)
+		return out
+	}
+	out.Policy = pe.Policy
+	if pe.ContractVersion != PayoutEvidenceVersion || pe.Attempt != fs.Attempt || pe.FactsetDigest != fs.Digest ||
+		pe.EventID != fs.Episode.EventID || decision.Policy != pe.Policy || decision.Attempt != pe.Attempt ||
+		decision.FactsetDigest != pe.FactsetDigest || decision.EventID != pe.EventID {
+		reason(MembershipReasonPayoutBindingMismatch)
+		return out
+	}
+	// The evidence must have been derived from THIS decision, not merely
+	// from some decision of this policy on this case.
+	if pe.decisionWitness == "" || pe.decisionWitness != decision.witness || pe.Derivation != decision.Derivation {
+		reason(MembershipReasonPayoutDecisionMismatch)
+		return out
+	}
+	out.Derivation = decision.Derivation
+	// The factset digest alone determines the attempt and the round for a
+	// derived decision; the attempt and event clauses are defence in depth.
+	if decisionRefusal(counterpart) == "" && counterpart.Policy != pe.Policy && counterpart.FactsetDigest == fs.Digest &&
+		counterpart.Attempt == fs.Attempt && counterpart.EventID == fs.Episode.EventID {
+		out.CounterpartDerivation = counterpart.Derivation
+	}
+	switch {
+	case pe.ResolutionFactsDigest == "":
+		// The evidence never read a resolution (it was refused before): it
+		// is no member of anything, and it is not bound to this resolution.
+		reason(MembershipReasonPayoutResolutionUnbound)
+		return out
+	case pe.ResolutionFactsDigest != res.ResolutionFactsDigest:
+		reason(MembershipReasonResolutionMismatch)
+		return out
+	}
+	if q.Quality != QualityPrimaryScorable {
+		reason(MembershipReasonCaseNotPrimary)
+		return out
+	}
+	out.Primary = pe.PrimaryDenominatorMember
+	out.PlacedBet = pe.PlacedBetDenominatorMember
+	return out
 }
 
 // sameMapping reports whether two action mappings are equal field for field.

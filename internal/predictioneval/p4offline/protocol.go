@@ -35,7 +35,9 @@ const (
 	// input or any entropy; P2 consumes no entropy at all.
 	NoStealthSignal = "NO_STEALTH_SIGNAL"
 
-	// PrimaryMetric is the preregistered primary metric.
+	// PrimaryMetric is the preregistered primary metric. Its denominator is,
+	// per policy and run, the resolved WOULD_ATTEMPT decisions of the
+	// PRIMARY_SCORABLE cases ([AssessDenominatorMembership]).
 	PrimaryMetric = "POLICY_CHOICE_ACCURACY"
 
 	// RequiredCompleteUTCWeeks is the preregistered observation window.

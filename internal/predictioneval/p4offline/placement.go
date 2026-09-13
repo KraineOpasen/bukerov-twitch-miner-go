@@ -75,8 +75,8 @@ const (
 
 // ProofBasisPlatformPredictionConfirmed is the only accepted platform
 // acceptance basis: the platform's own confirmation of the user's prediction.
-// It is this package's PROVISIONAL vocabulary (see the package
-// documentation's stated assumptions), not contract text.
+// It is this package's own, narrower vocabulary (see the package
+// documentation's reconciled readings), not contract text.
 const ProofBasisPlatformPredictionConfirmed = "PLATFORM_PREDICTION_CONFIRMED"
 
 // Decision refusals shared by the placement and payout seams: a decision that
@@ -113,6 +113,12 @@ const (
 // ErrDecisionBinding is a policy result bound to a factset other than the one
 // it is being attached to.
 var ErrDecisionBinding = errors.New("p4offline: the policy result is not bound to this factset")
+
+// ErrResultNotDerived is a policy result that no evaluator of this package
+// produced as it is: a hand-built, edited or stored-and-reloaded
+// [P2CaseResult] or [P3bCaseResult]. A decision is minted only from the
+// evaluator's own result.
+var ErrResultNotDerived = errors.New("p4offline: the policy result was not produced by this package's evaluator or was altered afterwards")
 
 // FactualPlacement is the selected attempt's own placement evidence, bound
 // to the case. It is derived from the dataset, never from a selection, and
@@ -186,14 +192,22 @@ type PlatformAcceptanceProof struct {
 
 // PolicyDecision is what one policy decided on one case, bound to the case.
 // It is produced by [P2CaseResult.Decision] and [P3bCaseResult.Decision],
-// which refuse a factset other than the one the result was evaluated over,
-// and it carries a witness only they set.
+// which refuse a factset other than the one the result was evaluated over
+// and a result the evaluator did not produce as it is (the result carries
+// its own witness), and it carries a witness only they set.
 type PolicyDecision struct {
 	Policy         string                    `json:"policy"`
 	Attempt        predictioneval.AttemptKey `json:"attempt"`
 	FactsetDigest  string                    `json:"factsetDigest"`
 	EventID        string                    `json:"eventId"`
 	CutoffPosition int64                     `json:"cutoffPosition"`
+	// Derivation names what produced this decision, so two genuine
+	// decisions of one policy on one case are distinguishable: for P2 the
+	// per-case config binding digest; for P3b the verified ruleset, its
+	// native config digest, the entropy run identity and the core's entropy
+	// digest. It is descriptive provenance for the audit, covered by the
+	// witness; it grants nothing.
+	Derivation string `json:"derivation"`
 	// OutcomeIDs is the factset's ordered outcome identity vector: the set
 	// the choice was made from, carried so a choice's index and identity can
 	// be checked against each other and against a resolution's set.
@@ -221,31 +235,53 @@ func policyDecisionWitness(p PolicyDecision) string {
 	c.str(p.FactsetDigest)
 	c.str(p.EventID)
 	c.i64(p.CutoffPosition)
+	c.str(p.Derivation)
 	c.count(len(p.OutcomeIDs))
 	for _, id := range p.OutcomeIDs {
 		c.str(id)
 	}
-	c.str(p.Action.MapVersion)
-	c.str(p.Action.Policy)
-	c.str(p.Action.NativeAction)
-	c.str(string(p.Action.Class))
-	c.boolean(p.Action.Legal)
-	c.count(len(p.Action.Illegality))
-	for _, r := range p.Action.Illegality {
+	frameAction(&c, p.Action)
+	frameChoice(&c, p.Choice)
+	frameFact(&c, p.Stake)
+	return c.digest()
+}
+
+// frameAction, frameChoice and frameFact frame the three values every
+// policy result and decision carries, so the result witnesses and the
+// decision witness cover them identically.
+func frameAction(c *canonical, a ActionMapping) {
+	c.str(a.MapVersion)
+	c.str(a.Policy)
+	c.str(a.NativeAction)
+	c.str(string(a.Class))
+	c.boolean(a.Legal)
+	c.count(len(a.Illegality))
+	for _, r := range a.Illegality {
 		c.str(r)
 	}
-	c.str(p.Action.SkipReason)
-	c.boolean(p.Choice.Present)
-	c.i64(int64(p.Choice.Index))
-	c.str(p.Choice.OutcomeID)
-	c.str(string(p.Stake.Presence))
-	c.i64(p.Stake.Value)
-	c.str(p.Stake.Reason)
-	return c.digest()
+	c.str(a.SkipReason)
+}
+
+func frameChoice(c *canonical, ch PolicyChoice) {
+	c.boolean(ch.Present)
+	c.i64(int64(ch.Index))
+	c.str(ch.OutcomeID)
+}
+
+func frameFact(c *canonical, f Int64Fact) {
+	c.str(string(f.Presence))
+	c.i64(f.Value)
+	c.str(f.Reason)
 }
 
 // PlacementEvidence is the evidence-only placement verdict for one policy,
 // bound to its case, carrying a witness only [DerivePlacement] sets.
+//
+// A placement verdict states no denominator membership: "would attempt" is
+// not "placed bet". Membership in the PLACED_BET_WIN_RATE denominator is a
+// fact about the SETTLED, platform-proven bet, stated by
+// [PayoutEvidence.PlacedBetDenominatorMember] and composed with the case's
+// quality by [AssessDenominatorMembership].
 type PlacementEvidence struct {
 	ContractVersion string                    `json:"contractVersion"`
 	Policy          string                    `json:"policy"`
@@ -261,12 +297,7 @@ type PlacementEvidence struct {
 	AttributedOutcomeID         string    `json:"attributedOutcomeId,omitempty"`
 	AttributedCallObservationID string    `json:"attributedCallObservationId,omitempty"`
 	AttributedCallPosition      int64     `json:"attributedCallPosition"`
-	// ContributesToBetOnlyDenominator is true exactly for a legal
-	// WOULD_ATTEMPT: a POLICY_SKIP contributes nothing to a bet-only
-	// denominator. (The contract fixes the POLICY_SKIP half; the rest is
-	// this package's stated reading.)
-	ContributesToBetOnlyDenominator bool `json:"contributesToBetOnlyDenominator"`
-	witness                         string
+	witness                     string
 }
 
 // derived reports whether the value is exactly what DerivePlacement produced.
@@ -290,18 +321,16 @@ func placementEvidenceWitness(p PlacementEvidence) string {
 	for _, r := range p.Reasons {
 		c.str(r)
 	}
-	c.str(string(p.PolicyStake.Presence))
-	c.i64(p.PolicyStake.Value)
-	c.str(p.PolicyStake.Reason)
+	frameFact(&c, p.PolicyStake)
 	c.str(p.AttributedOutcomeID)
 	c.str(p.AttributedCallObservationID)
 	c.i64(p.AttributedCallPosition)
-	c.boolean(p.ContributesToBetOnlyDenominator)
 	return c.digest()
 }
 
 // decisionOf binds a policy result to the factset it was evaluated over.
-func decisionOf(policy string, fs CommonFactset, resultDigest string, action ActionMapping, choice PolicyChoice, stake Int64Fact) (PolicyDecision, error) {
+func decisionOf(policy string, fs CommonFactset, resultDigest string, action ActionMapping, choice PolicyChoice,
+	stake Int64Fact, derivation string) (PolicyDecision, error) {
 	if err := VerifyCommonFactset(fs); err != nil {
 		return PolicyDecision{}, err
 	}
@@ -318,6 +347,7 @@ func decisionOf(policy string, fs CommonFactset, resultDigest string, action Act
 		FactsetDigest:  fs.Digest,
 		EventID:        fs.Episode.EventID,
 		CutoffPosition: fs.CutoffPosition,
+		Derivation:     derivation,
 		OutcomeIDs:     outcomeIDs(fs),
 		Action:         action,
 		Choice:         choice,
@@ -458,9 +488,6 @@ func derivePlacement(policy PolicyDecision, factual FactualPlacement, proof *Pla
 		reason(PlacementReasonCaseBindingMismatch)
 		return out
 	}
-	// Only a decision this seam actually attributes against can count in a
-	// bet-only denominator; a refused verdict contributes nothing.
-	out.ContributesToBetOnlyDenominator = policy.Action.Class == ActionWouldAttempt
 	switch policy.Action.Class {
 	case ActionPolicySkip:
 		out.Status = PlacementNotApplicable

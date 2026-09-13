@@ -187,34 +187,34 @@ func TestP3bRulesetIsSuppliedVerifiedAndBound(t *testing.T) {
 		_, fs := selectedFactset(t, nil, nil)
 		forged := p4offline.VerifiedP3bRuleset{RulesetID: "impostor", RawSHA256: "not-a-hash",
 			NativeConfigDigest: good.NativeConfigDigest, Config: cfg}
-		if _, err := p4offline.EvaluateP3bCase(fs, forged, "key", 0); !errors.Is(err, p4offline.ErrRulesetNotVerified) {
+		if _, err := p4offline.EvaluateP3bCase(fs, forged, synthCoords(fs, 0)); !errors.Is(err, p4offline.ErrRulesetNotVerified) {
 			t.Fatalf("got %v", err)
 		}
-		coords := p4offline.EntropyCoordinates{Trajectory: 0, SourceRoundID: "e1", PolicyID: "impostor"}
-		trace, _ := p4offline.BuildDrawTrace("key", coords, 2)
-		if _, err := p4offline.EvaluateP3bWithTrace(fs, forged, "key", coords, trace); !errors.Is(err, p4offline.ErrRulesetNotVerified) {
+		coords := synthCoords(fs, 0)
+		trace, _ := p4offline.BuildDrawTrace(coords, 2)
+		if _, err := p4offline.EvaluateP3bWithTrace(fs, forged, coords, trace); !errors.Is(err, p4offline.ErrRulesetNotVerified) {
 			t.Fatalf("got %v", err)
 		}
 		altered := rs
 		altered.RulesetID = "renamed-after-verification"
-		if _, err := p4offline.EvaluateP3bCase(fs, altered, "key", 0); !errors.Is(err, p4offline.ErrRulesetNotVerified) {
+		if _, err := p4offline.EvaluateP3bCase(fs, altered, synthCoords(fs, 0)); !errors.Is(err, p4offline.ErrRulesetNotVerified) {
 			t.Fatalf("got %v", err)
 		}
 		altered = rs
 		altered.RawSHA256 = strings.Repeat("0", 64)
-		if _, err := p4offline.EvaluateP3bCase(fs, altered, "key", 0); !errors.Is(err, p4offline.ErrRulesetNotVerified) {
+		if _, err := p4offline.EvaluateP3bCase(fs, altered, synthCoords(fs, 0)); !errors.Is(err, p4offline.ErrRulesetNotVerified) {
 			t.Fatalf("got %v", err)
 		}
 		retuned := rs
 		retuned.Config.Detailed = append([]predictioneval.OrderedRule(nil), rs.Config.Detailed...)
 		retuned.Config.Detailed[0].RawAttemptRatePercent = 0
-		if _, err := p4offline.EvaluateP3bCase(fs, retuned, "key", 0); !errors.Is(err, p4offline.ErrRulesetNotVerified) {
+		if _, err := p4offline.EvaluateP3bCase(fs, retuned, synthCoords(fs, 0)); !errors.Is(err, p4offline.ErrRulesetNotVerified) {
 			t.Fatalf("a config altered after verification no longer digests to the verified native digest: %v", err)
 		}
 		broken := rs
 		broken.Config.Detailed = append([]predictioneval.OrderedRule(nil), rs.Config.Detailed...)
 		broken.Config.Detailed[0].RawThresholdPercent = 500 // a shape the core refuses outright
-		if _, err := p4offline.EvaluateP3bCase(fs, broken, "key", 0); !errors.Is(err, p4offline.ErrRulesetNotVerified) {
+		if _, err := p4offline.EvaluateP3bCase(fs, broken, synthCoords(fs, 0)); !errors.Is(err, p4offline.ErrRulesetNotVerified) {
 			t.Fatalf("a config the core refuses is not a typed REFUSED under the honest identity; it is an unverified ruleset: %v", err)
 		}
 		var decoded p4offline.VerifiedP3bRuleset
@@ -222,7 +222,7 @@ func TestP3bRulesetIsSuppliedVerifiedAndBound(t *testing.T) {
 		if err := json.Unmarshal(raw, &decoded); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := p4offline.EvaluateP3bCase(fs, decoded, "key", 0); !errors.Is(err, p4offline.ErrRulesetNotVerified) {
+		if _, err := p4offline.EvaluateP3bCase(fs, decoded, synthCoords(fs, 0)); !errors.Is(err, p4offline.ErrRulesetNotVerified) {
 			t.Fatalf("a verified ruleset does not survive a round trip; the raw bytes must be re-verified: %v", err)
 		}
 	})
@@ -309,12 +309,12 @@ func TestP3bProjectionCarriesOnlyCommonDataAndBindsTheFactset(t *testing.T) {
 	}
 	// The mechanism's answer is invariant under P2-only changes.
 	rs := mustVerify(t, rulesetFrom(t, cfgWithRule("inv", predictioneval.ComparatorGe, 50, 100)))
-	a, err := p4offline.EvaluateP3bCase(fs, rs, "key", 0)
+	a, err := p4offline.EvaluateP3bCase(fs, rs, synthCoords(fs, 0))
 	if err != nil {
 		t.Fatal(err)
 	}
 	_, plain := selectedFactset(t, nil, nil)
-	b, err := p4offline.EvaluateP3bCase(plain, rs, "key", 0)
+	b, err := p4offline.EvaluateP3bCase(plain, rs, synthCoords(plain, 0))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -329,7 +329,7 @@ func TestP3bProjectionCarriesOnlyCommonDataAndBindsTheFactset(t *testing.T) {
 		a.Evaluation.StreamDigest != a.Projection.Stream.SelectionDigest {
 		t.Fatalf("the P3b result must be bound to its factset, ruleset and stream: %+v", a)
 	}
-	if a.Trace.Coordinates != (p4offline.EntropyCoordinates{Trajectory: 0, SourceRoundID: "e1", PolicyID: "inv"}) {
+	if a.Trace.Coordinates != synthCoords(fs, 0) {
 		t.Fatalf("trace coordinates: %+v", a.Trace.Coordinates)
 	}
 	if a.Trace.EntropyDigest == "" || a.Trace.EntropyDigest != a.Evaluation.EntropyDigest {
@@ -352,7 +352,7 @@ func TestP3bEntropyConsumptionThroughTheP4Trace(t *testing.T) {
 	_, fs := selectedFactset(t, nil, nil)
 	t.Run("a matched rule at 0% consumes one word and admits nothing", func(t *testing.T) {
 		rs := mustVerify(t, rulesetFrom(t, cfgWithRule("zero", predictioneval.ComparatorGe, 50, 0)))
-		res, err := p4offline.EvaluateP3bCase(fs, rs, "key", 5)
+		res, err := p4offline.EvaluateP3bCase(fs, rs, synthCoords(fs, 5))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -363,13 +363,13 @@ func TestP3bEntropyConsumptionThroughTheP4Trace(t *testing.T) {
 		if res.Trace.WordsSupplied != 2 { // 1 rule x 2 outcomes
 			t.Fatalf("the trace supplies one word per rule per outcome: %d", res.Trace.WordsSupplied)
 		}
-		if err := p4offline.ValidateEntropyWords("key", res.Trace.Coordinates, []predictioneval.OrderedRulesHex64{res.Evaluation.Trace[0].RawWordValue}); err != nil {
+		if err := p4offline.ValidateEntropyWords(res.Trace.Coordinates, []predictioneval.OrderedRulesHex64{res.Evaluation.Trace[0].RawWordValue}); err != nil {
 			t.Fatal(err)
 		}
 	})
 	t.Run("a matched rule at 100% consumes no word", func(t *testing.T) {
 		rs := mustVerify(t, rulesetFrom(t, cfgWithRule("one", predictioneval.ComparatorGe, 50, 100)))
-		res, err := p4offline.EvaluateP3bCase(fs, rs, "key", 5)
+		res, err := p4offline.EvaluateP3bCase(fs, rs, synthCoords(fs, 5))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -379,7 +379,7 @@ func TestP3bEntropyConsumptionThroughTheP4Trace(t *testing.T) {
 	})
 	t.Run("a default admission consumes no word", func(t *testing.T) {
 		rs := mustVerify(t, rulesetFrom(t, cfgDefaultOnly("dflt", 55, 65)))
-		res, err := p4offline.EvaluateP3bCase(fs, rs, "key", 5)
+		res, err := p4offline.EvaluateP3bCase(fs, rs, synthCoords(fs, 5))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -390,9 +390,9 @@ func TestP3bEntropyConsumptionThroughTheP4Trace(t *testing.T) {
 	})
 	t.Run("an exhausted trace is UNKNOWN_INPUT, not a default draw", func(t *testing.T) {
 		rs := mustVerify(t, rulesetFrom(t, cfgWithRule("half", predictioneval.ComparatorGe, 50, 50)))
-		coords := p4offline.EntropyCoordinates{Trajectory: 1, SourceRoundID: "e1", PolicyID: "half"}
-		empty, _ := p4offline.BuildDrawTrace("key", coords, 0)
-		res, err := p4offline.EvaluateP3bWithTrace(fs, rs, "key", coords, empty)
+		coords := synthCoords(fs, 1)
+		empty, _ := p4offline.BuildDrawTrace(coords, 0)
+		res, err := p4offline.EvaluateP3bWithTrace(fs, rs, coords, empty)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -400,41 +400,73 @@ func TestP3bEntropyConsumptionThroughTheP4Trace(t *testing.T) {
 			res.Stake.Known() || res.Choice.Present {
 			t.Fatalf("%+v %+v %+v", res.Action, res.Stake, res.Evaluation.Reason)
 		}
-		// A trace that does not belong to the coordinates is refused before
-		// the core sees it.
-		wrong, _ := p4offline.BuildDrawTrace("other-key", coords, 2)
-		if _, err := p4offline.EvaluateP3bWithTrace(fs, rs, "key", coords, wrong); !errors.Is(err, p4offline.ErrEntropyWordMismatch) {
+		// A trace whose words are not the algorithm's for the coordinates is
+		// refused before the core sees it.
+		wrong, _ := p4offline.BuildDrawTrace(coords, 2)
+		wrong.Words = append([]predictioneval.OrderedRulesHex64(nil), wrong.Words...)
+		wrong.Words[0] ^= 1
+		if _, err := p4offline.EvaluateP3bWithTrace(fs, rs, coords, wrong); !errors.Is(err, p4offline.ErrEntropyWordMismatch) {
 			t.Fatalf("got %v", err)
 		}
 	})
-	t.Run("a trace drawn for another round or another ruleset is refused", func(t *testing.T) {
+	t.Run("a trace drawn for another opportunity or another factset is refused", func(t *testing.T) {
 		rs := mustVerify(t, rulesetFrom(t, cfgWithRule("half", predictioneval.ComparatorGe, 50, 50)))
-		foreignRound := p4offline.EntropyCoordinates{Trajectory: 3, SourceRoundID: "SOME-OTHER-ROUND", PolicyID: "half"}
-		trace, _ := p4offline.BuildDrawTrace("key", foreignRound, 2)
-		if _, err := p4offline.EvaluateP3bWithTrace(fs, rs, "key", foreignRound, trace); !errors.Is(err, p4offline.ErrP3bBinding) {
-			t.Fatalf("round e1 must not be drawn under another round's words: %v", err)
+		foreignRound := synthCoords(fs, 3)
+		foreignRound.PairedOpportunityID = "SOME-OTHER-ROUND"
+		trace, _ := p4offline.BuildDrawTrace(foreignRound, 2)
+		if _, err := p4offline.EvaluateP3bWithTrace(fs, rs, foreignRound, trace); !errors.Is(err, p4offline.ErrP3bBinding) {
+			t.Fatalf("round e1 must not be drawn under another opportunity's words: %v", err)
 		}
-		foreignPolicy := p4offline.EntropyCoordinates{Trajectory: 3, SourceRoundID: "e1", PolicyID: "other-ruleset"}
-		trace, _ = p4offline.BuildDrawTrace("key", foreignPolicy, 2)
-		if _, err := p4offline.EvaluateP3bWithTrace(fs, rs, "key", foreignPolicy, trace); !errors.Is(err, p4offline.ErrP3bBinding) {
+		foreignFactset := synthCoords(fs, 3)
+		foreignFactset.CommonFactsetDigest = p4offline.DigestReference(strings.Repeat("0", 64))
+		trace, _ = p4offline.BuildDrawTrace(foreignFactset, 2)
+		if _, err := p4offline.EvaluateP3bWithTrace(fs, rs, foreignFactset, trace); !errors.Is(err, p4offline.ErrP3bBinding) {
+			t.Fatalf("a factset must not be drawn under another factset's words: %v", err)
+		}
+		// The digest must be spelled as the protocol spells it; the bare
+		// hex is outside the protocol, not a second spelling of the same
+		// coordinates.
+		bare := synthCoords(fs, 3)
+		bare.CommonFactsetDigest = fs.Digest
+		if _, err := p4offline.BuildDrawTrace(bare, 2); !errors.Is(err, p4offline.ErrEntropyCoordinates) {
 			t.Fatalf("got %v", err)
 		}
-		// The in-package path names the coordinates itself.
-		res, err := p4offline.EvaluateP3bCase(fs, rs, "key", 3)
+		// The in-package path carries the coordinates it was given, bound.
+		res, err := p4offline.EvaluateP3bCase(fs, rs, synthCoords(fs, 3))
 		if err != nil {
 			t.Fatal(err)
 		}
-		if res.Trace.Coordinates != (p4offline.EntropyCoordinates{Trajectory: 3, SourceRoundID: "e1", PolicyID: "half"}) {
+		if res.Trace.Coordinates != synthCoords(fs, 3) {
 			t.Fatalf("%+v", res.Trace.Coordinates)
 		}
-		if _, err := p4offline.EvaluateP3bCase(fs, rs, "key", p4offline.TrajectoryCount); !errors.Is(err, p4offline.ErrEntropyCoordinates) {
+		if _, err := p4offline.EvaluateP3bCase(fs, rs, foreignRound); !errors.Is(err, p4offline.ErrP3bBinding) {
+			t.Fatalf("got %v", err)
+		}
+		if _, err := p4offline.EvaluateP3bCase(fs, rs, foreignFactset); !errors.Is(err, p4offline.ErrP3bBinding) {
+			t.Fatalf("got %v", err)
+		}
+		if _, err := p4offline.EvaluateP3bCase(fs, rs, synthCoords(fs, p4offline.TrajectoryCount)); !errors.Is(err, p4offline.ErrEntropyCoordinates) {
 			t.Fatalf("a trajectory outside the protocol: %v", err)
+		}
+		// Two rulesets over the same opportunity and run draw the SAME words:
+		// the approved framing has no ruleset coordinate.
+		other := mustVerify(t, rulesetFrom(t, cfgWithRule("other-half", predictioneval.ComparatorGe, 50, 50)))
+		a, err := p4offline.EvaluateP3bCase(fs, rs, synthCoords(fs, 3))
+		if err != nil {
+			t.Fatal(err)
+		}
+		b, err := p4offline.EvaluateP3bCase(fs, other, synthCoords(fs, 3))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if a.Trace.RunID != b.Trace.RunID || a.Evaluation.Trace[0].RawWordValue != b.Evaluation.Trace[0].RawWordValue {
+			t.Fatalf("candidate rulesets must see common words: %+v / %+v", a.Trace, b.Trace)
 		}
 	})
 	t.Run("two trajectories draw different words", func(t *testing.T) {
 		rs := mustVerify(t, rulesetFrom(t, cfgWithRule("half", predictioneval.ComparatorGe, 50, 50)))
-		a, _ := p4offline.EvaluateP3bCase(fs, rs, "key", 0)
-		b, _ := p4offline.EvaluateP3bCase(fs, rs, "key", 1)
+		a, _ := p4offline.EvaluateP3bCase(fs, rs, synthCoords(fs, 0))
+		b, _ := p4offline.EvaluateP3bCase(fs, rs, synthCoords(fs, 1))
 		if a.Trace.RunID == b.Trace.RunID || a.Trace.EntropyDigest == b.Trace.EntropyDigest {
 			t.Fatalf("trajectories 0 and 1 share entropy: %+v / %+v", a.Trace, b.Trace)
 		}
@@ -451,7 +483,7 @@ func TestP3bKnownZeroStakeIsWouldAttemptAndNoAttemptPrefixIsNotASkip(t *testing.
 		e.FinalAmount = ptrI64(0)
 	}, nil)
 	rs := mustVerify(t, rulesetFrom(t, cfgWithRule("one", predictioneval.ComparatorGe, 50, 100)))
-	res, err := p4offline.EvaluateP3bCase(zero, rs, "key", 0)
+	res, err := p4offline.EvaluateP3bCase(zero, rs, synthCoords(zero, 0))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -470,7 +502,7 @@ func TestP3bKnownZeroStakeIsWouldAttemptAndNoAttemptPrefixIsNotASkip(t *testing.
 
 	_, fs := selectedFactset(t, nil, nil)
 	none := mustVerify(t, rulesetFrom(t, cfgDefaultOnly("none", 95, 100)))
-	res, err = p4offline.EvaluateP3bCase(fs, none, "key", 0)
+	res, err = p4offline.EvaluateP3bCase(fs, none, synthCoords(fs, 0))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -490,7 +522,7 @@ func TestP3bUint32AndVectorBoundariesAreRefusedNotClamped(t *testing.T) {
 		_, fs := selectedFactset(t, func(e *predictioneval.SourceDecisionEnvelope) {
 			e.Balance = ptrI64(math.MaxUint32 + 1)
 		}, nil)
-		res, err := p4offline.EvaluateP3bCase(fs, rs, "key", 0)
+		res, err := p4offline.EvaluateP3bCase(fs, rs, synthCoords(fs, 0))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -503,7 +535,7 @@ func TestP3bUint32AndVectorBoundariesAreRefusedNotClamped(t *testing.T) {
 		_, fs := selectedFactset(t, func(e *predictioneval.SourceDecisionEnvelope) {
 			e.Balance = ptrI64(math.MaxUint32)
 		}, nil)
-		res, err := p4offline.EvaluateP3bCase(fs, rs, "key", 0)
+		res, err := p4offline.EvaluateP3bCase(fs, rs, synthCoords(fs, 0))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -514,7 +546,7 @@ func TestP3bUint32AndVectorBoundariesAreRefusedNotClamped(t *testing.T) {
 	})
 	t.Run("negative points are out of domain", func(t *testing.T) {
 		_, fs := selectedFactset(t, func(e *predictioneval.SourceDecisionEnvelope) { e.Outcomes[1].TotalPoints = -1 }, nil)
-		res, err := p4offline.EvaluateP3bCase(fs, rs, "key", 0)
+		res, err := p4offline.EvaluateP3bCase(fs, rs, synthCoords(fs, 0))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -534,7 +566,7 @@ func TestP3bUint32AndVectorBoundariesAreRefusedNotClamped(t *testing.T) {
 		if proj.Stream.Candidates[0].OutcomesPresence != predictioneval.SuppliedInvalid {
 			t.Fatalf("a partially present vector is declared INVALID, never passed off as whole: %+v", proj.Stream.Candidates[0])
 		}
-		res, err := p4offline.EvaluateP3bCase(fs, rs, "key", 0)
+		res, err := p4offline.EvaluateP3bCase(fs, rs, synthCoords(fs, 0))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -547,12 +579,45 @@ func TestP3bUint32AndVectorBoundariesAreRefusedNotClamped(t *testing.T) {
 		if _, err := p4offline.ProjectP3bSingleCandidate(fs); !errors.Is(err, p4offline.ErrP3bProjectionRefused) {
 			t.Fatalf("got %v", err)
 		}
-		res, err := p4offline.EvaluateP3bCase(fs, rs, "key", 0)
+		res, err := p4offline.EvaluateP3bCase(fs, rs, synthCoords(fs, 0))
 		if err != nil {
 			t.Fatal(err)
 		}
 		if res.Action.Class != p4offline.ActionRefused || res.Action.NativeAction != "P4_PROJECTION_REFUSED" || res.Stake.Known() {
 			t.Fatalf("a refused projection is a typed REFUSED, never a skip: %+v", res.Action)
+		}
+		// Even a refused projection is bound to its coordinates and inside
+		// the protocol: another opportunity's coordinates, a trajectory at
+		// the count or an empty dataset identity yield no result at all,
+		// exactly as on an evaluable factset; and the refused result names
+		// the run it was produced under.
+		if res.Trace.Coordinates != synthCoords(fs, 0) {
+			t.Fatalf("a refused result must name its coordinates: %+v", res.Trace)
+		}
+		if empty, _ := p4offline.BuildDrawTrace(synthCoords(fs, 0), 0); res.Trace.RunID == "" || res.Trace.RunID != empty.RunID {
+			t.Fatalf("a refused result names the run by the empty trace's identity: %q", res.Trace.RunID)
+		}
+		foreign := synthCoords(fs, 0)
+		foreign.PairedOpportunityID = "SOME-OTHER-ROUND"
+		if _, err := p4offline.EvaluateP3bCase(fs, rs, foreign); !errors.Is(err, p4offline.ErrP3bBinding) {
+			t.Fatalf("got %v", err)
+		}
+		if _, err := p4offline.EvaluateP3bCase(fs, rs, synthCoords(fs, p4offline.TrajectoryCount)); !errors.Is(err, p4offline.ErrEntropyCoordinates) {
+			t.Fatalf("a trajectory outside the protocol on the refused path: %v", err)
+		}
+		noDataset := synthCoords(fs, 0)
+		noDataset.DatasetID = ""
+		if _, err := p4offline.EvaluateP3bCase(fs, rs, noDataset); !errors.Is(err, p4offline.ErrEntropyCoordinates) {
+			t.Fatalf("an empty dataset identity on the refused path: %v", err)
+		}
+		// The supplied-trace entry point refuses the same coordinates the
+		// same way, before it projects anything.
+		out, _ := p4offline.BuildDrawTrace(synthCoords(fs, 0), 0)
+		if _, err := p4offline.EvaluateP3bWithTrace(fs, rs, synthCoords(fs, p4offline.TrajectoryCount), out); !errors.Is(err, p4offline.ErrEntropyCoordinates) {
+			t.Fatalf("the supplied-trace path must refuse an out-of-protocol trajectory as such: %v", err)
+		}
+		if _, err := p4offline.EvaluateP3bWithTrace(fs, rs, noDataset, out); !errors.Is(err, p4offline.ErrEntropyCoordinates) {
+			t.Fatalf("got %v", err)
 		}
 	})
 }
@@ -565,8 +630,8 @@ func TestP3bNativeActionMapIsExhaustive(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	coords := p4offline.EntropyCoordinates{Trajectory: 0, SourceRoundID: "e1", PolicyID: "x"}
-	trace, _ := p4offline.BuildDrawTrace("key", coords, 4)
+	coords := synthCoords(fs, 0)
+	trace, _ := p4offline.BuildDrawTrace(coords, 4)
 	// A missing-balance stream, built natively, for the stake-unknown status.
 	missingBalance := proj.Stream
 	missingBalance.Candidates = append([]predictioneval.OrderedRulesCandidate(nil), proj.Stream.Candidates...)

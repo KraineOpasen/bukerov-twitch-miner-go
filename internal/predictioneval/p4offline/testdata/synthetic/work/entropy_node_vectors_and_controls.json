@@ -1,0 +1,133 @@
+{
+  "scope": "SYNTHETIC_SERIALIZATION_ONLY_NO_MODEL_EXECUTION",
+  "implementation": {
+    "runtime": "v24.19.0",
+    "crypto": "node:crypto",
+    "algorithm": "p4-hmac-sha256-u64/v1",
+    "protocol_sha256": "120066777687604f85d86357e5b9c60316ded6458da612035c16995ecbf16f50"
+  },
+  "seed_utf8": "BUKEROV|P4|COMMON_CUTOFF|v1",
+  "seed_hex": "c4c7808033ef29c21e7904c323b3554ae1bdf3aae69251972d0e7a72a80f59ca",
+  "fixture_count": 7,
+  "vectors": [
+    {
+      "fixture": "A",
+      "dataset_id": "synthetic-p4-dataset",
+      "dataset_version": "v1",
+      "common_factset_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+      "paired_opportunity_id": "synthetic:round:0001",
+      "run_index": "0",
+      "word_index": "0",
+      "lp_byte_length": "238",
+      "lp_sha256": "1d23da4b1d7839741ea197b38814296535ee4c8ae6b41afcd3ec28d92bcce754",
+      "full_hmac_hex": "cd9165ff68343fe05b4e1462c33e85a603ef11aad541152c25be37444031002a",
+      "hex16_word": "cd9165ff68343fe0"
+    },
+    {
+      "fixture": "A",
+      "dataset_id": "synthetic-p4-dataset",
+      "dataset_version": "v1",
+      "common_factset_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+      "paired_opportunity_id": "synthetic:round:0001",
+      "run_index": "0",
+      "word_index": "1",
+      "lp_byte_length": "238",
+      "lp_sha256": "450b6fd8f2955b2d91bd5c3af288c554936a811596446b7c8e04081ccbbdaa35",
+      "full_hmac_hex": "8e47ec149aa31581ee8c6b7bb7e5e64f56d3795b32a8f29c18fc86baa6242809",
+      "hex16_word": "8e47ec149aa31581"
+    },
+    {
+      "fixture": "A",
+      "dataset_id": "synthetic-p4-dataset",
+      "dataset_version": "v1",
+      "common_factset_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+      "paired_opportunity_id": "synthetic:round:0001",
+      "run_index": "1",
+      "word_index": "0",
+      "lp_byte_length": "238",
+      "lp_sha256": "7a6e44b7d66434648bcac9a15aba56a620103a573be98f3359475fe76c109d4a",
+      "full_hmac_hex": "d7d443c513be3ee59ef872823f3791d2baeddf802aa3246d1e261d74eb346d50",
+      "hex16_word": "d7d443c513be3ee5"
+    },
+    {
+      "fixture": "A",
+      "dataset_id": "synthetic-p4-dataset",
+      "dataset_version": "v1",
+      "common_factset_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+      "paired_opportunity_id": "synthetic:round:0001",
+      "run_index": "16383",
+      "word_index": "0",
+      "lp_byte_length": "242",
+      "lp_sha256": "d49c1275f871908abc9a4bacfce7b6fffad3a583fc8218d82eaf4b86e24e9140",
+      "full_hmac_hex": "3246189b5a57613d321de3a6f33c05796953480c5f7f568562a3ebd8b8995450",
+      "hex16_word": "3246189b5a57613d"
+    },
+    {
+      "fixture": "A",
+      "dataset_id": "synthetic-p4-dataset",
+      "dataset_version": "v1",
+      "common_factset_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+      "paired_opportunity_id": "synthetic:round:0001",
+      "run_index": "16383",
+      "word_index": "8191",
+      "lp_byte_length": "245",
+      "lp_sha256": "23219fb3ebb26c1c14500d603517b596123f5675a7831adea50063676636ebf3",
+      "full_hmac_hex": "e56e237e7e3f04e5e9f00f5f2cf1768232dfdb67387cbf36dc7df30191a191e4",
+      "hex16_word": "e56e237e7e3f04e5"
+    },
+    {
+      "fixture": "B",
+      "dataset_id": "synthetic-π-данные",
+      "dataset_version": "v1",
+      "common_factset_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+      "paired_opportunity_id": "synthetic:раунд:é",
+      "run_index": "0",
+      "word_index": "0",
+      "lp_byte_length": "246",
+      "lp_sha256": "3e728cd30e591fca98424b133b2ae110e268838cb2c4607b2696af4d0ef65641",
+      "full_hmac_hex": "a6cb36f11b29ca0bed3964b3ccfb557470aad650b7a66ddda769a67ff60a833e",
+      "hex16_word": "a6cb36f11b29ca0b"
+    },
+    {
+      "fixture": "B",
+      "dataset_id": "synthetic-π-данные",
+      "dataset_version": "v1",
+      "common_factset_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+      "paired_opportunity_id": "synthetic:раунд:é",
+      "run_index": "1",
+      "word_index": "1",
+      "lp_byte_length": "246",
+      "lp_sha256": "b2402611860c897f2fee1a89fdc6f313da8294d64ceb4043973439e2645be6dc",
+      "full_hmac_hex": "bd3ca41cd8f720994546c257134a916cf40bf04de96615442f06bc2fe6417e47",
+      "hex16_word": "bd3ca41cd8f72099"
+    }
+  ],
+  "controls": {
+    "utf8_byte_length": {
+      "status": "PASS",
+      "input": "synthetic-π-данные",
+      "actual_byte_length": "25",
+      "incorrect_js_code_unit_length": "18",
+      "healthy_lp_hex": "000000000000001973796e7468657469632dcf802dd0b4d0b0d0bdd0bdd18bd0b5",
+      "negative_wrong_length_lp_differs": true
+    },
+    "first8_big_endian": {
+      "status": "PASS",
+      "healthy_hex16": "cd9165ff68343fe0",
+      "negative_little_endian_hex16": "e03f3468ff6591cd",
+      "negative_last8_differs": true
+    },
+    "fixed_width_zero": {
+      "status": "PASS",
+      "healthy_zero": "0000000000000000",
+      "negative_unpadded_zero_rejected": true
+    },
+    "native_string_encoding": {
+      "status": "PASS",
+      "json_string_roundtrip": true,
+      "negative_0x_rejected": true,
+      "negative_number_rejected": true,
+      "negative_uppercase_rejected": true
+    }
+  }
+}

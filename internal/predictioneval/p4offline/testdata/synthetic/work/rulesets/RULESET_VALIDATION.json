@@ -1,0 +1,117 @@
+{
+  "candidates": [
+    {
+      "bytes": 652,
+      "candidate_id": "C01",
+      "config_id": "donor-example-streamer-a",
+      "config_structure": "PASS",
+      "donor_yaml_value_correspondence": "PASS",
+      "file": "C01_streamer_a_raw_config.json",
+      "independently_derived_native_config_digest": "8a317f48ac905e6ca887d8b1515ce7079a70fda60266c9630ae0fa8d7d300b53",
+      "native_go_digest_execution": "NOT_RUN",
+      "normalized_fixture_bits": "PASS",
+      "owner_binding": "PENDING",
+      "raw_basis": "pe-orc-raw/v1",
+      "raw_bytes_sha256": "ce24a1bb5d2d3b7adec6449cc420bb164a70d0c20435a9b85827c266fbf8ab99",
+      "source_yaml_path": "streamers.streamer_a.prediction.strategy.detailed"
+    },
+    {
+      "bytes": 169,
+      "candidate_id": "C02",
+      "config_id": "donor-example-preset-small",
+      "config_structure": "PASS",
+      "donor_yaml_value_correspondence": "PASS",
+      "file": "C02_preset_small_raw_config.json",
+      "independently_derived_native_config_digest": "1a7ddd7f867cb36677ee45ae1b94640e1b2fceb1ca024eb42fad4cbffe72e30c",
+      "native_go_digest_execution": "NOT_RUN",
+      "normalized_fixture_bits": "PASS",
+      "owner_binding": "PENDING",
+      "raw_basis": "pe-orc-raw/v1",
+      "raw_bytes_sha256": "cb7ebc6df78f534eb43a28d2d1da0956a2fc095af65cb2b606d15a8c077e80ae",
+      "source_yaml_path": "presets.small.prediction.strategy.detailed"
+    }
+  ],
+  "comparative_execution": "NOT_RUN",
+  "donor_yaml_resolution": "PASS: both exact configs reconstructed independently from pinned YAML",
+  "encoding": "UTF-8, ASCII escapes, no BOM, sorted object keys, compact separators, source-derived JSON numeric types, exactly one LF; arrays retain source order; null retained for absent donor detailed list; not RFC 8785",
+  "invalid_controls": [
+    {
+      "name": "missing_default_presence",
+      "result": "REFUSED_AS_EXPECTED"
+    },
+    {
+      "name": "false_default_presence",
+      "result": "REFUSED_AS_EXPECTED"
+    },
+    {
+      "name": "missing_points",
+      "result": "REFUSED_AS_EXPECTED"
+    },
+    {
+      "name": "invalid_comparator",
+      "result": "REFUSED_AS_EXPECTED"
+    },
+    {
+      "name": "raw_percentage_over_100",
+      "result": "REFUSED_AS_EXPECTED"
+    },
+    {
+      "name": "non_finite_percentage",
+      "result": "REFUSED_AS_EXPECTED"
+    },
+    {
+      "name": "point_cap_over_uint32",
+      "result": "REFUSED_AS_EXPECTED"
+    },
+    {
+      "name": "boolean_is_not_percentage",
+      "result": "REFUSED_AS_EXPECTED"
+    }
+  ],
+  "native_config_digest_status": "INDEPENDENT_SOURCE_TRANSCRIPTION_ONLY",
+  "native_go_config_validator_execution": "NOT_RUN",
+  "native_go_evaluator_execution": "NOT_RUN",
+  "normalization_oracle_checks": 22,
+  "parser": "PyYAML 6.0.3; custom SafeLoader preserves only known document values",
+  "raw_basis_ambiguity_control": "PASS: normalized numeric lookalike passes domain but fails approved raw-byte identity; range checks cannot prove raw provenance",
+  "result": "PASS_WITH_NATIVE_EXECUTION_LIMITATION",
+  "scope": "CONFIG_BYTES_AND_ORACLES_ONLY",
+  "sources": [
+    {
+      "blob_check": "PASS",
+      "bytes": 3724,
+      "git_blob_sha1": "11a545a82dcb321c2f835619f9df89fc474d7a2c",
+      "local": "sources/native_donor_example_config.json",
+      "path": "internal/predictioneval/testdata/ordered_rules/donor_example_config.json",
+      "sha256": "16df6a0786e4dad68cf567f97d3f1b0a1c3ca983f99d320ba4992ebf7d05ec3c",
+      "url": "https://github.com/KraineOpasen/bukerov-twitch-miner-go/blob/bd4d2727a2e5781e3ac150a5d40819e64ea3f879/internal/predictioneval/testdata/ordered_rules/donor_example_config.json"
+    },
+    {
+      "blob_check": "PASS",
+      "bytes": 6954,
+      "git_blob_sha1": "4341b073309ecaced57b6eb759327abb2db0d070",
+      "local": "sources/native_PROVENANCE.md",
+      "path": "internal/predictioneval/testdata/ordered_rules/PROVENANCE.md",
+      "sha256": "0f943e5731a4ab5f820d710331786e378d2485d5af40dbe949eab808542e6ae8",
+      "url": "https://github.com/KraineOpasen/bukerov-twitch-miner-go/blob/bd4d2727a2e5781e3ac150a5d40819e64ea3f879/internal/predictioneval/testdata/ordered_rules/PROVENANCE.md"
+    },
+    {
+      "blob_check": "PASS",
+      "bytes": 1609,
+      "git_blob_sha1": "0e5889816fd9dda591deb7a09aeac444c43ff6a2",
+      "local": "sources/donor_example.config.yaml",
+      "path": "example.config.yaml",
+      "sha256": "82950b2aa643e71adf4e048dc70002a6988b47087967fd0ba1ffc19a4510fcb1",
+      "url": "https://github.com/t348575/twitch-points-miner/blob/ae9d39d3d10ff8240f24e2529fe7cf6dd701db66/example.config.yaml"
+    },
+    {
+      "blob_check": "PASS",
+      "bytes": 4588,
+      "git_blob_sha1": "eee117476395c194b4a675b64f64bcefee3de058",
+      "local": "sources/donor_strategy.rs",
+      "path": "common/src/config/strategy.rs",
+      "sha256": "3498d0370142a10446382cef676fb609fd2db3fbc0c931d5e4462e5609956392",
+      "url": "https://github.com/t348575/twitch-points-miner/blob/ae9d39d3d10ff8240f24e2529fe7cf6dd701db66/common/src/config/strategy.rs"
+    }
+  ]
+}

@@ -59,11 +59,17 @@ func TestResolutionArtifactIsTypedImmutableAndDigested(t *testing.T) {
 		"the availability": func(x *p4offline.ResolutionArtifact) { x.Availability = p4offline.AvailabilityUnavailable },
 		"the revision":     func(x *p4offline.ResolutionArtifact) { x.ProofRevision = "other" },
 		"the digest": func(x *p4offline.ResolutionArtifact) {
+			// Flip the first hex DIGIT after the "sha256:" prefix.
+			i := len(p4offline.DigestReferencePrefix)
 			flip := "0"
-			if x.ResolutionFactsDigest[0] == '0' {
+			if x.ResolutionFactsDigest[i] == '0' {
 				flip = "1"
 			}
-			x.ResolutionFactsDigest = flip + x.ResolutionFactsDigest[1:]
+			x.ResolutionFactsDigest = x.ResolutionFactsDigest[:i] + flip + x.ResolutionFactsDigest[i+1:]
+		},
+		"the digest spelling": func(x *p4offline.ResolutionArtifact) {
+			// The bare hex is not a second spelling of the same digest.
+			x.ResolutionFactsDigest = x.ResolutionFactsDigest[len(p4offline.DigestReferencePrefix):]
 		},
 	} {
 		t.Run("tampering "+name, func(t *testing.T) {
@@ -98,7 +104,7 @@ func forgedWinnerArtifact(winner string) p4offline.ResolutionArtifact {
 		a.WinnerIndex = 1
 	}
 	a.Refusals = nil
-	a.ResolutionFactsDigest = digestOf(p4offline.SerializeResolutionArtifact(a))
+	a.ResolutionFactsDigest = p4offline.DigestReference(digestOf(p4offline.SerializeResolutionArtifact(a)))
 	return a
 }
 
@@ -107,7 +113,7 @@ func forgedWinnerArtifact(winner string) p4offline.ResolutionArtifact {
 // projecting its own facts produces.
 func TestResolutionVerificationRederivesTheOutcome(t *testing.T) {
 	forged := forgedWinnerArtifact("o2")
-	if got := digestOf(p4offline.SerializeResolutionArtifact(forged)); got != forged.ResolutionFactsDigest {
+	if got := p4offline.DigestReference(digestOf(p4offline.SerializeResolutionArtifact(forged))); got != forged.ResolutionFactsDigest {
 		t.Fatalf("fixture: the forged digest must be consistent")
 	}
 	if err := p4offline.VerifyResolutionArtifact(forged); !errors.Is(err, p4offline.ErrResolutionNotDerivable) {
@@ -115,14 +121,14 @@ func TestResolutionVerificationRederivesTheOutcome(t *testing.T) {
 	}
 	// A genuine artifact serializes to the bytes its digest covers.
 	a := p4offline.ProjectResolution(goodWinnerEvidence())
-	if digestOf(p4offline.SerializeResolutionArtifact(a)) != a.ResolutionFactsDigest {
+	if p4offline.DigestReference(digestOf(p4offline.SerializeResolutionArtifact(a))) != a.ResolutionFactsDigest {
 		t.Fatal("the exported serialization is not what the digest covers")
 	}
 	// A REFUND asserted without its proof is refused the same way.
 	refund := p4offline.ResolutionNotRecorded(p4offline.PublicRoundIdentity{EventID: "e1"}, []string{"o1", "o2"}, nil, "p")
 	refund.Outcome = p4offline.ResolutionRefund
 	refund.Refusals = nil
-	refund.ResolutionFactsDigest = digestOf(p4offline.SerializeResolutionArtifact(refund))
+	refund.ResolutionFactsDigest = p4offline.DigestReference(digestOf(p4offline.SerializeResolutionArtifact(refund)))
 	if err := p4offline.VerifyResolutionArtifact(refund); !errors.Is(err, p4offline.ErrResolutionNotDerivable) {
 		t.Fatalf("got %v", err)
 	}
@@ -130,14 +136,14 @@ func TestResolutionVerificationRederivesTheOutcome(t *testing.T) {
 	unknown := p4offline.ResolutionNotRecorded(p4offline.PublicRoundIdentity{EventID: "e1"}, []string{"o1", "o2"}, nil, "p")
 	unknown.WinnerOutcomeID = "o1"
 	unknown.WinnerIndex = 0
-	unknown.ResolutionFactsDigest = digestOf(p4offline.SerializeResolutionArtifact(unknown))
+	unknown.ResolutionFactsDigest = p4offline.DigestReference(digestOf(p4offline.SerializeResolutionArtifact(unknown)))
 	if err := p4offline.VerifyResolutionArtifact(unknown); !errors.Is(err, p4offline.ErrResolutionNotDerivable) {
 		t.Fatalf("got %v", err)
 	}
 	// An outcome outside the vocabulary is refused whatever its digest.
 	odd := a
 	odd.Outcome = "PROBABLY_O2"
-	odd.ResolutionFactsDigest = digestOf(p4offline.SerializeResolutionArtifact(odd))
+	odd.ResolutionFactsDigest = p4offline.DigestReference(digestOf(p4offline.SerializeResolutionArtifact(odd)))
 	if err := p4offline.VerifyResolutionArtifact(odd); !errors.Is(err, p4offline.ErrResolutionNotDerivable) {
 		t.Fatalf("got %v", err)
 	}

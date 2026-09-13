@@ -26,14 +26,23 @@ import (
 // not prove is refused, whatever its digest says. Every consumer in this
 // package verifies before it reads.
 //
-// # Proof obligations — PROVISIONAL
+// # Proof obligations — PROVISIONAL label, reconciled semantics
 //
-// The owner's contract names proof obligations whose text was not available
-// to this session. The obligations enforced here are this package's own
-// provisional definition, versioned as [ResolutionObligationsRevision] and
-// carried in every artifact, so that aligning them with the contract's text
-// is a visible identity change rather than a silent one. Every one of them is
-// a rule the contract already implies by what it forbids:
+// The obligations enforced here are this package's own definition, versioned
+// as [ResolutionObligationsRevision] and carried in every artifact. The
+// owner's source-validation evidence (testdata/synthetic/work/, see
+// WORK_PROVENANCE.md) has since been reconciled against them and found
+// semantically identical where both speak, with one NARROWING on this side:
+// the source validation admits, as a proof obligation, a derived winner from
+// a unique, causally linked, platform-accepted factual action whose terminal
+// says WON (or LOST on an independently proven exhaustive binary set); this
+// package implements NO derived-winner path, so such evidence yields UNKNOWN
+// here, never a winner. A narrowing can only withhold, never upgrade. The
+// availability-before-T1 censoring the source validation names is a
+// dataset-window binding: the pure source records carry no timestamps, so it
+// belongs to the owner's dataset binding, not to this projector. Every
+// obligation below is a rule the contract already implies by what it
+// forbids:
 //
 //	WINNER_KNOWN requires ALL of:
 //	  - the claim is WINNER_KNOWN and the basis is
@@ -87,8 +96,10 @@ const (
 	AvailabilityUnavailable Availability = "UNAVAILABLE"
 )
 
-// ResolutionObligationsRevision names the obligation set applied. It is
-// PROVISIONAL: it changes when the owner's contract text is aligned in.
+// ResolutionObligationsRevision names the obligation set applied. The label
+// stays PROVISIONAL: the set has been reconciled with the owner's source-
+// validation evidence as semantically identical with a documented narrowing
+// (no derived-winner path), and the label changes only by an owner decision.
 const ResolutionObligationsRevision = "p4offline-resolution-obligations/provisional-v1"
 
 // Round states the obligations read, as the store spells them.
@@ -163,14 +174,17 @@ type ResolutionArtifact struct {
 	Outcome             ResolutionOutcome   `json:"outcome"`
 	WinnerOutcomeID     string              `json:"winnerOutcomeId,omitempty"`
 	// WinnerIndex is the winner's position in OrderedOutcomeIDs, or -1.
-	WinnerIndex           int                 `json:"winnerIndex"`
-	ProofBasis            string              `json:"proofBasis,omitempty"`
-	EvidenceReferences    []EvidenceReference `json:"evidenceReferences,omitempty"`
-	Availability          Availability        `json:"availability"`
-	ProjectorRevision     string              `json:"projectorRevision"`
-	ProofRevision         string              `json:"proofRevision"`
-	Refusals              []string            `json:"refusals,omitempty"`
-	ResolutionFactsDigest string              `json:"resolutionFactsDigest"`
+	WinnerIndex        int                 `json:"winnerIndex"`
+	ProofBasis         string              `json:"proofBasis,omitempty"`
+	EvidenceReferences []EvidenceReference `json:"evidenceReferences,omitempty"`
+	Availability       Availability        `json:"availability"`
+	ProjectorRevision  string              `json:"projectorRevision"`
+	ProofRevision      string              `json:"proofRevision"`
+	Refusals           []string            `json:"refusals,omitempty"`
+	// ResolutionFactsDigest is the exact-byte digest both scorers share, as
+	// the protocol spells it: "sha256:" followed by the 64 lower-case hex
+	// digits of SHA-256 over [SerializeResolutionArtifact].
+	ResolutionFactsDigest string `json:"resolutionFactsDigest"`
 }
 
 // ProjectResolution applies the proof obligations and digests the result.
@@ -331,7 +345,7 @@ func SerializeResolutionArtifact(a ResolutionArtifact) []byte {
 }
 
 func resolutionDigest(a ResolutionArtifact) string {
-	return sha256Hex(SerializeResolutionArtifact(a))
+	return DigestReference(sha256Hex(SerializeResolutionArtifact(a)))
 }
 
 // VerifyResolutionArtifact checks the digest AND the derivation: a

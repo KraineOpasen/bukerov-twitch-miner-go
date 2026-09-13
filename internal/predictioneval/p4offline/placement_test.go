@@ -82,7 +82,7 @@ func TestLocalReturnDoesNotProvePlatformAcceptance(t *testing.T) {
 			t.Fatalf("%+v", pl)
 		}
 		if !pl.PolicyStake.Known() || pl.PolicyStake.Value != 50 || pl.AttributedOutcomeID != "o1" ||
-			pl.AttributedCallObservationID != fp.CallStartedObservationID || !pl.ContributesToBetOnlyDenominator {
+			pl.AttributedCallObservationID != fp.CallStartedObservationID {
 			t.Fatalf("%+v", pl)
 		}
 		if pl.Attempt != fs.Attempt || pl.FactsetDigest != fs.Digest || pl.EventID != "e1" {
@@ -167,7 +167,7 @@ func TestCounterfactualDecisionsCannotInheritTheFactualPlacement(t *testing.T) {
 	_, fs, fp, p2 := factualCase(t, coherentCall)
 	same := decisionOf(t, p2, fs)
 	rs := mustVerify(t, rulesetFrom(t, cfgWithRule("same", predictioneval.ComparatorGe, 50, 100)))
-	p3b, err := p4offline.EvaluateP3bCase(fs, rs, "key", 0)
+	p3b, err := p4offline.EvaluateP3bCase(fs, rs, synthCoords(fs, 0))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -190,7 +190,7 @@ func TestCounterfactualDecisionsCannotInheritTheFactualPlacement(t *testing.T) {
 		// o1 holds 60%, o2 40%: a Le-50 rule admits o2 at 5% of 1000 = 50,
 		// the factual stake on the other outcome.
 		rs := mustVerify(t, rulesetFrom(t, cfgWithRulePoints("pick-o2", predictioneval.ComparatorLe, 50, 100, 5)))
-		res, err := p4offline.EvaluateP3bCase(fs, rs, "key", 0)
+		res, err := p4offline.EvaluateP3bCase(fs, rs, synthCoords(fs, 0))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -217,7 +217,7 @@ func TestCounterfactualDecisionsCannotInheritTheFactualPlacement(t *testing.T) {
 			edit(&d)
 			pl := p4offline.DerivePlacement(d, fp, validProof(fp))
 			if pl.Status != p4offline.PlacementUnknown || !containsString(pl.Reasons, "DECISION_NOT_DERIVED") ||
-				pl.AttributedCallObservationID != "" || pl.ContributesToBetOnlyDenominator {
+				pl.AttributedCallObservationID != "" {
 				t.Fatalf("%s: %+v", name, pl)
 			}
 		}
@@ -244,7 +244,7 @@ func TestCounterfactualDecisionsCannotInheritTheFactualPlacement(t *testing.T) {
 		d.Choice = p4offline.PolicyChoice{Present: true, Index: 0, OutcomeID: "o2"}
 		pl := p4offline.DerivePlacement(d, fp, validProof(fp))
 		if pl.Status != p4offline.PlacementUnknown || !containsString(pl.Reasons, "CHOICE_INDEX_ID_MISMATCH") ||
-			pl.AttributedCallObservationID != "" || pl.ContributesToBetOnlyDenominator {
+			pl.AttributedCallObservationID != "" {
 			t.Fatalf("slot 0 is o1; a decision naming o2 at slot 0 cannot inherit slot 0's call: %+v", pl)
 		}
 		d.Choice = p4offline.PolicyChoice{Present: true, Index: 7, OutcomeID: "o1"}
@@ -310,7 +310,7 @@ func TestCounterfactualDecisionsCannotInheritTheFactualPlacement(t *testing.T) {
 	t.Run("a P3b decision equal to the factual one inherits the factual call", func(t *testing.T) {
 		// A Ge-50 rule admits o1 at 5% of 1000 = 50: the factual decision.
 		rs := mustVerify(t, rulesetFrom(t, cfgWithRulePoints("same-as-factual", predictioneval.ComparatorGe, 50, 100, 5)))
-		res, err := p4offline.EvaluateP3bCase(fs, rs, "key", 0)
+		res, err := p4offline.EvaluateP3bCase(fs, rs, synthCoords(fs, 0))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -329,7 +329,7 @@ func TestCounterfactualDecisionsCannotInheritTheFactualPlacement(t *testing.T) {
 		illegal.Action.Legal = false
 		illegal.Action.Class = p4offline.ActionUnsupportedShape
 		if pl := p4offline.DerivePlacement(illegal, fp, validProof(fp)); pl.Status != p4offline.PlacementUnknown ||
-			!containsString(pl.Reasons, "ILLEGAL_NATIVE_SHAPE") || pl.ContributesToBetOnlyDenominator {
+			!containsString(pl.Reasons, "ILLEGAL_NATIVE_SHAPE") {
 			t.Fatalf("%+v", pl)
 		}
 		foreignMap := same
@@ -365,7 +365,7 @@ func TestPolicyResultsBindOnlyToTheirOwnFactset(t *testing.T) {
 		t.Fatalf("got %v", err)
 	}
 	rs := mustVerify(t, rulesetFrom(t, cfgWithRule("bind", predictioneval.ComparatorGe, 50, 100)))
-	p3b, err := p4offline.EvaluateP3bCase(fs, rs, "key", 0)
+	p3b, err := p4offline.EvaluateP3bCase(fs, rs, synthCoords(fs, 0))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -390,7 +390,7 @@ func TestPolicySkipAndNoAttemptPrefixPlacementsAreDistinct(t *testing.T) {
 		t.Fatalf("fixture: %+v %+v", skip.Action, skip.Stake)
 	}
 	pl := p4offline.DerivePlacement(skip, fpS, nil)
-	if pl.Status != p4offline.PlacementNotApplicable || pl.ContributesToBetOnlyDenominator ||
+	if pl.Status != p4offline.PlacementNotApplicable ||
 		!pl.PolicyStake.Known() || pl.PolicyStake.Value != 0 || pl.AttributedCallObservationID != "" {
 		t.Fatalf("a skip has no placement and an exact zero stake: %+v", pl)
 	}
@@ -409,7 +409,7 @@ func TestPolicySkipAndNoAttemptPrefixPlacementsAreDistinct(t *testing.T) {
 		}
 	})
 	rs := mustVerify(t, rulesetFrom(t, cfgDefaultOnly("none", 95, 100)))
-	p3b, err := p4offline.EvaluateP3bCase(fs, rs, "key", 0)
+	p3b, err := p4offline.EvaluateP3bCase(fs, rs, synthCoords(fs, 0))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -419,7 +419,7 @@ func TestPolicySkipAndNoAttemptPrefixPlacementsAreDistinct(t *testing.T) {
 	}
 	pl = p4offline.DerivePlacement(none, fp, validProof(fp))
 	if pl.Status != p4offline.PlacementUnknown || pl.PolicyStake.Presence != p4offline.PresenceUnknown ||
-		!containsString(pl.Reasons, string(p4offline.ActionNoAttemptInSuppliedPrefix)) || pl.ContributesToBetOnlyDenominator {
+		!containsString(pl.Reasons, string(p4offline.ActionNoAttemptInSuppliedPrefix)) {
 		t.Fatalf("NO_ATTEMPT_IN_SUPPLIED_PREFIX is not NOT_APPLICABLE and carries no zero: %+v", pl)
 	}
 	// A genuine PARTICIPATION_ADMITTED_STAKE_UNKNOWN: a balance past u32.
@@ -429,7 +429,7 @@ func TestPolicySkipAndNoAttemptPrefixPlacementsAreDistinct(t *testing.T) {
 		t.Fatal(err)
 	}
 	one := mustVerify(t, rulesetFrom(t, cfgWithRule("one", predictioneval.ComparatorGe, 50, 100)))
-	p3bU, err := p4offline.EvaluateP3bCase(fsU, one, "key", 0)
+	p3bU, err := p4offline.EvaluateP3bCase(fsU, one, synthCoords(fsU, 0))
 	if err != nil {
 		t.Fatal(err)
 	}

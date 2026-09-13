@@ -8,6 +8,7 @@ package p4offline_test
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/predictioneval"
@@ -187,7 +188,7 @@ func TestHandwrittenWinLoseRefundScoring(t *testing.T) {
 	})
 	t.Run("a placement from another policy is not this policy's", func(t *testing.T) {
 		rs := mustVerify(t, rulesetFrom(t, cfgWithRule("p3b", predictioneval.ComparatorGe, 50, 100)))
-		p3b, err := p4offline.EvaluateP3bCase(fs, rs, "key", 0)
+		p3b, err := p4offline.EvaluateP3bCase(fs, rs, synthCoords(fs, 0))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -223,7 +224,7 @@ func TestHandwrittenWinLoseRefundScoring(t *testing.T) {
 		}
 		handBuilt := p4offline.PlacementEvidence{ContractVersion: p4offline.PlacementEvidenceVersion, Policy: p4offline.PolicyP2,
 			Attempt: dec.Attempt, FactsetDigest: dec.FactsetDigest, EventID: dec.EventID, Status: p4offline.PlacementAcceptedPlatformProven,
-			PolicyStake: dec.Stake, AttributedOutcomeID: "o1", AttributedCallObservationID: "ghost-call", ContributesToBetOnlyDenominator: true}
+			PolicyStake: dec.Stake, AttributedOutcomeID: "o1", AttributedCallObservationID: "ghost-call"}
 		if pe := p4offline.DerivePayout(dec, handBuilt, winnerArtifact("o1"), linkedRecord(handBuilt, p4offline.KnownInt64(120), p4offline.UnknownInt64("n/a"))); pe.Payout.Known() ||
 			!containsString(pe.Reasons, "PLACEMENT_NOT_DERIVED") {
 			t.Fatalf("%+v", pe)
@@ -311,7 +312,7 @@ func TestPolicySkipVersusNoAttemptPrefixPayout(t *testing.T) {
 	})
 
 	rs := mustVerify(t, rulesetFrom(t, cfgDefaultOnly("none", 95, 100)))
-	p3b, err := p4offline.EvaluateP3bCase(fs, rs, "key", 0)
+	p3b, err := p4offline.EvaluateP3bCase(fs, rs, synthCoords(fs, 0))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -350,7 +351,7 @@ func TestKnownZeroP3bStakeIsScoredOnChoiceOnly(t *testing.T) {
 		t.Fatal(err)
 	}
 	rs := mustVerify(t, rulesetFrom(t, cfgWithRule("one", predictioneval.ComparatorGe, 50, 100)))
-	p3b, err := p4offline.EvaluateP3bCase(fs, rs, "key", 0)
+	p3b, err := p4offline.EvaluateP3bCase(fs, rs, synthCoords(fs, 0))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -448,7 +449,7 @@ func TestAssessCaseQualityIsTheMinimumOverEverySeam(t *testing.T) {
 	ds, fs, _, p2 := factualCase(t, coherentCall)
 	p2dec := decisionOf(t, p2, fs)
 	rs := mustVerify(t, rulesetFrom(t, cfgWithRule("one", predictioneval.ComparatorGe, 50, 100)))
-	p3b, err := p4offline.EvaluateP3bCase(fs, rs, "key", 0)
+	p3b, err := p4offline.EvaluateP3bCase(fs, rs, synthCoords(fs, 0))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -512,7 +513,7 @@ func TestAssessCaseQualityIsTheMinimumOverEverySeam(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		p3bN, err := p4offline.EvaluateP3bCase(fsN, rs, "key", 0)
+		p3bN, err := p4offline.EvaluateP3bCase(fsN, rs, synthCoords(fsN, 0))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -537,26 +538,26 @@ func TestAssessCaseQualityIsTheMinimumOverEverySeam(t *testing.T) {
 			t.Fatal(err)
 		}
 		skipDec := decisionOf(t, p2skip, fsSkip)
-		p3bSkipCase, err := p4offline.EvaluateP3bCase(fsSkip, rs, "key", 0)
+		p3bSkipCase, err := p4offline.EvaluateP3bCase(fsSkip, rs, synthCoords(fsSkip, 0))
 		if err != nil {
 			t.Fatal(err)
 		}
 		if skipDec.Action.Class != p4offline.ActionPolicySkip || !skipDec.Choice.Present {
 			t.Fatalf("fixture: a skip with a computed choice, got %+v", skipDec)
 		}
-		if q := p4offline.AssessCaseQuality(dsSkip, fsSkip, skipDec, decisionOf(t, p3bSkipCase, fsSkip), winnerArtifact("o1")); q.Quality != p4offline.QualityDescriptiveOnly ||
-			!containsString(q.Reasons, "P2_NO_CHOICE:POLICY_SKIP") {
-			t.Fatalf("a policy that bet on nothing has no choice to score, whatever it computed on the way (stated assumption): %+v", q)
+		if q := p4offline.AssessCaseQuality(dsSkip, fsSkip, skipDec, decisionOf(t, p3bSkipCase, fsSkip), winnerArtifact("o1")); q.Quality != p4offline.QualityPrimaryScorable ||
+			len(q.Reasons) != 0 {
+			t.Fatalf("a skip is a per-policy non-member of the primary denominator, not a case downgrade: %+v", q)
 		}
 		noneRs := mustVerify(t, rulesetFrom(t, cfgDefaultOnly("none", 95, 100)))
-		p3bNone, err := p4offline.EvaluateP3bCase(fs, noneRs, "key", 0)
+		p3bNone, err := p4offline.EvaluateP3bCase(fs, noneRs, synthCoords(fs, 0))
 		if err != nil {
 			t.Fatal(err)
 		}
 		none := decisionOf(t, p3bNone, fs)
-		if q := p4offline.AssessCaseQuality(ds, fs, p2dec, none, winnerArtifact("o1")); q.Quality != p4offline.QualityDescriptiveOnly ||
-			!containsString(q.Reasons, "P3B_NO_CHOICE:NO_ATTEMPT_IN_SUPPLIED_PREFIX") {
-			t.Fatalf("%+v", q)
+		if q := p4offline.AssessCaseQuality(ds, fs, p2dec, none, winnerArtifact("o1")); q.Quality != p4offline.QualityPrimaryScorable ||
+			len(q.Reasons) != 0 {
+			t.Fatalf("a no-attempt prefix is a per-policy non-member of the primary denominator, not a case downgrade: %+v", q)
 		}
 		// A hand-built P3b decision claiming the factual choice and stake
 		// under a fabricated mapping is not derived, however well bound.
@@ -612,6 +613,19 @@ func TestAssessCaseQualityIsTheMinimumOverEverySeam(t *testing.T) {
 		if q := p4offline.AssessCaseQuality(ds, tamperedFs, p2dec, p3bdec, winnerArtifact("o1")); q.Quality != p4offline.QualityExcluded ||
 			!containsString(q.Reasons, "FACTSET_DIGEST_MISMATCH") {
 			t.Fatalf("%+v", q)
+		}
+		// An unverifiable factset's completeness label is not this package's:
+		// it is never echoed into the reasons.
+		relabelled := fs
+		relabelled.Completeness = "GARBAGE"
+		qr := p4offline.AssessCaseQuality(ds, relabelled, p2dec, p3bdec, winnerArtifact("o1"))
+		if qr.Quality != p4offline.QualityExcluded || !containsString(qr.Reasons, "FACTSET_DIGEST_MISMATCH") {
+			t.Fatalf("%+v", qr)
+		}
+		for _, r := range qr.Reasons {
+			if strings.Contains(r, "GARBAGE") {
+				t.Fatalf("an unverified label reached the reasons: %+v", qr)
+			}
 		}
 	})
 	t.Run("resolution verdicts", func(t *testing.T) {

@@ -27,17 +27,46 @@ import (
 //	                                               returned stake is recorded and equals the stake
 //
 // A POLICY_SKIP carries its own exact zero — the decision's stake, which
-// must be KNOWN 0 for the decision to be usable at all — and contributes to
-// no bet-only denominator. NO_ATTEMPT_IN_SUPPLIED_PREFIX is not a skip: its
-// stake and net are UNKNOWN.
+// must be KNOWN 0 for the decision to be usable at all — and its placement
+// is NOT_APPLICABLE. NO_ATTEMPT_IN_SUPPLIED_PREFIX is not a skip: its stake
+// and net are UNKNOWN.
+//
+// # Denominator membership (approved semantics)
+//
+// Two denominators are named per policy and carried as explicit facts, so a
+// runner can count members and non-members without re-deriving the rule:
+//
+//   - POLICY_CHOICE_ACCURACY, the primary metric: the denominator is the
+//     resolved WOULD_ATTEMPT decisions — a legal, derived WOULD_ATTEMPT whose
+//     choice was scored against a WINNER_KNOWN resolution over the outcome
+//     set it was made from. A POLICY_SKIP and a NO_ATTEMPT_IN_SUPPLIED_PREFIX
+//     are not attempted choices: they are non-members and are never counted
+//     wrong. An admitted participation whose stake is unknown carries a
+//     visible verdict but is not a WOULD_ATTEMPT. A zero denominator is the
+//     runner's N/A, never a zero rate.
+//   - PLACED_BET_WIN_RATE: the denominator is the platform-proven, attributed
+//     bets that settled WIN or LOSE. A mere WOULD_ATTEMPT is not sufficient;
+//     REFUND, POLICY_SKIP, NO_ATTEMPT and UNKNOWN are excluded.
+//
+// The two membership fields are the PAYOUT SEAM's half of the answer: they
+// say what this policy's decision is on this case, given the resolution and
+// the placement. Whether the CASE counts at all — admitted episode, complete
+// factset, proven boundary, both decisions derived and determinate, a
+// WINNER_KNOWN resolution — is seam 12's verdict, and the two are composed
+// only by [AssessDenominatorMembership], which re-derives the case quality
+// from the dataset and binds the payout evidence to the case. A runner that
+// counts the payout fields alone counts cases the boundary and admission
+// seams exclude; the fields are documented as necessary, not sufficient.
 //
 // Every artifact handed in is checked for its binding to the decision before
 // it is read: the placement must be this policy's on this case and must carry
 // the witness only [DerivePlacement] sets, and the resolution must be this
 // round's over the outcome set the choice was made from. A payout record and
-// its linkage are SUPPLIED evidence in this package's PROVISIONAL vocabulary
-// (see the package documentation's stated assumptions): the package checks
-// the linkage it is handed and cannot authenticate that the record exists.
+// its linkage are SUPPLIED evidence in this package's own vocabulary (see the
+// package documentation's reconciled readings): the package checks the
+// linkage it is handed and cannot authenticate that the record exists. The
+// payout evidence itself carries a witness only [DerivePayout] sets, like
+// every other derived artifact here.
 
 // PayoutOutcome is the closed settlement vocabulary.
 type PayoutOutcome string
@@ -109,7 +138,9 @@ type PayoutRecord struct {
 }
 
 // PayoutEvidence is the evidence-only settlement of one policy on one case,
-// bound to its case.
+// bound to its case, carrying a witness only [DerivePayout] sets: an edited
+// or stored-and-reloaded payout evidence is refused by
+// [AssessDenominatorMembership], the only consumer of its membership fields.
 type PayoutEvidence struct {
 	ContractVersion string                    `json:"contractVersion"`
 	Policy          string                    `json:"policy"`
@@ -120,16 +151,74 @@ type PayoutEvidence struct {
 	// NOT_APPLICABLE.
 	Outcome PayoutOutcome `json:"outcome"`
 	// ChoiceCorrect is the primary metric's input for this case and policy.
-	ChoiceCorrect         ChoiceVerdict `json:"choiceCorrect"`
-	Stake                 Int64Fact     `json:"stake"`
-	Payout                Int64Fact     `json:"payout"`
-	Net                   Int64Fact     `json:"net"`
-	Reasons               []string      `json:"reasons,omitempty"`
-	ResolutionFactsDigest string        `json:"resolutionFactsDigest,omitempty"`
+	ChoiceCorrect ChoiceVerdict `json:"choiceCorrect"`
+	// PrimaryDenominatorMember is the payout seam's POLICY_CHOICE_ACCURACY
+	// condition: a legal, derived WOULD_ATTEMPT whose ChoiceCorrect is
+	// CORRECT or INCORRECT against a WINNER_KNOWN resolution over the outcome
+	// set the choice was made from. It is never true for a skip, a no-attempt
+	// prefix, an admitted participation without a stake, an unresolved round
+	// or a refund. It is NECESSARY, not sufficient: the case must also be
+	// PRIMARY_SCORABLE, which only [AssessDenominatorMembership] establishes.
+	PrimaryDenominatorMember bool `json:"primaryDenominatorMember"`
+	// PlacedBetDenominatorMember is the payout seam's PLACED_BET_WIN_RATE
+	// condition: the attributed, platform-proven bet settled WIN or LOSE. A
+	// WIN whose payout amount is not recorded is still a settled bet; its
+	// Payout and Net stay UNKNOWN. Necessary, not sufficient, as above.
+	PlacedBetDenominatorMember bool      `json:"placedBetDenominatorMember"`
+	Stake                      Int64Fact `json:"stake"`
+	Payout                     Int64Fact `json:"payout"`
+	Net                        Int64Fact `json:"net"`
+	Reasons                    []string  `json:"reasons,omitempty"`
+	ResolutionFactsDigest      string    `json:"resolutionFactsDigest,omitempty"`
+	// Derivation is the decision's own derivation, carried so a stored
+	// payout names the decision it settled; the decision's witness travels
+	// unexported beside it and binds the evidence to that exact decision.
+	Derivation      string `json:"derivation,omitempty"`
+	decisionWitness string
+	witness         string
+}
+
+// derived reports whether the value is exactly what DerivePayout produced.
+func (p PayoutEvidence) derived() bool {
+	return p.witness != "" && p.witness == payoutEvidenceWitness(p)
+}
+
+func payoutEvidenceWitness(p PayoutEvidence) string {
+	var c canonical
+	c.str("p4offline-payout-evidence-witness")
+	c.str(p.ContractVersion)
+	c.str(p.Policy)
+	c.i64(p.Attempt.CollectorEpoch)
+	c.str(p.Attempt.CollectorSessionID)
+	c.str(p.Attempt.PoolInstanceID)
+	c.u64(p.Attempt.AttemptID)
+	c.str(p.FactsetDigest)
+	c.str(p.EventID)
+	c.str(string(p.Outcome))
+	c.str(string(p.ChoiceCorrect))
+	c.boolean(p.PrimaryDenominatorMember)
+	c.boolean(p.PlacedBetDenominatorMember)
+	frameFact(&c, p.Stake)
+	frameFact(&c, p.Payout)
+	frameFact(&c, p.Net)
+	c.count(len(p.Reasons))
+	for _, r := range p.Reasons {
+		c.str(r)
+	}
+	c.str(p.ResolutionFactsDigest)
+	c.str(p.Derivation)
+	c.str(p.decisionWitness)
+	return c.digest()
 }
 
 // DerivePayout is seam 10.
 func DerivePayout(policy PolicyDecision, placement PlacementEvidence, res ResolutionArtifact, record *PayoutRecord) PayoutEvidence {
+	out := derivePayout(policy, placement, res, record)
+	out.witness = payoutEvidenceWitness(out)
+	return out
+}
+
+func derivePayout(policy PolicyDecision, placement PlacementEvidence, res ResolutionArtifact, record *PayoutRecord) PayoutEvidence {
 	out := PayoutEvidence{
 		ContractVersion: PayoutEvidenceVersion,
 		Policy:          policy.Policy,
@@ -141,6 +230,8 @@ func DerivePayout(policy PolicyDecision, placement PlacementEvidence, res Resolu
 		Stake:           UnknownInt64(PayoutReasonNotEvaluated),
 		Payout:          UnknownInt64(PayoutReasonNotEvaluated),
 		Net:             UnknownInt64(PayoutReasonNotEvaluated),
+		Derivation:      policy.Derivation,
+		decisionWitness: policy.witness,
 	}
 	reason := func(r string) { out.Reasons = appendOnce(out.Reasons, r) }
 
@@ -223,6 +314,10 @@ func DerivePayout(policy PolicyDecision, placement PlacementEvidence, res Resolu
 	default:
 		reason(PayoutReasonResolutionUnknown)
 	}
+	// A resolved WOULD_ATTEMPT is a member of the primary denominator whether
+	// or not any bet was ever placed; nothing below changes that.
+	out.PrimaryDenominatorMember = policy.Action.Class == ActionWouldAttempt &&
+		(out.ChoiceCorrect == ChoiceCorrect || out.ChoiceCorrect == ChoiceIncorrect)
 
 	// ---- The stake (its sign was checked with the decision). --------------
 	out.Stake = policy.Stake
@@ -247,6 +342,7 @@ func DerivePayout(policy PolicyDecision, placement PlacementEvidence, res Resolu
 		switch out.ChoiceCorrect {
 		case ChoiceCorrect:
 			out.Outcome = PayoutWin
+			out.PlacedBetDenominatorMember = true
 			rec, why := linkedRecord(record, placement, res)
 			if why != "" {
 				reason(why)
@@ -266,6 +362,7 @@ func DerivePayout(policy PolicyDecision, placement PlacementEvidence, res Resolu
 			out.Net = KnownInt64(rec.Payout.Value - policy.Stake.Value)
 		case ChoiceIncorrect:
 			out.Outcome = PayoutLose
+			out.PlacedBetDenominatorMember = true
 			out.Payout = Int64Fact{Presence: PresenceKnown, Value: 0, Reason: PayoutReasonLoseByResolution}
 			out.Net = Int64Fact{Presence: PresenceKnown, Value: -policy.Stake.Value, Reason: PayoutReasonLoseByResolution}
 		default:

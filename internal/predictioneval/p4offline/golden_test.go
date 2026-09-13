@@ -71,7 +71,9 @@ func TestP2ConfigBindingDigestMatchesTheIndependentGolden(t *testing.T) {
 func TestResolutionArtifactDigestMatchesTheIndependentGolden(t *testing.T) {
 	g := loadGoldens(t)["resolutionArtifact"]
 	a := p4offline.ProjectResolution(goodWinnerEvidence())
-	if a.ResolutionFactsDigest != g.SHA256 {
+	// The artifact spells its digest as the protocol does: a "sha256:"
+	// reference to the oracle's hex.
+	if a.ResolutionFactsDigest != p4offline.DigestReference(g.SHA256) {
 		t.Fatalf("digest %s, oracle %s", a.ResolutionFactsDigest, g.SHA256)
 	}
 }

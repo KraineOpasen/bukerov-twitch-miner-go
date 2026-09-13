@@ -184,6 +184,19 @@ func ptrInt(v int) *int         { return &v }
 func ptrBool(v bool) *bool      { return &v }
 func ptrF64(v float64) *float64 { return &v }
 
+// synthCoords names the synthetic dataset binding of one factset and run:
+// the fixtures' dataset identity, the factset's own digest reference and its
+// round's event id as the paired opportunity.
+func synthCoords(fs p4offline.CommonFactset, trajectory uint32) p4offline.EntropyCoordinates {
+	return p4offline.EntropyCoordinates{
+		DatasetID:           "p4-synthetic-dataset",
+		DatasetVersion:      "v1",
+		CommonFactsetDigest: p4offline.DigestReference(fs.Digest),
+		PairedOpportunityID: fs.Episode.EventID,
+		Trajectory:          trajectory,
+	}
+}
+
 // synthOutcomes is the recurring two-outcome vector: o1 holds 600 of 1000
 // points (6 users, top single stake 90), o2 holds 400 (4 users, top 80).
 func synthOutcomes() []predictioneval.SourceModelOutcome {
