@@ -244,9 +244,14 @@ func AssessCaseQuality(ds predictioneval.SourceDataset, fs CommonFactset, p2, p3
 			factset = factset.Downgrade(QualityExcluded, QualityReasonFactsetBindingMismatch)
 		}
 	}
-	// The completeness label is read only from a VERIFIED factset, whose
-	// labels were re-derived from its values; an unverifiable factset's
-	// label is not this package's and never reaches the reasons.
+	// The completeness label is echoed into the reasons only from a VERIFIED
+	// factset, whose labels were re-derived from its values; an unverifiable
+	// factset's label is not this package's and never reaches the reasons.
+	// This function reads the label once more, to refuse a decision on a
+	// factset that is not COMPLETE; that branch appends at most one fixed
+	// constant. A factset that fails verification is EXCLUDED above and the
+	// merge floors there, so its label cannot raise the verdict — what it
+	// can still change is WHICH of this package's own reasons are recorded.
 	if verr == nil && fs.Completeness != FactsetComplete {
 		factset = factset.Downgrade(QualityDescriptiveOnly, QualityReasonFactsetPrefix+string(fs.Completeness))
 	}
