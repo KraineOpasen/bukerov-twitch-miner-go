@@ -373,7 +373,7 @@ func decisionRefusal(p PolicyDecision) string {
 		return DecisionReasonCaseBindingMismatch
 	case !p.Action.Legal:
 		return DecisionReasonIllegalNativeShape
-	case p.Action.Class == ActionPolicySkip && !(p.Stake.Known() && p.Stake.Value == 0):
+	case p.Action.Class == ActionPolicySkip && (!p.Stake.Known() || p.Stake.Value != 0):
 		return DecisionReasonPolicySkipStakeNotZero
 	case p.Choice.Present && (p.Choice.Index < 0 || p.Choice.Index >= len(p.OutcomeIDs) ||
 		p.Choice.OutcomeID == "" || p.OutcomeIDs[p.Choice.Index] != p.Choice.OutcomeID):
