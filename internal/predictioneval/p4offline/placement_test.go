@@ -222,7 +222,7 @@ func TestCounterfactualDecisionsCannotInheritTheFactualPlacement(t *testing.T) {
 			}
 		}
 		var decoded p4offline.PolicyDecision
-		raw, _ := json.Marshal(same)
+		raw := mustMarshal(t, same)
 		if err := json.Unmarshal(raw, &decoded); err != nil {
 			t.Fatal(err)
 		}
@@ -276,7 +276,7 @@ func TestCounterfactualDecisionsCannotInheritTheFactualPlacement(t *testing.T) {
 			}
 		}
 		var decoded p4offline.FactualPlacement
-		raw, _ := json.Marshal(fp)
+		raw := mustMarshal(t, fp)
 		if err := json.Unmarshal(raw, &decoded); err != nil {
 			t.Fatal(err)
 		}

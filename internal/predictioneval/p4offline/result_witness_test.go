@@ -96,7 +96,7 @@ func TestPolicyResultsCarryTheirOwnWitness(t *testing.T) {
 			}
 		}
 		var decoded p4offline.P3bCaseResult
-		raw, _ := json.Marshal(p3b)
+		raw := mustMarshal(t, p3b)
 		if err := json.Unmarshal(raw, &decoded); err != nil {
 			t.Fatal(err)
 		}
@@ -144,7 +144,7 @@ func TestPolicyResultsCarryTheirOwnWitness(t *testing.T) {
 			}
 		}
 		var decoded p4offline.P2CaseResult
-		raw, _ := json.Marshal(p2)
+		raw := mustMarshal(t, p2)
 		if err := json.Unmarshal(raw, &decoded); err != nil {
 			t.Fatal(err)
 		}

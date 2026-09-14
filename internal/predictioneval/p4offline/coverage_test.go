@@ -123,7 +123,7 @@ func TestDigestedArtifactsSurviveTheirOwnJSONRoundTrip(t *testing.T) {
 	}
 	res := winnerArtifact("o1")
 	var res2 p4offline.ResolutionArtifact
-	raw, _ = json.Marshal(res)
+	raw = mustMarshal(t, res)
 	if err := json.Unmarshal(raw, &res2); err != nil {
 		t.Fatal(err)
 	}
@@ -132,7 +132,7 @@ func TestDigestedArtifactsSurviveTheirOwnJSONRoundTrip(t *testing.T) {
 	}
 	rs := mustVerify(t, rulesetFrom(t, cfgWithRule("rt", predictioneval.ComparatorGe, 50, 100)))
 	coords := synthCoords(fs, 0)
-	trace, _ := p4offline.BuildDrawTrace(coords, 2)
+	trace := mustDrawTrace(t, coords, 2)
 	a, err := p4offline.EvaluateP3bWithTrace(fs, rs, coords, trace)
 	if err != nil {
 		t.Fatal(err)
@@ -148,7 +148,7 @@ func TestDigestedArtifactsSurviveTheirOwnJSONRoundTrip(t *testing.T) {
 	// The projected stream itself survives JSON and is still the same
 	// stream to the native core.
 	var proj2 p4offline.P3bProjection
-	raw, _ = json.Marshal(a.Projection)
+	raw = mustMarshal(t, a.Projection)
 	if err := json.Unmarshal(raw, &proj2); err != nil {
 		t.Fatal(err)
 	}

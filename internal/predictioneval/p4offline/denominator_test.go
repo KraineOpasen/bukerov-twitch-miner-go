@@ -382,7 +382,7 @@ func TestDenominatorMembershipIsComposedWithTheCaseQuality(t *testing.T) {
 		// is DESCRIPTIVE_ONLY, and P2's proven WIN is described, not counted;
 		// the verdict names the counterpart it was judged beside.
 		half := mustVerify(t, rulesetFrom(t, cfgWithRule("half", predictioneval.ComparatorGe, 50, 50)))
-		empty, _ := p4offline.BuildDrawTrace(synthCoords(fs, 0), 0)
+		empty := mustDrawTrace(t, synthCoords(fs, 0), 0)
 		p3bU, err := p4offline.EvaluateP3bWithTrace(fs, half, synthCoords(fs, 0), empty)
 		if err != nil {
 			t.Fatal(err)
@@ -465,7 +465,7 @@ func TestDenominatorMembershipIsComposedWithTheCaseQuality(t *testing.T) {
 			t.Fatalf("a skip promoted by hand is not a member: %+v", m)
 		}
 		var decoded p4offline.PayoutEvidence
-		raw, _ := json.Marshal(p2win)
+		raw := mustMarshal(t, p2win)
 		if err := json.Unmarshal(raw, &decoded); err != nil {
 			t.Fatal(err)
 		}

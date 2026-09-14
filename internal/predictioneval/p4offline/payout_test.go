@@ -215,7 +215,7 @@ func TestHandwrittenWinLoseRefundScoring(t *testing.T) {
 			t.Fatalf("a status edited into ACCEPTED must not pay: %+v", pe)
 		}
 		var decoded p4offline.PlacementEvidence
-		raw, _ := json.Marshal(proven)
+		raw := mustMarshal(t, proven)
 		if err := json.Unmarshal(raw, &decoded); err != nil {
 			t.Fatal(err)
 		}

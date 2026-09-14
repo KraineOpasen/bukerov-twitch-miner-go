@@ -333,8 +333,17 @@ func SelectEpisodes(ds predictioneval.SourceDataset) (EvidenceSelection, error) 
 		}
 
 		// ---- Seam 2: the first automatic opportunity, from RAW facts. -----
+		// Selection order is a fact about the RAW evidence: the earliest
+		// automatic row is the episode's first opportunity whether or not it
+		// names an attempt. A row that names none is an opportunity nothing
+		// can be materialized for — unusable, and a later attempt must not be
+		// searched out to stand in for it, or the episode would be scored on
+		// an opportunity that was not its first.
 		var firstID int64
 		var firstSeq int64
+		var earliestSeq int64 // orders the scan only; never an episode field
+		earliestNamesAttempt := false
+		sawAutomaticRow := false
 		attemptIDs := map[int64]bool{}
 		attemptObs := map[int64][]string{}
 		for _, r := range recs {
@@ -342,7 +351,12 @@ func SelectEpisodes(ds predictioneval.SourceDataset) (EvidenceSelection, error) 
 				continue
 			}
 			id, ok := r.Payload.Counters[predictioneval.CounterAutoAttemptID]
-			if !ok || id <= 0 {
+			namesAttempt := ok && id > 0
+			if !sawAutomaticRow || r.CollectorSequence < earliestSeq {
+				sawAutomaticRow = true
+				earliestSeq, earliestNamesAttempt = r.CollectorSequence, namesAttempt
+			}
+			if !namesAttempt {
 				continue
 			}
 			attemptIDs[id] = true
@@ -351,9 +365,18 @@ func SelectEpisodes(ds predictioneval.SourceDataset) (EvidenceSelection, error) 
 				firstID, firstSeq = id, r.CollectorSequence
 			}
 		}
-		if firstID == 0 {
+		switch {
+		case !sawAutomaticRow:
 			exclude(ExclusionNoAutomaticOpportunity)
-		} else {
+		case !earliestNamesAttempt:
+			// Every id-bearing attempt on the round is a substitution this
+			// refuses. FirstOpportunityPosition keeps the episode's own first
+			// position: seam 3 orders supersession by it, and an episode whose
+			// earliest automatic row names no attempt must not lose its place
+			// in that order — it is still the round's earliest incarnation.
+			ep.LaterAttempts = len(attemptIDs)
+			exclude(ExclusionFirstOpportunityUnusable)
+		default:
 			ep.FirstOpportunityPosition = firstSeq
 			key := predictioneval.AttemptKey{
 				CollectorEpoch:     ds.Source.CollectorEpoch,
@@ -634,9 +657,10 @@ func classifySignals(recs []predictioneval.SourceRecord) []rawSignal {
 	// Recorded call starts, for orphan-return detection: keyed by the
 	// attempt's full identity (epoch, session, pool, id) for automatic calls
 	// — the automatic counter restarts per pool — and by round for calls
-	// without one.
-	autoStarts := map[attemptStartKey]bool{}
-	otherStarts := map[roundTriple]bool{}
+	// without one. Counted, not flagged: the producer records one start per
+	// return, so a start settles ONE return and is spent doing it.
+	autoStarts := map[attemptStartKey]int{}
+	otherStarts := map[roundTriple]int{}
 	for i := range recs {
 		r := &recs[i]
 		sig := rawSignal{rec: r}
@@ -653,9 +677,19 @@ func classifySignals(recs []predictioneval.SourceRecord) []rawSignal {
 		triple := roundTriple{r.PoolInstanceID, r.RoundIncarnationID, r.EventID}
 		switch r.Kind {
 		case predictioneval.KindPlacement:
+			// A placement fact this package cannot read — undecodable, or in a
+			// payload version it does not support — is a fact ABOUT the call
+			// record that cannot be read. Its phase could be CALL_RETURNED and
+			// the start it would name could precede the cutoff, so it positions
+			// itself as a call of unknown shape AND breaks the no-call coverage
+			// argument, the way an undecodable fact of any kind does. The version
+			// test is placement-only: an unsupported version on an automatic row
+			// is already refused upstream, where materialization drops the
+			// attempt and seam 2 finds no usable first opportunity.
 			switch {
-			case r.PayloadUndecodable:
+			case r.PayloadUndecodable || r.PayloadVersion != predictioneval.SupportedPayloadVersion:
 				sig.call, sig.callKind = true, CallKindAmbiguous
+				sig.undecodable = true
 			case r.Payload.Phase == predictioneval.PhaseCallStarted:
 				sig.call = true
 				switch {
@@ -667,16 +701,23 @@ func classifySignals(recs []predictioneval.SourceRecord) []rawSignal {
 					sig.callKind = CallKindAmbiguous
 				}
 				if sig.callKind == CallKindAuto {
-					autoStarts[attemptStartKey{r.CollectorEpoch, r.CollectorSessionID, r.PoolInstanceID, sig.attemptID}] = true
+					autoStarts[attemptStartKey{r.CollectorEpoch, r.CollectorSessionID, r.PoolInstanceID, sig.attemptID}]++
 				} else {
-					otherStarts[triple] = true
+					otherStarts[triple]++
 				}
 			case r.Payload.Phase == predictioneval.PhaseCallReturned:
+				// Spend one recorded start. A return that finds none has no start
+				// of its own, and the start it lacks could precede the cutoff.
 				started := false
 				if sig.attemptID > 0 && !sig.manual {
-					started = autoStarts[attemptStartKey{r.CollectorEpoch, r.CollectorSessionID, r.PoolInstanceID, sig.attemptID}]
-				} else {
-					started = otherStarts[triple]
+					key := attemptStartKey{r.CollectorEpoch, r.CollectorSessionID, r.PoolInstanceID, sig.attemptID}
+					if autoStarts[key] > 0 {
+						autoStarts[key]--
+						started = true
+					}
+				} else if otherStarts[triple] > 0 {
+					otherStarts[triple]--
+					started = true
 				}
 				if !started {
 					sig.orphanReturn = true

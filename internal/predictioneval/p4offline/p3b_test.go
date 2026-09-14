@@ -64,6 +64,31 @@ func rulesetFrom(t *testing.T, cfg predictioneval.OrderedRulesConfig) p4offline.
 	}
 }
 
+// mustMarshal serializes v or fails the test. Serialization is setup for the
+// round-trip and digest tests that follow it: a discarded error there would
+// leave a nil document whose later assertion could pass for the wrong reason.
+func mustMarshal(t *testing.T, v any) []byte {
+	t.Helper()
+	raw, err := json.Marshal(v)
+	if err != nil {
+		t.Fatalf("marshal %T: %v", v, err)
+	}
+	return raw
+}
+
+// mustDrawTrace builds the trace or fails the test. The refusal tests below
+// assert a LATER error (a binding or an unverified ruleset); a trace that was
+// never built would satisfy some of them without exercising the path at all,
+// so a construction failure must surface as itself, here.
+func mustDrawTrace(t *testing.T, coords p4offline.EntropyCoordinates, count int) predictioneval.SuppliedDrawTrace {
+	t.Helper()
+	trace, err := p4offline.BuildDrawTrace(coords, count)
+	if err != nil {
+		t.Fatalf("BuildDrawTrace(%d words): %v", count, err)
+	}
+	return trace
+}
+
 func mustVerify(t *testing.T, r p4offline.P3bRuleset) p4offline.VerifiedP3bRuleset {
 	t.Helper()
 	rs, err := p4offline.VerifyP3bRuleset(r)
@@ -191,7 +216,7 @@ func TestP3bRulesetIsSuppliedVerifiedAndBound(t *testing.T) {
 			t.Fatalf("got %v", err)
 		}
 		coords := synthCoords(fs, 0)
-		trace, _ := p4offline.BuildDrawTrace(coords, 2)
+		trace := mustDrawTrace(t, coords, 2)
 		if _, err := p4offline.EvaluateP3bWithTrace(fs, forged, coords, trace); !errors.Is(err, p4offline.ErrRulesetNotVerified) {
 			t.Fatalf("got %v", err)
 		}
@@ -218,7 +243,7 @@ func TestP3bRulesetIsSuppliedVerifiedAndBound(t *testing.T) {
 			t.Fatalf("a config the core refuses is not a typed REFUSED under the honest identity; it is an unverified ruleset: %v", err)
 		}
 		var decoded p4offline.VerifiedP3bRuleset
-		raw, _ := json.Marshal(rs)
+		raw := mustMarshal(t, rs)
 		if err := json.Unmarshal(raw, &decoded); err != nil {
 			t.Fatal(err)
 		}
@@ -228,7 +253,7 @@ func TestP3bRulesetIsSuppliedVerifiedAndBound(t *testing.T) {
 	})
 	t.Run("a config the core refuses is unusable", func(t *testing.T) {
 		bad := cfgWithRule("bad", predictioneval.ComparatorGe, 150, 100) // threshold out of domain
-		raw, _ := json.Marshal(bad)
+		raw := mustMarshal(t, bad)
 		sum := sha256.Sum256(raw)
 		r := p4offline.P3bRuleset{RulesetID: "bad", RawBytes: raw, RawSHA256: hex.EncodeToString(sum[:]),
 			Config: bad, NativeConfigDigest: strings.Repeat("b", 64)}
@@ -391,7 +416,7 @@ func TestP3bEntropyConsumptionThroughTheP4Trace(t *testing.T) {
 	t.Run("an exhausted trace is UNKNOWN_INPUT, not a default draw", func(t *testing.T) {
 		rs := mustVerify(t, rulesetFrom(t, cfgWithRule("half", predictioneval.ComparatorGe, 50, 50)))
 		coords := synthCoords(fs, 1)
-		empty, _ := p4offline.BuildDrawTrace(coords, 0)
+		empty := mustDrawTrace(t, coords, 0)
 		res, err := p4offline.EvaluateP3bWithTrace(fs, rs, coords, empty)
 		if err != nil {
 			t.Fatal(err)
@@ -402,7 +427,7 @@ func TestP3bEntropyConsumptionThroughTheP4Trace(t *testing.T) {
 		}
 		// A trace whose words are not the algorithm's for the coordinates is
 		// refused before the core sees it.
-		wrong, _ := p4offline.BuildDrawTrace(coords, 2)
+		wrong := mustDrawTrace(t, coords, 2)
 		wrong.Words = append([]predictioneval.OrderedRulesHex64(nil), wrong.Words...)
 		wrong.Words[0] ^= 1
 		if _, err := p4offline.EvaluateP3bWithTrace(fs, rs, coords, wrong); !errors.Is(err, p4offline.ErrEntropyWordMismatch) {
@@ -413,13 +438,13 @@ func TestP3bEntropyConsumptionThroughTheP4Trace(t *testing.T) {
 		rs := mustVerify(t, rulesetFrom(t, cfgWithRule("half", predictioneval.ComparatorGe, 50, 50)))
 		foreignRound := synthCoords(fs, 3)
 		foreignRound.PairedOpportunityID = "SOME-OTHER-ROUND"
-		trace, _ := p4offline.BuildDrawTrace(foreignRound, 2)
+		trace := mustDrawTrace(t, foreignRound, 2)
 		if _, err := p4offline.EvaluateP3bWithTrace(fs, rs, foreignRound, trace); !errors.Is(err, p4offline.ErrP3bBinding) {
 			t.Fatalf("round e1 must not be drawn under another opportunity's words: %v", err)
 		}
 		foreignFactset := synthCoords(fs, 3)
 		foreignFactset.CommonFactsetDigest = p4offline.DigestReference(strings.Repeat("0", 64))
-		trace, _ = p4offline.BuildDrawTrace(foreignFactset, 2)
+		trace = mustDrawTrace(t, foreignFactset, 2)
 		if _, err := p4offline.EvaluateP3bWithTrace(fs, rs, foreignFactset, trace); !errors.Is(err, p4offline.ErrP3bBinding) {
 			t.Fatalf("a factset must not be drawn under another factset's words: %v", err)
 		}
@@ -465,8 +490,14 @@ func TestP3bEntropyConsumptionThroughTheP4Trace(t *testing.T) {
 	})
 	t.Run("two trajectories draw different words", func(t *testing.T) {
 		rs := mustVerify(t, rulesetFrom(t, cfgWithRule("half", predictioneval.ComparatorGe, 50, 50)))
-		a, _ := p4offline.EvaluateP3bCase(fs, rs, synthCoords(fs, 0))
-		b, _ := p4offline.EvaluateP3bCase(fs, rs, synthCoords(fs, 1))
+		a, err := p4offline.EvaluateP3bCase(fs, rs, synthCoords(fs, 0))
+		if err != nil {
+			t.Fatalf("trajectory 0: %v", err)
+		}
+		b, err := p4offline.EvaluateP3bCase(fs, rs, synthCoords(fs, 1))
+		if err != nil {
+			t.Fatalf("trajectory 1: %v", err)
+		}
 		if a.Trace.RunID == b.Trace.RunID || a.Trace.EntropyDigest == b.Trace.EntropyDigest {
 			t.Fatalf("trajectories 0 and 1 share entropy: %+v / %+v", a.Trace, b.Trace)
 		}
@@ -594,7 +625,8 @@ func TestP3bUint32AndVectorBoundariesAreRefusedNotClamped(t *testing.T) {
 		if res.Trace.Coordinates != synthCoords(fs, 0) {
 			t.Fatalf("a refused result must name its coordinates: %+v", res.Trace)
 		}
-		if empty, _ := p4offline.BuildDrawTrace(synthCoords(fs, 0), 0); res.Trace.RunID == "" || res.Trace.RunID != empty.RunID {
+		empty := mustDrawTrace(t, synthCoords(fs, 0), 0)
+		if res.Trace.RunID == "" || res.Trace.RunID != empty.RunID {
 			t.Fatalf("a refused result names the run by the empty trace's identity: %q", res.Trace.RunID)
 		}
 		foreign := synthCoords(fs, 0)
@@ -612,7 +644,7 @@ func TestP3bUint32AndVectorBoundariesAreRefusedNotClamped(t *testing.T) {
 		}
 		// The supplied-trace entry point refuses the same coordinates the
 		// same way, before it projects anything.
-		out, _ := p4offline.BuildDrawTrace(synthCoords(fs, 0), 0)
+		out := mustDrawTrace(t, synthCoords(fs, 0), 0)
 		if _, err := p4offline.EvaluateP3bWithTrace(fs, rs, synthCoords(fs, p4offline.TrajectoryCount), out); !errors.Is(err, p4offline.ErrEntropyCoordinates) {
 			t.Fatalf("the supplied-trace path must refuse an out-of-protocol trajectory as such: %v", err)
 		}
@@ -631,7 +663,7 @@ func TestP3bNativeActionMapIsExhaustive(t *testing.T) {
 		t.Fatal(err)
 	}
 	coords := synthCoords(fs, 0)
-	trace, _ := p4offline.BuildDrawTrace(coords, 4)
+	trace := mustDrawTrace(t, coords, 4)
 	// A missing-balance stream, built natively, for the stake-unknown status.
 	missingBalance := proj.Stream
 	missingBalance.Candidates = append([]predictioneval.OrderedRulesCandidate(nil), proj.Stream.Candidates...)

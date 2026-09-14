@@ -160,12 +160,17 @@ func TestFirstAutomatedOpportunityIsNeverSubstitutedByALaterOne(t *testing.T) {
 		}
 	})
 
-	t.Run("an episode with no automatic attempt is not an opportunity", func(t *testing.T) {
+	t.Run("an automatic row naming no attempt is an unusable first opportunity", func(t *testing.T) {
 		s := newSynth()
 		s.add(s.fact(predictioneval.KindAutoDecision, predictioneval.PhaseAutoDue, "r1", "e1", 0))
 		ep := singleEpisode(t, mustSelect(t, s.dataset()))
-		if !ep.Excluded || !containsString(ep.ExclusionReasons, "NO_AUTOMATIC_OPPORTUNITY") {
+		// The row exists, so the episode HAD a first opportunity; it names no
+		// attempt, so nothing can be materialized for it.
+		if !ep.Excluded || !containsString(ep.ExclusionReasons, "FIRST_OPPORTUNITY_UNUSABLE") {
 			t.Fatalf("%+v", ep)
+		}
+		if ep.FirstOpportunityPosition != 1 || ep.FirstOpportunityUsable || ep.Attempt != nil {
+			t.Fatalf("its position is still evidence and nothing stands in for it: %+v", ep)
 		}
 	})
 }
@@ -224,7 +229,7 @@ func TestManualOrAmbiguousCallsExcludeTheEpisodeOrBreakTheBoundary(t *testing.T)
 		}
 	})
 
-	t.Run("an ambiguous placement fact before the cutoff breaks the boundary", func(t *testing.T) {
+	t.Run("an undecodable placement fact breaks the boundary", func(t *testing.T) {
 		s := newSynth()
 		s.due("r1", "e1", 1)
 		amb := s.fact(predictioneval.KindPlacement, "", "r1", "e1", 0)
@@ -235,8 +240,14 @@ func TestManualOrAmbiguousCallsExcludeTheEpisodeOrBreakTheBoundary(t *testing.T)
 		if !ep.Excluded || !containsString(ep.ExclusionReasons, "BOUNDARY_NOT_PROVEN") {
 			t.Fatalf("%+v", ep)
 		}
-		if ep.Boundary.EarliestCallKind != p4offline.CallKindAmbiguous || ep.Boundary.Reason != "C_NOT_BEFORE_F" {
+		if ep.Boundary.EarliestCallKind != p4offline.CallKindAmbiguous || !ep.Boundary.EarliestCallPresent {
 			t.Fatalf("an undecodable placement fact is an AMBIGUOUS call at its own position: %+v", ep.Boundary)
+		}
+		// Unreadable is also unreadable FOR COVERAGE, and the boundary reports
+		// that before it compares positions at all.
+		if ep.Boundary.Reason != "NO_CALL_COVERAGE_UNPROVEN" ||
+			!containsString(ep.Boundary.NoCallCoverage.Reasons, "UNDECODABLE_FACT_ON_ROUND") {
+			t.Fatalf("%+v", ep.Boundary)
 		}
 	})
 }
@@ -735,4 +746,197 @@ func cloneRegistry(reg p4offline.SourceRoundRegistry) p4offline.SourceRoundRegis
 		out.Entries[i] = e
 	}
 	return out
+}
+
+// TestOneCallStartPairsAtMostOneReturn pins the producer's one-start/one-return
+// shape. A recorded start settles ONE return: a second return under the same
+// identity has no start of its own, and the start it lacks could precede the
+// cutoff, so coverage is not proven. The check is on cardinality, not identity
+// — the full-identity scoping stays exactly as it is.
+func TestOneCallStartPairsAtMostOneReturn(t *testing.T) {
+	t.Run("a second automatic return is orphaned when one start was recorded", func(t *testing.T) {
+		s := newSynth()
+		s.placedAttempt("r1", "e1", 1)
+		s.placement("r1", "e1", 1, predictioneval.PhaseCallReturned, 50, 0, "OK", "NONE")
+		ep := singleEpisode(t, mustSelect(t, s.dataset()))
+		if ep.Boundary.NoCallCoverage.Proven ||
+			!containsString(ep.Boundary.NoCallCoverage.Reasons, "ORPHAN_CALL_RETURNED") {
+			t.Fatalf("one start cannot settle two returns: %+v", ep.Boundary)
+		}
+		if !ep.Excluded || !containsString(ep.ExclusionReasons, "BOUNDARY_NOT_PROVEN") {
+			t.Fatalf("an unproven boundary excludes the episode: %+v", ep)
+		}
+	})
+	t.Run("a second non-automatic return is orphaned when one start was recorded", func(t *testing.T) {
+		s := newSynth()
+		s.skippedAttempt("r1", "e1", 1)
+		s.add(s.fact(predictioneval.KindPlacement, predictioneval.PhaseCallStarted, "r1", "e1", 0))
+		s.add(s.fact(predictioneval.KindPlacement, predictioneval.PhaseCallReturned, "r1", "e1", 0))
+		s.add(s.fact(predictioneval.KindPlacement, predictioneval.PhaseCallReturned, "r1", "e1", 0))
+		ep := singleEpisode(t, mustSelect(t, s.dataset()))
+		if ep.Boundary.NoCallCoverage.Proven ||
+			!containsString(ep.Boundary.NoCallCoverage.Reasons, "ORPHAN_CALL_RETURNED") {
+			t.Fatalf("the non-automatic path settles one return per start too: %+v", ep.Boundary)
+		}
+	})
+	t.Run("a return with no start at all is still orphaned", func(t *testing.T) {
+		s := newSynth()
+		s.skippedAttempt("r1", "e1", 1)
+		s.placement("r1", "e1", 1, predictioneval.PhaseCallReturned, 50, 0, "OK", "NONE")
+		ep := singleEpisode(t, mustSelect(t, s.dataset()))
+		if ep.Boundary.NoCallCoverage.Proven ||
+			!containsString(ep.Boundary.NoCallCoverage.Reasons, "ORPHAN_CALL_RETURNED") {
+			t.Fatalf("%+v", ep.Boundary)
+		}
+	})
+	t.Run("one start and one return still pair", func(t *testing.T) {
+		s := newSynth()
+		s.placedAttempt("r1", "e1", 1)
+		ep := singleEpisode(t, mustSelect(t, s.dataset()))
+		if ep.Excluded || !ep.Boundary.Proven || !ep.Boundary.NoCallCoverage.Proven {
+			t.Fatalf("the honest one-start/one-return pair is untouched: %+v", ep)
+		}
+	})
+	t.Run("each pool's own start settles only its own return", func(t *testing.T) {
+		s := newSynth()
+		s.placedAttempt("r1", "e1", 1)
+		s.pool = "pool-b"
+		s.placedAttempt("r2", "e2", 1)
+		sel := mustSelect(t, s.dataset())
+		if len(sel.Episodes) != 2 {
+			t.Fatalf("want two episodes: %+v", sel.Episodes)
+		}
+		for _, ep := range sel.Episodes {
+			if ep.Excluded || !ep.Boundary.NoCallCoverage.Proven {
+				t.Fatalf("one pool's pair does not consume another pool's start: %+v", ep)
+			}
+		}
+	})
+}
+
+// TestUnreadableOrUnsupportedPlacementLeavesCoverageUnproven pins the second
+// half of the no-call coverage argument. A placement fact the reader could not
+// decode, or one claiming a payload version this package does not support, is
+// a fact about the call record that cannot be read: its phase could be
+// CALL_RETURNED and the start it names could precede the cutoff. Coverage is
+// therefore not proven, exactly as it is not proven for any other unreadable
+// fact on the round. The fact still positions itself as an ambiguous call.
+func TestUnreadableOrUnsupportedPlacementLeavesCoverageUnproven(t *testing.T) {
+	// afterCutoff builds a skipping attempt and then one placement fact at a
+	// LATER position, so C < F holds and coverage is the only thing left that
+	// can refuse the boundary.
+	afterCutoff := func(t *testing.T, mutate func(*predictioneval.SourceRecord)) p4episode {
+		t.Helper()
+		s := newSynth()
+		s.skippedAttempt("r1", "e1", 1)
+		r := s.fact(predictioneval.KindPlacement, predictioneval.PhaseCallStarted, "r1", "e1", 1)
+		mutate(&r)
+		s.add(r)
+		return singleEpisode(t, mustSelect(t, s.dataset()))
+	}
+
+	t.Run("an undecodable placement fact after the cutoff leaves coverage unproven", func(t *testing.T) {
+		ep := afterCutoff(t, func(r *predictioneval.SourceRecord) { r.PayloadUndecodable = true })
+		if ep.Boundary.NoCallCoverage.Proven ||
+			!containsString(ep.Boundary.NoCallCoverage.Reasons, "UNDECODABLE_FACT_ON_ROUND") {
+			t.Fatalf("an unreadable placement fact cannot prove there was no call: %+v", ep.Boundary)
+		}
+		if ep.Boundary.Reason != "NO_CALL_COVERAGE_UNPROVEN" || !ep.Excluded {
+			t.Fatalf("the boundary must fail closed on unproven coverage: %+v", ep)
+		}
+		if ep.Boundary.EarliestCallKind != p4offline.CallKindAmbiguous || !ep.Boundary.EarliestCallPresent {
+			t.Fatalf("the fact still positions itself as an ambiguous call: %+v", ep.Boundary)
+		}
+	})
+	t.Run("a placement fact claiming an unsupported payload version leaves coverage unproven", func(t *testing.T) {
+		ep := afterCutoff(t, func(r *predictioneval.SourceRecord) {
+			r.PayloadVersion = predictioneval.SupportedPayloadVersion + 1
+		})
+		if ep.Boundary.NoCallCoverage.Proven ||
+			!containsString(ep.Boundary.NoCallCoverage.Reasons, "UNDECODABLE_FACT_ON_ROUND") {
+			t.Fatalf("a placement fact in an unsupported version is not readable evidence: %+v", ep.Boundary)
+		}
+		if ep.Boundary.Reason != "NO_CALL_COVERAGE_UNPROVEN" || !ep.Excluded {
+			t.Fatalf("the boundary must fail closed on unproven coverage: %+v", ep)
+		}
+	})
+	t.Run("a supported, decodable placement fact still proves coverage", func(t *testing.T) {
+		ep := afterCutoff(t, func(*predictioneval.SourceRecord) {})
+		if !ep.Boundary.NoCallCoverage.Proven || !ep.Boundary.Proven || ep.Excluded {
+			t.Fatalf("a readable call after the cutoff is exactly what the boundary admits: %+v", ep)
+		}
+	})
+}
+
+// TestEarliestAutomaticRowWithoutAnIdentifierIsNotSubstituted pins seam 2's
+// no-later-substitution rule at the one shape that used to escape it: the
+// EARLIEST raw automatic row carries no usable attempt id. It is the episode's
+// first opportunity and it is unusable; a later, fully materialized attempt
+// must not stand in for it.
+func TestEarliestAutomaticRowWithoutAnIdentifierIsNotSubstituted(t *testing.T) {
+	t.Run("a later valid attempt does not substitute for an identifier-less first row", func(t *testing.T) {
+		s := newSynth()
+		s.add(s.fact(predictioneval.KindAutoDecision, predictioneval.PhaseAutoDue, "r1", "e1", 0))
+		s.placedAttempt("r1", "e1", 2)
+		ep := singleEpisode(t, mustSelect(t, s.dataset()))
+		if !ep.Excluded || !containsString(ep.ExclusionReasons, "FIRST_OPPORTUNITY_UNUSABLE") {
+			t.Fatalf("the earliest automatic row is the first opportunity and it is unusable: %+v", ep)
+		}
+		if ep.FirstOpportunityUsable || ep.Attempt != nil {
+			t.Fatalf("no later attempt may stand in for it: %+v", ep.Attempt)
+		}
+		if ep.Quality.Quality == p4offline.QualityPrimaryScorable {
+			t.Fatalf("a substituted episode must not reach the primary cohort: %+v", ep.Quality)
+		}
+	})
+	t.Run("a non-positive attempt id is identifier-less too", func(t *testing.T) {
+		s := newSynth()
+		r := s.fact(predictioneval.KindAutoDecision, predictioneval.PhaseAutoDue, "r1", "e1", 0)
+		r.Payload.Counters = map[string]int64{predictioneval.CounterAutoAttemptID: -1}
+		s.add(r)
+		s.placedAttempt("r1", "e1", 2)
+		ep := singleEpisode(t, mustSelect(t, s.dataset()))
+		if !ep.Excluded || !containsString(ep.ExclusionReasons, "FIRST_OPPORTUNITY_UNUSABLE") {
+			t.Fatalf("a non-positive id names no attempt: %+v", ep)
+		}
+	})
+	t.Run("an episode with no automatic row at all is not an opportunity", func(t *testing.T) {
+		s := newSynth()
+		s.userTerminal("r1", "e1", "OK", 0, 0)
+		ep := singleEpisode(t, mustSelect(t, s.dataset()))
+		// The fixture carries no call, so this reason stands alone.
+		if !ep.Excluded || !containsString(ep.ExclusionReasons, "NO_AUTOMATIC_OPPORTUNITY") {
+			t.Fatalf("no automatic row at all is still NO_AUTOMATIC_OPPORTUNITY: %+v", ep)
+		}
+		if containsString(ep.ExclusionReasons, "FIRST_OPPORTUNITY_UNUSABLE") {
+			t.Fatalf("the two halves of the partition are distinct: %+v", ep.ExclusionReasons)
+		}
+	})
+	t.Run("an unusable earliest incarnation still supersedes the later one", func(t *testing.T) {
+		// Seam 3 orders supersession by FirstOpportunityPosition. An episode
+		// whose earliest automatic row names no attempt is still the round's
+		// EARLIEST incarnation, so it must keep its place in that order and
+		// the later incarnation must stay superseded — an unusable first
+		// opportunity may not hand the round to a usable later one.
+		s := newSynth()
+		s.userTerminal("r1", "e1", "OK", 0, 0)
+		s.skippedAttempt("r2", "e1", 1)
+		s.add(s.fact(predictioneval.KindAutoDecision, predictioneval.PhaseAutoDue, "r1", "e1", 0))
+		sel := mustSelect(t, s.dataset())
+		var later *p4episode
+		for i := range sel.Episodes {
+			if sel.Episodes[i].Episode.RoundIncarnationID == "r2" {
+				later = &sel.Episodes[i]
+			}
+		}
+		if later == nil {
+			t.Fatalf("no r2 episode: %+v", sel.Episodes)
+		}
+		if !later.Excluded || !containsString(later.ExclusionReasons, "SUPERSEDED_BY_EARLIER_INCARNATION") {
+			t.Fatalf("the later incarnation must stay superseded: %+v", later)
+		}
+		if later.Quality.Quality == p4offline.QualityPrimaryScorable {
+			t.Fatalf("a superseded incarnation must not reach the primary cohort: %+v", later.Quality)
+		}
+	})
 }
