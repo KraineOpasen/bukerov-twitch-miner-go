@@ -77,8 +77,11 @@ func TestPreDecisionExitIsCoverageOnly(t *testing.T) {
 		t.Fatalf("%v", err)
 	}
 	// The native evaluator's own COVERAGE_ONLY mapping is what such an attempt
-	// yields when replayed directly.
-	m := p4offline.MapP2Action(predictioneval.Evaluate(predictioneval.DecisionInputs{PreDecisionExit: "NOT_ELIGIBLE"}, predictioneval.ObservedRealization{}))
+	// yields when replayed directly (under the minimum the projection pins on
+	// every path).
+	m := p4offline.MapP2Action(predictioneval.Evaluate(
+		predictioneval.DecisionInputs{PreDecisionExit: "NOT_ELIGIBLE", MinimumStake: predictioneval.PinnedMinimumStake},
+		predictioneval.ObservedRealization{}))
 	if !m.Legal || m.Class != p4offline.ActionCoverageOnly {
 		t.Fatalf("%+v", m)
 	}

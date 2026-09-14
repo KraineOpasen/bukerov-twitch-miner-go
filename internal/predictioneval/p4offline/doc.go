@@ -20,7 +20,7 @@
 //  2. First automated opportunity selection WITHOUT later substitution: part
 //     of [SelectEpisodes]; see [EpisodeSelection].
 //  3. Globally reconciled source-round identity and deduplication:
-//     [ClaimSourceRound], [ReconcileSourceRounds].
+//     [ClaimSourceRound], [ReconcileSourceRounds], [VerifySourceRoundRegistry].
 //  4. Outcome-free common factset serialization and digest:
 //     [BuildCommonFactset], [SerializeCommonFactset], [VerifyCommonFactset],
 //     [CommonFactsetDigestVersion].
@@ -62,7 +62,9 @@
 //     settled WIN or LOSE, and a POLICY_SKIP or NO_ATTEMPT_IN_SUPPLIED_PREFIX
 //     is a visible non-member that is never counted wrong. The payout seam
 //     states its half ([PayoutEvidence]); the case's half is re-derived from
-//     the dataset; only [AssessDenominatorMembership] composes them;
+//     the dataset; only [AssessDenominatorMembership] composes them, and
+//     only for the canonical claim of the round in the source-round
+//     registry the caller reconciled;
 //   - no later fact repairs an earlier missing value;
 //   - a different counterfactual choice or stake cannot inherit the factual
 //     placement;
@@ -100,12 +102,16 @@
 // before [ReconcileSourceRounds] reconciles it; and the entropy coordinates
 // must name the factset's own digest and round. The trusted path is
 // therefore IN-PROCESS derivation from the dataset: a runner that stores
-// artifacts re-derives them before it settles anything on them, and
-// [AssessCaseQuality] is the gate that decides whether a case counts. What
-// no pure function can do is authenticate that a supplied reference EXISTS:
-// "proven" always means "the supplied proof was checked for its binding",
-// and the observation identities it names are what the reader's audit
-// follows.
+// artifacts re-derives them before it settles anything on them,
+// [AssessCaseQuality] is the gate that decides whether a case is scorable,
+// and [AssessDenominatorMembership] is the only place a decision is
+// counted — as the canonical claim of its round in a registry that
+// re-derives from its own entries, whose digest the verdict names. Whether
+// that registry was reconciled over every dataset of the run is the
+// runner's record, not a pure function's proof; and no pure function can
+// authenticate that a supplied reference EXISTS: "proven" always means
+// "the supplied proof was checked for its binding", and the observation
+// identities it names are what the reader's audit follows.
 //
 // # Digest spellings
 //

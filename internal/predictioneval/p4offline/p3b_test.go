@@ -729,3 +729,42 @@ func TestP3bNativeActionMapIsExhaustive(t *testing.T) {
 		})
 	}
 }
+
+// TestRulesetDocumentMustSpellEveryMandatoryKey pins the raw document's
+// completeness: a mandatory key the document omits, or spells with a null,
+// would decode to a zero the core cannot tell from an explicit one — a
+// document without its default would pass as a resolved configuration whose
+// default is [0,0] — so it is refused as a decode failure before any digest
+// is read. Only "detailed" may be absent or null.
+func TestRulesetDocumentMustSpellEveryMandatoryKey(t *testing.T) {
+	dummy := strings.Repeat("a", 64)
+	refused := map[string]string{
+		"the default omitted":               `{"configId":"x","hasDefault":true}`,
+		"the default null":                  `{"configId":"x","hasDefault":true,"default":null}`,
+		"the default's points omitted":      `{"configId":"x","hasDefault":true,"default":{"rawMinPercent":95,"rawMaxPercent":100}}`,
+		"a bound of the default omitted":    `{"configId":"x","hasDefault":true,"default":{"rawMinPercent":95,"points":{"maxValue":0,"rawPercent":1}}}`,
+		"hasDefault omitted":                `{"configId":"x","default":{"rawMinPercent":95,"rawMaxPercent":100,"points":{"maxValue":0,"rawPercent":1}}}`,
+		"configId null":                     `{"configId":null,"hasDefault":true,"default":{"rawMinPercent":95,"rawMaxPercent":100,"points":{"maxValue":0,"rawPercent":1}}}`,
+		"a rule without its attempt rate":   `{"configId":"x","hasDefault":true,"detailed":[{"comparator":"Ge","rawThresholdPercent":50,"points":{"maxValue":0,"rawPercent":10}}],"default":{"rawMinPercent":95,"rawMaxPercent":100,"points":{"maxValue":0,"rawPercent":1}}}`,
+		"a rule's points without a percent": `{"configId":"x","hasDefault":true,"detailed":[{"comparator":"Ge","rawThresholdPercent":50,"rawAttemptRatePercent":100,"points":{"maxValue":0}}],"default":{"rawMinPercent":95,"rawMaxPercent":100,"points":{"maxValue":0,"rawPercent":1}}}`,
+		"a null rule":                       `{"configId":"x","hasDefault":true,"detailed":[null],"default":{"rawMinPercent":95,"rawMaxPercent":100,"points":{"maxValue":0,"rawPercent":1}}}`,
+	}
+	for name, doc := range refused {
+		raw := []byte(doc)
+		sum := sha256.Sum256(raw)
+		r := p4offline.P3bRuleset{RulesetID: "x", RawBytes: raw, RawSHA256: hex.EncodeToString(sum[:]),
+			Config: predictioneval.OrderedRulesConfig{ConfigID: "x", HasDefault: true}, NativeConfigDigest: dummy}
+		if _, err := p4offline.VerifyP3bRuleset(r); !errors.Is(err, p4offline.ErrRulesetRawDecode) {
+			t.Errorf("%s: must be refused as a decode failure, got %v", name, err)
+		}
+	}
+	// The one omission the contract admits: no detailed rules, absent or null.
+	nullDetailed := []byte(`{"configId":"x","hasDefault":true,"detailed":null,"default":{"rawMinPercent":95,"rawMaxPercent":100,"points":{"maxValue":0,"rawPercent":1}}}`)
+	cfg := cfgDefaultOnly("x", 95, 100)
+	sum := sha256.Sum256(nullDetailed)
+	if _, err := p4offline.VerifyP3bRuleset(p4offline.P3bRuleset{RulesetID: "x", RawBytes: nullDetailed,
+		RawSHA256: hex.EncodeToString(sum[:]), Config: cfg, NativeConfigDigest: nativeConfigDigest(t, cfg)}); err != nil {
+		t.Fatalf("a null detailed list means no detailed rules: %v", err)
+	}
+	mustVerify(t, rulesetFrom(t, cfg)) // absent detailed, the same thing
+}

@@ -61,6 +61,17 @@ const (
 	StealthProofUnknown StealthProof = "STEALTH_UNKNOWN"
 )
 
+// Incompleteness reasons of this package's own. Every other reason a
+// factset carries is one of the core's eligibility reasons or a
+// [StealthProof] label.
+const (
+	// FactsetReasonMinimumStakeNotPinned names a factset whose minimum stake
+	// is not [predictioneval.PinnedMinimumStake]. The projection pins it on
+	// every case it hands to this seam, so only a factset digested by hand
+	// can carry another; such a factset is INCOMPLETE by its values.
+	FactsetReasonMinimumStakeNotPinned = "MINIMUM_STAKE_NOT_PINNED"
+)
+
 // Factset refusals.
 var (
 	// ErrEpisodeNotSelected is an episode that is not in the dataset, is
@@ -314,6 +325,23 @@ func valueDerivedReasons(fs CommonFactset) []string {
 	}
 	if fs.Settings == nil {
 		out = append(out, predictioneval.IneligibleMissingSettings)
+	}
+	// The health verdict is a witnessed value with a closed vocabulary, and
+	// a reached decision witnesses one of the four gate states — never
+	// NOT_REACHED. The projection refuses both on the dataset path; a
+	// factset digested by hand is held to the same values here.
+	switch fs.HealthState {
+	case predictioneval.HealthDisabled, predictioneval.HealthNoGate, predictioneval.HealthAllowed, predictioneval.HealthDenied:
+	case predictioneval.HealthNotReached:
+		out = append(out, predictioneval.IneligibleInconsistentStageStates)
+	default:
+		out = append(out, predictioneval.IneligibleUnknownStageState)
+	}
+	// The minimum stake is the pinned one on every case the projection hands
+	// to this seam; a factset digested by hand around it is held to the same
+	// value.
+	if fs.MinimumStake != predictioneval.PinnedMinimumStake {
+		out = append(out, FactsetReasonMinimumStakeNotPinned)
 	}
 	return out
 }

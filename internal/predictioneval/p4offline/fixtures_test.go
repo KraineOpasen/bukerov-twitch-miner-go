@@ -179,6 +179,18 @@ func (s *synth) dataset() predictioneval.SourceDataset {
 	return predictioneval.SourceDataset{Source: src, Records: append([]predictioneval.SourceRecord(nil), s.records...)}
 }
 
+// registryOf reconciles the one claim the dataset derives for fs: the
+// registry a single-dataset case hands to the membership verdict. A factset
+// the dataset does not derive yields an empty registry, so the verdict names
+// the case as non-canonical rather than the fixture failing first.
+func registryOf(ds predictioneval.SourceDataset, fs p4offline.CommonFactset) p4offline.SourceRoundRegistry {
+	claim, err := p4offline.ClaimSourceRound(ds, fs)
+	if err != nil {
+		return p4offline.ReconcileSourceRounds(nil)
+	}
+	return p4offline.ReconcileSourceRounds([]p4offline.SourceRoundClaim{claim})
+}
+
 func ptrI64(v int64) *int64     { return &v }
 func ptrInt(v int) *int         { return &v }
 func ptrBool(v bool) *bool      { return &v }

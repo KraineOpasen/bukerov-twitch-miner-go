@@ -266,6 +266,22 @@ var rulesetKeySets = map[string][]string{
 	"default.points":  {"maxValue", "rawPercent"},
 }
 
+// rulesetOptionalKeys names, per object path, the keys a document may omit;
+// every other key the contract spells is MANDATORY. Every field of the
+// config has a legitimate zero, so a key the document omits — or spells
+// with a null — would decode to a value the core cannot tell from an
+// explicit one: a document without its default would be accepted as a
+// resolved configuration whose default is [0,0]. The document must spell
+// every mandatory key with a value. Only "detailed" is optional, at the
+// root, and only there is null allowed: absent, null and empty all mean no
+// detailed rules to the core.
+var rulesetOptionalKeys = map[string][]string{
+	"": {"detailed"},
+}
+
+// rulesetNullOK names the one path whose value may be null.
+const rulesetNullOK = "detailed"
+
 // VerifyP3bRuleset checks every binding of a supplied ruleset.
 func VerifyP3bRuleset(r P3bRuleset) (VerifiedP3bRuleset, error) {
 	if r.RulesetID == "" || r.Config.ConfigID != r.RulesetID {
@@ -332,7 +348,8 @@ func VerifyP3bRuleset(r P3bRuleset) (VerifiedP3bRuleset, error) {
 }
 
 // checkRulesetKeys walks the raw document token by token and refuses a
-// duplicated key or a key not spelled exactly as the contract spells it.
+// duplicated key, a key not spelled exactly as the contract spells it, a
+// mandatory key the document omits, and a null anywhere but "detailed".
 func checkRulesetKeys(raw []byte) error {
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	tok, err := dec.Token()
@@ -358,6 +375,14 @@ func walkRulesetObject(dec *json.Decoder, path string) error {
 		}
 		if d, ok := tok.(json.Delim); ok {
 			if d == '}' {
+				for _, req := range allowed {
+					if containsID(rulesetOptionalKeys[path], req) {
+						continue
+					}
+					if !seen[req] {
+						return errors.New("p4offline: mandatory key " + strconv.Quote(req) + " is absent at " + pathName(path))
+					}
+				}
 				return nil
 			}
 			return errors.New("p4offline: unexpected " + d.String() + " in object at " + pathName(path))
@@ -377,16 +402,22 @@ func walkRulesetObject(dec *json.Decoder, path string) error {
 		if path != "" {
 			child = path + "." + key
 		}
-		if err := walkRulesetValue(dec, child); err != nil {
+		if err := walkRulesetValue(dec, child, child == rulesetNullOK); err != nil {
 			return err
 		}
 	}
 }
 
-func walkRulesetValue(dec *json.Decoder, path string) error {
+func walkRulesetValue(dec *json.Decoder, path string, nullOK bool) error {
 	tok, err := dec.Token()
 	if err != nil {
 		return err
+	}
+	if tok == nil {
+		if nullOK {
+			return nil
+		}
+		return errors.New("p4offline: null at " + pathName(path) + " is not a value the contract admits there")
 	}
 	d, ok := tok.(json.Delim)
 	if !ok {
@@ -397,7 +428,7 @@ func walkRulesetValue(dec *json.Decoder, path string) error {
 		return walkRulesetObject(dec, path)
 	case '[':
 		for dec.More() {
-			if err := walkRulesetValue(dec, path); err != nil {
+			if err := walkRulesetValue(dec, path, false); err != nil {
 				return err
 			}
 		}

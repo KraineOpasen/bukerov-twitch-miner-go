@@ -1,6 +1,7 @@
 package p4offline
 
 import (
+	"errors"
 	"sort"
 	"strconv"
 
@@ -245,9 +246,10 @@ type SourceRoundEntry struct {
 	Canonical *SourceRoundClaim `json:"canonical,omitempty"`
 }
 
-// SourceRoundRegistry is the globally reconciled source-round identity set.
-// An event id can carry two entries: its reconciled one and an INVALID one
-// for claims that named it without a factset digest.
+// SourceRoundRegistry is the reconciled source-round identity set of the
+// claims the caller supplied. An event id can carry two entries: its
+// reconciled one and an INVALID one for claims that named it without a
+// factset digest.
 type SourceRoundRegistry struct {
 	Version string             `json:"version"`
 	Entries []SourceRoundEntry `json:"entries"`
@@ -387,9 +389,13 @@ func SelectEpisodes(ds predictioneval.SourceDataset) (EvidenceSelection, error) 
 				})
 				// A call the episode's OWN automatic attempts did not make is
 				// an intervention: manual when marked, otherwise of unknown
-				// origin — and unknown is not automatic.
+				// origin — and unknown is not automatic. An automatic attempt
+				// id names one of the episode's own attempts only on the
+				// episode's own pool, session and epoch: the counter restarts
+				// per pool, so another pool's attempt 1 on the same public
+				// round is another attempt.
 				if sig.callKind == CallKindAuto {
-					if id := sig.attemptID; !attemptIDs[id] {
+					if id := sig.attemptID; !attemptIDs[id] || !sameAttemptScope(sig.rec, ep.Episode) {
 						exclude(ExclusionUnattributedIntervention)
 					}
 				} else if !sig.manual {
@@ -540,6 +546,17 @@ type poolRound struct{ pool, round string }
 // roundTriple keys a call start by everything a non-automatic call names.
 type roundTriple struct{ pool, round, event string }
 
+// attemptStartKey keys an automatic call start by the attempt's FULL
+// identity. The automatic attempt counter restarts in every pool, so the
+// numeric id alone would pair one pool's orphan return with another pool's
+// start and hide the unrecorded call.
+type attemptStartKey struct {
+	epoch   int64
+	session string
+	pool    string
+	attempt int64
+}
+
 // rawSignal is one fact's bearing on an episode's admissibility.
 type rawSignal struct {
 	rec          *predictioneval.SourceRecord
@@ -614,9 +631,11 @@ func (ix signalIndex) matching(ep EpisodeIdentity) []rawSignal {
 // classifySignals reads every fact once and records what it signals.
 func classifySignals(recs []predictioneval.SourceRecord) []rawSignal {
 	out := make([]rawSignal, 0, len(recs))
-	// Recorded call starts, for orphan-return detection: keyed by attempt id
-	// for automatic calls, and by round for calls without one.
-	autoStarts := map[int64]bool{}
+	// Recorded call starts, for orphan-return detection: keyed by the
+	// attempt's full identity (epoch, session, pool, id) for automatic calls
+	// — the automatic counter restarts per pool — and by round for calls
+	// without one.
+	autoStarts := map[attemptStartKey]bool{}
 	otherStarts := map[roundTriple]bool{}
 	for i := range recs {
 		r := &recs[i]
@@ -648,14 +667,14 @@ func classifySignals(recs []predictioneval.SourceRecord) []rawSignal {
 					sig.callKind = CallKindAmbiguous
 				}
 				if sig.callKind == CallKindAuto {
-					autoStarts[sig.attemptID] = true
+					autoStarts[attemptStartKey{r.CollectorEpoch, r.CollectorSessionID, r.PoolInstanceID, sig.attemptID}] = true
 				} else {
 					otherStarts[triple] = true
 				}
 			case r.Payload.Phase == predictioneval.PhaseCallReturned:
 				started := false
 				if sig.attemptID > 0 && !sig.manual {
-					started = autoStarts[sig.attemptID]
+					started = autoStarts[attemptStartKey{r.CollectorEpoch, r.CollectorSessionID, r.PoolInstanceID, sig.attemptID}]
 				} else {
 					started = otherStarts[triple]
 				}
@@ -678,6 +697,14 @@ func classifySignals(recs []predictioneval.SourceRecord) []rawSignal {
 		out = append(out, sig)
 	}
 	return out
+}
+
+// sameAttemptScope reports whether a fact was recorded on the episode's own
+// pool, in its own collector session and epoch — the scope within which an
+// automatic attempt id identifies one attempt.
+func sameAttemptScope(r *predictioneval.SourceRecord, ep EpisodeIdentity) bool {
+	return r.CollectorEpoch == ep.CollectorEpoch && r.CollectorSessionID == ep.CollectorSessionID &&
+		r.PoolInstanceID == ep.PoolInstanceID
 }
 
 func earliestCall(calls []CallSignal) (CallSignal, bool) {
@@ -800,10 +827,17 @@ func ReconcileSourceRounds(claims []SourceRoundClaim) SourceRoundRegistry {
 		out.Entries = append(out.Entries, SourceRoundEntry{EventID: c.Episode.EventID, Status: SourceRoundInvalid, Claims: []SourceRoundClaim{c}})
 	}
 
+	out.Digest = registryDigest(out.Entries)
+	return out
+}
+
+// registryDigest frames a registry's entries exactly as ReconcileSourceRounds
+// digests them, so a registry can be re-verified from its own entries.
+func registryDigest(entries []SourceRoundEntry) string {
 	var c canonical
 	c.str(SourceRoundRegistryVersion)
-	c.count(len(out.Entries))
-	for _, e := range out.Entries {
+	c.count(len(entries))
+	for _, e := range entries {
 		c.str(e.EventID)
 		c.str(string(e.Status))
 		c.count(len(e.Claims))
@@ -812,8 +846,79 @@ func ReconcileSourceRounds(claims []SourceRoundClaim) SourceRoundRegistry {
 		}
 		c.boolean(e.Canonical != nil)
 	}
-	out.Digest = c.digest()
-	return out
+	return c.digest()
+}
+
+// ErrSourceRoundRegistry names a registry that is not what
+// [ReconcileSourceRounds] produces from its own entries.
+var ErrSourceRoundRegistry = errors.New("p4offline: source-round registry does not re-derive from its entries")
+
+// VerifySourceRoundRegistry re-derives a registry from the claims its own
+// entries carry: the registry must be exactly what [ReconcileSourceRounds]
+// produces from them — the same entries, statuses and canonical claims,
+// under a digest that matches the entries — so a registry whose entries
+// were altered after reconciliation, in storage or in memory (a status, a
+// canonical claim, an order, a digest), is named as such, while one read
+// back unchanged still re-derives. What it proves is that the entries are
+// a fixed point of reconciliation over the claims they carry — nothing
+// about WHICH claims: a claim withheld before reconciliation, a claim
+// removed or replaced afterwards with its entry and the digest re-derived
+// over the rest, or an entry removed whole, leaves a registry that
+// re-derives. The digest alone frames the claims and whether an
+// entry has a canonical claim, not which claim it is; the re-reconciliation
+// is what binds that. Like every digest here this detects change, not
+// origin: the claims are the ones the caller reconciled, and nothing here
+// can tell whether every dataset of the run was among them.
+func VerifySourceRoundRegistry(reg SourceRoundRegistry) error {
+	var claims []SourceRoundClaim
+	for _, e := range reg.Entries {
+		claims = append(claims, e.Claims...)
+	}
+	rebuilt := ReconcileSourceRounds(claims)
+	if reg.Version != SourceRoundRegistryVersion || reg.Digest == "" || reg.Digest != registryDigest(reg.Entries) ||
+		!sameEntries(rebuilt.Entries, reg.Entries) {
+		return ErrSourceRoundRegistry
+	}
+	return nil
+}
+
+// sameEntries compares two entry lists field for field, canonical claims by
+// value.
+func sameEntries(a, b []SourceRoundEntry) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i].EventID != b[i].EventID || a[i].Status != b[i].Status || len(a[i].Claims) != len(b[i].Claims) ||
+			(a[i].Canonical == nil) != (b[i].Canonical == nil) {
+			return false
+		}
+		for j := range a[i].Claims {
+			if a[i].Claims[j] != b[i].Claims[j] {
+				return false
+			}
+		}
+		if a[i].Canonical != nil && *a[i].Canonical != *b[i].Canonical {
+			return false
+		}
+	}
+	return true
+}
+
+// isCanonical reports whether claim is the registry's one canonical claim
+// for its public round: an entry for the round that is UNIQUE or
+// DEDUPLICATED_IDENTICAL and whose canonical claim is this claim. It is
+// read only behind [VerifySourceRoundRegistry], which has already proved
+// the entry to be reconciliation's own, so the canonical claim agrees with
+// every claim of its entry by construction.
+func (reg SourceRoundRegistry) isCanonical(claim SourceRoundClaim) bool {
+	for _, e := range reg.Entries {
+		if e.EventID == claim.Episode.EventID && e.Canonical != nil && *e.Canonical == claim &&
+			(e.Status == SourceRoundUnique || e.Status == SourceRoundDeduplicatedIdentical) {
+			return true
+		}
+	}
+	return false
 }
 
 // claimKey renders a claim canonically for ordering and digesting.

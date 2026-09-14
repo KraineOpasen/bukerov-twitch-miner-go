@@ -259,10 +259,12 @@ func TestCounterfactualDecisionsCannotInheritTheFactualPlacement(t *testing.T) {
 				f.CallStartedPosition = fp.CallStartedPosition + 10
 				f.CallStartedObservationID = "call-of-attempt-2"
 			},
-			"a call moved before the cutoff": func(f *p4offline.FactualPlacement) { f.CallStartedPosition = fp.CutoffPosition },
-			"another factset":                func(f *p4offline.FactualPlacement) { f.FactsetDigest = "other" },
-			"another round":                  func(f *p4offline.FactualPlacement) { f.EventID = "e2" },
-			"a local error erased":           func(f *p4offline.FactualPlacement) { f.LocalReasonOK = true; f.ErrorClass = "" },
+			"a call moved before the cutoff":  func(f *p4offline.FactualPlacement) { f.CallStartedPosition = fp.CutoffPosition },
+			"another factset":                 func(f *p4offline.FactualPlacement) { f.FactsetDigest = "other" },
+			"another round":                   func(f *p4offline.FactualPlacement) { f.EventID = "e2" },
+			"a local error erased":            func(f *p4offline.FactualPlacement) { f.LocalReasonOK = true; f.ErrorClass = "" },
+			"the recorded identity rewritten": func(f *p4offline.FactualPlacement) { f.RecordedChoiceOutcomeID = "o2" },
+			"the terminal slot rewritten":     func(f *p4offline.FactualPlacement) { f.RecordedTerminalSlot = ptrInt(1) },
 		}
 		for name, edit := range edits {
 			edited := fp
@@ -468,4 +470,130 @@ func skippedCase(t *testing.T) (predictioneval.SourceDataset, p4offline.CommonFa
 		t.Fatal(err)
 	}
 	return ds, fs, fp, p2
+}
+
+// TestRecordedChoiceIdentityMustMatchBeforeInheritance pins the factual
+// decision's identity: when the store recorded which outcome the factual
+// choice named, the policy's choice must name the same one, index and
+// identity alike, to be THE factual decision. A recorded decision whose index
+// agrees with the policy's but whose outcome does not is another decision,
+// and the platform-proven call is not inherited across it.
+func TestRecordedChoiceIdentityMustMatchBeforeInheritance(t *testing.T) {
+	build := func(t *testing.T, recorded string) (p4offline.FactualPlacement, p4offline.PolicyDecision) {
+		t.Helper()
+		s := newSynth()
+		s.due("r1", "e1", 1)
+		env := synthPlacedEnvelope()
+		env.ChoiceOutcomeID = recorded
+		s.terminal("r1", "e1", 1, predictioneval.PhaseAutoDecided, "OK", env)
+		s.call("r1", "e1", 1, *env.FinalAmount, *env.ChoiceIndex)
+		ds := s.dataset()
+		ep := singleEpisode(t, mustSelect(t, ds))
+		if ep.Excluded {
+			t.Fatalf("%v", ep.ExclusionReasons)
+		}
+		fs, err := p4offline.BuildCommonFactset(ds, ep.Episode)
+		if err != nil {
+			t.Fatal(err)
+		}
+		fp, err := p4offline.ProjectFactualPlacement(ds, fs)
+		if err != nil {
+			t.Fatal(err)
+		}
+		p2, err := p4offline.EvaluateP2Case(fs)
+		if err != nil {
+			t.Fatal(err)
+		}
+		dec := decisionOf(t, p2, fs)
+		if !dec.Choice.Present || dec.Choice.Index != 0 || dec.Choice.OutcomeID != "o1" {
+			t.Fatalf("fixture: %+v", dec.Choice)
+		}
+		if fp.RecordedChoiceOutcomeID != recorded {
+			t.Fatalf("the factual placement carries the recorded identity %q, got %q", recorded, fp.RecordedChoiceOutcomeID)
+		}
+		return fp, dec
+	}
+	t.Run("a recorded identity that names another outcome is another decision", func(t *testing.T) {
+		fp, dec := build(t, "o2")
+		pl := p4offline.DerivePlacement(dec, fp, validProof(fp))
+		if pl.Status != p4offline.PlacementCounterfactualNotInheritable || !containsString(pl.Reasons, "CHOICE_IDENTITY_DIFFERS") ||
+			pl.AttributedCallObservationID != "" {
+			t.Fatalf("the store says o2 at index 0; the policy's o1 at index 0 is not that decision and inherits nothing: %+v", pl)
+		}
+	})
+	t.Run("the recorded identity that names the policy's outcome inherits", func(t *testing.T) {
+		fp, dec := build(t, "o1")
+		if pl := p4offline.DerivePlacement(dec, fp, validProof(fp)); pl.Status != p4offline.PlacementAcceptedPlatformProven {
+			t.Fatalf("%+v", pl)
+		}
+	})
+	t.Run("a store that recorded no identity settles on the index alone", func(t *testing.T) {
+		fp, dec := build(t, "")
+		if pl := p4offline.DerivePlacement(dec, fp, validProof(fp)); pl.Status != p4offline.PlacementAcceptedPlatformProven {
+			t.Fatalf("%+v", pl)
+		}
+	})
+}
+
+// TestTerminalSlotMustMatchBeforeInheritance pins the second recorded
+// identity of the factual choice: the slot the terminal fact itself named.
+// The pinned producer writes it on every placing terminal fact, so a PLACE
+// whose terminal fact names another slot — or none — is not the policy's
+// decision, whatever the envelope's index says.
+func TestTerminalSlotMustMatchBeforeInheritance(t *testing.T) {
+	build := func(t *testing.T, terminalSlot *int) (p4offline.FactualPlacement, p4offline.PolicyDecision) {
+		t.Helper()
+		s := newSynth()
+		s.due("r1", "e1", 1)
+		env := synthPlacedEnvelope()
+		s.terminal("r1", "e1", 1, predictioneval.PhaseAutoDecided, "OK", env)
+		s.records[len(s.records)-1].Payload.OutcomeSlot = terminalSlot
+		s.call("r1", "e1", 1, *env.FinalAmount, *env.ChoiceIndex)
+		ds := s.dataset()
+		ep := singleEpisode(t, mustSelect(t, ds))
+		if ep.Excluded {
+			t.Fatalf("%v", ep.ExclusionReasons)
+		}
+		fs, err := p4offline.BuildCommonFactset(ds, ep.Episode)
+		if err != nil {
+			t.Fatal(err)
+		}
+		fp, err := p4offline.ProjectFactualPlacement(ds, fs)
+		if err != nil {
+			t.Fatal(err)
+		}
+		p2, err := p4offline.EvaluateP2Case(fs)
+		if err != nil {
+			t.Fatal(err)
+		}
+		dec := decisionOf(t, p2, fs)
+		if !dec.Choice.Present || dec.Choice.Index != 0 {
+			t.Fatalf("fixture: %+v", dec.Choice)
+		}
+		if (fp.RecordedTerminalSlot == nil) != (terminalSlot == nil) || (terminalSlot != nil && *fp.RecordedTerminalSlot != *terminalSlot) {
+			t.Fatalf("the factual placement carries the terminal fact's own slot %v, got %v", terminalSlot, fp.RecordedTerminalSlot)
+		}
+		return fp, dec
+	}
+	t.Run("a terminal fact naming another slot is another decision", func(t *testing.T) {
+		fp, dec := build(t, ptrInt(1))
+		pl := p4offline.DerivePlacement(dec, fp, validProof(fp))
+		if pl.Status != p4offline.PlacementCounterfactualNotInheritable || !containsString(pl.Reasons, "TERMINAL_SLOT_DIFFERS") ||
+			pl.AttributedCallObservationID != "" {
+			t.Fatalf("the terminal fact names slot 1; the policy's slot 0 is not that decision and inherits nothing: %+v", pl)
+		}
+	})
+	t.Run("a placing terminal fact without its slot is missing evidence", func(t *testing.T) {
+		fp, dec := build(t, nil)
+		pl := p4offline.DerivePlacement(dec, fp, validProof(fp))
+		if pl.Status != p4offline.PlacementCounterfactualNotInheritable || !containsString(pl.Reasons, "TERMINAL_SLOT_DIFFERS") {
+			t.Fatalf("%+v", pl)
+		}
+	})
+	t.Run("the terminal fact naming the policy's slot inherits", func(t *testing.T) {
+		fp, dec := build(t, ptrInt(0))
+		if pl := p4offline.DerivePlacement(dec, fp, validProof(fp)); pl.Status != p4offline.PlacementAcceptedPlatformProven {
+			t.Fatalf("%+v", pl)
+		}
+	})
 }

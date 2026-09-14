@@ -19,6 +19,7 @@ package p4offline_test
 
 import (
 	"encoding/json"
+	"errors"
 	"strconv"
 	"strings"
 	"testing"
@@ -50,10 +51,19 @@ func wireBool(t *testing.T, artifact any, key string) bool {
 	return b
 }
 
-func wireHasKey(artifact any, key string) bool {
-	raw, _ := json.Marshal(artifact)
+// wireHasKey reports whether the artifact's JSON carries key. Both
+// conversions must succeed: a negative assertion over a nil map would pass
+// without proving anything.
+func wireHasKey(t *testing.T, artifact any, key string) bool {
+	t.Helper()
+	raw, err := json.Marshal(artifact)
+	if err != nil {
+		t.Fatal(err)
+	}
 	var m map[string]json.RawMessage
-	_ = json.Unmarshal(raw, &m)
+	if err := json.Unmarshal(raw, &m); err != nil {
+		t.Fatalf("the artifact is not a JSON object: %v: %s", err, raw)
+	}
 	_, ok := m[key]
 	return ok
 }
@@ -72,7 +82,7 @@ func TestPlacedBetDenominatorCountsOnlyProvenWinOrLose(t *testing.T) {
 	}
 	// The placement artifact must not carry a denominator claim of its own:
 	// "would attempt" is not "placed bet".
-	if wireHasKey(proven, "contributesToBetOnlyDenominator") {
+	if wireHasKey(t, proven, "contributesToBetOnlyDenominator") {
 		t.Errorf("the placement artifact still carries the provisional contributesToBetOnlyDenominator flag")
 	}
 	win := p4offline.DerivePayout(dec, proven, winnerArtifact("o1"), linkedRecord(proven, p4offline.KnownInt64(120), p4offline.UnknownInt64("n/a")))
@@ -239,7 +249,7 @@ func TestDenominatorMembershipIsComposedWithTheCaseQuality(t *testing.T) {
 	}
 
 	t.Run("a scorable case counts its payout-seam members", func(t *testing.T) {
-		m := p4offline.AssessDenominatorMembership(ds, fs, p2dec, p3bdec, res, p2win)
+		m := p4offline.AssessDenominatorMembership(ds, registryOf(ds, fs), fs, p2dec, p3bdec, res, p2win)
 		if m.Policy != p4offline.PolicyP2 || m.Quality != p4offline.QualityPrimaryScorable || !m.Primary || !m.PlacedBet || len(m.Reasons) != 0 {
 			t.Fatalf("%+v", m)
 		}
@@ -253,10 +263,10 @@ func TestDenominatorMembershipIsComposedWithTheCaseQuality(t *testing.T) {
 				t.Fatalf("%s: %+v", key, m)
 			}
 		}
-		if !wireHasKey(m, "quality") || !wireHasKey(m, "policy") || !wireHasKey(m, "derivation") || !wireHasKey(m, "counterpartDerivation") {
+		if !wireHasKey(t, m, "quality") || !wireHasKey(t, m, "policy") || !wireHasKey(t, m, "derivation") || !wireHasKey(t, m, "counterpartDerivation") {
 			t.Fatalf("the verdict's identity is not on the wire: %+v", m)
 		}
-		m = p4offline.AssessDenominatorMembership(ds, fs, p2dec, p3bdec, res, p3bPayout)
+		m = p4offline.AssessDenominatorMembership(ds, registryOf(ds, fs), fs, p2dec, p3bdec, res, p3bPayout)
 		if m.Policy != p4offline.PolicyP3b || !m.Primary || m.PlacedBet || wireBool(t, m, "placedBet") {
 			t.Fatalf("a counterfactual attempt is a primary member and not a placed bet: %+v", m)
 		}
@@ -277,7 +287,7 @@ func TestDenominatorMembershipIsComposedWithTheCaseQuality(t *testing.T) {
 		}
 		attempt := decisionOf(t, p3bS, fsS)
 		skipPayout := p4offline.DerivePayout(skip, p4offline.DerivePlacement(skip, fpS, nil), res, nil)
-		m := p4offline.AssessDenominatorMembership(dsS, fsS, skip, attempt, res, skipPayout)
+		m := p4offline.AssessDenominatorMembership(dsS, registryOf(dsS, fsS), fsS, skip, attempt, res, skipPayout)
 		if m.Quality != p4offline.QualityPrimaryScorable || m.Primary || m.PlacedBet {
 			t.Fatalf("the case is scorable, the skip counts for nothing and is never counted wrong: %+v", m)
 		}
@@ -287,7 +297,7 @@ func TestDenominatorMembershipIsComposedWithTheCaseQuality(t *testing.T) {
 			t.Fatalf("%+v", m)
 		}
 		attemptPayout := p4offline.DerivePayout(attempt, p4offline.DerivePlacement(attempt, fpS, nil), res, nil)
-		if m := p4offline.AssessDenominatorMembership(dsS, fsS, skip, attempt, res, attemptPayout); !m.Primary || m.PlacedBet {
+		if m := p4offline.AssessDenominatorMembership(dsS, registryOf(dsS, fsS), fsS, skip, attempt, res, attemptPayout); !m.Primary || m.PlacedBet {
 			t.Fatalf("the other policy's attempt on the same case counts: %+v", m)
 		}
 	})
@@ -308,7 +318,7 @@ func TestDenominatorMembershipIsComposedWithTheCaseQuality(t *testing.T) {
 		if !otherPayout.PrimaryDenominatorMember {
 			t.Fatalf("fixture: the payout seam alone cannot know the case is foreign: %+v", otherPayout)
 		}
-		m := p4offline.AssessDenominatorMembership(ds, other, otherDec, asP3bAttempt(otherDec), res, otherPayout)
+		m := p4offline.AssessDenominatorMembership(ds, registryOf(ds, other), other, otherDec, asP3bAttempt(otherDec), res, otherPayout)
 		if m.Quality != p4offline.QualityExcluded || m.Primary || m.PlacedBet || m.CounterpartDerivation != "" ||
 			!containsString(m.Reasons, "FACTSET_BINDING_MISMATCH") || !containsString(m.Reasons, "CASE_NOT_PRIMARY_SCORABLE") {
 			t.Fatalf("%+v", m)
@@ -319,7 +329,7 @@ func TestDenominatorMembershipIsComposedWithTheCaseQuality(t *testing.T) {
 		// nothing either.
 		edited := p2dec
 		edited.Stake = p4offline.KnownInt64(51)
-		m := p4offline.AssessDenominatorMembership(ds, fs, edited, p3bdec, res, p3bPayout)
+		m := p4offline.AssessDenominatorMembership(ds, registryOf(ds, fs), fs, edited, p3bdec, res, p3bPayout)
 		if m.Quality != p4offline.QualityExcluded || m.Primary || !containsString(m.Reasons, "CASE_NOT_PRIMARY_SCORABLE") ||
 			m.CounterpartDerivation != "" {
 			t.Fatalf("an edited (unusable) counterpart is never echoed as the pairing: %+v", m)
@@ -329,7 +339,7 @@ func TestDenominatorMembershipIsComposedWithTheCaseQuality(t *testing.T) {
 		// no derivation is recorded for it.
 		relabelled := p3bdec
 		relabelled.Derivation = "P3B:ruleset=\"other\""
-		if m := p4offline.AssessDenominatorMembership(ds, fs, p2dec, relabelled, res, p3bPayout); m.Quality != p4offline.QualityExcluded ||
+		if m := p4offline.AssessDenominatorMembership(ds, registryOf(ds, fs), fs, p2dec, relabelled, res, p3bPayout); m.Quality != p4offline.QualityExcluded ||
 			!containsString(m.Reasons, "P3B_DECISION_NOT_DERIVED") || !containsString(m.Reasons, "PAYOUT_DECISION_MISMATCH") ||
 			m.Derivation != "" {
 			t.Fatalf("%+v", m)
@@ -337,7 +347,7 @@ func TestDenominatorMembershipIsComposedWithTheCaseQuality(t *testing.T) {
 		// An unusable counterpart is named by the quality reasons and never
 		// echoed as a pairing.
 		bogus := p4offline.PolicyDecision{Policy: p4offline.PolicyP3b, Derivation: "P3B:ruleset=\"nobody\""}
-		if m := p4offline.AssessDenominatorMembership(ds, fs, p2dec, bogus, res, p2win); m.Primary || m.PlacedBet ||
+		if m := p4offline.AssessDenominatorMembership(ds, registryOf(ds, fs), fs, p2dec, bogus, res, p2win); m.Primary || m.PlacedBet ||
 			m.CounterpartDerivation != "" || m.Derivation != p2dec.Derivation || m.Quality != p4offline.QualityExcluded {
 			t.Fatalf("%+v", m)
 		}
@@ -349,13 +359,13 @@ func TestDenominatorMembershipIsComposedWithTheCaseQuality(t *testing.T) {
 			t.Fatal(err)
 		}
 		foreign := decisionOf(t, p3bOtherCase, otherFs)
-		if m := p4offline.AssessDenominatorMembership(ds, fs, p2dec, foreign, res, p2win); m.Primary || m.PlacedBet ||
+		if m := p4offline.AssessDenominatorMembership(ds, registryOf(ds, fs), fs, p2dec, foreign, res, p2win); m.Primary || m.PlacedBet ||
 			m.CounterpartDerivation != "" || !containsString(m.Reasons, "POLICY_BINDING_MISMATCH") {
 			t.Fatalf("%+v", m)
 		}
 		// This case's own P2 decision in the P3b slot is not a counterpart
 		// either: the two policies are positional.
-		if m := p4offline.AssessDenominatorMembership(ds, fs, p2dec, p2dec, res, p2win); m.Primary || m.PlacedBet ||
+		if m := p4offline.AssessDenominatorMembership(ds, registryOf(ds, fs), fs, p2dec, p2dec, res, p2win); m.Primary || m.PlacedBet ||
 			m.CounterpartDerivation != "" || m.Quality != p4offline.QualityExcluded {
 			t.Fatalf("%+v", m)
 		}
@@ -363,7 +373,7 @@ func TestDenominatorMembershipIsComposedWithTheCaseQuality(t *testing.T) {
 		// by the P2 re-derivation, and both say so.
 		relabelledP2 := p2dec
 		relabelledP2.Derivation = "P2:binding=other"
-		if m := p4offline.AssessDenominatorMembership(ds, fs, relabelledP2, p3bdec, res, p3bPayout); m.Primary ||
+		if m := p4offline.AssessDenominatorMembership(ds, registryOf(ds, fs), fs, relabelledP2, p3bdec, res, p3bPayout); m.Primary ||
 			!containsString(m.Reasons, "POLICY_DECISION_NOT_DERIVED") || !containsString(m.Reasons, "P2_DECISION_NOT_DERIVED") ||
 			m.CounterpartDerivation != "" {
 			t.Fatalf("a relabelled counterpart's string never reaches the wire: %+v", m)
@@ -381,7 +391,7 @@ func TestDenominatorMembershipIsComposedWithTheCaseQuality(t *testing.T) {
 		if udec.Action.Class != p4offline.ActionUnknownInput || udec.Derivation == p3bdec.Derivation {
 			t.Fatalf("fixture: %+v %q", udec.Action, udec.Derivation)
 		}
-		m = p4offline.AssessDenominatorMembership(ds, fs, p2dec, udec, res, p2win)
+		m = p4offline.AssessDenominatorMembership(ds, registryOf(ds, fs), fs, p2dec, udec, res, p2win)
 		if m.Quality != p4offline.QualityDescriptiveOnly || m.Primary || m.PlacedBet ||
 			!containsString(m.Reasons, "P3B_NOT_DETERMINATE:UNKNOWN_INPUT") || !containsString(m.Reasons, "CASE_NOT_PRIMARY_SCORABLE") ||
 			m.CounterpartDerivation != udec.Derivation {
@@ -389,7 +399,7 @@ func TestDenominatorMembershipIsComposedWithTheCaseQuality(t *testing.T) {
 		}
 		// A payout derived from one genuine P3b decision is not judged as
 		// another genuine P3b decision's on the same case.
-		if m := p4offline.AssessDenominatorMembership(ds, fs, p2dec, udec, res, p3bPayout); m.Primary || m.PlacedBet ||
+		if m := p4offline.AssessDenominatorMembership(ds, registryOf(ds, fs), fs, p2dec, udec, res, p3bPayout); m.Primary || m.PlacedBet ||
 			!containsString(m.Reasons, "PAYOUT_DECISION_MISMATCH") || m.Derivation != "" {
 			t.Fatalf("the evidence was derived from p3bdec, not from udec: %+v", m)
 		}
@@ -399,11 +409,11 @@ func TestDenominatorMembershipIsComposedWithTheCaseQuality(t *testing.T) {
 			t.Fatal(err)
 		}
 		odec := decisionOf(t, p3bOther, fs)
-		if m := p4offline.AssessDenominatorMembership(ds, fs, p2dec, odec, res, p3bPayout); m.Primary ||
+		if m := p4offline.AssessDenominatorMembership(ds, registryOf(ds, fs), fs, p2dec, odec, res, p3bPayout); m.Primary ||
 			!containsString(m.Reasons, "PAYOUT_DECISION_MISMATCH") {
 			t.Fatalf("another ruleset's decision on the same case: %+v", m)
 		}
-		if m := p4offline.AssessDenominatorMembership(ds, fs, p2dec, odec, res,
+		if m := p4offline.AssessDenominatorMembership(ds, registryOf(ds, fs), fs, p2dec, odec, res,
 			p4offline.DerivePayout(odec, p4offline.DerivePlacement(odec, fp, nil), res, nil)); !m.Primary || m.Derivation != odec.Derivation {
 			t.Fatalf("its own evidence counts: %+v", m)
 		}
@@ -429,14 +439,14 @@ func TestDenominatorMembershipIsComposedWithTheCaseQuality(t *testing.T) {
 		} {
 			edited := p2win
 			edit(&edited)
-			if m := p4offline.AssessDenominatorMembership(ds, fs, p2dec, p3bdec, res, edited); m.Primary || m.PlacedBet ||
+			if m := p4offline.AssessDenominatorMembership(ds, registryOf(ds, fs), fs, p2dec, p3bdec, res, edited); m.Primary || m.PlacedBet ||
 				!containsString(m.Reasons, "PAYOUT_NOT_DERIVED") {
 				t.Fatalf("%s: an edited payout evidence settles nothing: %+v", name, m)
 			}
 		}
 		promoted := p3bPayout
 		promoted.PlacedBetDenominatorMember = true
-		if m := p4offline.AssessDenominatorMembership(ds, fs, p2dec, p3bdec, res, promoted); m.Primary || m.PlacedBet ||
+		if m := p4offline.AssessDenominatorMembership(ds, registryOf(ds, fs), fs, p2dec, p3bdec, res, promoted); m.Primary || m.PlacedBet ||
 			!containsString(m.Reasons, "PAYOUT_NOT_DERIVED") {
 			t.Fatalf("a membership edited in is refused whole: %+v", m)
 		}
@@ -450,7 +460,7 @@ func TestDenominatorMembershipIsComposedWithTheCaseQuality(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if m := p4offline.AssessDenominatorMembership(dsS, fsS, skip, decisionOf(t, p3bS, fsS), res, skipPromoted); m.Primary ||
+		if m := p4offline.AssessDenominatorMembership(dsS, registryOf(dsS, fsS), fsS, skip, decisionOf(t, p3bS, fsS), res, skipPromoted); m.Primary ||
 			!containsString(m.Reasons, "PAYOUT_NOT_DERIVED") {
 			t.Fatalf("a skip promoted by hand is not a member: %+v", m)
 		}
@@ -459,7 +469,7 @@ func TestDenominatorMembershipIsComposedWithTheCaseQuality(t *testing.T) {
 		if err := json.Unmarshal(raw, &decoded); err != nil {
 			t.Fatal(err)
 		}
-		if m := p4offline.AssessDenominatorMembership(ds, fs, p2dec, p3bdec, res, decoded); m.Primary || m.PlacedBet ||
+		if m := p4offline.AssessDenominatorMembership(ds, registryOf(ds, fs), fs, p2dec, p3bdec, res, decoded); m.Primary || m.PlacedBet ||
 			!containsString(m.Reasons, "PAYOUT_NOT_DERIVED") {
 			t.Fatalf("a payout evidence read back from storage must be re-derived, not trusted: %+v", m)
 		}
@@ -468,7 +478,7 @@ func TestDenominatorMembershipIsComposedWithTheCaseQuality(t *testing.T) {
 			ChoiceCorrect: p4offline.ChoiceCorrect, PrimaryDenominatorMember: true, PlacedBetDenominatorMember: true,
 			Stake: p4offline.KnownInt64(50), Payout: p4offline.KnownInt64(120), Net: p4offline.KnownInt64(70),
 			ResolutionFactsDigest: res.ResolutionFactsDigest}
-		if m := p4offline.AssessDenominatorMembership(ds, fs, p2dec, p3bdec, res, handBuilt); m.Primary || m.PlacedBet ||
+		if m := p4offline.AssessDenominatorMembership(ds, registryOf(ds, fs), fs, p2dec, p3bdec, res, handBuilt); m.Primary || m.PlacedBet ||
 			!containsString(m.Reasons, "PAYOUT_NOT_DERIVED") {
 			t.Fatalf("%+v", m)
 		}
@@ -478,7 +488,7 @@ func TestDenominatorMembershipIsComposedWithTheCaseQuality(t *testing.T) {
 		_, fsS, fpS, p2S := skippedCase(t)
 		skip := decisionOf(t, p2S, fsS)
 		skipPayout := p4offline.DerivePayout(skip, p4offline.DerivePlacement(skip, fpS, nil), res, nil)
-		if m := p4offline.AssessDenominatorMembership(ds, fs, p2dec, p3bdec, res, skipPayout); m.Primary || m.PlacedBet ||
+		if m := p4offline.AssessDenominatorMembership(ds, registryOf(ds, fs), fs, p2dec, p3bdec, res, skipPayout); m.Primary || m.PlacedBet ||
 			!containsString(m.Reasons, "PAYOUT_BINDING_MISMATCH") {
 			t.Fatalf("%+v", m)
 		}
@@ -486,7 +496,7 @@ func TestDenominatorMembershipIsComposedWithTheCaseQuality(t *testing.T) {
 		// attempt's decision.
 		foreignP2 := p2dec
 		foreignP2.Attempt.AttemptID = 2
-		if m := p4offline.AssessDenominatorMembership(ds, fs, foreignP2, p3bdec, res, p2win); m.Primary || m.PlacedBet ||
+		if m := p4offline.AssessDenominatorMembership(ds, registryOf(ds, fs), fs, foreignP2, p3bdec, res, p2win); m.Primary || m.PlacedBet ||
 			!containsString(m.Reasons, "PAYOUT_BINDING_MISMATCH") {
 			t.Fatalf("%+v", m)
 		}
@@ -497,16 +507,16 @@ func TestDenominatorMembershipIsComposedWithTheCaseQuality(t *testing.T) {
 		if lose.Outcome != p4offline.PayoutLose {
 			t.Fatalf("fixture: %+v", lose)
 		}
-		if m := p4offline.AssessDenominatorMembership(ds, fs, p2dec, p3bdec, res, lose); m.Primary || m.PlacedBet ||
+		if m := p4offline.AssessDenominatorMembership(ds, registryOf(ds, fs), fs, p2dec, p3bdec, res, lose); m.Primary || m.PlacedBet ||
 			!containsString(m.Reasons, "PAYOUT_RESOLUTION_MISMATCH") {
 			t.Fatalf("%+v", m)
 		}
-		if m := p4offline.AssessDenominatorMembership(ds, fs, p2dec, p3bdec, otherRes, lose); !m.Primary || !m.PlacedBet {
+		if m := p4offline.AssessDenominatorMembership(ds, registryOf(ds, fs), fs, p2dec, p3bdec, otherRes, lose); !m.Primary || !m.PlacedBet {
 			t.Fatalf("assessed with its own resolution, a proven LOSE counts: %+v", m)
 		}
 		unknownPolicy := p2win
 		unknownPolicy.Policy = "P9"
-		if m := p4offline.AssessDenominatorMembership(ds, fs, p2dec, p3bdec, res, unknownPolicy); m.Primary ||
+		if m := p4offline.AssessDenominatorMembership(ds, registryOf(ds, fs), fs, p2dec, p3bdec, res, unknownPolicy); m.Primary ||
 			!containsString(m.Reasons, "PAYOUT_NOT_DERIVED") || m.Policy != "" || m.Derivation != "" {
 			t.Fatalf("a refused verdict echoes no unverified identity: %+v", m)
 		}
@@ -517,8 +527,219 @@ func TestDenominatorMembershipIsComposedWithTheCaseQuality(t *testing.T) {
 		if refused.ResolutionFactsDigest != "" || !containsString(refused.Reasons, "POLICY_BINDING_MISMATCH") {
 			t.Fatalf("fixture: %+v", refused)
 		}
-		if m := p4offline.AssessDenominatorMembership(ds, fs, p2dec, p3bdec, res, refused); m.Primary || m.PlacedBet ||
+		if m := p4offline.AssessDenominatorMembership(ds, registryOf(ds, fs), fs, p2dec, p3bdec, res, refused); m.Primary || m.PlacedBet ||
 			!containsString(m.Reasons, "PAYOUT_RESOLUTION_UNBOUND") || m.Derivation != p2dec.Derivation {
+			t.Fatalf("%+v", m)
+		}
+	})
+}
+
+// TestDenominatorMembershipRequiresTheCanonicalSourceRound pins seam 3 at
+// the only place a decision is counted: the case must be the ONE canonical
+// claim of its public round in the registry the caller reconciled. A round
+// in CONFLICT across datasets, a round the registry never reconciled, a
+// registry that does not re-derive from its own claims, and a canonical
+// claim swapped in by hand all count nothing — however scorable a single
+// dataset's evidence looks on its own.
+func TestDenominatorMembershipRequiresTheCanonicalSourceRound(t *testing.T) {
+	ds, fs, fp, p2 := factualCase(t, coherentCall)
+	p2dec := decisionOf(t, p2, fs)
+	rs := mustVerify(t, rulesetFrom(t, cfgWithRule("one", predictioneval.ComparatorGe, 50, 100)))
+	p3b, err := p4offline.EvaluateP3bCase(fs, rs, synthCoords(fs, 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	p3bdec := decisionOf(t, p3b, fs)
+	res := winnerArtifact("o1")
+	proven := p4offline.DerivePlacement(p2dec, fp, validProof(fp))
+	win := p4offline.DerivePayout(p2dec, proven, res, linkedRecord(proven, p4offline.KnownInt64(120), p4offline.UnknownInt64("n/a")))
+	claim, err := p4offline.ClaimSourceRound(ds, fs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Another collector session claims the same public round with different
+	// evidence (another balance, so another factset).
+	sB := newSynth()
+	sB.session = "p4-synth-session-b"
+	sB.source.CollectorSessionID = sB.session
+	sB.due("r1", "e1", 1)
+	envB := synthPlacedEnvelope()
+	envB.Balance = ptrI64(2000)
+	sB.terminal("r1", "e1", 1, predictioneval.PhaseAutoDecided, "OK", envB)
+	sB.call("r1", "e1", 1, *envB.FinalAmount, *envB.ChoiceIndex)
+	dsB := sB.dataset()
+	fsB, err := p4offline.BuildCommonFactset(dsB, singleEpisode(t, mustSelect(t, dsB)).Episode)
+	if err != nil {
+		t.Fatal(err)
+	}
+	claimB, err := p4offline.ClaimSourceRound(dsB, fsB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claimB == claim || fsB.Digest == fs.Digest {
+		t.Fatalf("fixture: the two sessions must claim e1 differently")
+	}
+
+	t.Run("the canonical claim counts", func(t *testing.T) {
+		for name, reg := range map[string]p4offline.SourceRoundRegistry{
+			"unique":                 p4offline.ReconcileSourceRounds([]p4offline.SourceRoundClaim{claim}),
+			"deduplicated identical": p4offline.ReconcileSourceRounds([]p4offline.SourceRoundClaim{claim, claim}),
+		} {
+			if err := p4offline.VerifySourceRoundRegistry(reg); err != nil {
+				t.Fatalf("%s: %v", name, err)
+			}
+			if m := p4offline.AssessDenominatorMembership(ds, reg, fs, p2dec, p3bdec, res, win); !m.Primary || !m.PlacedBet || len(m.Reasons) != 0 {
+				t.Fatalf("%s: %+v", name, m)
+			}
+		}
+	})
+	t.Run("a round in conflict across datasets counts for nobody", func(t *testing.T) {
+		reg := p4offline.ReconcileSourceRounds([]p4offline.SourceRoundClaim{claim, claimB})
+		if len(reg.Entries) != 1 || reg.Entries[0].Status != p4offline.SourceRoundConflict {
+			t.Fatalf("fixture: %+v", reg.Entries)
+		}
+		m := p4offline.AssessDenominatorMembership(ds, reg, fs, p2dec, p3bdec, res, win)
+		if m.Primary || m.PlacedBet || m.Quality != p4offline.QualityPrimaryScorable ||
+			!containsString(m.Reasons, "CASE_NOT_CANONICAL_SOURCE_ROUND") {
+			t.Fatalf("a scorable case on a conflicting round is described, never counted: %+v", m)
+		}
+	})
+	t.Run("a round the registry never reconciled counts for nobody", func(t *testing.T) {
+		for name, reg := range map[string]p4offline.SourceRoundRegistry{
+			"empty":         p4offline.ReconcileSourceRounds(nil),
+			"another round": p4offline.ReconcileSourceRounds([]p4offline.SourceRoundClaim{claimB}),
+		} {
+			if m := p4offline.AssessDenominatorMembership(ds, reg, fs, p2dec, p3bdec, res, win); m.Primary || m.PlacedBet ||
+				!containsString(m.Reasons, "CASE_NOT_CANONICAL_SOURCE_ROUND") {
+				t.Fatalf("%s: %+v", name, m)
+			}
+		}
+	})
+	t.Run("a registry that does not re-derive from its entries is not read", func(t *testing.T) {
+		reg := p4offline.ReconcileSourceRounds([]p4offline.SourceRoundClaim{claim, claimB})
+		reg.Entries[0].Status = p4offline.SourceRoundUnique // the conflict edited away
+		c := claim
+		reg.Entries[0].Canonical = &c
+		if err := p4offline.VerifySourceRoundRegistry(reg); !errors.Is(err, p4offline.ErrSourceRoundRegistry) {
+			t.Fatalf("got %v", err)
+		}
+		if m := p4offline.AssessDenominatorMembership(ds, reg, fs, p2dec, p3bdec, res, win); m.Primary || m.PlacedBet ||
+			!containsString(m.Reasons, "SOURCE_ROUND_REGISTRY_NOT_DERIVED") {
+			t.Fatalf("%+v", m)
+		}
+		var decoded p4offline.SourceRoundRegistry
+		raw, err := json.Marshal(p4offline.ReconcileSourceRounds([]p4offline.SourceRoundClaim{claim}))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := json.Unmarshal(raw, &decoded); err != nil {
+			t.Fatal(err)
+		}
+		if err := p4offline.VerifySourceRoundRegistry(decoded); err != nil {
+			t.Fatalf("a registry read back unchanged still re-derives: %v", err)
+		}
+		decoded.Version = "p4-source-round-registry/v0"
+		if err := p4offline.VerifySourceRoundRegistry(decoded); !errors.Is(err, p4offline.ErrSourceRoundRegistry) {
+			t.Fatalf("got %v", err)
+		}
+		// The digest itself, edited over intact entries, is not the entries'.
+		forged := p4offline.ReconcileSourceRounds([]p4offline.SourceRoundClaim{claim})
+		forged.Digest = strings.Repeat("0", 64)
+		if err := p4offline.VerifySourceRoundRegistry(forged); !errors.Is(err, p4offline.ErrSourceRoundRegistry) {
+			t.Fatalf("got %v", err)
+		}
+		if m := p4offline.AssessDenominatorMembership(ds, forged, fs, p2dec, p3bdec, res, win); m.Primary || m.PlacedBet ||
+			!containsString(m.Reasons, "SOURCE_ROUND_REGISTRY_NOT_DERIVED") {
+			t.Fatalf("%+v", m)
+		}
+	})
+	t.Run("a canonical claim swapped in by hand does not re-derive", func(t *testing.T) {
+		// The digest frames the claims and whether a canonical exists, not
+		// which claim it is: the swap survives the digest and is refused
+		// because the registry is no longer what reconciling its own claims
+		// produces.
+		reg := p4offline.ReconcileSourceRounds([]p4offline.SourceRoundClaim{claimB})
+		c := claim
+		reg.Entries[0].Canonical = &c
+		if err := p4offline.VerifySourceRoundRegistry(reg); !errors.Is(err, p4offline.ErrSourceRoundRegistry) {
+			t.Fatalf("got %v", err)
+		}
+		if m := p4offline.AssessDenominatorMembership(ds, reg, fs, p2dec, p3bdec, res, win); m.Primary || m.PlacedBet ||
+			!containsString(m.Reasons, "SOURCE_ROUND_REGISTRY_NOT_DERIVED") {
+			t.Fatalf("%+v", m)
+		}
+		// What no verifier can see: a conflicting claim deleted by hand
+		// leaves a registry that IS the reconciliation of the survivor. The
+		// registry is only as complete as the claims the caller reconciled.
+		if m := p4offline.AssessDenominatorMembership(ds, p4offline.ReconcileSourceRounds([]p4offline.SourceRoundClaim{claim}), fs, p2dec, p3bdec, res, win); !m.Primary {
+			t.Fatalf("%+v", m)
+		}
+	})
+}
+
+// TestDenominatorVerdictNamesTheRegistryItWasIssuedUnder pins the audit
+// handle seam 3 leaves on the verdict: once the registry re-derived from its
+// own entries and was read for the round, the verdict carries that
+// registry's digest — whether the case then counted or was refused as not
+// canonical — so an audit can follow it to the registry, and from there to
+// the runner's record of what was reconciled into it. A registry that did
+// not re-derive, or one never read because the verdict was refused earlier,
+// leaves the verdict naming no registry at all.
+func TestDenominatorVerdictNamesTheRegistryItWasIssuedUnder(t *testing.T) {
+	ds, fs, fp, p2 := factualCase(t, coherentCall)
+	p2dec := decisionOf(t, p2, fs)
+	rs := mustVerify(t, rulesetFrom(t, cfgWithRule("one", predictioneval.ComparatorGe, 50, 100)))
+	p3b, err := p4offline.EvaluateP3bCase(fs, rs, synthCoords(fs, 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	p3bdec := decisionOf(t, p3b, fs)
+	res := winnerArtifact("o1")
+	proven := p4offline.DerivePlacement(p2dec, fp, validProof(fp))
+	win := p4offline.DerivePayout(p2dec, proven, res, linkedRecord(proven, p4offline.KnownInt64(120), p4offline.UnknownInt64("n/a")))
+	claim, err := p4offline.ClaimSourceRound(ds, fs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Another dataset's claim on the same public round, under another
+	// factset: the registry can only take the caller's word for it, which
+	// is exactly why the verdict must name the registry it read.
+	other := claim
+	other.FactsetDigest = strings.Repeat("f", 64)
+	canonical := p4offline.ReconcileSourceRounds([]p4offline.SourceRoundClaim{claim})
+	conflict := p4offline.ReconcileSourceRounds([]p4offline.SourceRoundClaim{claim, other})
+	if canonical.Digest == "" || conflict.Digest == "" || canonical.Digest == conflict.Digest {
+		t.Fatalf("fixture: %q %q", canonical.Digest, conflict.Digest)
+	}
+	t.Run("a counted decision names the registry", func(t *testing.T) {
+		m := p4offline.AssessDenominatorMembership(ds, canonical, fs, p2dec, p3bdec, res, win)
+		if !m.Primary || m.RegistryDigest != canonical.Digest {
+			t.Fatalf("%+v", m)
+		}
+		if !wireHasKey(t, m, "registryDigest") {
+			t.Fatal("the registry digest must reach the wire")
+		}
+	})
+	t.Run("a decision refused as not canonical names the registry that refused it", func(t *testing.T) {
+		m := p4offline.AssessDenominatorMembership(ds, conflict, fs, p2dec, p3bdec, res, win)
+		if m.Primary || !containsString(m.Reasons, "CASE_NOT_CANONICAL_SOURCE_ROUND") || m.RegistryDigest != conflict.Digest {
+			t.Fatalf("%+v", m)
+		}
+	})
+	t.Run("a registry that did not re-derive is not named", func(t *testing.T) {
+		forged := canonical
+		forged.Digest = strings.Repeat("0", 64)
+		m := p4offline.AssessDenominatorMembership(ds, forged, fs, p2dec, p3bdec, res, win)
+		if !containsString(m.Reasons, "SOURCE_ROUND_REGISTRY_NOT_DERIVED") || m.RegistryDigest != "" {
+			t.Fatalf("%+v", m)
+		}
+		if wireHasKey(t, m, "registryDigest") {
+			t.Fatal("an unnamed registry is absent from the wire, not an empty string")
+		}
+	})
+	t.Run("a verdict refused before the registry is read names none", func(t *testing.T) {
+		m := p4offline.AssessDenominatorMembership(ds, canonical, fs, p2dec, p3bdec, res, p4offline.PayoutEvidence{})
+		if !containsString(m.Reasons, "PAYOUT_NOT_DERIVED") || m.RegistryDigest != "" {
 			t.Fatalf("%+v", m)
 		}
 	})

@@ -98,6 +98,8 @@ const (
 	PlacementReasonPolicyStakeUnknown    = "POLICY_STAKE_UNKNOWN"
 	PlacementReasonChoiceMissing         = "CHOICE_MISSING"
 	PlacementReasonChoiceDiffers         = "CHOICE_DIFFERS"
+	PlacementReasonChoiceIdentityDiffers = "CHOICE_IDENTITY_DIFFERS"
+	PlacementReasonTerminalSlotDiffers   = "TERMINAL_SLOT_DIFFERS"
 	PlacementReasonStakeDiffers          = "STAKE_DIFFERS"
 	PlacementReasonFactualNotPlace       = "FACTUAL_DECISION_NOT_PLACE"
 	PlacementReasonCallNotAfterCutoff    = "CALL_NOT_AFTER_CUTOFF"
@@ -128,10 +130,16 @@ type FactualPlacement struct {
 	FactsetDigest  string                    `json:"factsetDigest"`
 	EventID        string                    `json:"eventId"`
 	CutoffPosition int64                     `json:"cutoffPosition"`
-	// The factual DECISION, from the terminal envelope's recorded results.
-	TerminalDecision    string `json:"terminalDecision"`
-	RecordedChoiceIndex *int   `json:"recordedChoiceIndex,omitempty"`
-	RecordedFinalAmount *int64 `json:"recordedFinalAmount,omitempty"`
+	// The factual DECISION, from the terminal envelope's recorded results:
+	// the chosen index, the outcome identity the store recorded for it (empty
+	// when the store carries none), the final amount, and the slot the
+	// terminal fact ITSELF named — the pinned producer writes it on every
+	// placing terminal fact, independently of the envelope's index.
+	TerminalDecision        string `json:"terminalDecision"`
+	RecordedChoiceIndex     *int   `json:"recordedChoiceIndex,omitempty"`
+	RecordedChoiceOutcomeID string `json:"recordedChoiceOutcomeId,omitempty"`
+	RecordedFinalAmount     *int64 `json:"recordedFinalAmount,omitempty"`
+	RecordedTerminalSlot    *int   `json:"recordedTerminalSlot,omitempty"`
 	// The factual CALL, from the post-decision facts. Coherence is the P2
 	// settlement projection's own verdict; StartedOnly separates the one
 	// half-present shape that is evidentially distinct — a call that started
@@ -167,7 +175,9 @@ func factualPlacementWitness(f FactualPlacement) string {
 	c.i64(f.CutoffPosition)
 	c.str(f.TerminalDecision)
 	serializeOptionalInt(&c, f.RecordedChoiceIndex)
+	c.str(f.RecordedChoiceOutcomeID)
 	serializeOptionalInt64(&c, f.RecordedFinalAmount)
+	serializeOptionalInt(&c, f.RecordedTerminalSlot)
 	c.str(f.Coherence)
 	c.boolean(f.StartedOnly)
 	c.boolean(f.CallPresent)
@@ -422,6 +432,11 @@ func ProjectFactualPlacement(ds predictioneval.SourceDataset, fs CommonFactset) 
 		idx := dc.Recorded.ChoiceIndex
 		out.RecordedChoiceIndex = &idx
 	}
+	out.RecordedChoiceOutcomeID = dc.Recorded.ChoiceOutcomeID
+	if dc.Recorded.TerminalOutcomeSlot != nil {
+		slot := *dc.Recorded.TerminalOutcomeSlot
+		out.RecordedTerminalSlot = &slot
+	}
 	if dc.Recorded.FinalAmountRecorded {
 		final := dc.Recorded.FinalAmount
 		out.RecordedFinalAmount = &final
@@ -520,6 +535,25 @@ func derivePlacement(policy PolicyDecision, factual FactualPlacement, proof *Pla
 	}
 	if factual.RecordedChoiceIndex == nil || *factual.RecordedChoiceIndex != policy.Choice.Index {
 		reason(PlacementReasonChoiceDiffers)
+		inheritable = false
+	}
+	// The identity the store recorded for the factual choice, when it
+	// carries one, must be the policy's: a recorded decision whose index
+	// agrees with the policy's but whose outcome does not names another
+	// outcome, and the policy's decision is not that decision.
+	if factual.RecordedChoiceOutcomeID != "" && factual.RecordedChoiceOutcomeID != policy.Choice.OutcomeID {
+		reason(PlacementReasonChoiceIdentityDiffers)
+		inheritable = false
+	}
+	// The slot the terminal fact itself named is a second, independent
+	// record of the same choice (the pinned producer writes it on every
+	// placing terminal fact and on no other): absent, or naming another
+	// slot, the terminal fact does not name the policy's slot. On a factual
+	// SKIP the slot is rightly absent and this reason joins
+	// FACTUAL_DECISION_NOT_PLACE; it says the fact names no such slot, not
+	// that the producer recorded a wrong one.
+	if factual.RecordedTerminalSlot == nil || *factual.RecordedTerminalSlot != policy.Choice.Index {
+		reason(PlacementReasonTerminalSlotDiffers)
 		inheritable = false
 	}
 	if factual.RecordedFinalAmount == nil || *factual.RecordedFinalAmount != policy.Stake.Value {

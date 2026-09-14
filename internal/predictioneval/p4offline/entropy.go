@@ -118,10 +118,10 @@ type EntropyCoordinates struct {
 	// factset digest ([CommonFactset.Digest]) of the paired opportunity.
 	CommonFactsetDigest string `json:"commonFactsetDigest"`
 	// PairedOpportunityID names the paired opportunity — the one selected
-	// first automated opportunity of a globally reconciled source round. In
-	// this package it is the round's public event identity: seam 3 admits
-	// exactly one canonical opportunity per source round of a dataset, so
-	// the event identity names it uniquely.
+	// first automated opportunity of a reconciled source round. In this
+	// package it is the round's public event identity: seam 3 admits exactly
+	// one canonical opportunity per source round of a dataset, so the event
+	// identity names it uniquely.
 	PairedOpportunityID string `json:"pairedOpportunityId"`
 	// Trajectory is the run index, in [0, TrajectoryCount).
 	Trajectory uint32 `json:"trajectory"`

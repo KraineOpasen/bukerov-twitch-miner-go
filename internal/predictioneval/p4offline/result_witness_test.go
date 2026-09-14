@@ -189,7 +189,7 @@ func TestPolicyResultsCarryTheirOwnWitness(t *testing.T) {
 		// was minted from: the genuine chain counts, exactly once.
 		genuine := decisionOf(t, p3b, fs)
 		pe := p4offline.DerivePayout(genuine, p4offline.DerivePlacement(genuine, fp, nil), res, nil)
-		if m := p4offline.AssessDenominatorMembership(ds, fs, p2dec, genuine, res, pe); !m.Primary {
+		if m := p4offline.AssessDenominatorMembership(ds, registryOf(ds, fs), fs, p2dec, genuine, res, pe); !m.Primary {
 			t.Fatalf("%+v", m)
 		}
 	})

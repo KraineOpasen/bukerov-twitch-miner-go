@@ -373,6 +373,16 @@ type DenominatorMembership struct {
 	// Reasons carries every reason the case was lowered and every reason the
 	// payout evidence could not be read.
 	Reasons []string `json:"reasons,omitempty"`
+	// RegistryDigest names the source-round registry this verdict was issued
+	// under: the digest of the registry that re-derived from its own entries
+	// ([VerifySourceRoundRegistry]) and was read for the round, whether the
+	// case then counted or was refused as not canonical. It is empty when
+	// the verdict was refused before the registry was read, or when the
+	// registry did not re-derive — an unverified digest is never echoed. An
+	// audit follows it to the registry, and from there to the runner's
+	// record of which datasets were reconciled into it: the one obligation
+	// no verdict can carry.
+	RegistryDigest string `json:"registryDigest,omitempty"`
 }
 
 // Membership reasons. Closed vocabulary; the quality reasons are carried too.
@@ -382,18 +392,33 @@ const (
 	MembershipReasonPayoutDecisionMismatch  = "PAYOUT_DECISION_MISMATCH"
 	MembershipReasonPayoutResolutionUnbound = "PAYOUT_RESOLUTION_UNBOUND"
 	MembershipReasonResolutionMismatch      = "PAYOUT_RESOLUTION_MISMATCH"
+	MembershipReasonRegistryNotDerived      = "SOURCE_ROUND_REGISTRY_NOT_DERIVED"
+	MembershipReasonCaseNotCanonical        = "CASE_NOT_CANONICAL_SOURCE_ROUND"
 	MembershipReasonCaseNotPrimary          = "CASE_NOT_PRIMARY_SCORABLE"
 )
 
-// AssessDenominatorMembership composes seam 12 with seam 10 for one policy's
-// decision on one case. The case quality is re-derived from the DATASET by
-// [AssessCaseQuality] — never read from a supplied record — and the payout
-// evidence must be [DerivePayout]'s own (its witness), bound to this case
-// (attempt, factset digest, round), to the very decision it was derived
-// from (that decision's own witness and derivation, so a payout of one
-// P3b decision is never judged as another's), and to the resolution the
-// case was assessed against. Only then are the payout seam's membership
-// conditions read, and only for a PRIMARY_SCORABLE case.
+// AssessDenominatorMembership composes seam 12 with seams 3 and 10 for one
+// policy's decision on one case. The case quality is re-derived from the
+// DATASET by [AssessCaseQuality] — never read from a supplied record — and
+// the payout evidence must be [DerivePayout]'s own (its witness), bound to
+// this case (attempt, factset digest, round), to the very decision it was
+// derived from (that decision's own witness and derivation, so a payout of
+// one P3b decision is never judged as another's), and to the resolution the
+// case was assessed against. The case must then be the CANONICAL source
+// round: the claim the dataset derives for it ([ClaimSourceRound]) must be
+// the one canonical claim of its public round in the registry the caller
+// reconciled (reg, re-derived from its own claims by
+// [VerifySourceRoundRegistry]) — a round that registry holds in CONFLICT, a
+// round it never reconciled, or a registry that does not re-derive counts
+// nothing, however good a single dataset's evidence looks on its own. Only
+// then are the payout seam's membership conditions read, and only for a
+// PRIMARY_SCORABLE case. What this function cannot check is that reg was
+// reconciled over EVERY dataset of the run: a registry reconciled over the
+// one dataset in hand, or over a claim set a conflicting claim was dropped
+// from, finds its own claim UNIQUE, so that obligation is the runner's. The
+// verdict names the registry it was issued under
+// ([DenominatorMembership.RegistryDigest]) so an audit can follow it to the
+// registry, and to the runner's record of what was reconciled into it.
 //
 // The pairing is the CALLER's and is recorded, not inferred: the counterpart
 // decision is the one handed in the other slot, and both derivations are
@@ -402,9 +427,12 @@ const (
 // policy is never counted beside a counterpart that is not derived or not
 // determinate.
 //
-// Each call re-derives the case from the whole dataset (seams 1–3 run
-// again); that is the trusted path's cost, paid once per verdict.
-func AssessDenominatorMembership(ds predictioneval.SourceDataset, fs CommonFactset, p2, p3b PolicyDecision,
+// Each call re-derives the case from the whole dataset at most twice —
+// once for the quality and, once the case has reached the final gate, once
+// more for the source-round claim (seams 1–3 run for each) — and at that
+// gate re-reconciles the registry from its own entries; that is the trusted
+// path's cost, paid per verdict.
+func AssessDenominatorMembership(ds predictioneval.SourceDataset, reg SourceRoundRegistry, fs CommonFactset, p2, p3b PolicyDecision,
 	res ResolutionArtifact, pe PayoutEvidence) DenominatorMembership {
 	q := AssessCaseQuality(ds, fs, p2, p3b, res)
 	out := DenominatorMembership{Quality: q.Quality, Reasons: cloneStrings(q.Reasons)}
@@ -455,6 +483,24 @@ func AssessDenominatorMembership(ds predictioneval.SourceDataset, fs CommonFacts
 	}
 	if q.Quality != QualityPrimaryScorable {
 		reason(MembershipReasonCaseNotPrimary)
+		return out
+	}
+	// Seam 3, the last gate: only the canonical claim of the round in the
+	// registry the caller reconciled may count. The registry is re-derived
+	// from its own claims, and the case's claim from the dataset, never read
+	// from the caller. A claim that cannot be derived is, by that fact, not
+	// the round's canonical claim: the one reason names both (a case that
+	// reached this gate is PRIMARY_SCORABLE, so its claim derives; the error
+	// arm is defence in depth).
+	if err := VerifySourceRoundRegistry(reg); err != nil {
+		reason(MembershipReasonRegistryNotDerived)
+		return out
+	}
+	// The registry re-derived and is read: the verdict names it from here
+	// on, counted or refused alike.
+	out.RegistryDigest = reg.Digest
+	if claim, err := ClaimSourceRound(ds, fs); err != nil || !reg.isCanonical(claim) {
+		reason(MembershipReasonCaseNotCanonical)
 		return out
 	}
 	out.Primary = pe.PrimaryDenominatorMember

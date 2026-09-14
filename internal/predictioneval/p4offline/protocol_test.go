@@ -39,7 +39,7 @@ func TestFrozenProtocolMatchesTheContract(t *testing.T) {
 		{"action map", p4offline.NativeActionMapVersion, "p4-native-action-map/v1"},
 		{"placement contract", p4offline.PlacementEvidenceVersion, "p4-placement-evidence-only/v1"},
 		{"payout contract", p4offline.PayoutEvidenceVersion, "p4-payout-evidence-only/v1"},
-		{"resolution obligations are named and provisional", p.ResolutionObligations != "", true},
+		{"resolution obligations (provisional label, changed only by an owner decision)", p.ResolutionObligations, "p4offline-resolution-obligations/provisional-v1"},
 	}
 	for _, c := range checks {
 		if c.got != c.want {

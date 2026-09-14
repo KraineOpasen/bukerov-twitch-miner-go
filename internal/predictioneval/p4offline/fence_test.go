@@ -361,7 +361,10 @@ func transitiveClosure(t *testing.T, roots []string) map[string]bool {
 			pkg, err = build.Default.Import(p, "", 0)
 		}
 		if err != nil {
-			return
+			// An import the walk cannot resolve is not a leaf: its own
+			// imports would be missing from the closure and the fence
+			// would pass over them.
+			t.Fatalf("resolve import %q: %v", p, err)
 		}
 		for _, imp := range pkg.Imports {
 			walk(imp)

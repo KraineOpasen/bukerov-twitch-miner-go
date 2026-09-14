@@ -11,7 +11,10 @@ package p4offline_test
 // and that a reused public round is not evidence twice.
 
 import (
+	"encoding/binary"
+	"encoding/hex"
 	"errors"
+	"strconv"
 	"testing"
 
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/predictioneval"
@@ -507,4 +510,229 @@ func TestPostCutoffFactsDoNotChangeTheSelectedOpportunity(t *testing.T) {
 		len(before.Attempt.CommonInputSlice) != len(after.Attempt.CommonInputSlice) {
 		t.Fatalf("post-cutoff facts changed the selected opportunity:\n%+v\n%+v", before.Boundary, after.Boundary)
 	}
+}
+
+// TestAutomaticCallIdentityIsScopedToItsPool pins the identity an automatic
+// attempt id carries: the counter restarts in every pool, so attempt 1 names
+// one attempt per pool, session and epoch — never across pools. A return in
+// one pool is not paired with a start in another, and another pool's
+// automatic call on the same public round is an intervention on this
+// episode, not its own call.
+func TestAutomaticCallIdentityIsScopedToItsPool(t *testing.T) {
+	t.Run("an orphan return in another pool is not paired with this pool's start", func(t *testing.T) {
+		s := newSynth()
+		s.placedAttempt("r1", "e1", 1)
+		s.pool = "pool-b"
+		s.due("r2", "e2", 1)
+		s.terminal("r2", "e2", 1, predictioneval.PhaseAutoDecided, "OK", synthPlacedEnvelope())
+		s.placement("r2", "e2", 1, predictioneval.PhaseCallReturned, 50, 0, "OK", "NONE")
+		sel := mustSelect(t, s.dataset())
+		var sawA, sawB bool
+		for _, ep := range sel.Episodes {
+			switch ep.Episode.EventID {
+			case "e1":
+				sawA = true
+				if ep.Excluded {
+					t.Fatalf("pool-a's complete attempt is untouched by pool-b's orphan: %+v", ep)
+				}
+			case "e2":
+				sawB = true
+				if !ep.Excluded || ep.Boundary.NoCallCoverage.Proven || ep.Boundary.Reason != "NO_CALL_COVERAGE_UNPROVEN" ||
+					!containsString(ep.Boundary.NoCallCoverage.Reasons, "ORPHAN_CALL_RETURNED") {
+					t.Fatalf("pool-b's return without a start is an orphan whatever pool-a recorded under the same attempt id: %+v", ep)
+				}
+			}
+		}
+		if !sawA || !sawB {
+			t.Fatalf("expected episodes e1 and e2: %+v", sel.Episodes)
+		}
+	})
+	t.Run("another pool's automatic call on the same round is not this episode's own", func(t *testing.T) {
+		s := newSynth()
+		s.skippedAttempt("r1", "e1", 1)
+		s.pool = "pool-b"
+		s.placement("r1b", "e1", 1, predictioneval.PhaseCallStarted, 50, 0, "OK", "NONE")
+		s.placement("r1b", "e1", 1, predictioneval.PhaseCallReturned, 50, 0, "OK", "NONE")
+		sel := mustSelect(t, s.dataset())
+		for _, ep := range sel.Episodes {
+			if ep.Episode.EventID == "e1" && ep.Episode.PoolInstanceID == "pool-a" {
+				if !ep.Excluded || !containsString(ep.ExclusionReasons, "UNATTRIBUTED_INTERVENTION") {
+					t.Fatalf("a call by another pool's attempt 1 is an intervention on this episode, not its own call: %+v", ep)
+				}
+				return
+			}
+		}
+		t.Fatalf("no pool-a e1 episode: %+v", sel.Episodes)
+	})
+	t.Run("the same pool's own attempt still pairs and attributes as before", func(t *testing.T) {
+		s := newSynth()
+		s.placedAttempt("r1", "e1", 1)
+		ep := singleEpisode(t, mustSelect(t, s.dataset()))
+		if ep.Excluded || !ep.Boundary.Proven || !ep.Boundary.NoCallCoverage.Proven || !ep.Boundary.EarliestCallPresent {
+			t.Fatalf("%+v", ep)
+		}
+	})
+}
+
+// framing re-frames registry parts the way the package's canonical framing
+// does: every part length-prefixed by eight big-endian bytes, counts and
+// booleans as their decimal and "true"/"false" strings. It exists so a
+// test can present an entry list reconciliation would never produce under
+// a digest that MATCHES it; the test checks first that it agrees with the
+// package on an honest registry, whose digest the golden test pins to the
+// independent oracle.
+type framing struct{ buf []byte }
+
+func (f *framing) str(s string) {
+	var n [8]byte
+	binary.BigEndian.PutUint64(n[:], uint64(len(s)))
+	f.buf = append(append(f.buf, n[:]...), s...)
+}
+
+// restampRegistry returns reg under the digest the package's framing yields
+// for its entries as they are, so a hand-altered entry list can be presented
+// under a digest that matches it.
+func restampRegistry(reg p4offline.SourceRoundRegistry) p4offline.SourceRoundRegistry {
+	claimKey := func(c p4offline.SourceRoundClaim) string {
+		var k framing
+		k.str(c.Episode.String())
+		k.str(strconv.FormatInt(c.Attempt.CollectorEpoch, 10))
+		k.str(c.Attempt.CollectorSessionID)
+		k.str(c.Attempt.PoolInstanceID)
+		k.str(strconv.FormatUint(c.Attempt.AttemptID, 10))
+		k.str(c.FactsetDigest)
+		return hex.EncodeToString(k.buf)
+	}
+	var f framing
+	f.str(p4offline.SourceRoundRegistryVersion)
+	f.str(strconv.Itoa(len(reg.Entries)))
+	for _, e := range reg.Entries {
+		f.str(e.EventID)
+		f.str(string(e.Status))
+		f.str(strconv.Itoa(len(e.Claims)))
+		for _, c := range e.Claims {
+			f.str(claimKey(c))
+		}
+		f.str(strconv.FormatBool(e.Canonical != nil))
+	}
+	reg.Digest = digestOf(f.buf)
+	return reg
+}
+
+// TestSourceRoundRegistryVerifierAdmitsOnlyReconciliationsOwnOutput pins the
+// verifier as a FIXED POINT of reconciliation, independently of the digest:
+// every shape below carries a digest that matches its entries, so only the
+// re-reconciliation — the same entries, in the same order, with the same
+// statuses, claims and canonical claims — stands between it and acceptance.
+// What reconciliation produces is admitted, whatever it holds; what it never
+// produces is refused, however its digest was made.
+func TestSourceRoundRegistryVerifierAdmitsOnlyReconciliationsOwnOutput(t *testing.T) {
+	ep := func(session, incarnation, event string) p4offline.EpisodeIdentity {
+		return p4offline.EpisodeIdentity{CollectorEpoch: 1, CollectorSessionID: session, PoolInstanceID: "p", RoundIncarnationID: incarnation, EventID: event}
+	}
+	key := func(session string) predictioneval.AttemptKey {
+		return predictioneval.AttemptKey{CollectorEpoch: 1, CollectorSessionID: session, PoolInstanceID: "p", AttemptID: 1}
+	}
+	a1 := p4offline.SourceRoundClaim{Episode: ep("s-a", "r1", "e1"), Attempt: key("s-a"), FactsetDigest: "d1"}
+	b1 := p4offline.SourceRoundClaim{Episode: ep("s-b", "r1", "e1"), Attempt: key("s-b"), FactsetDigest: "d9"}
+	a2 := p4offline.SourceRoundClaim{Episode: ep("s-a", "r2", "e2"), Attempt: key("s-a"), FactsetDigest: "d2"}
+	undigested := p4offline.SourceRoundClaim{Episode: ep("s-a", "r3", "e3"), Attempt: key("s-a")}
+	unrounded := p4offline.SourceRoundClaim{Episode: ep("s-a", "", ""), Attempt: key("s-a"), FactsetDigest: "d4"}
+	honest := p4offline.ReconcileSourceRounds([]p4offline.SourceRoundClaim{a1, a1, a2})
+	conflict := p4offline.ReconcileSourceRounds([]p4offline.SourceRoundClaim{a1, b1, a2})
+	if conflict.Entries[0].Status != p4offline.SourceRoundConflict || len(conflict.Entries[0].Claims) != 2 {
+		t.Fatalf("fixture: %+v", conflict.Entries)
+	}
+
+	admitted := map[string]p4offline.SourceRoundRegistry{
+		"the honest registry":                         honest,
+		"the empty registry":                          p4offline.ReconcileSourceRounds(nil),
+		"a conflict":                                  conflict,
+		"an honest INVALID entry":                     p4offline.ReconcileSourceRounds([]p4offline.SourceRoundClaim{a1, undigested}),
+		"a round named by a valid and an INVALID one": p4offline.ReconcileSourceRounds([]p4offline.SourceRoundClaim{a1, {Episode: ep("s-a", "r1", "e1"), Attempt: key("s-a")}}),
+	}
+	for name, reg := range admitted {
+		// Every status and both canonical states pass through here, so the
+		// framing is proved against the package's on each before it is used
+		// to re-stamp anything.
+		if restampRegistry(reg).Digest != reg.Digest {
+			t.Fatalf("%s: the test's framing disagrees with the package's: %q vs %q", name, restampRegistry(reg).Digest, reg.Digest)
+		}
+		if err := p4offline.VerifySourceRoundRegistry(reg); err != nil {
+			t.Fatalf("%s is reconciliation's own output: %v", name, err)
+		}
+	}
+
+	refused := map[string]func(p4offline.SourceRoundRegistry) p4offline.SourceRoundRegistry{
+		"entries reordered": func(reg p4offline.SourceRoundRegistry) p4offline.SourceRoundRegistry {
+			reg.Entries = []p4offline.SourceRoundEntry{reg.Entries[1], reg.Entries[0]}
+			return reg
+		},
+		"an entry with no claims": func(reg p4offline.SourceRoundRegistry) p4offline.SourceRoundRegistry {
+			reg.Entries = append(reg.Entries, p4offline.SourceRoundEntry{EventID: "e3", Status: p4offline.SourceRoundUnique})
+			return reg
+		},
+		"UNIQUE relabelled DEDUPLICATED_IDENTICAL": func(reg p4offline.SourceRoundRegistry) p4offline.SourceRoundRegistry {
+			reg.Entries[1].Status = p4offline.SourceRoundDeduplicatedIdentical
+			return reg
+		},
+		"DEDUPLICATED_IDENTICAL relabelled UNIQUE": func(reg p4offline.SourceRoundRegistry) p4offline.SourceRoundRegistry {
+			reg.Entries[0].Status = p4offline.SourceRoundUnique
+			return reg
+		},
+		"an entry with a valid claim relabelled INVALID": func(reg p4offline.SourceRoundRegistry) p4offline.SourceRoundRegistry {
+			reg.Entries[1].Status = p4offline.SourceRoundInvalid
+			reg.Entries[1].Canonical = nil
+			return reg
+		},
+		"a claim filed under another round's entry": func(reg p4offline.SourceRoundRegistry) p4offline.SourceRoundRegistry {
+			reg.Entries[0].Claims = []p4offline.SourceRoundClaim{a1}
+			reg.Entries[1].Claims = []p4offline.SourceRoundClaim{a2, a1}
+			return reg
+		},
+		"an INVALID entry filed under a round its claim does not name": func(reg p4offline.SourceRoundRegistry) p4offline.SourceRoundRegistry {
+			reg.Entries = append(reg.Entries, p4offline.SourceRoundEntry{EventID: "e4", Status: p4offline.SourceRoundInvalid, Claims: []p4offline.SourceRoundClaim{unrounded}})
+			return reg
+		},
+	}
+	for name, tamper := range refused {
+		t.Run(name, func(t *testing.T) {
+			reg := restampRegistry(tamper(cloneRegistry(honest)))
+			if err := p4offline.VerifySourceRoundRegistry(reg); !errors.Is(err, p4offline.ErrSourceRoundRegistry) {
+				t.Fatalf("got %v for %+v", err, reg.Entries)
+			}
+		})
+	}
+	t.Run("a CONFLICT entry given a canonical", func(t *testing.T) {
+		reg := cloneRegistry(conflict)
+		c := a1
+		reg.Entries[0].Canonical = &c
+		if err := p4offline.VerifySourceRoundRegistry(restampRegistry(reg)); !errors.Is(err, p4offline.ErrSourceRoundRegistry) {
+			t.Fatalf("got %v", err)
+		}
+	})
+	t.Run("claims reordered inside a CONFLICT entry", func(t *testing.T) {
+		reg := cloneRegistry(conflict)
+		cs := reg.Entries[0].Claims
+		reg.Entries[0].Claims = []p4offline.SourceRoundClaim{cs[1], cs[0]}
+		if err := p4offline.VerifySourceRoundRegistry(restampRegistry(reg)); !errors.Is(err, p4offline.ErrSourceRoundRegistry) {
+			t.Fatalf("got %v", err)
+		}
+	})
+}
+
+// cloneRegistry copies a registry deep enough for a test to tamper with one
+// entry without touching the fixture.
+func cloneRegistry(reg p4offline.SourceRoundRegistry) p4offline.SourceRoundRegistry {
+	out := reg
+	out.Entries = make([]p4offline.SourceRoundEntry, len(reg.Entries))
+	for i, e := range reg.Entries {
+		e.Claims = append([]p4offline.SourceRoundClaim(nil), e.Claims...)
+		if e.Canonical != nil {
+			c := *e.Canonical
+			e.Canonical = &c
+		}
+		out.Entries[i] = e
+	}
+	return out
 }
