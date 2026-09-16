@@ -14,6 +14,8 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"errors"
+	"fmt"
+	"runtime"
 	"strconv"
 	"testing"
 
@@ -902,9 +904,19 @@ func TestUnreadableOrUnsupportedPlacementLeavesCoverageUnproven(t *testing.T) {
 		}
 	})
 	t.Run("a supported, decodable placement fact still proves coverage", func(t *testing.T) {
-		ep := afterCutoff(t, func(*predictioneval.SourceRecord) {})
-		if !ep.Boundary.NoCallCoverage.Proven || !ep.Boundary.Proven || ep.Excluded {
-			t.Fatalf("a readable call after the cutoff is exactly what the boundary admits: %+v", ep)
+		// The control builds its own SETTLED pair rather than reusing the
+		// helper's lone CALL_STARTED. A start no return ever spends is
+		// contradicted evidence in an admitted COMPLETE session, so the
+		// helper's shape is no longer a readable-call control — it is the
+		// unspent-start case, which has its own test.
+		s := newSynth()
+		s.due("r1", "e1", 1)
+		env := synthPlacedEnvelope()
+		s.terminal("r1", "e1", 1, predictioneval.PhaseAutoDecided, "OK", env)
+		s.call("r1", "e1", 1, *env.FinalAmount, *env.ChoiceIndex)
+		ep := singleEpisode(t, mustSelect(t, s.dataset()))
+		if !ep.Boundary.NoCallCoverage.Proven {
+			t.Fatalf("a readable, settled call after the cutoff is exactly what the boundary admits: %+v", ep)
 		}
 	})
 }
@@ -1272,6 +1284,58 @@ func TestUnreadableEvidenceOnTheRoundNeverProvesNoCall(t *testing.T) {
 			}
 		}
 	})
+	t.Run("a known kind carrying an automatic-only phase does not prove coverage", func(t *testing.T) {
+		// The second half of the same vocabulary, and the exploit is worse than
+		// the placement one because it needs no orphan. Seam 2 reads attempt ids
+		// out of auto_decision rows, so relabelling the EARLIEST automatic
+		// attempt's rows onto another kind hides that attempt from selection
+		// while this classifier leaves coverage proven — and a LATER attempt
+		// becomes the first opportunity, which is the substitution the protocol
+		// forbids.
+		//
+		// The ground is the same single-writer one the call phases rest on,
+		// established the same way rather than assumed from the phase table's
+		// grouping comments: every site that emits AUTO_DUE, AUTO_DECIDED or
+		// AUTO_SKIPPED passes ObsKindAutoDecision, so no other kind can carry
+		// one. The remaining phase families are NOT refused here, because their
+		// writers have not been enumerated and a grouping comment is not a
+		// contract.
+		for _, kind := range []string{
+			predictioneval.KindUserTerminal, "channel_event", "schedule_decision",
+			"user_prediction_made", "round_cleanup", "manual_control",
+		} {
+			for _, phase := range []string{
+				predictioneval.PhaseAutoDue, predictioneval.PhaseAutoDecided, predictioneval.PhaseAutoSkipped,
+			} {
+				t.Run(kind+"/"+phase, func(t *testing.T) {
+					s := newSynth()
+					s.skippedAttempt("r1", "e1", 1)
+					s.add(s.fact(kind, phase, "r1", "e1", 0))
+					ep := singleEpisode(t, mustSelect(t, s.dataset()))
+					if ep.Boundary.NoCallCoverage.Proven ||
+						!containsString(ep.Boundary.NoCallCoverage.Reasons, "UNCLASSIFIED_FACT_ON_ROUND") {
+						t.Fatalf("a %s carrying %s is a pairing the producer cannot write: %+v", kind, phase, ep.Boundary)
+					}
+				})
+			}
+		}
+		t.Run("the kind that does carry them is untouched", func(t *testing.T) {
+			// The false-refusal control: auto_decision is where all three live.
+			for _, phase := range []string{
+				predictioneval.PhaseAutoDue, predictioneval.PhaseAutoDecided, predictioneval.PhaseAutoSkipped,
+			} {
+				t.Run(phase, func(t *testing.T) {
+					s := newSynth()
+					s.skippedAttempt("r1", "e1", 1)
+					s.add(s.fact(predictioneval.KindAutoDecision, phase, "r1", "e1", 0))
+					ep := singleEpisode(t, mustSelect(t, s.dataset()))
+					if !ep.Boundary.NoCallCoverage.Proven {
+						t.Fatalf("auto_decision is the kind these phases live on: %+v", ep.Boundary)
+					}
+				})
+			}
+		})
+	})
 	t.Run("a known kind carrying its own phase still proves coverage", func(t *testing.T) {
 		// The control: the same arm must not start refusing honest rows. An
 		// auto_decision carrying AUTO_DUE is exactly what the producer writes.
@@ -1302,4 +1366,268 @@ func TestUnreadableEvidenceOnTheRoundNeverProvesNoCall(t *testing.T) {
 			t.Fatalf("the healthy no-call round is untouched: %+v", ep)
 		}
 	})
+}
+
+// TestEpisodeSignalMatchingKeepsItsOrderAndDeduplicates pins the two semantic
+// properties the streaming merge has to preserve, at the public seam.
+//
+// The merge replaced a copy-sort-materialize per episode. Order and duplicate
+// removal used to come from sort.Ints plus a neighbour check; they now come
+// from advancing every posting list that holds the current minimum. Both are
+// observable here rather than argued: a record reachable through TWO posting
+// lists must still be seen once, and calls must still come back in ascending
+// collector order.
+func TestEpisodeSignalMatchingKeepsItsOrderAndDeduplicates(t *testing.T) {
+	t.Run("a record matched by two indexes is still one record", func(t *testing.T) {
+		// A placement fact carries the episode's EventID AND its round
+		// incarnation, so it sits in byEvent and byPoolRound at once.
+		//
+		// This asserts only that a healthy placed attempt stays selectable. It
+		// does NOT detect a dedup failure, and it used to claim it did: the
+		// at-most-one-start rule lives in classifySignals, which runs once per
+		// record while the index is built, so how many times eachMatching
+		// visits a signal afterwards cannot re-trigger it. The deduplication is
+		// pinned differentially in evidence_internal_test.go instead, which is
+		// where it can actually be observed.
+		s := newSynth()
+		s.placedAttempt("r1", "e1", 1)
+		ep := singleEpisode(t, mustSelect(t, s.dataset()))
+		if !ep.Boundary.NoCallCoverage.Proven && containsString(ep.Boundary.NoCallCoverage.Reasons, "UNCLASSIFIED_FACT_ON_ROUND") {
+			t.Fatalf("a doubly-indexed record must not look like two: %+v", ep.Boundary)
+		}
+		if ep.Excluded {
+			t.Fatalf("a healthy placed attempt must stay selectable: %+v", ep)
+		}
+	})
+	t.Run("the earliest call is the earliest one in collector order", func(t *testing.T) {
+		// This asserts that the EARLIEST call is identified correctly. It does
+		// NOT pin the merge's ordering, and an earlier version of this comment
+		// claimed it did: the earliest call is selected by a minimum over
+		// position and observation id, which is order-independent by
+		// construction. Merge ordering is pinned differentially in
+		// evidence_internal_test.go against the implementation this one
+		// replaced. An independent lane proved the point with a mutant that
+		// reversed the entire visit order: this test passed, that one failed.
+		for _, tc := range []struct {
+			name        string
+			manualFirst bool
+			wantKind    p4offline.CallKind
+		}{
+			{"a manual call before the automatic one", true, p4offline.CallKindManual},
+			{"a manual call after the automatic one", false, p4offline.CallKindAuto},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				s := newSynth()
+				s.due("r1", "e1", 1)
+				if tc.manualFirst {
+					s.manualCall("r1", "e1", 10, 0)
+					s.placedAttempt("r1", "e1", 1)
+				} else {
+					s.placedAttempt("r1", "e1", 1)
+					s.manualCall("r1", "e1", 10, 0)
+				}
+				ep := singleEpisode(t, mustSelect(t, s.dataset()))
+				if !ep.Boundary.EarliestCallPresent {
+					t.Fatalf("both shapes carry a call: %+v", ep.Boundary)
+				}
+				// Both calls are placement records; which one is EARLIEST is
+				// the merge's answer, and the kind is what distinguishes them.
+				if ep.Boundary.EarliestCallKind != tc.wantKind {
+					t.Fatalf("earliest call is %s at %d, want %s: %+v",
+						ep.Boundary.EarliestCallKind, ep.Boundary.EarliestCallPosition, tc.wantKind, ep.Boundary)
+				}
+			})
+		}
+	})
+}
+
+// TestEpisodeSelectionDoesNotRebuildTheEventBucketPerEpisode is the measured
+// evidence for the colliding-EventID repair.
+//
+// It asserts SHAPE, not speed. A wall-clock threshold on shared CI would be
+// flaky and would prove nothing about complexity, so the assertions are on
+// allocated bytes, which are deterministic for this deterministic workload,
+// and on RATIOS rather than absolute figures, so a machine with a different
+// allocator profile does not move the verdict.
+//
+// Before the repair, matching copied and sorted the whole shared event bucket
+// once per episode: 26 MB at 256 colliding rounds, 384 MB at 1,024 and 6.67 GB
+// at 4,096 (12,288 records) — about 16x per 4x input, against 29 MB for the
+// same record count with distinct event ids. The allocation was the part that
+// mattered: it turns a slow parse into an OOM before the verifier can answer.
+func TestEpisodeSelectionDoesNotRebuildTheEventBucketPerEpisode(t *testing.T) {
+	// The fixture MUST carry call facts. An earlier version of this test built
+	// skipped attempts only, so seam 1 matched no calls and the per-episode
+	// accumulation the repair is about never ran — the test passed while a
+	// colliding dataset with calls still allocated quadratically. An
+	// independent lane found that gap by adding exactly this.
+	build := func(rounds int, collide, withCalls bool) predictioneval.SourceDataset {
+		s := newSynth()
+		for i := 0; i < rounds; i++ {
+			ev := "shared"
+			if !collide {
+				ev = fmt.Sprintf("e%d", i)
+			}
+			round := fmt.Sprintf("r%d", i)
+			if withCalls {
+				s.placedAttempt(round, ev, int64(i+1))
+			} else {
+				s.skippedAttempt(round, ev, int64(i+1))
+			}
+		}
+		return s.dataset()
+	}
+	measure := func(t *testing.T, ds predictioneval.SourceDataset) uint64 {
+		t.Helper()
+		runtime.GC()
+		var a, b runtime.MemStats
+		runtime.ReadMemStats(&a)
+		if _, err := p4offline.SelectEpisodes(ds); err != nil {
+			t.Fatal(err)
+		}
+		runtime.ReadMemStats(&b)
+		return b.TotalAlloc - a.TotalAlloc
+	}
+
+	for _, shape := range []struct {
+		name      string
+		withCalls bool
+	}{
+		{"skipped attempts", false},
+		{"attempts that placed a call", true},
+	} {
+		t.Run(shape.name, func(t *testing.T) {
+			small := measure(t, build(512, true, shape.withCalls))
+			large := measure(t, build(2048, true, shape.withCalls))
+			distinct := measure(t, build(2048, false, shape.withCalls))
+			t.Logf("colliding small=%d large=%d; distinct large=%d", small, large, distinct)
+
+			// Quadratic growth over a 4x input is ~16x; linear is ~4x. The
+			// bound is loose enough that allocator differences cannot trip it
+			// and still far below the quadratic shape.
+			if ratio := float64(large) / float64(small); ratio > 8 {
+				t.Fatalf("allocation grew %.1fx over a 4x input, which is the superlinear shape this repair removes", ratio)
+			}
+			// And a shared event id must not cost materially more than
+			// distinct ones at the same record count.
+			if ratio := float64(large) / float64(distinct); ratio > 3 {
+				t.Fatalf("colliding event ids cost %.1fx a distinct-id dataset of the same size", ratio)
+			}
+		})
+	}
+}
+
+// TestAnUnspentAutomaticStartContradictsAnAdmittedSource enforces the owner's
+// D16 disposition of PLACEMENT_NOT_RETURNED.
+//
+// P4 admits only COMPLETE + AS_FINALIZED source sessions. Under the pinned
+// producer and lifecycle contract a factual AUTOMATIC CALL_STARTED in such a
+// session cannot legitimately lack its CALL_RETURNED: the return is written
+// unconditionally with any error carried into the fact, nothing in the
+// producer's pubsub path recovers from a panic between the two, and a dropped
+// observation prevents the session finalizing COMPLETE at all. An unspent
+// automatic start beside a claim of that contract is therefore a contradiction
+// in the evidence, and it fails closed HERE — before any factual placement can
+// be minted from it — rather than being reported downstream as a placement
+// outcome.
+//
+// The rule is stated of the AUTOMATIC emitter only, which passes one captured
+// incarnation and event id to both halves of its pair. The manual emitter
+// resolves the incarnation separately per half, so its two facts are not
+// guaranteed to agree, and an episode carrying a manual call is excluded as an
+// intervention regardless.
+func TestAnUnspentAutomaticStartContradictsAnAdmittedSource(t *testing.T) {
+	startedOnly := func() predictioneval.SourceDataset {
+		s := newSynth()
+		s.due("r1", "e1", 1)
+		env := synthPlacedEnvelope()
+		s.terminal("r1", "e1", 1, predictioneval.PhaseAutoDecided, "OK", env)
+		// The start alone: no CALL_RETURNED anywhere on the round.
+		s.placement("r1", "e1", 1, predictioneval.PhaseCallStarted, *env.FinalAmount, *env.ChoiceIndex, "OK", "NONE")
+		return s.dataset()
+	}
+	t.Run("the evidence is refused rather than scored", func(t *testing.T) {
+		ep := singleEpisode(t, mustSelect(t, startedOnly()))
+		if ep.Boundary.NoCallCoverage.Proven {
+			t.Fatalf("an unspent automatic start cannot leave coverage proven: %+v", ep.Boundary)
+		}
+		if !containsString(ep.Boundary.NoCallCoverage.Reasons, "UNCLASSIFIED_FACT_ON_ROUND") {
+			t.Fatalf("want the start named as contradicted evidence: %+v", ep.Boundary.NoCallCoverage.Reasons)
+		}
+	})
+	t.Run("the complete pair is untouched", func(t *testing.T) {
+		// The false-refusal control. The very same attempt WITH its return is
+		// the producer's normal output and must stay selectable.
+		s := newSynth()
+		s.placedAttempt("r1", "e1", 1)
+		ep := singleEpisode(t, mustSelect(t, s.dataset()))
+		if containsString(ep.Boundary.NoCallCoverage.Reasons, "UNCLASSIFIED_FACT_ON_ROUND") {
+			t.Fatalf("a settled pair is not contradicted evidence: %+v", ep.Boundary)
+		}
+	})
+	t.Run("two complete pairs on one round are untouched", func(t *testing.T) {
+		// Two attempts, each with its own start and return: every start is
+		// spent, so nothing here is contradicted.
+		s := newSynth()
+		s.placedAttempt("r1", "e1", 1)
+		s.placedAttempt("r1", "e1", 2)
+		ep := singleEpisode(t, mustSelect(t, s.dataset()))
+		if containsString(ep.Boundary.NoCallCoverage.Reasons, "UNCLASSIFIED_FACT_ON_ROUND") {
+			t.Fatalf("two settled pairs are not contradicted evidence: %+v", ep.Boundary)
+		}
+	})
+}
+
+// TestUnspentStartDoesNotExcludeAHealthySiblingIncarnation scopes the D16 mark
+// to the incarnation whose evidence actually contradicts itself.
+//
+// Signals are matched to episodes by EventID among other keys, so an unspent
+// start recorded on one incarnation of a public round reaches every episode
+// carrying that event. A comment used to assert this could only ADD A REASON
+// and never flip an admission, on the ground that such a start carries an
+// attempt id the sibling does not own and is therefore already excluded as an
+// unattributed intervention. An independent lane falsified that: attempt ids
+// are scoped to the pool, not the incarnation, so a sibling on the same pool
+// CAN own the id — and then the D16 mark is the only thing excluding it.
+func TestUnspentStartDoesNotExcludeAHealthySiblingIncarnation(t *testing.T) {
+	byIncarnation := func(t *testing.T, sel p4selection, want string) p4episode {
+		t.Helper()
+		for _, ep := range sel.Episodes {
+			if ep.Episode.RoundIncarnationID == want {
+				return ep
+			}
+		}
+		t.Fatalf("no episode for incarnation %q in %d episodes", want, len(sel.Episodes))
+		return p4episode{}
+	}
+	build := func(paired bool) predictioneval.SourceDataset {
+		s := newSynth()
+		// The sibling: its own complete, earliest attempt, and it also owns
+		// attempt id 2 on the same pool.
+		s.skippedAttempt("r2", "e1", 1)
+		s.due("r2", "e1", 2)
+		// The contradicted incarnation: a start labelled attempt 2, with or
+		// without its return.
+		s.placement("r1", "e1", 2, predictioneval.PhaseCallStarted, 50, 0, "OK", "NONE")
+		if paired {
+			s.placement("r1", "e1", 2, predictioneval.PhaseCallReturned, 50, 0, "OK", "NONE")
+		}
+		return s.dataset()
+	}
+	paired := byIncarnation(t, mustSelect(t, build(true)), "r2")
+	unpaired := byIncarnation(t, mustSelect(t, build(false)), "r2")
+
+	// The ONLY difference between the two datasets is whether r1's start was
+	// spent. r2's own evidence is identical and complete in both.
+	if paired.Excluded {
+		t.Fatalf("the control must be admitted: %+v", paired.ExclusionReasons)
+	}
+	if unpaired.Excluded {
+		t.Fatalf("an unspent start on a SIBLING incarnation must not exclude this one: %+v -> %+v",
+			unpaired.ExclusionReasons, unpaired.Boundary)
+	}
+	if unpaired.Boundary.NoCallCoverage.Proven != paired.Boundary.NoCallCoverage.Proven {
+		t.Fatalf("coverage differs on an episode whose own evidence is unchanged: %+v vs %+v",
+			unpaired.Boundary.NoCallCoverage, paired.Boundary.NoCallCoverage)
+	}
 }

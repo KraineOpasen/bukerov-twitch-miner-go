@@ -338,8 +338,19 @@ func SelectEpisodes(ds predictioneval.SourceDataset) (EvidenceSelection, error) 
 		ep.FirstOpportunityPosition = recs[0].CollectorSequence
 
 		exclude := func(reason string) {
-			ep.Excluded = true
+			// Repeating a reason already recorded is a no-op in the OUTPUT —
+			// ExclusionReasons and Quality.Reasons both go through appendOnce,
+			// and Downgrade appends to History only on an actual rank drop, so
+			// the second call with the same reason changes nothing. It is not a
+			// no-op in COST: Downgrade normalises, which clones the reasons and
+			// the history every time. On a colliding-event dataset this fires
+			// once per matched foreign call, so the clone is per-signal.
+			before := len(ep.ExclusionReasons)
 			ep.ExclusionReasons = appendOnce(ep.ExclusionReasons, reason)
+			if ep.Excluded && len(ep.ExclusionReasons) == before {
+				return
+			}
+			ep.Excluded = true
 			ep.Quality = ep.Quality.Downgrade(QualityExcluded, reason)
 		}
 
@@ -411,16 +422,29 @@ func SelectEpisodes(ds predictioneval.SourceDataset) (EvidenceSelection, error) 
 		}
 
 		// ---- Seam 1: interventions and calls matched to the episode. ------
-		var calls []CallSignal
+		// Only the EARLIEST matched call is ever read — ProveCommonCutoff takes
+		// it and so does the unusable-cutoff branch below, both through
+		// earliestCall, which is a minimum and not a count. Accumulating every
+		// matched call was therefore never required output work, and on a
+		// colliding-event dataset it is exactly the per-episode O(matched)
+		// growth the merge removed one layer down: the slice IS the bucket
+		// again. The running minimum uses earliestCall's own comparison so the
+		// answer is identical.
+		var earliest CallSignal
+		var haveCall bool
 		coverage := NoCallCoverageProof{Proven: true}
-		for _, sig := range signals.matching(ep.Episode) {
+		signals.eachMatching(ep.Episode, func(sig rawSignal) {
 			if sig.manual {
 				ep.ManualSignals = appendOnce(ep.ManualSignals, sig.rec.ObservationID)
 			}
 			if sig.call {
-				calls = append(calls, CallSignal{
+				c := CallSignal{
 					Position: sig.rec.CollectorSequence, ObservationID: sig.rec.ObservationID, Kind: sig.callKind,
-				})
+				}
+				if !haveCall || c.Position < earliest.Position ||
+					(c.Position == earliest.Position && c.ObservationID < earliest.ObservationID) {
+					earliest, haveCall = c, true
+				}
 				// A call the episode's OWN automatic attempts did not make is
 				// an intervention: manual when marked, otherwise of unknown
 				// origin — and unknown is not automatic. An automatic attempt
@@ -444,13 +468,34 @@ func SelectEpisodes(ds predictioneval.SourceDataset) (EvidenceSelection, error) 
 				coverage.Proven = false
 				coverage.Reasons = appendOnce(coverage.Reasons, CoverageUnclassifiedFact)
 			}
+			// The D16 contradiction belongs to the incarnation that recorded
+			// the start, and to that one only. Signals are matched by EventID
+			// among other keys, so without this scope an unspent start reaches
+			// every episode of the public round — and it does NOT merely add a
+			// reason to them. Attempt ids are scoped to the pool rather than to
+			// the incarnation, so a sibling can own the id the start carries,
+			// never collect UNATTRIBUTED_INTERVENTION, and be excluded by this
+			// mark alone. An independent lane demonstrated exactly that flip on
+			// an episode whose own evidence was complete.
+			if sig.unspentStart &&
+				sig.rec.PoolInstanceID == ep.Episode.PoolInstanceID &&
+				sig.rec.RoundIncarnationID == ep.Episode.RoundIncarnationID {
+				coverage.Proven = false
+				coverage.Reasons = appendOnce(coverage.Reasons, CoverageUnclassifiedFact)
+			}
 			if sig.undecodable {
 				coverage.Proven = false
 				coverage.Reasons = appendOnce(coverage.Reasons, CoverageUndecodableFact)
 			}
-		}
+		})
 		if len(ep.ManualSignals) > 0 {
 			exclude(ExclusionManualIntervention)
+		}
+		// ProveCommonCutoff is exported and keeps its signature; it is handed
+		// the one call it would have selected anyway.
+		var calls []CallSignal
+		if haveCall {
+			calls = []CallSignal{earliest}
 		}
 		if ep.FirstOpportunityUsable {
 			ep.Boundary = ProveCommonCutoff(ep.Boundary.CutoffPosition, ep.Boundary.CutoffObservationID, calls, coverage)
@@ -616,7 +661,13 @@ type autoStartSlot struct {
 // substitutes for the other: recorded refuses a duplicate start even after the
 // first one has already been spent, and spent is what makes consumption
 // one-to-one.
-type autoStartTally struct{ recorded, spent bool }
+type autoStartTally struct {
+	recorded, spent bool
+	// at is where the start's own signal sits in the output, so that a start
+	// left unspent at the end of the pass can be marked on the fact that made
+	// the claim rather than on the round in general.
+	at int
+}
 
 // autoStartSlotOf names the slot one automatic call fact belongs to. The
 // identity half is derived here from the record itself, so recording a start
@@ -651,6 +702,11 @@ type rawSignal struct {
 	orphanReturn bool
 	unclassified bool
 	undecodable  bool
+	// unspentStart marks a recorded automatic call start that no return ever
+	// spent. It is kept apart from unclassified because it is scoped: the
+	// contradiction is about the incarnation that RECORDED the start, and
+	// signals reach every episode sharing the public round.
+	unspentStart bool
 }
 
 // signalIndex holds every fact's signal, indexed by the three ways a fact
@@ -694,22 +750,106 @@ func indexSignals(recs []predictioneval.SourceRecord, knownEvents map[string]boo
 
 // matching returns the signals bearing on the episode, each once, in causal
 // order.
-func (ix signalIndex) matching(ep EpisodeIdentity) []rawSignal {
-	var idx []int
+// eachMatching visits the signals matched to one episode, in index order and
+// without duplicates, WITHOUT materializing them.
+//
+// It used to copy the three posting lists into one slice, sort it, and build a
+// []rawSignal — per episode. On a dataset whose episodes share one EventID
+// that slice IS the whole event bucket, so N episodes copied and sorted an
+// O(N)-sized bucket N times: quadratic in both work and transient allocation,
+// The allocation was the part that mattered, because it turns a slow parse
+// into an OOM before the verifier can produce a fail-closed answer.
+//
+// Absolute figures are environment-dependent — two independent measurements of
+// the same 12,288-record shape here differed by about 2.5x (2.3 GB and 6.7 GB)
+// — so what is pinned is the SHAPE: the old code grew about 15x per 4x input,
+// this one grows about 4x, and the regression test asserts ratios rather than
+// byte counts for exactly that reason.
+//
+// Nothing about WHICH signals match, their order, or their deduplication
+// changes here. Each posting list is built by appending indices in increasing
+// order, so all three are already sorted ascending and carry each index at
+// most once; a three-way merge therefore yields exactly the ascending unique
+// sequence the sort produced, and consuming every list that holds the current
+// minimum is what drops the duplicates the old dedup dropped. The equivalence
+// is not left to that argument: evidence_internal_test.go keeps a verbatim copy
+// of the replaced implementation and compares the two element by element over
+// randomized colliding and non-colliding datasets, and asserts the
+// strictly-ascending property that argument rests on. This sentence previously
+// described a comparison that did not exist; an independent lane caught it.
+//
+// WHAT THIS DOES AND DOES NOT REMOVE, because that distinction is the honest
+// content of the repair. It removes the per-episode ALLOCATION and the sort's
+// log factor. It does NOT make the work linear in the input: byEvent is keyed
+// on EventID alone, so the matching RELATION is itself quadratic on a
+// colliding-event dataset — every record of an event is matched to every
+// episode of that event, and the caller inspects each match. Measured
+// independently, the visit count grows exactly 4x per 2x input on that shape.
+//
+// That residue is the SIZE OF THE RELATION rather than an implementation
+// artefact, and shrinking it would change which signals match which episodes,
+// which is the one thing this rewrite had to keep identical. What the space
+// claim buys is the failure MODE: the verifier now gets slower on a hostile
+// input instead of being killed by the allocator before it can produce its
+// fail-closed answer. A declared ceiling on this ingest path is still the
+// follow-up the measurements argue for.
+//
+// ONE RESIDUE THIS DOES NOT REMOVE, beside the CPU one above: ManualSignals is
+// still accumulated per matched manual signal through appendOnce, so a
+// colliding-event dataset carrying many MANUAL calls keeps both quadratic
+// allocation and an O(M^2) scan. That list is exported output — it is what the
+// episode reports — so unlike the calls slice it is not free to drop, and the
+// declared ingest ceiling is the only real answer to it.
+//
+// One honest note on the deduplication: no PRODUCTION consumer is
+// duplicate-sensitive. Seam 1 sets flags idempotently, collects manual signals
+// and coverage reasons through appendOnce, and tracks the earliest call as a
+// running minimum rather than a count. So a duplicate visit would change no
+// verdict today; the dedup is kept because this rewrite had to preserve the old
+// behaviour exactly, and it IS pinned — the differential test kills a mutant
+// that visits every signal twice. If a future consumer ever counts matched
+// signals, this is the line it depends on.
+func (ix signalIndex) eachMatching(ep EpisodeIdentity, visit func(rawSignal)) {
+	var a []int
 	if ep.EventID != "" {
-		idx = append(idx, ix.byEvent[ep.EventID]...)
+		a = ix.byEvent[ep.EventID]
 	}
-	idx = append(idx, ix.byPoolRound[poolRound{ep.PoolInstanceID, ep.RoundIncarnationID}]...)
-	idx = append(idx, ix.byPoolUnattributed[ep.PoolInstanceID]...)
-	sort.Ints(idx)
-	out := make([]rawSignal, 0, len(idx))
-	for i, k := range idx {
-		if i > 0 && idx[i-1] == k {
-			continue
+	b := ix.byPoolRound[poolRound{ep.PoolInstanceID, ep.RoundIncarnationID}]
+	c := ix.byPoolUnattributed[ep.PoolInstanceID]
+	for i, j, k := 0, 0, 0; i < len(a) || j < len(b) || k < len(c); {
+		// The minimum of the live heads, tracked with a FOUND flag rather than
+		// a sentinel value. A sentinel would be a value a posting list could in
+		// principle hold, and if it ever did, no head would compare below it,
+		// no pointer would advance and this loop would not terminate. Indices
+		// come from ranging over the signals so that cannot happen today; the
+		// flag costs nothing and removes the "today" from that sentence.
+		n, found := 0, false
+		if i < len(a) && (!found || a[i] < n) {
+			n, found = a[i], true
 		}
-		out = append(out, ix.signals[k])
+		if j < len(b) && (!found || b[j] < n) {
+			n, found = b[j], true
+		}
+		if k < len(c) && (!found || c[k] < n) {
+			n, found = c[k], true
+		}
+		if !found {
+			return
+		}
+		// Every list holding the minimum advances past it, so an index carried
+		// by two lists is visited once and the next minimum is strictly
+		// greater.
+		if i < len(a) && a[i] == n {
+			i++
+		}
+		if j < len(b) && b[j] == n {
+			j++
+		}
+		if k < len(c) && c[k] == n {
+			k++
+		}
+		visit(ix.signals[n])
 	}
-	return out
 }
 
 // classifySignals reads every fact once and records what it signals.
@@ -778,7 +918,7 @@ func classifySignals(recs []predictioneval.SourceRecord) []rawSignal {
 					if t := autoStarts[slot]; t.recorded {
 						sig.unclassified = true
 					} else {
-						t.recorded = true
+						t.recorded, t.at = true, len(out)
 						autoStarts[slot] = t
 					}
 				} else {
@@ -861,22 +1001,48 @@ func classifySignals(recs []predictioneval.SourceRecord) []rawSignal {
 			// an unreadable fact, an unnameable one — and a supplier who moves a
 			// row between kinds or phases can still erase a refusal two ways this
 			// does not reach. A row relabelled onto a pairing the producer CAN
-			// write (auto_decision + AUTO_DECIDED) is indistinguishable from
-			// honest data by any intrinsic test. An orphan CALL_RETURNED
-			// relabelled to CALL_STARTED becomes an unspent start, and nothing
-			// here requires a start to be spent: that one IS refusable on the
-			// producer's own terms, but only at the cost of making the placement
-			// seam's NOT_RETURNED outcome unreachable through this pipeline, so
-			// it is a product decision recorded for the owner rather than a fix
-			// taken here. Authenticating the RECORDS themselves is what would
+			// write (auto_decision + AUTO_DECIDED, which is why the arm below
+			// excludes that kind rather than refusing the phase outright) is
+			// indistinguishable from honest data by any intrinsic test. The
+			// phase families this arm does NOT refuse — the manual, schedule,
+			// terminal, cleanup and round ones, and equally the confirmation,
+			// unclassified and unknown values — are left readable because their
+			// writers have not been enumerated the way the call and automatic
+			// ones have, and the producer's grouping comments are a naming
+			// convention rather than a contract. An orphan CALL_RETURNED
+			// relabelled to CALL_STARTED becomes an unspent start. That one IS
+			// refusable on the producer's own terms and IS now refused, by the
+			// pass at the end of this function, under the owner's D16
+			// disposition — at the stated cost of making the placement seam's
+			// NOT_RETURNED outcome unreachable through this pipeline, which is
+			// why that status is now documented as reserved and non-emittable
+			// rather than deleted. This paragraph previously said the opposite,
+			// having been written before that decision. Authenticating the RECORDS themselves is what would
 			// close the class: ObservationSHA256 is carried on every row and
 			// this package verifies no record digest. (It does verify plenty of
 			// its own — the factset, the registry, the ruleset, the resolution —
 			// but none of those binds a source row to its stored bytes.)
-			if r.PayloadUndecodable || r.PayloadVersion != predictioneval.SupportedPayloadVersion {
+			switch {
+			case r.PayloadUndecodable || r.PayloadVersion != predictioneval.SupportedPayloadVersion:
 				sig.undecodable = true
-			} else if r.Payload.Phase == predictioneval.PhaseCallStarted ||
-				r.Payload.Phase == predictioneval.PhaseCallReturned {
+			case r.Payload.Phase == predictioneval.PhaseCallStarted,
+				r.Payload.Phase == predictioneval.PhaseCallReturned:
+				sig.unclassified = true
+			case r.Kind != predictioneval.KindAutoDecision &&
+				(r.Payload.Phase == predictioneval.PhaseAutoDue ||
+					r.Payload.Phase == predictioneval.PhaseAutoDecided ||
+					r.Payload.Phase == predictioneval.PhaseAutoSkipped):
+				// The automatic half of the same argument, and its erasure is
+				// worse than the placement one because it needs no orphan.
+				// Seam 2 reads attempt ids out of auto_decision rows, so
+				// relabelling the EARLIEST automatic attempt's rows onto
+				// another kind hides that attempt from selection while leaving
+				// this round's coverage proven — and a LATER attempt then
+				// becomes FirstOpportunity, which is the substitution the
+				// protocol forbids. Established on the same footing as the call
+				// phases: every site that emits AUTO_DUE, AUTO_DECIDED or
+				// AUTO_SKIPPED passes ObsKindAutoDecision, so no other kind can
+				// carry one.
 				sig.unclassified = true
 			}
 		default:
@@ -896,6 +1062,54 @@ func classifySignals(recs []predictioneval.SourceRecord) []rawSignal {
 			sig.unclassified = true
 		}
 		out = append(out, sig)
+	}
+	// A recorded automatic start that no return ever spent.
+	//
+	// P4 admits only COMPLETE + AS_FINALIZED sessions, and under the pinned
+	// producer and lifecycle contract such a session cannot carry a factual
+	// automatic CALL_STARTED without its CALL_RETURNED: the return is written
+	// unconditionally with any error carried into the fact, the producer's
+	// pubsub path recovers from no panic between the two, and a dropped
+	// observation stops the session finalizing COMPLETE at all. The pairing is
+	// therefore not merely unproven here — it is contradicted by the
+	// completeness the source itself claims, so the start is marked on its own
+	// fact and the round's coverage argument breaks.
+	//
+	// This is what makes the placement seam's NOT_RETURNED verdict unreachable
+	// through this pipeline, which is the owner's D16 disposition rather than
+	// an accident: the contradiction is refused HERE, before any factual
+	// placement can be minted from it, instead of being reported downstream as
+	// though it were a placement outcome.
+	//
+	// ONE EDGE THE SCOPE DOES NOT COVER, named rather than implied: a record
+	// carrying no incarnation at all forms no episode, so a mark on such a
+	// start is honoured NOWHERE rather than on one episode. The automatic
+	// emitter always passes the resolved incarnation, so the producer cannot
+	// write it; the row is still a positioned call signal and still bears on
+	// the cutoff proof; and authenticating rows is out of scope here anyway.
+	//
+	// SCOPED TO ITS OWN INCARNATION, and the scope is not cosmetic. Signals
+	// are matched to episodes by EventID among other keys, so this mark reaches
+	// every episode of the public round. A previous version of this comment
+	// claimed that could only add a reason and never flip an admission, because
+	// such a start carries an attempt id a sibling does not own and is already
+	// refused as an unattributed intervention. That was FALSE: attempt ids are
+	// scoped to the pool, not the incarnation, so a sibling on the same pool
+	// can own the id, collect no intervention, and be excluded by this mark
+	// alone. The consuming site therefore honours the mark only on the
+	// incarnation that recorded the start; the flag is separate from
+	// unclassified for exactly that reason.
+	//
+	// AUTOMATIC starts only. The automatic emitter passes one captured
+	// incarnation and event id to both halves of its pair, so the two are
+	// guaranteed to agree and an unspent one is a real contradiction. The
+	// manual emitter resolves the incarnation separately per half, so its facts
+	// carry no such guarantee — and an episode carrying a manual call is
+	// excluded as an intervention however it pairs.
+	for _, t := range autoStarts {
+		if t.recorded && !t.spent {
+			out[t.at].unspentStart = true
+		}
 	}
 	return out
 }

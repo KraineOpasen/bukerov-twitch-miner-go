@@ -129,16 +129,42 @@ func TestLocalReturnDoesNotProvePlatformAcceptance(t *testing.T) {
 			t.Fatalf("even with a proof supplied, a local error is not turned into acceptance: %+v", pl)
 		}
 	})
-	t.Run("a started call that never returned", func(t *testing.T) {
-		_, fs2, fp2, p22 := factualCase(t, func(s *synth, env *predictioneval.SourceDecisionEnvelope) {
-			s.placement("r1", "e1", 1, predictioneval.PhaseCallStarted, 50, 0, "OK", "NONE")
-		})
-		if fp2.Coherence != predictioneval.PlacementShapeIncoherent || !fp2.StartedOnly {
-			t.Fatalf("the P2 projection calls a half pair incoherent; the started-only shape must be kept apart: %+v", fp2)
+	t.Run("a started call that never returned is refused before a placement exists", func(t *testing.T) {
+		// OWNER DISPOSITION (D16). PLACEMENT_NOT_RETURNED is NOT an admissible
+		// reachable derived outcome of this pipeline. P4 admits only
+		// COMPLETE + AS_FINALIZED sources, and such a source cannot carry a
+		// factual automatic CALL_STARTED without its CALL_RETURNED, so an
+		// unspent start is a contradiction in the EVIDENCE rather than a
+		// placement result to report.
+		//
+		// This used to be the positive fixture for that status: it built a
+		// started-only case, asserted it was scorable, and asserted the seam
+		// answered NOT_RETURNED. It is now the negative proof along the trusted
+		// path, which is the whole point of the disposition — the shape never
+		// reaches the placement seam at all.
+		s := newSynth()
+		s.due("r1", "e1", 1)
+		env := synthPlacedEnvelope()
+		s.terminal("r1", "e1", 1, predictioneval.PhaseAutoDecided, "OK", env)
+		s.placement("r1", "e1", 1, predictioneval.PhaseCallStarted, *env.FinalAmount, *env.ChoiceIndex, "OK", "NONE")
+		ds := s.dataset()
+
+		ep := singleEpisode(t, mustSelect(t, ds))
+		if !ep.Excluded {
+			t.Fatalf("an unspent automatic start must exclude the episode: %+v", ep)
 		}
-		pl := p4offline.DerivePlacement(decisionOf(t, p22, fs2), fp2, validProof(fp2))
-		if pl.Status != p4offline.PlacementNotReturned || pl.AttributedCallObservationID != fp2.CallStartedObservationID {
-			t.Fatalf("a proof cannot turn an unreturned call into an accepted one: %+v", pl)
+		if ep.Boundary.NoCallCoverage.Proven || ep.Boundary.Proven {
+			t.Fatalf("the boundary cannot be proven over contradicted evidence: %+v", ep.Boundary)
+		}
+		// And nothing downstream can mint a factual placement from it. Whether
+		// the factset or the projection is the one that refuses, the required
+		// property is the same: no FactualPlacement exists for this shape.
+		fs, err := p4offline.BuildCommonFactset(ds, ep.Episode)
+		if err != nil {
+			return
+		}
+		if fp, err := p4offline.ProjectFactualPlacement(ds, fs); err == nil {
+			t.Fatalf("a factual placement must not be derivable from an unspent start: %+v", fp)
 		}
 	})
 	t.Run("a placing decision with no call recorded", func(t *testing.T) {

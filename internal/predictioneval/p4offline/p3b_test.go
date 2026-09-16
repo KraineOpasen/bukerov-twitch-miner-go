@@ -11,6 +11,7 @@ import (
 	"errors"
 	"math"
 	"os"
+	"reflect"
 	"sort"
 	"strings"
 	"testing"
@@ -1091,7 +1092,14 @@ func TestP3bSelectionMustBeIntrinsicallyConsistent(t *testing.T) {
 				}, "ADMITTING_STEP_CONTRADICTS_ITS_KIND"},
 				{"a word past everything the run consumed", func(e *predictioneval.OrderedRulesTraceEntry) {
 					e.RawWordIndex = 1 << 30
-				}, "ADMITTING_STEP_RAW_WORD_OUT_OF_RANGE"},
+				}, "ADMITTING_STEP_RAW_WORD_OVER_CEILING"},
+				{"an index below the no-word sentinel", func(e *predictioneval.OrderedRulesTraceEntry) {
+					// -1 is the producer's "no word". Nothing below it means
+					// anything, and the lower bound is the only guard that
+					// says so — the two upper bounds are scoped to a
+					// NON-NEGATIVE index and never see this shape.
+					e.RawWordIndex = -2
+				}, "ADMITTING_STEP_RAW_WORD_BELOW_NO_WORD"},
 			} {
 				t.Run(tc.name, func(t *testing.T) {
 					ev := predictioneval.EvaluateOrderedRules(proj.Stream, cfgWithRule("a", predictioneval.ComparatorGe, 50, 100), trace)
@@ -1114,9 +1122,10 @@ func TestP3bSelectionMustBeIntrinsicallyConsistent(t *testing.T) {
 			for _, tc := range []struct {
 				name            string
 				index, consumed int
+				want            string
 			}{
-				{"a counter co-forged to match an index past the ceiling", 1 << 30, 1<<30 + 1},
-				{"an index inside the ceiling but past what the run consumed", 5, 1},
+				{"a counter co-forged to match an index past the ceiling", 1 << 30, 1<<30 + 1, "ADMITTING_STEP_RAW_WORD_OVER_CEILING"},
+				{"an index inside the ceiling but past what the run consumed", 5, 1, "ADMITTING_STEP_RAW_WORD_NOT_CONSUMED"},
 			} {
 				t.Run(tc.name, func(t *testing.T) {
 					ev := predictioneval.EvaluateOrderedRules(proj.Stream, cfgWithRule("a", predictioneval.ComparatorGe, 50, 100), trace)
@@ -1127,9 +1136,10 @@ func TestP3bSelectionMustBeIntrinsicallyConsistent(t *testing.T) {
 					entries[len(entries)-1].RawWordIndex = tc.index
 					ev.Trace = entries
 					ev.RawWordsConsumed = tc.consumed
-					if m := p4offline.MapP3bAction(ev); m.Legal ||
-						!containsString(m.Illegality, "ADMITTING_STEP_RAW_WORD_OUT_OF_RANGE") {
-						t.Fatalf("want the word index refused: %+v", m)
+					// Each bound now reports under its own name, so this also
+					// pins that the OTHER bound is not the one answering.
+					if m := p4offline.MapP3bAction(ev); m.Legal || !containsString(m.Illegality, tc.want) {
+						t.Fatalf("want %s: %+v", tc.want, m)
 					}
 				})
 			}
@@ -1148,7 +1158,10 @@ func TestP3bSelectionMustBeIntrinsicallyConsistent(t *testing.T) {
 				}, "ADMITTING_STEP_CONTRADICTS_ITS_KIND"},
 				{"a word the default half cannot spend", func(e *predictioneval.OrderedRulesTraceEntry) {
 					e.RawWordIndex = 3
-				}, "ADMITTING_STEP_CONTRADICTS_ITS_KIND"},
+				}, "ADMITTING_STEP_DEFAULT_SPENT_A_WORD"},
+				{"a raw value the default half cannot carry", func(e *predictioneval.OrderedRulesTraceEntry) {
+					e.RawWordValue = 7
+				}, "ADMITTING_STEP_RAW_WORD_VALUE_WITHOUT_WORD"},
 				{"bounds it admitted outside of", func(e *predictioneval.OrderedRulesTraceEntry) {
 					e.ComparatorMatched = false
 				}, "ADMITTING_STEP_CONTRADICTS_ITS_KIND"},
@@ -1294,4 +1307,680 @@ func TestP3bSelectionMustBeIntrinsicallyConsistent(t *testing.T) {
 			}
 		}
 	})
+}
+
+// TestP3bEvaluationMustNotContradictItsOwnBookkeeping covers four shapes an
+// external review reproduced against the previous head. Each is a value the
+// producer fixes on a path this map already reads, left unread so that an
+// evaluation could contradict itself and still map legal. None of them asks the
+// map to re-run the evaluator: every relation below compares the evaluation
+// against another field of the same evaluation.
+func TestP3bEvaluationMustNotContradictItsOwnBookkeeping(t *testing.T) {
+	_, fs := selectedFactset(t, nil, nil)
+	proj, err := p4offline.ProjectP3bSingleCandidate(fs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	coords := synthCoords(fs, 0)
+	trace := mustDrawTrace(t, coords, 4)
+	ruleCfg := cfgWithRule("a", predictioneval.ComparatorGe, 50, 100)
+
+	// A rate of exactly one is the producer's "always true" threshold: it
+	// answers WITHOUT drawing, so the admitting entry carries the no-word
+	// sentinel and a zero raw value, and BernoulliEvaluations still advances
+	// because the counter sits below the branch rather than inside it. Both
+	// facts are pinned here because the cases below rest on them.
+	admitting := func(t *testing.T) predictioneval.OrderedRulesEvaluation {
+		t.Helper()
+		ev := predictioneval.EvaluateOrderedRules(proj.Stream, ruleCfg, trace)
+		if ev.Status != predictioneval.StatusWouldAttempt || ev.Selected == nil {
+			t.Fatalf("fixture must admit: %q/%q", ev.Status, ev.Reason)
+		}
+		if ev.Selected.Basis != predictioneval.SelectionDetailedRule {
+			t.Fatalf("fixture must admit on the detailed-rule half: %+v", ev.Selected)
+		}
+		last := ev.Trace[len(ev.Trace)-1]
+		if last.Step != predictioneval.TraceStepRuleDraw || last.RawWordIndex != -1 || last.RawWordValue != 0 {
+			t.Fatalf("fixture must admit on an UNDRAWN rule draw: %+v", last)
+		}
+		if ev.BernoulliEvaluations < 1 {
+			t.Fatalf("a detailed-rule admission always evaluated a draw: %+v", ev)
+		}
+		if m := p4offline.MapP3bAction(ev); !m.Legal {
+			t.Fatalf("the untouched fixture must stay legal: %+v", m)
+		}
+		return ev
+	}
+	editLast := func(ev *predictioneval.OrderedRulesEvaluation, f func(*predictioneval.OrderedRulesTraceEntry)) {
+		entries := append([]predictioneval.OrderedRulesTraceEntry(nil), ev.Trace...)
+		f(&entries[len(entries)-1])
+		ev.Trace = entries
+	}
+	editVisit := func(ev *predictioneval.OrderedRulesEvaluation, f func(*predictioneval.OrderedRulesCandidateVisit)) {
+		visits := append([]predictioneval.OrderedRulesCandidateVisit(nil), ev.Visits...)
+		f(&visits[len(visits)-1])
+		ev.Visits = visits
+	}
+
+	t.Run("a raw value beside the no-word sentinel", func(t *testing.T) {
+		// The rule-draw half leaves RawWordValue unread BECAUSE a drawn word's
+		// value is not something the evaluation attests to. That reasoning does
+		// not reach the case where the entry itself says no word was drawn:
+		// there the producer fixes the value at zero, exactly as on the default
+		// half, so a nonzero value is a self-contradicting witness.
+		ev := admitting(t)
+		editLast(&ev, func(e *predictioneval.OrderedRulesTraceEntry) { e.RawWordValue = 1 })
+		// Its own identifier, not the kind check's: the two can fail on one
+		// entry, and a shared name would report one shape twice and say which
+		// guard answered neither time — the masking defect this diff repairs
+		// for the raw-word bounds a few lines below.
+		if m := p4offline.MapP3bAction(ev); m.Legal ||
+			!containsString(m.Illegality, "ADMITTING_STEP_RAW_WORD_VALUE_WITHOUT_WORD") {
+			t.Fatalf("a raw value with no word drawn must fail closed: %+v", m)
+		}
+	})
+	t.Run("a drawn word's value stays unread", func(t *testing.T) {
+		// The guard above must NOT become "RawWordValue is always zero": on a
+		// rule that really drew, the value is whatever the trace supplied and
+		// the evaluation never attests to it.
+		ev := predictioneval.EvaluateOrderedRules(proj.Stream, cfgWithRule("a", predictioneval.ComparatorGe, 50, 50), trace)
+		if ev.Status != predictioneval.StatusWouldAttempt || ev.Selected == nil {
+			t.Skipf("this trace did not admit at 50%%: %q/%q", ev.Status, ev.Reason)
+		}
+		last := ev.Trace[len(ev.Trace)-1]
+		if last.RawWordIndex < 0 {
+			t.Fatalf("fixture must have SPENT a word: %+v", last)
+		}
+		if m := p4offline.MapP3bAction(ev); !m.Legal {
+			t.Fatalf("a genuine drawn word must stay legal: %+v", m)
+		}
+	})
+	t.Run("a detailed-rule admission that evaluated no draw", func(t *testing.T) {
+		// BernoulliEvaluations is incremented on the common path below the
+		// rate-one branch, so EVERY detailed-rule admission has passed it at
+		// least once, including one that drew no word.
+		ev := admitting(t)
+		ev.BernoulliEvaluations = 0
+		if m := p4offline.MapP3bAction(ev); m.Legal ||
+			!containsString(m.Illegality, "SELECTION_BASIS_CONTRADICTS_BERNOULLI_COUNT") {
+			t.Fatalf("a detailed-rule admission with no evaluated draw must fail closed: %+v", m)
+		}
+	})
+	t.Run("a default admission is held to no such count", func(t *testing.T) {
+		// The converse does NOT hold and must not be asserted: detailed rules
+		// that failed on an earlier outcome advance the counter and the default
+		// still admits, so a default admission may carry any count.
+		ev := predictioneval.EvaluateOrderedRules(proj.Stream, cfgDefaultOnly("a", 0, 100), trace)
+		if ev.Selected == nil || ev.Selected.Basis != predictioneval.SelectionDefault {
+			t.Fatalf("fixture must admit by default: %+v", ev.Selected)
+		}
+		if ev.BernoulliEvaluations != 0 {
+			t.Fatalf("this fixture reaches no rule: %+v", ev)
+		}
+		if m := p4offline.MapP3bAction(ev); !m.Legal {
+			t.Fatalf("a default admission with a zero count is legal: %+v", m)
+		}
+	})
+	t.Run("an admitting visit whose balance use the status contradicts", func(t *testing.T) {
+		// admitOrderedRules writes the visit's BalanceUse and the status in ONE
+		// switch, so on an admitting visit it is an exact function of the
+		// status and reason. NOT_EVALUATED is what a visit carries before that
+		// switch runs, and the admitting visit is appended after it.
+		for _, tc := range []struct {
+			name string
+			use  predictioneval.OrderedRulesBalanceUse
+		}{
+			{"a balance the admission never evaluated", predictioneval.BalanceNotEvaluated},
+			{"a balance use outside the vocabulary", "FORGED"},
+			{"a balance the admission could not size with", predictioneval.BalanceRequiredButMissing},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				ev := admitting(t)
+				editVisit(&ev, func(v *predictioneval.OrderedRulesCandidateVisit) { v.BalanceUse = tc.use })
+				if m := p4offline.MapP3bAction(ev); m.Legal ||
+					!containsString(m.Illegality, "SELECTION_VISIT_CONTRADICTS_BALANCE_USE") {
+					t.Fatalf("want the visit refused: %+v", m)
+				}
+			})
+		}
+	})
+	t.Run("each balance-use arm is pinned on its own", func(t *testing.T) {
+		// One arm per admitting outcome. WOULD_ATTEMPT is covered above; this
+		// covers the stake-unknown one, so that swapping either arm's answer
+		// refuses genuine producer output at a case named for it rather than
+		// being caught only by some other test's fixture check.
+		cands := append([]predictioneval.OrderedRulesCandidate(nil), proj.Stream.Candidates...)
+		cands[0].Balance = predictioneval.SuppliedInt64{Presence: predictioneval.SuppliedMissing, Reason: "test"}
+		missing, err := predictioneval.ProjectOrderedRulesStream(
+			predictioneval.OrderedRulesSource{Scope: proj.Stream.Scope, Candidates: cands}, proj.Stream.Admission)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ev := predictioneval.EvaluateOrderedRules(missing, ruleCfg, trace)
+		if ev.Status != predictioneval.StatusParticipationAdmittedStakeUnknown ||
+			ev.Reason != predictioneval.ReasonBalanceNotSupplied || ev.Selected == nil {
+			t.Fatalf("fixture must admit with an unsupplied balance: %q/%q", ev.Status, ev.Reason)
+		}
+		last := ev.Visits[len(ev.Visits)-1]
+		if last.BalanceUse != predictioneval.BalanceRequiredButMissing {
+			t.Fatalf("the producer writes REQUIRED_BUT_MISSING on this arm: %+v", last)
+		}
+		if m := p4offline.MapP3bAction(ev); !m.Legal {
+			t.Fatalf("genuine output on this arm must stay legal: %+v", m)
+		}
+		// And the arm is not interchangeable with the other one.
+		editVisit(&ev, func(v *predictioneval.OrderedRulesCandidateVisit) { v.BalanceUse = predictioneval.BalanceUsed })
+		if m := p4offline.MapP3bAction(ev); m.Legal ||
+			!containsString(m.Illegality, "SELECTION_VISIT_CONTRADICTS_BALANCE_USE") {
+			t.Fatalf("a used balance cannot witness an unsupplied one: %+v", m)
+		}
+	})
+	t.Run("a status naming no balance use is not held to one", func(t *testing.T) {
+		// The pairing is checked only where the status names one. A reason the
+		// arm above has already refused names none, and reporting the visit as
+		// contradicting an empty expectation would describe ONE contradiction
+		// under two names. The exact set is what pins that.
+		cands := append([]predictioneval.OrderedRulesCandidate(nil), proj.Stream.Candidates...)
+		cands[0].Balance = predictioneval.SuppliedInt64{Presence: predictioneval.SuppliedMissing, Reason: "test"}
+		reproj, err := predictioneval.ProjectOrderedRulesStream(
+			predictioneval.OrderedRulesSource{Scope: proj.Stream.Scope, Candidates: cands}, proj.Stream.Admission)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ev := predictioneval.EvaluateOrderedRules(reproj, ruleCfg, trace)
+		if ev.Status != predictioneval.StatusParticipationAdmittedStakeUnknown || ev.Selected == nil {
+			t.Fatalf("fixture: %q/%q", ev.Status, ev.Reason)
+		}
+		ev.Reason = "FORGED"
+		m := p4offline.MapP3bAction(ev)
+		if m.Legal || !sameStrings(m.Illegality, []string{"STAKE_UNKNOWN_REASON_FOREIGN"}) {
+			t.Fatalf("want exactly the foreign reason named: %+v", m)
+		}
+	})
+	t.Run("terminal reasons are held to their status vocabulary", func(t *testing.T) {
+		// Both arms tested only for a NONEMPTY reason, so any string passed.
+		// The producer emits a closed, status-specific set at every site.
+		for _, tc := range []struct {
+			name   string
+			cfg    predictioneval.OrderedRulesConfig
+			trace  predictioneval.SuppliedDrawTrace
+			native predictioneval.OrderedRulesStatus
+			want   string
+		}{
+			{"unknown input", cfgWithRule("a", predictioneval.ComparatorGe, 50, 50),
+				predictioneval.SuppliedDrawTrace{RunID: "r", EntropySemanticsVersion: predictioneval.OrderedRulesEntropySemanticsVersion},
+				predictioneval.StatusUnknownInput, "UNKNOWN_INPUT_REASON_FOREIGN"},
+			{"refused", predictioneval.OrderedRulesConfig{ConfigID: "nodefault"}, trace,
+				predictioneval.StatusRefused, "REFUSAL_REASON_FOREIGN"},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				ev := predictioneval.EvaluateOrderedRules(proj.Stream, tc.cfg, tc.trace)
+				if ev.Status != tc.native {
+					t.Fatalf("fixture produced %q/%q, want %q", ev.Status, ev.Reason, tc.native)
+				}
+				if m := p4offline.MapP3bAction(ev); !m.Legal {
+					t.Fatalf("the producer's own reason %q must stay legal: %+v", ev.Reason, m)
+				}
+				ev.Reason = "FORGED"
+				if m := p4offline.MapP3bAction(ev); m.Legal || !containsString(m.Illegality, tc.want) {
+					t.Fatalf("a foreign %q reason must fail closed: %+v", tc.native, m)
+				}
+			})
+		}
+	})
+}
+
+// TestP3bMapReadsEveryLoadBearingHeaderAndStakeField closes the two fields the
+// field/status matrix classified as load-bearing but accidentally unread.
+func TestP3bMapReadsEveryLoadBearingHeaderAndStakeField(t *testing.T) {
+	_, fs := selectedFactset(t, nil, nil)
+	proj, err := p4offline.ProjectP3bSingleCandidate(fs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	coords := synthCoords(fs, 0)
+	trace := mustDrawTrace(t, coords, 4)
+	ruleCfg := cfgWithRule("a", predictioneval.ComparatorGe, 50, 100)
+
+	t.Run("a foreign donor revision", func(t *testing.T) {
+		// The fourth pinned header string. EvidenceLabel, ModelVersion and
+		// EntropySemanticsVersion are all held to their constants; this one was
+		// unchecked beside them, which was an omission rather than a decision.
+		ev := predictioneval.EvaluateOrderedRules(proj.Stream, ruleCfg, trace)
+		if m := p4offline.MapP3bAction(ev); !m.Legal {
+			t.Fatalf("fixture must be legal: %+v", m)
+		}
+		ev.DonorRevision = "someone-elses/fork@0000000"
+		if m := p4offline.MapP3bAction(ev); m.Legal ||
+			!containsString(m.Illegality, "DONOR_REVISION_FOREIGN") {
+			t.Fatalf("a foreign donor revision must fail closed: %+v", m)
+		}
+	})
+	t.Run("a stake reason no non-admitting status can carry", func(t *testing.T) {
+		// The producer initialises Stake to {MISSING, NOT_EVALUATED} at both
+		// construction sites and overwrites it ONLY where it admits, so on
+		// every non-admitting status the REASON is fixed exactly as the
+		// presence is. The presence was held to that and the reason was not.
+		for _, tc := range []struct {
+			name   string
+			cfg    predictioneval.OrderedRulesConfig
+			trace  predictioneval.SuppliedDrawTrace
+			native predictioneval.OrderedRulesStatus
+		}{
+			{"no attempt in prefix", cfgDefaultOnly("a", 95, 100), trace, predictioneval.StatusNoAttemptInSuppliedPrefix},
+			{"unknown input", cfgWithRule("a", predictioneval.ComparatorGe, 50, 50),
+				predictioneval.SuppliedDrawTrace{RunID: "r", EntropySemanticsVersion: predictioneval.OrderedRulesEntropySemanticsVersion},
+				predictioneval.StatusUnknownInput},
+			{"refused", predictioneval.OrderedRulesConfig{ConfigID: "nodefault"}, trace, predictioneval.StatusRefused},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				ev := predictioneval.EvaluateOrderedRules(proj.Stream, tc.cfg, tc.trace)
+				if ev.Status != tc.native {
+					t.Fatalf("fixture produced %q/%q", ev.Status, ev.Reason)
+				}
+				if ev.Stake.Reason != predictioneval.ReasonBalanceNotEvaluated {
+					t.Fatalf("the producer fixes this arm's stake reason: %+v", ev.Stake)
+				}
+				if m := p4offline.MapP3bAction(ev); !m.Legal {
+					t.Fatalf("genuine output must stay legal: %+v", m)
+				}
+				ev.Stake.Reason = "BALANCE_INVALID"
+				if m := p4offline.MapP3bAction(ev); m.Legal ||
+					!containsString(m.Illegality, "STAKE_REASON_CONTRADICTS_STATUS") {
+					t.Fatalf("a stake reason no non-admitting status writes must fail closed: %+v", m)
+				}
+			})
+		}
+	})
+	t.Run("an admitting arm's stake reason stays unread", func(t *testing.T) {
+		// It must NOT become "the reason is always NOT_EVALUATED": where the
+		// model admits, balanceReason carries the CALLER's own balance reason
+		// string, which is arbitrary text and not a vocabulary this package
+		// can bound.
+		cands := append([]predictioneval.OrderedRulesCandidate(nil), proj.Stream.Candidates...)
+		cands[0].Balance = predictioneval.SuppliedInt64{Presence: predictioneval.SuppliedMissing, Reason: "anything the caller wrote"}
+		reproj, err := predictioneval.ProjectOrderedRulesStream(
+			predictioneval.OrderedRulesSource{Scope: proj.Stream.Scope, Candidates: cands}, proj.Stream.Admission)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ev := predictioneval.EvaluateOrderedRules(reproj, ruleCfg, trace)
+		if ev.Status != predictioneval.StatusParticipationAdmittedStakeUnknown {
+			t.Fatalf("fixture: %q/%q", ev.Status, ev.Reason)
+		}
+		if ev.Stake.Reason != "anything the caller wrote" {
+			t.Fatalf("this arm carries the caller's own text: %+v", ev.Stake)
+		}
+		if m := p4offline.MapP3bAction(ev); !m.Legal {
+			t.Fatalf("caller text on an admitting arm is not a contradiction: %+v", m)
+		}
+	})
+}
+
+// TestP3bFieldStatusMatrixIsComplete pins the census the seam-C field/status
+// matrix in actionmap.go is written against.
+//
+// The matrix classifies every field of every native structure MapP3bAction
+// reads as VALIDATED_LOAD_BEARING or INTENTIONALLY_NON_AUTHORITATIVE. That
+// classification is only trustworthy while the census it was taken over is
+// still the whole census: if the native core gains a field, the matrix would
+// silently stop covering it and the new field would be accidentally unread —
+// exactly the condition this class of repair exists to remove.
+//
+// So this test does not check behaviour. It checks that the set of fields has
+// not changed, and fails with the new name when it has, which forces the field
+// to be classified in the matrix before the suite can go green again.
+func TestP3bFieldStatusMatrixIsComplete(t *testing.T) {
+	census := map[string][]string{
+		"OrderedRulesEvaluation": {
+			"EvidenceLabel", "ModelVersion", "DonorRevision", "EntropySemanticsVersion",
+			"StreamDigest", "ConfigDigest", "EntropyDigest", "ConsumedInputDigest",
+			"Status", "Reason", "Participation", "Stake", "Selected",
+			"HasStopPosition", "StoppedAtCandidate", "StoppedAtPosition",
+			"CandidatesConsumed", "OutcomesConsidered", "RulesConsidered",
+			"BernoulliEvaluations", "RawWordsConsumed",
+			"Cutoff", "Qualifications", "Trace", "Visits",
+		},
+		"OrderedRulesSelection": {
+			"CandidateIdentity", "CandidatePosition", "CandidateIndex",
+			"OutcomeIndex", "OutcomeIdentity", "Basis", "RuleIndex", "ShareBits",
+		},
+		"OrderedRulesTraceEntry": {
+			"Step", "CandidateIndex", "CandidatePosition", "OutcomeIndex", "ShareBits",
+			"RuleIndex", "ComparatorMatched", "BernoulliEvaluated", "BernoulliResult",
+			"RawWordIndex", "RawWordValue", "Admitted",
+		},
+		"OrderedRulesCandidateVisit": {
+			"CandidateIndex", "CandidateIdentity", "CandidatePosition", "Verdict",
+			"BalanceUse", "PoolTotalKnown", "PoolTotal", "RawWordsConsumedHere",
+		},
+		"SuppliedUint32": {"Presence", "Value", "Reason"},
+	}
+	samples := map[string]any{
+		"OrderedRulesEvaluation":     predictioneval.OrderedRulesEvaluation{},
+		"OrderedRulesSelection":      predictioneval.OrderedRulesSelection{},
+		"OrderedRulesTraceEntry":     predictioneval.OrderedRulesTraceEntry{},
+		"OrderedRulesCandidateVisit": predictioneval.OrderedRulesCandidateVisit{},
+		"SuppliedUint32":             predictioneval.SuppliedUint32{},
+	}
+	total := 0
+	for name, want := range census {
+		ty := reflect.TypeOf(samples[name])
+		got := map[string]bool{}
+		for i := 0; i < ty.NumField(); i++ {
+			if f := ty.Field(i); f.IsExported() {
+				got[f.Name] = true
+			}
+		}
+		total += len(want)
+		classified := map[string]bool{}
+		for _, f := range want {
+			classified[f] = true
+			if !got[f] {
+				t.Errorf("%s: the matrix classifies %q, which the native structure no longer has", name, f)
+			}
+		}
+		for f := range got {
+			if !classified[f] {
+				t.Errorf("%s: field %q is NOT classified in the seam-C field/status matrix. "+
+					"Classify it as VALIDATED_LOAD_BEARING or INTENTIONALLY_NON_AUTHORITATIVE "+
+					"in actionmap.go before relying on the map's closure.", name, f)
+			}
+		}
+		if len(got) != len(want) {
+			t.Errorf("%s: native structure has %d exported fields, matrix classifies %d", name, len(got), len(want))
+		}
+	}
+	if total != 56 {
+		t.Errorf("the matrix documents 56 classified fields, this census counts %d", total)
+	}
+}
+
+// TestP3bAdmittingArmsBindTheirOwnProducerFixedFields closes two gaps an
+// independent review lane found in the field/status matrix: a justification
+// that was true of some producer arms and applied to all of them, and a
+// presence flag classified with the value it accompanies.
+func TestP3bAdmittingArmsBindTheirOwnProducerFixedFields(t *testing.T) {
+	_, fs := selectedFactset(t, nil, nil)
+	proj, err := p4offline.ProjectP3bSingleCandidate(fs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	coords := synthCoords(fs, 0)
+	trace := mustDrawTrace(t, coords, 4)
+	ruleCfg := cfgWithRule("a", predictioneval.ComparatorGe, 50, 100)
+	streamWith := func(t *testing.T, bal predictioneval.SuppliedInt64) predictioneval.OrderedRulesStream {
+		t.Helper()
+		cands := append([]predictioneval.OrderedRulesCandidate(nil), proj.Stream.Candidates...)
+		cands[0].Balance = bal
+		re, err := predictioneval.ProjectOrderedRulesStream(
+			predictioneval.OrderedRulesSource{Scope: proj.Stream.Scope, Candidates: cands}, proj.Stream.Admission)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return re
+	}
+
+	t.Run("a sized stake carries no reason", func(t *testing.T) {
+		// The admitting default arm writes SuppliedUint32{KNOWN, Value} and
+		// never sets Reason, so a KNOWN stake carrying one is a shape the
+		// producer cannot write. balanceReason — the caller-text path the
+		// exemption was written for — is not reached on this arm at all.
+		ev := predictioneval.EvaluateOrderedRules(proj.Stream, ruleCfg, trace)
+		if ev.Status != predictioneval.StatusWouldAttempt || ev.Stake.Reason != "" {
+			t.Fatalf("fixture: %q stake=%+v", ev.Status, ev.Stake)
+		}
+		if m := p4offline.MapP3bAction(ev); !m.Legal {
+			t.Fatalf("genuine output must stay legal: %+v", m)
+		}
+		ev.Stake.Reason = predictioneval.ReasonBalanceInvalid
+		if m := p4offline.MapP3bAction(ev); m.Legal ||
+			!containsString(m.Illegality, "STAKE_REASON_CONTRADICTS_STATUS") {
+			t.Fatalf("a sized stake with a balance failure reason must fail closed: %+v", m)
+		}
+	})
+	t.Run("the out-of-domain arm writes a constant, not caller text", func(t *testing.T) {
+		// This arm builds SuppliedUint32 directly with the constant, so unlike
+		// the two balanceReason arms it IS bounded.
+		bal := proj.Stream.Candidates[0].Balance
+		bal.Value = 1 << 33
+		ev := predictioneval.EvaluateOrderedRules(streamWith(t, bal), ruleCfg, trace)
+		if ev.Reason != predictioneval.ReasonBalanceOutOfDomain ||
+			ev.Stake.Reason != predictioneval.ReasonBalanceOutOfDomain {
+			t.Fatalf("fixture: %q/%q stake=%+v", ev.Status, ev.Reason, ev.Stake)
+		}
+		if m := p4offline.MapP3bAction(ev); !m.Legal {
+			t.Fatalf("genuine output must stay legal: %+v", m)
+		}
+		ev.Stake.Reason = predictioneval.ReasonBalanceNotEvaluated
+		if m := p4offline.MapP3bAction(ev); m.Legal ||
+			!containsString(m.Illegality, "STAKE_REASON_CONTRADICTS_REASON") {
+			t.Fatalf("this arm's stake reason is a constant: %+v", m)
+		}
+	})
+	t.Run("the two caller-text arms stay unread", func(t *testing.T) {
+		// The exemption must survive where it is actually justified.
+		for _, tc := range []struct {
+			name string
+			bal  predictioneval.SuppliedInt64
+		}{
+			{"an unsupplied balance", predictioneval.SuppliedInt64{Presence: predictioneval.SuppliedMissing, Reason: "caller wrote this"}},
+			{"an invalid balance", predictioneval.SuppliedInt64{Presence: predictioneval.SuppliedInvalid, Reason: "and this"}},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				ev := predictioneval.EvaluateOrderedRules(streamWith(t, tc.bal), ruleCfg, trace)
+				if ev.Status != predictioneval.StatusParticipationAdmittedStakeUnknown {
+					t.Fatalf("fixture: %q/%q", ev.Status, ev.Reason)
+				}
+				if ev.Stake.Reason != tc.bal.Reason {
+					t.Fatalf("this arm passes the caller's text through: %+v", ev.Stake)
+				}
+				if m := p4offline.MapP3bAction(ev); !m.Legal {
+					t.Fatalf("caller text on this arm is not a contradiction: %+v", m)
+				}
+			})
+		}
+	})
+	t.Run("an admitting visit whose pool was never summed", func(t *testing.T) {
+		// checkedPoolSum runs BEFORE the outcome loop and returns early on
+		// failure, so PoolTotalKnown is true on every visit that can go on to
+		// admit. A false flag on an admitting visit is the evaluation's own
+		// record saying the pool could not be summed — which the producer emits
+		// as UNKNOWN_INPUT, never as an admission.
+		ev := predictioneval.EvaluateOrderedRules(proj.Stream, ruleCfg, trace)
+		if ev.Selected == nil || !ev.Visits[len(ev.Visits)-1].PoolTotalKnown {
+			t.Fatalf("fixture must admit with a summed pool: %+v", ev.Visits)
+		}
+		if m := p4offline.MapP3bAction(ev); !m.Legal {
+			t.Fatalf("genuine output must stay legal: %+v", m)
+		}
+		for _, tc := range []struct {
+			name string
+			on   func(*predictioneval.OrderedRulesCandidateVisit)
+			want string
+		}{
+			{"a pool the visit says was never summed", func(v *predictioneval.OrderedRulesCandidateVisit) {
+				v.PoolTotalKnown, v.PoolTotal = false, 0
+			}, "SELECTION_VISIT_POOL_NOT_SUMMED"},
+			{"a negative pool total", func(v *predictioneval.OrderedRulesCandidateVisit) {
+				v.PoolTotal = -999
+			}, "SELECTION_VISIT_POOL_TOTAL_NEGATIVE"},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				ev := predictioneval.EvaluateOrderedRules(proj.Stream, ruleCfg, trace)
+				visits := append([]predictioneval.OrderedRulesCandidateVisit(nil), ev.Visits...)
+				tc.on(&visits[len(visits)-1])
+				ev.Visits = visits
+				if m := p4offline.MapP3bAction(ev); m.Legal || !containsString(m.Illegality, tc.want) {
+					t.Fatalf("want %s: %+v", tc.want, m)
+				}
+			})
+		}
+	})
+}
+
+// TestP3bStakeAmountIsZeroWhereverNoStakeWasSized closes the last field an
+// independent lane found classified on a justification true of one status.
+//
+// Only the admitting default arm sizes a stake, through pointsValue. Every
+// other status writes a struct literal that leaves Value at its zero, so a
+// non-zero amount outside WOULD_ATTEMPT is producer-impossible — and reading
+// that costs nothing and reimplements no policy. The AMOUNT on WOULD_ATTEMPT
+// stays unread, which is where the recomputation argument actually applies.
+func TestP3bStakeAmountIsZeroWhereverNoStakeWasSized(t *testing.T) {
+	_, fs := selectedFactset(t, nil, nil)
+	proj, err := p4offline.ProjectP3bSingleCandidate(fs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	coords := synthCoords(fs, 0)
+	trace := mustDrawTrace(t, coords, 4)
+	ruleCfg := cfgWithRule("a", predictioneval.ComparatorGe, 50, 100)
+	streamWith := func(t *testing.T, bal predictioneval.SuppliedInt64) predictioneval.OrderedRulesStream {
+		t.Helper()
+		cands := append([]predictioneval.OrderedRulesCandidate(nil), proj.Stream.Candidates...)
+		cands[0].Balance = bal
+		re, err := predictioneval.ProjectOrderedRulesStream(
+			predictioneval.OrderedRulesSource{Scope: proj.Stream.Scope, Candidates: cands}, proj.Stream.Admission)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return re
+	}
+	missing := streamWith(t, predictioneval.SuppliedInt64{Presence: predictioneval.SuppliedMissing, Reason: "caller text"})
+
+	for _, tc := range []struct {
+		name   string
+		stream predictioneval.OrderedRulesStream
+		cfg    predictioneval.OrderedRulesConfig
+		trace  predictioneval.SuppliedDrawTrace
+		native predictioneval.OrderedRulesStatus
+	}{
+		{"no attempt in prefix", proj.Stream, cfgDefaultOnly("a", 95, 100), trace, predictioneval.StatusNoAttemptInSuppliedPrefix},
+		{"unknown input", proj.Stream, cfgWithRule("a", predictioneval.ComparatorGe, 50, 50),
+			predictioneval.SuppliedDrawTrace{RunID: "r", EntropySemanticsVersion: predictioneval.OrderedRulesEntropySemanticsVersion},
+			predictioneval.StatusUnknownInput},
+		{"refused", proj.Stream, predictioneval.OrderedRulesConfig{ConfigID: "nodefault"}, trace, predictioneval.StatusRefused},
+		{"stake unknown", missing, ruleCfg, trace, predictioneval.StatusParticipationAdmittedStakeUnknown},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ev := predictioneval.EvaluateOrderedRules(tc.stream, tc.cfg, tc.trace)
+			if ev.Status != tc.native {
+				t.Fatalf("fixture produced %q/%q", ev.Status, ev.Reason)
+			}
+			if ev.Stake.Value != 0 {
+				t.Fatalf("this arm sizes no stake: %+v", ev.Stake)
+			}
+			if m := p4offline.MapP3bAction(ev); !m.Legal {
+				t.Fatalf("genuine output must stay legal: %+v", m)
+			}
+			ev.Stake.Value = 123456
+			if m := p4offline.MapP3bAction(ev); m.Legal ||
+				!containsString(m.Illegality, "STAKE_VALUE_CONTRADICTS_STATUS") {
+				t.Fatalf("an amount no arm sized must fail closed: %+v", m)
+			}
+		})
+	}
+	t.Run("the sized amount itself stays unread", func(t *testing.T) {
+		// The guard must NOT become "Value is always zero": on WOULD_ATTEMPT
+		// the producer sizes a real stake and this package does not recompute
+		// it.
+		ev := predictioneval.EvaluateOrderedRules(proj.Stream, ruleCfg, trace)
+		if ev.Status != predictioneval.StatusWouldAttempt || ev.Stake.Value == 0 {
+			t.Fatalf("fixture must size a stake: %q %+v", ev.Status, ev.Stake)
+		}
+		ev.Stake.Value = 999999
+		if m := p4offline.MapP3bAction(ev); !m.Legal {
+			t.Fatalf("the amount is bound downstream, not here: %+v", m)
+		}
+	})
+	t.Run("an admitting arm's caller text is never empty", func(t *testing.T) {
+		ev := predictioneval.EvaluateOrderedRules(missing, ruleCfg, trace)
+		if ev.Status != predictioneval.StatusParticipationAdmittedStakeUnknown {
+			t.Fatalf("fixture: %q/%q", ev.Status, ev.Reason)
+		}
+		if m := p4offline.MapP3bAction(ev); !m.Legal {
+			t.Fatalf("caller text is legal: %+v", m)
+		}
+		// balanceReason falls back to a non-empty constant, so empty is a shape
+		// no admitting arm writes.
+		ev.Stake.Reason = ""
+		if m := p4offline.MapP3bAction(ev); m.Legal ||
+			!containsString(m.Illegality, "STAKE_REASON_EMPTY_ON_ADMISSION") {
+			t.Fatalf("an empty stake reason must fail closed: %+v", m)
+		}
+	})
+}
+
+// TestP3bTerminalReasonsTheProducerEmitsStayLegal is the test actionmap.go's
+// vocabulary note points at, and it exists so that note claims exactly what is
+// pinned and no more.
+//
+// Bounding a closed vocabulary refuses honest output as easily as forged, so
+// the risk that matters is a reason the producer really emits being missing
+// from one of the two maps. Membership was established by enumerating every
+// emitting site; this drives the subset reachable through the exported
+// evaluator and asserts each one maps LEGAL. It deliberately reports the set it
+// reached, so the coverage claim cannot drift from the coverage.
+func TestP3bTerminalReasonsTheProducerEmitsStayLegal(t *testing.T) {
+	_, fs := selectedFactset(t, nil, nil)
+	proj, err := p4offline.ProjectP3bSingleCandidate(fs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	coords := synthCoords(fs, 0)
+	trace := mustDrawTrace(t, coords, 4)
+	good := cfgWithRule("a", predictioneval.ComparatorGe, 50, 100)
+	tamper := func(f func(*predictioneval.OrderedRulesStream)) predictioneval.OrderedRulesStream {
+		st := proj.Stream
+		st.Candidates = append([]predictioneval.OrderedRulesCandidate(nil), proj.Stream.Candidates...)
+		f(&st)
+		return st
+	}
+	cases := []struct {
+		name   string
+		stream predictioneval.OrderedRulesStream
+		cfg    predictioneval.OrderedRulesConfig
+		trace  predictioneval.SuppliedDrawTrace
+	}{
+		{"config default not supplied", proj.Stream, predictioneval.OrderedRulesConfig{ConfigID: "nodefault"}, trace},
+		{"config out of domain", proj.Stream, cfgWithRule("a", predictioneval.ComparatorGe, 50, 1000), trace},
+		{"entropy exhausted", proj.Stream, cfgWithRule("a", predictioneval.ComparatorGe, 50, 50),
+			predictioneval.SuppliedDrawTrace{RunID: "r", EntropySemanticsVersion: predictioneval.OrderedRulesEntropySemanticsVersion}},
+		{"entropy semantics mismatch", proj.Stream, good,
+			predictioneval.SuppliedDrawTrace{RunID: "r", EntropySemanticsVersion: "other/v0", Words: trace.Words}},
+		{"stream contract version", tamper(func(s *predictioneval.OrderedRulesStream) {
+			s.Scope.SourceContractVersion = "wrong/v0"
+		}), good, trace},
+		{"stream invariant violated", tamper(func(s *predictioneval.OrderedRulesStream) {
+			s.Candidates[0].Position = 99
+		}), good, trace},
+		{"stream selection digest mismatch", tamper(func(s *predictioneval.OrderedRulesStream) {
+			s.SelectionDigest = "0000000000000000000000000000000000000000000000000000000000000000"
+		}), good, trace},
+		{"supplied text not encodable", proj.Stream, func() predictioneval.OrderedRulesConfig {
+			c := good
+			c.ConfigID = string([]byte{0xff, 0xfe})
+			return c
+		}(), trace},
+	}
+	reached := map[string]bool{}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ev := predictioneval.EvaluateOrderedRules(tc.stream, tc.cfg, tc.trace)
+			if ev.Reason == "" {
+				t.Fatalf("this fixture must produce a terminal reason: %q", ev.Status)
+			}
+			reached[string(ev.Status)+"/"+ev.Reason] = true
+			if m := p4offline.MapP3bAction(ev); !m.Legal {
+				t.Fatalf("the producer's own %s/%s must stay legal: %+v", ev.Status, ev.Reason, m)
+			}
+		})
+	}
+	// The number is asserted so that losing a case is a failure rather than a
+	// silent narrowing of what the vocabulary note claims.
+	if len(reached) < 7 {
+		t.Fatalf("expected at least 7 distinct status/reason pairs, reached %d: %v", len(reached), reached)
+	}
+	t.Logf("reached %d distinct producer status/reason pairs: %v", len(reached), reached)
 }

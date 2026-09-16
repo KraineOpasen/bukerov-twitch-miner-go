@@ -57,7 +57,22 @@ const (
 	// PlacementLocalErrorPlatformUnknown — the factual call returned with a
 	// local error. Whether the platform saw it is unknown.
 	PlacementLocalErrorPlatformUnknown PlacementStatus = "LOCAL_ERROR_PLATFORM_UNKNOWN"
-	// PlacementNotReturned — the factual call started and never returned.
+	// PlacementNotReturned — RESERVED, and NOT EMITTABLE through the D16
+	// pipeline.
+	//
+	// It names a factual call that started and never returned. Under the
+	// owner's D16 disposition that is not an admissible derived outcome: P4
+	// admits only COMPLETE + AS_FINALIZED sources, and such a source cannot
+	// carry a factual automatic CALL_STARTED without its CALL_RETURNED, so an
+	// unspent start is a contradiction in the evidence rather than a placement
+	// result. classifySignals refuses it there — before any factual placement
+	// can be minted — so no trusted path reaches the branch below that names
+	// this status, and the negative proof of that lives in placement_test.go.
+	//
+	// The constant is retained rather than deleted to avoid pre-merge API and
+	// vocabulary churn, and the branch is retained as defence in depth behind
+	// FactualPlacement's producer-only witness. Neither is a path: nothing here
+	// invents a way to emit it.
 	PlacementNotReturned PlacementStatus = "NOT_RETURNED"
 	// PlacementNotRecorded — the factual decision placed and no call exists.
 	PlacementNotRecorded PlacementStatus = "NOT_RECORDED"
@@ -594,6 +609,10 @@ func derivePlacement(policy PolicyDecision, factual FactualPlacement, proof *Pla
 	out.AttributedCallPosition = factual.CallStartedPosition
 	switch {
 	case factual.StartedOnly || !factual.Returned:
+		// Unreachable through the D16 pipeline: an unspent automatic start is
+		// refused in the evidence seam, so no episode carrying one is ever
+		// selected and no FactualPlacement is minted from it. Kept as defence
+		// in depth behind the producer-only witness. See PlacementNotReturned.
 		out.Status = PlacementNotReturned
 		return out
 	case !factual.LocalReasonOK:

@@ -200,8 +200,13 @@ func (s *shapeCheck) require(ok bool, name string) {
 // What it deliberately does NOT read, so that the boundary is stated rather than
 // discovered:
 //
-//   - the admitting visit's BalanceUse, PoolTotalKnown, PoolTotal and
-//     RawWordsConsumedHere;
+//   - the admitting visit's RawWordsConsumedHere. Its BalanceUse and its
+//     PoolTotalKnown used to be listed here and are now READ, as is PoolTotal's
+//     SIGN; only the total's VALUE stays unread. BalanceUse because
+//     admitOrderedRules writes it and the status in one switch, so on an
+//     admitting visit it is an exact function of the status and reason;
+//     PoolTotalKnown because checkedPoolSum sets it before the outcome loop, so
+//     an admitting visit cannot say the pool went unsummed;
 //   - the CONTENTS of every trace entry and every visit except the last. Their
 //     COUNTS are not symmetric and the asymmetry is deliberate: the number of
 //     VISITS is pinned, because a candidate iteration appends exactly one visit
@@ -214,15 +219,25 @@ func (s *shapeCheck) require(ok bool, name string) {
 //     RulesConsidered — and it is unread for a different reason: it is
 //     O(len(Trace)), and an honest run that exhausts the work budget retains
 //     MaxOrderedRulesWork entries;
-//   - BernoulliEvaluations, which is not read in any form, in relation or
-//     otherwise; and Stake.Value and Stake.Reason, of which the arms read
-//     Presence and hold it to its vocabulary. RawWordsConsumed IS read, but
-//     only as one of the two bounds on the admitting step's word index;
-//   - the admitting step's RawWordValue on a RULE_DRAW. It is read on a
-//     DEFAULT_BOUNDS step, where the producer fixes it at zero because that
-//     half spends nothing, and it is not read on the half that may really have
-//     drawn a word, because the evaluation says WHICH word was drawn and never
-//     what that word was — the words live in the draw trace, not in here;
+//   - Stake.Value and Stake.Reason, of which the arms read Presence and hold
+//     it to its vocabulary. THE ARMS, by contrast, now read both: the value is
+//     required zero wherever no stake was sized, and the reason is bound on
+//     every non-admitting status and on two of the four admitting ones — see
+//     the field matrix. RawWordsConsumed IS read, but only as one of the two
+//     bounds on the admitting step's word index. BernoulliEvaluations was
+//     listed here as read "in no form, in relation or otherwise" and now IS
+//     read, in one direction only: a DETAILED_RULE selection requires at least
+//     one, because the producer increments it below the rate branch and so
+//     advances it even where the rate is exactly one and no word is drawn. The
+//     converse is not asserted — a DEFAULT selection may carry any count,
+//     since rules that failed on an earlier outcome advance it too;
+//   - the admitting step's RawWordValue on a RULE_DRAW that really DREW,
+//     because the evaluation says WHICH word was drawn and never what that
+//     word was — the words live in the draw trace, not in here. It IS read on
+//     a DEFAULT_BOUNDS step and, since the repair this line records, on a
+//     RULE_DRAW whose own index is the no-word sentinel: both are halves where
+//     the producer fixes it at zero, so a nonzero value there is the entry
+//     contradicting itself rather than a word this package declines to judge;
 //   - Cutoff and Qualifications.
 //
 // Those are the traversal's own bookkeeping, or the caller's framing of the
@@ -230,8 +245,10 @@ func (s *shapeCheck) require(ok bool, name string) {
 // this a validator for every exported field of an evaluation instead of a
 // coherence check on the one thing it maps.
 //
-// The four digests and DonorRevision are unread for a DIFFERENT reason, and it
-// is worth not lumping them in: they are input bindings and a pinned provenance
+// The four digests are unread for a DIFFERENT reason, and it is worth not
+// lumping them in. (DonorRevision used to be named here too. It is now READ,
+// beside its three sibling header constants — leaving it unchecked was an
+// omission rather than the decision this paragraph describes.) they are input bindings and a pinned provenance
 // header, not bookkeeping. See the note above MapP2Action — binding an
 // evaluation to the stream, config and entropy it claims is the caller's job,
 // not this map's.
@@ -291,6 +308,14 @@ func requireCoherentSelection(s *shapeCheck, ev predictioneval.OrderedRulesEvalu
 			// equality; the ceiling above is what bounds it per slot.
 			s.require(sel.RuleIndex < ev.RulesConsidered, "SELECTION_CONTRADICTS_RULES_CONSIDERED")
 		}
+		// A detailed rule admits only by winning its draw, and the producer
+		// increments BernoulliEvaluations on the path BELOW the rate branch —
+		// so the counter advances even where the rate is exactly one and no
+		// word is drawn. Every detailed-rule admission has therefore passed it
+		// at least once. The converse does NOT hold and is not asserted: rules
+		// that failed on an earlier outcome advance the counter and the default
+		// half still admits, so a DEFAULT selection may carry any count.
+		s.require(ev.BernoulliEvaluations >= 1, "SELECTION_BASIS_CONTRADICTS_BERNOULLI_COUNT")
 	default:
 		basisOK = false
 		s.require(false, "SELECTION_BASIS_OUTSIDE_VOCABULARY")
@@ -380,9 +405,23 @@ func requireCoherentSelection(s *shapeCheck, ev predictioneval.OrderedRulesEvalu
 		case predictioneval.TraceStepRuleDraw:
 			s.require(last.ComparatorMatched && last.BernoulliEvaluated && last.BernoulliResult,
 				"ADMITTING_STEP_CONTRADICTS_ITS_KIND")
+			// The value is unread on a step that really DREW, because the
+			// evaluation says which word was drawn and never what it was. That
+			// reasoning stops at the entry's own sentinel: where the step says
+			// no word was drawn, the producer fixes the value at zero exactly
+			// as it does on the default half, so a nonzero value beside -1 is
+			// the entry contradicting itself rather than a word this package
+			// declines to judge.
+			s.require(last.RawWordIndex != -1 || last.RawWordValue == 0,
+				"ADMITTING_STEP_RAW_WORD_VALUE_WITHOUT_WORD")
 		case predictioneval.TraceStepDefaultBounds:
-			s.require(last.ComparatorMatched && !last.BernoulliEvaluated && !last.BernoulliResult &&
-				last.RawWordIndex == -1 && last.RawWordValue == 0, "ADMITTING_STEP_CONTRADICTS_ITS_KIND")
+			// Split for the same reason the raw-word bounds were: bundling
+			// distinct predicates under one name says which of them failed
+			// none of the times, and lets them mask each other in a ledger.
+			s.require(last.ComparatorMatched && !last.BernoulliEvaluated && !last.BernoulliResult,
+				"ADMITTING_STEP_CONTRADICTS_ITS_KIND")
+			s.require(last.RawWordIndex == -1, "ADMITTING_STEP_DEFAULT_SPENT_A_WORD")
+			s.require(last.RawWordValue == 0, "ADMITTING_STEP_RAW_WORD_VALUE_WITHOUT_WORD")
 		}
 		// A word it claims to have spent is one the run says it consumed. -1 is
 		// the producer's "no word", so only a non-negative index is bounded.
@@ -392,11 +431,17 @@ func requireCoherentSelection(s *shapeCheck, ev predictioneval.OrderedRulesEvalu
 			// consumed.
 			// The counter alone is not enough — nothing else constrains it, so
 			// on its own it is a free variable a forger sets to match.
+			// Each bound reports under its OWN name. They shared one, and
+			// require appends without deduplicating, so a shape both refuse
+			// named the same identifier twice and said which bound failed
+			// neither time. It is not only a reporting defect: the two masked
+			// each other in the mutation ledger, and one survivor was found
+			// only after a fixture was built to separate them by hand.
 			s.require(last.RawWordIndex < predictioneval.MaxOrderedRulesDrawWords,
-				"ADMITTING_STEP_RAW_WORD_OUT_OF_RANGE")
-			s.require(last.RawWordIndex < ev.RawWordsConsumed, "ADMITTING_STEP_RAW_WORD_OUT_OF_RANGE")
+				"ADMITTING_STEP_RAW_WORD_OVER_CEILING")
+			s.require(last.RawWordIndex < ev.RawWordsConsumed, "ADMITTING_STEP_RAW_WORD_NOT_CONSUMED")
 		}
-		s.require(last.RawWordIndex >= -1, "ADMITTING_STEP_RAW_WORD_OUT_OF_RANGE")
+		s.require(last.RawWordIndex >= -1, "ADMITTING_STEP_RAW_WORD_BELOW_NO_WORD")
 	}
 
 	// The second record of the same admission. The producer mints a visit at the
@@ -417,6 +462,32 @@ func requireCoherentSelection(s *shapeCheck, ev predictioneval.OrderedRulesEvalu
 		s.require(v.Verdict == predictioneval.CandidateAdmitted, "SELECTION_VISIT_NOT_ADMITTED")
 		s.require(v.CandidateIndex == sel.CandidateIndex && v.CandidateIdentity == sel.CandidateIdentity &&
 			v.CandidatePosition == sel.CandidatePosition, "SELECTION_CONTRADICTS_ADMITTING_VISIT")
+		// The visit's BalanceUse and the evaluation's status are written by the
+		// SAME switch in admitOrderedRules, one arm each, so on an admitting
+		// visit the first is an exact function of the second. NOT_EVALUATED is
+		// what a visit carries BEFORE that switch runs and the admitting visit
+		// is appended after it, so it cannot survive onto one.
+		//
+		// The pairing is checked only where the status names one. A status the
+		// arms already refuse names no balance use, and reporting it twice
+		// under two names would describe one contradiction as two.
+		if want, named := admittingBalanceUse(ev); named {
+			s.require(v.BalanceUse == want, "SELECTION_VISIT_CONTRADICTS_BALANCE_USE")
+		}
+		// checkedPoolSum runs BEFORE the outcome loop and returns early on
+		// failure, so PoolTotalKnown is set true on every visit that can go on
+		// to admit at all. A false flag on an ADMITTING visit is the
+		// evaluation's own record saying the pool could not be summed, which
+		// the producer emits as UNKNOWN_INPUT and never as an admission.
+		//
+		// The flag is a presence bit, as intrinsic and as cheap to read as
+		// HasStopPosition. It used to be classified with the VALUE beside it,
+		// under a justification — recomputing the sum would reimplement the
+		// policy — that is true of the total and not of the flag. The total
+		// itself stays unread except for its sign, which checkedPoolSum
+		// guarantees by refusing negative points outright.
+		s.require(v.PoolTotalKnown, "SELECTION_VISIT_POOL_NOT_SUMMED")
+		s.require(v.PoolTotal >= 0, "SELECTION_VISIT_POOL_TOTAL_NEGATIVE")
 	}
 }
 
@@ -680,6 +751,169 @@ func (s *shapeCheck) finish(m ActionMapping) ActionMapping {
 	return m
 }
 
+// THE FIELD / STATUS MATRIX FOR SEAM C.
+//
+// The engineering contract for this seam is: a native evaluation plus its exact
+// bindings maps to an exhaustive p4-native-action-map/v1 result, or to a typed
+// refusal for a shape the producer cannot have written. That promise is only as
+// good as its coverage, so every field of every native structure this mapper
+// reads is classified here, exactly once, as one of:
+//
+//	A  VALIDATED_LOAD_BEARING       — a native invariant names it and it is checked.
+//	B  INTENTIONALLY_NON_AUTHORITATIVE — changing it cannot contradict the action
+//	                                   shape this seam promises, and no
+//	                                   authoritative value is derived from it here.
+//
+// No field is left accidentally unread: the census is pinned by a reflection
+// test that fails if the native structures gain a field, which forces the new
+// one to be classified rather than silently ignored. 56 fields, 49 A, 7 B.
+//
+// The census test pins the field NAMES and the total; it does not pin the A/B
+// split, so the counts below are prose and were wrong once already — an
+// independent lane caught a sub-total that contradicted both its own list and
+// the global figure.
+//
+// The matrix is NOT an authentication scheme and does not try to become one.
+// Every relation compares the evaluation against another part of the SAME
+// evaluation, so a forger who edits a witness and the field it witnesses
+// together defeats the relation that uses them. Provenance is the caller's job
+// and the trust boundary is stated in doc.go; the scorer recomputes the
+// evaluation and binds it to the stream and config digests after the map has
+// answered.
+//
+// OrderedRulesEvaluation (25) — 19 A, 6 B
+//
+//	A EvidenceLabel, ModelVersion, EntropySemanticsVersion, DonorRevision
+//	    the four pinned header constants the producer stamps.
+//	A Status                exhaustive; an unknown one is UNSUPPORTED_SHAPE.
+//	A Participation, Stake  closed vocabularies, bounded BEFORE the arms derive
+//	                        their negative booleans by equality.
+//	A Reason                per-status closed vocabulary, transcribed from the
+//	                        emitting sites; empty exactly where the producer
+//	                        writes none.
+//	A Selected              present exactly on the two admitting statuses.
+//	A HasStopPosition, StoppedAtCandidate, StoppedAtPosition
+//	                        the stop the producer records before minting a
+//	                        selection, so the two cannot disagree.
+//	A CandidatesConsumed, OutcomesConsidered, RulesConsidered
+//	                        cumulative counters that must already have passed
+//	                        the index the selection admits on.
+//	A BernoulliEvaluations  at least one on a DETAILED_RULE admission; the
+//	                        producer advances it below the rate branch.
+//	A RawWordsConsumed      one of the two bounds on the admitting word index.
+//	A Trace, Visits         the two admitting witnesses.
+//	B StreamDigest, ConfigDigest, EntropyDigest, ConsumedInputDigest
+//	                        input bindings and a consumed-prefix attestation.
+//	                        They say WHICH inputs produced this, never what the
+//	                        action is; the scorer binds them after mapping, and
+//	                        nothing here derives a value from them. NOTE what
+//	                        this does NOT say: the producer withholds them on
+//	                        its unread refusal tier, so an evaluation that
+//	                        carries a digest its own refusal reason could not
+//	                        have earned is producer-impossible and still maps
+//	                        legal. The CLASS is unaffected, which is why these
+//	                        stay B, but the attestation tier is not checked.
+//	B Cutoff, Qualifications
+//	                        derived fields. They are assigned only once the
+//	                        stream is shown derivable, NOT carried through every
+//	                        refusal — an earlier repair in the producer removed
+//	                        exactly that, so an unread-tier refusal carrying an
+//	                        established cutoff is likewise producer-impossible
+//	                        and likewise unchecked. Neither can make an admitted
+//	                        shape unadmitted or the reverse.
+//
+// OrderedRulesSelection (8) — 8 A, 0 B
+//
+//	A CandidateIndex, OutcomeIndex, RuleIndex   non-negative, inside the
+//	    ceilings the producer itself refuses past, and reached by the
+//	    traversal's own counters.
+//	A Basis                 one of two, and pairs with RuleIndex as the producer
+//	                        pairs them (DEFAULT ⇒ -1).
+//	A CandidateIdentity, OutcomeIdentity        non-empty and, for the
+//	    candidate, equal to the admitting visit's.
+//	A CandidatePosition, ShareBits              equal to the admitting trace
+//	    entry's and to the recorded stop.
+//
+// OrderedRulesTraceEntry, the ADMITTING entry only (12) — 12 A, 0 B
+//
+//	A Admitted, Step        the last entry admitted, and its step names the same
+//	                        half as the basis.
+//	A CandidateIndex, OutcomeIndex, RuleIndex, CandidatePosition, ShareBits
+//	                        equal to the selection's.
+//	A ComparatorMatched, BernoulliEvaluated, BernoulliResult
+//	                        the shape each half admits with; a RULE_DRAW that
+//	                        admitted won its draw, a DEFAULT_BOUNDS took none.
+//	A RawWordIndex          -1 or bounded twice, under its own name per bound.
+//	A RawWordValue          zero on DEFAULT_BOUNDS and on a RULE_DRAW carrying
+//	                        the no-word sentinel. On a step that really drew it
+//	                        is deliberately unread — the evaluation says WHICH
+//	                        word was drawn, never what it was — which is a
+//	                        scoped B inside an otherwise A field. It is not the
+//	                        only scoped entry: the counters, the stop fields,
+//	                        Trace and Visits are all read ONLY when a selection
+//	                        is carried, because requireCoherentSelection returns
+//	                        early without one and the terminal arms read none of
+//	                        them. On those arms an intrinsic relation does go
+//	                        unused — every candidate iteration appends exactly
+//	                        one visit on every exit path, so len(Visits) equals
+//	                        CandidatesConsumed — and it is unchecked.
+//	  The CONTENTS of every non-final entry are B: a candidate refused for too
+//	  few outcomes appends a visit and no trace entry, so no count relation
+//	  against the trace follows from the selection, and reading them would be
+//	  O(len(Trace)) on a run that legitimately retains MaxOrderedRulesWork.
+//
+// OrderedRulesCandidateVisit, the ADMITTING visit only (8) — 7 A, 1 B
+//
+//	A Verdict               the last visit ADMITTED.
+//	A CandidateIndex, CandidateIdentity, CandidatePosition
+//	                        equal to the selection's, and the NUMBER of visits
+//	                        accounts for the candidate it names.
+//	A BalanceUse            an exact function of status and reason:
+//	                        admitOrderedRules writes both in one switch.
+//	A PoolTotalKnown        true on every admitting visit: checkedPoolSum runs
+//	                        before the outcome loop and returns early on
+//	                        failure. A presence bit, not the value beside it —
+//	                        it was classified B under the value's justification,
+//	                        which is the kind of over-broad reasoning this
+//	                        matrix exists to surface.
+//	A PoolTotal             its SIGN only, which checkedPoolSum guarantees by
+//	                        refusing negative points outright. The VALUE stays
+//	                        B: recomputing the sum would reimplement the policy.
+//	B RawWordsConsumedHere  a per-candidate slice of the evaluation-level
+//	                        counter. It DOES carry relations that are not
+//	                        checked — it is never negative, never exceeds
+//	                        RawWordsConsumed, and equals it exactly on an
+//	                        admitting visit at candidate 0 — so the accurate
+//	                        reason for leaving it unread is consequence, not
+//	                        redundancy: it is bookkeeping, and no action shape
+//	                        this seam promises depends on it.
+//
+// SuppliedUint32, the Stake (3) — 3 A, 0 B
+//
+//	A Presence              bounded to its three-member vocabulary and bound to
+//	                        the status on every arm.
+//	A Reason                fixed at NOT_EVALUATED on every non-admitting
+//	                        status, by the same initialisation as the presence;
+//	                        empty on WOULD_ATTEMPT, whose arm sets no reason at
+//	                        all; and the CONSTANT on the out-of-domain arm,
+//	                        which builds the stake directly rather than through
+//	                        balanceReason. Those two arms are a SCOPED B in this
+//	                        matrix's usual sense: the TEXT is unbounded, but it
+//	                        is still required non-empty, because balanceReason
+//	                        falls back to a constant. The exemption once covered
+//	                        all four admitting arms flatly, on a justification
+//	                        true of two of them.
+//	A Value                 zero on every status but WOULD_ATTEMPT, which is the
+//	                        only arm that sizes a stake; the others write a
+//	                        literal that leaves it at its zero. On WOULD_ATTEMPT
+//	                        the AMOUNT stays unread — recomputing it means
+//	                        reimplementing pointsValue, the policy algorithm,
+//	                        which this seam does not do, and it is bound
+//	                        downstream through the decision digest. So this is a
+//	                        scoped B inside an A field, the mirror of the reason
+//	                        beside it. The old entry gave the recomputation
+//	                        reason for all five statuses; it was true of one.
+//
 // MapP3bAction maps a native P3b evaluation.
 //
 // Every status keeps its own class: PARTICIPATION_ADMITTED_STAKE_UNKNOWN and
@@ -691,6 +925,11 @@ func MapP3bAction(ev predictioneval.OrderedRulesEvaluation) ActionMapping {
 	s.require(ev.EvidenceLabel == predictioneval.OrderedRulesEvidenceLabel, "EVIDENCE_LABEL_FOREIGN")
 	s.require(ev.ModelVersion == predictioneval.OrderedRulesModelVersion, "MODEL_VERSION_FOREIGN")
 	s.require(ev.EntropySemanticsVersion == predictioneval.OrderedRulesEntropySemanticsVersion, "ENTROPY_SEMANTICS_FOREIGN")
+	// The fourth pinned header string, held exactly like its three siblings. It
+	// was unread beside them, which was an omission rather than a decision: all
+	// four are constants the producer stamps, so leaving one unchecked lets an
+	// evaluation claim a donor this model was not derived from.
+	s.require(ev.DonorRevision == predictioneval.OrderedRulesDonorRevision, "DONOR_REVISION_FOREIGN")
 	// Both are closed vocabularies, and the two booleans below are EQUALITY
 	// tests — so a value outside its vocabulary reads as the negative state and
 	// quietly satisfies every `!admitted` and `!stakeKnown` requirement the arms
@@ -711,10 +950,32 @@ func MapP3bAction(ev predictioneval.OrderedRulesEvaluation) ActionMapping {
 	case predictioneval.StatusWouldAttempt, predictioneval.StatusParticipationAdmittedStakeUnknown:
 	default:
 		s.require(ev.Stake.Presence == predictioneval.SuppliedMissing, "STAKE_PRESENCE_CONTRADICTS_STATUS")
+		// And the VALUE. Only the admitting default arm sizes a stake; every
+		// other status writes a struct literal that leaves Value at its zero,
+		// so a non-zero amount outside WOULD_ATTEMPT is a shape the producer
+		// cannot write. This is the same O(1) literal-shape relation as the
+		// reason beside it, and reading it does NOT recompute pointsValue: the
+		// recomputation argument for leaving the amount unread holds on
+		// WOULD_ATTEMPT, where it is computed, and only there.
+		s.require(ev.Stake.Value == 0, "STAKE_VALUE_CONTRADICTS_STATUS")
+		// The REASON is fixed by the same initialisation as the presence, and
+		// was left unread beside it. Two of the four ADMITTING arms are bound
+		// as well, each on its own arm below: WOULD_ATTEMPT sets no reason at
+		// all, and the out-of-domain arm writes the constant directly. Only the
+		// two arms that pass the caller's balance reason through balanceReason
+		// are exempt, because that text is not a vocabulary this package can
+		// bound. See the field matrix above.
+		s.require(ev.Stake.Reason == predictioneval.ReasonBalanceNotEvaluated, "STAKE_REASON_CONTRADICTS_STATUS")
 	}
 	switch ev.Status {
 	case predictioneval.StatusWouldAttempt:
 		m.Class = ActionWouldAttempt
+		// The admitting DEFAULT arm builds SuppliedUint32{KNOWN, Value} and
+		// never sets Reason, so a sized stake carrying one is a shape the
+		// producer cannot write. The caller-text exemption below covers the two
+		// balanceReason arms; it does not reach this one, which sets no reason
+		// at all.
+		s.require(ev.Stake.Reason == "", "STAKE_REASON_CONTRADICTS_STATUS")
 		s.require(admitted, "PARTICIPATION_NOT_ADMITTED")
 		s.require(ev.Selected != nil, "NO_SELECTION")
 		requireCoherentSelection(&s, ev)
@@ -732,6 +993,8 @@ func MapP3bAction(ev predictioneval.OrderedRulesEvaluation) ActionMapping {
 		s.require(ev.Selected != nil, "NO_SELECTION")
 		requireCoherentSelection(&s, ev)
 		s.require(!stakeKnown, "STAKE_KNOWN_ON_UNKNOWN_STATUS")
+		// None of the three stake-unknown arms sizes a stake either.
+		s.require(ev.Stake.Value == 0, "STAKE_VALUE_CONTRADICTS_STATUS")
 		s.require(ev.Reason == predictioneval.ReasonBalanceNotSupplied || ev.Reason == predictioneval.ReasonBalanceInvalid ||
 			ev.Reason == predictioneval.ReasonBalanceOutOfDomain, "STAKE_UNKNOWN_REASON_FOREIGN")
 		// The producer writes the presence and the reason together, in one
@@ -743,6 +1006,21 @@ func MapP3bAction(ev predictioneval.OrderedRulesEvaluation) ActionMapping {
 			s.require(ev.Stake.Presence == predictioneval.SuppliedMissing, "STAKE_PRESENCE_CONTRADICTS_REASON")
 		case predictioneval.ReasonBalanceInvalid, predictioneval.ReasonBalanceOutOfDomain:
 			s.require(ev.Stake.Presence == predictioneval.SuppliedInvalid, "STAKE_PRESENCE_CONTRADICTS_REASON")
+		}
+		// Only two of the four admitting arms pass the caller's balance reason
+		// through balanceReason. The out-of-domain arm builds the stake with
+		// the CONSTANT, so on that arm the reason is as fixed as the presence.
+		// An exemption written for the caller-text arms used to cover this one
+		// as well, which is the kind of over-broad justification a matrix
+		// exists to catch.
+		if ev.Reason == predictioneval.ReasonBalanceOutOfDomain {
+			s.require(ev.Stake.Reason == predictioneval.ReasonBalanceOutOfDomain, "STAKE_REASON_CONTRADICTS_REASON")
+		} else {
+			// The other two arms carry caller text, which is not a vocabulary
+			// to bound — but balanceReason falls back to a non-empty constant
+			// when the caller supplied none, so it is never EMPTY. That is the
+			// one predicate those arms do admit.
+			s.require(ev.Stake.Reason != "", "STAKE_REASON_EMPTY_ON_ADMISSION")
 		}
 	case predictioneval.StatusNoAttemptInSuppliedPrefix:
 		m.Class = ActionNoAttemptInSuppliedPrefix
@@ -756,15 +1034,100 @@ func MapP3bAction(ev predictioneval.OrderedRulesEvaluation) ActionMapping {
 		s.require(ev.Selected == nil, "SELECTION_ON_UNKNOWN_INPUT")
 		s.require(!stakeKnown, "STAKE_ON_UNKNOWN_INPUT")
 		s.require(ev.Reason != "", "UNKNOWN_INPUT_WITHOUT_REASON")
+		if ev.Reason != "" {
+			s.require(unknownInputReasons[ev.Reason], "UNKNOWN_INPUT_REASON_FOREIGN")
+		}
 	case predictioneval.StatusRefused:
 		m.Class = ActionRefused
 		s.require(!admitted, "PARTICIPATION_ADMITTED_ON_REFUSAL")
 		s.require(ev.Selected == nil, "SELECTION_ON_REFUSAL")
 		s.require(!stakeKnown, "STAKE_ON_REFUSAL")
 		s.require(ev.Reason != "", "REFUSAL_WITHOUT_REASON")
+		if ev.Reason != "" {
+			s.require(refusalReasons[ev.Reason], "REFUSAL_REASON_FOREIGN")
+		}
 	default:
 		m.Class = ActionUnsupportedShape
 		s.found = append(s.found, "UNKNOWN_NATIVE_STATUS")
 	}
 	return s.finish(m)
 }
+
+// admittingBalanceUse is the balance use the producer writes beside a status,
+// on the visit it appends when it admits.
+//
+// admitOrderedRules decides both in one switch over the candidate's balance:
+// an INVALID balance is REQUIRED_BUT_INVALID beside STAKE_UNKNOWN/BALANCE_INVALID,
+// an unsupplied one REQUIRED_BUT_MISSING beside BALANCE_NOT_SUPPLIED, one past
+// the u32 domain REQUIRED_BUT_OUT_OF_DOMAIN beside BALANCE_OUT_OF_U32_DOMAIN,
+// and a usable one USED beside WOULD_ATTEMPT. The four arms are total over the
+// admitting paths, so a status naming none of them is a shape the arms above
+// have already refused, and the second return says so rather than guessing.
+func admittingBalanceUse(ev predictioneval.OrderedRulesEvaluation) (predictioneval.OrderedRulesBalanceUse, bool) {
+	switch ev.Status {
+	case predictioneval.StatusWouldAttempt:
+		return predictioneval.BalanceUsed, true
+	case predictioneval.StatusParticipationAdmittedStakeUnknown:
+		switch ev.Reason {
+		case predictioneval.ReasonBalanceInvalid:
+			return predictioneval.BalanceRequiredButInvalid, true
+		case predictioneval.ReasonBalanceNotSupplied:
+			return predictioneval.BalanceRequiredButMissing, true
+		case predictioneval.ReasonBalanceOutOfDomain:
+			return predictioneval.BalanceRequiredButOutOfDomain, true
+		}
+	}
+	return "", false
+}
+
+// The closed, status-specific reason vocabularies the producer emits.
+//
+// Both terminal arms used to test only that a reason was NONEMPTY, which any
+// string satisfies. These are transcribed from the emitting sites rather than
+// from the reason constants as a block, because the constants do not say which
+// status carries which: the three balance reasons belong to the admitting arm
+// and are held there, and every remaining reason belongs to exactly one of the
+// two sets below.
+//
+// The census closes: 22 refusal reasons in the ordered-rules vocabulary — 14
+// here under REFUSED, 5 under UNKNOWN_INPUT, 3 balance reasons on the
+// stake-unknown arm. Bounding a vocabulary refuses honest output as easily as
+// forged, so membership was established by ENUMERATING every emitting site —
+// including the three gates that return a reason as a value — rather than by
+// reading the constant block. What the suite drives end to end from real
+// producer output, asserting the mapping stays legal, is a SUBSET of the
+// nineteen: TestP3bTerminalReasonsTheProducerEmitsStayLegal names exactly which,
+// and this paragraph should not be read as claiming more.
+var (
+	// UNKNOWN_INPUT is written at three sites: a model vector that is not
+	// known, a pool sum the outcomes do not permit (three reasons, from
+	// checkedPoolSum), and a draw trace spent mid-rule.
+	unknownInputReasons = map[string]bool{
+		predictioneval.ReasonOutcomeVectorNotKnown:    true,
+		predictioneval.ReasonOutcomePointsNotKnown:    true,
+		predictioneval.ReasonOutcomePointsOutOfDomain: true,
+		predictioneval.ReasonPoolSumOverflow:          true,
+		predictioneval.ReasonEntropyExhausted:         true,
+	}
+	// REFUSED is written through three helpers — the mid-traversal refusal,
+	// the pre-traversal one, and the unread one that attests to nothing — and
+	// this is the union over all of their call sites, including the reasons
+	// they take as values from the two input gates and from config
+	// normalization.
+	refusalReasons = map[string]bool{
+		predictioneval.ReasonWorkBudgetExceeded:       true,
+		predictioneval.ReasonAttemptRateOutOfDomain:   true,
+		predictioneval.ReasonDrawWordsOverBound:       true,
+		predictioneval.ReasonRuleCountOverBound:       true,
+		predictioneval.ReasonStreamShapeOverBound:     true,
+		predictioneval.ReasonStreamTextOverBound:      true,
+		predictioneval.ReasonStreamBytesOverBound:     true,
+		predictioneval.ReasonStreamContractMismatch:   true,
+		predictioneval.ReasonEntropySemanticsMismatch: true,
+		predictioneval.ReasonStreamInvariantViolated:  true,
+		predictioneval.ReasonStreamDigestMismatch:     true,
+		predictioneval.ReasonSuppliedTextNotEncodable: true,
+		predictioneval.ReasonConfigDefaultNotSupplied: true,
+		predictioneval.ReasonConfigOutOfDomain:        true,
+	}
+)

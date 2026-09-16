@@ -113,6 +113,56 @@
 // "the supplied proof was checked for its binding", and the observation
 // identities it names are what the reader's audit follows.
 //
+// # The source trust boundary
+//
+// This package authenticates NOTHING about where a [predictioneval.SourceDataset]
+// came from, and nothing in it should be read as doing so.
+//
+// The approved chain is: an owner-pinned source snapshot and its provenance,
+// then the EXISTING P1 ingest path's verification of that snapshot — the row
+// digests and session witnesses are recomputed by the STORE, inside the
+// transaction that reads them, and the reader consumes that verdict rather than
+// re-deriving it — producing a SourceDataset, and only then the pure validation
+// and evaluation in this package. Every guarantee here is
+// conditional on the step before it. P4 requires those row witnesses intact;
+// this package is not a second P1 storage reader and does not re-verify them.
+//
+// So a hand-built SourceDataset that simply lies about its provenance is NOT
+// authenticated here and must not be described as an authenticated source. It
+// will be validated — shapes the producer cannot write are refused, and the
+// refusals are typed — but validation is not authentication. A supplier who
+// fabricates a self-consistent dataset gets a self-consistent answer.
+//
+// The distinction the digests do and do not carry is the same one. A hash binds
+// BYTES: it proves an artifact was not altered after it was digested, and it is
+// what makes a stored artifact re-derivable and an edited one detectable. It
+// proves nothing about the TRUTH of what those bytes assert. ObservationSHA256
+// rides on every source row for the reader's audit; this package verifies no
+// record digest, and could not make a fabricated row true by verifying one.
+//
+// What this package does contribute to that chain is SHAPE. SOME relations the
+// pinned producer cannot violate — established by enumerating its actual
+// writers, not read off the grouping comments in its vocabulary tables — are
+// enforced. Not all of them are; the ones that are were chosen because they
+// are load-bearing for P4's own semantics: which
+// episode is the first automatic opportunity, where the common cutoff falls,
+// whether an intervention occurred, and whether a native evaluation is a shape
+// its evaluator could have produced. Those refusals narrow what a fabricated
+// source can claim without contradicting itself. They do not turn it into a
+// verified one.
+//
+// Two limits on that, stated rather than left to be found. The enforced
+// relations are a chosen subset: other phase families LOOK equally
+// single-writer on inspection and are deliberately not transcribed, because a
+// grouping comment is not a contract and enumerating every writer is what earns
+// a refusal — and that enumeration was done for the call and automatic phases
+// only. And no producer-side VALIDATOR pins the relations that are enforced:
+// the analytics layer checks a phase against one flat vocabulary with no
+// binding to the kind. Some producer flow tests do compare exact kind/phase
+// sequences, so a new emitter inside those flows would fail them, but one on
+// another path would not — and this package would then begin refusing honest
+// rows: fail-closed, and wrong.
+//
 // # Digest spellings
 //
 // Two spellings of a SHA-256 exist here, on purpose and in fixed places. The
