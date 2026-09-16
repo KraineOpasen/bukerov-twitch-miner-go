@@ -165,7 +165,8 @@ func (s *shapeCheck) require(ok bool, name string) {
 // Every index the selection names is also one the traversal's OWN counters say
 // it reached, the candidate it names is the one the evaluation says it stopped
 // on, and the whole selection agrees with the evaluation's record of the step
-// that admitted it.
+// that admitted it — including that step's own shape, because a witness that
+// contradicts itself witnesses nothing.
 //
 // These are intrinsic: nothing here re-runs the evaluator, recomputes a share
 // or a draw, or re-derives any field from an input this map does not take. A
@@ -199,8 +200,6 @@ func (s *shapeCheck) require(ok bool, name string) {
 // What it deliberately does NOT read, so that the boundary is stated rather than
 // discovered:
 //
-//   - the admitting trace entry's own draw fields — ComparatorMatched,
-//     BernoulliEvaluated, BernoulliResult, RawWordIndex, RawWordValue;
 //   - the admitting visit's BalanceUse, PoolTotalKnown, PoolTotal and
 //     RawWordsConsumedHere;
 //   - the CONTENTS of every trace entry and every visit except the last. Their
@@ -215,9 +214,15 @@ func (s *shapeCheck) require(ok bool, name string) {
 //     RulesConsidered — and it is unread for a different reason: it is
 //     O(len(Trace)), and an honest run that exhausts the work budget retains
 //     MaxOrderedRulesWork entries;
-//   - BernoulliEvaluations and RawWordsConsumed, which are not read in any form,
-//     in relation or otherwise; and Stake.Value and Stake.Reason, of which the
-//     arms read only Presence;
+//   - BernoulliEvaluations, which is not read in any form, in relation or
+//     otherwise; and Stake.Value and Stake.Reason, of which the arms read
+//     Presence and hold it to its vocabulary. RawWordsConsumed IS read, but
+//     only as one of the two bounds on the admitting step's word index;
+//   - the admitting step's RawWordValue on a RULE_DRAW. It is read on a
+//     DEFAULT_BOUNDS step, where the producer fixes it at zero because that
+//     half spends nothing, and it is not read on the half that may really have
+//     drawn a word, because the evaluation says WHICH word was drawn and never
+//     what that word was — the words live in the draw trace, not in here;
 //   - Cutoff and Qualifications.
 //
 // Those are the traversal's own bookkeeping, or the caller's framing of the
@@ -350,8 +355,8 @@ func requireCoherentSelection(s *shapeCheck, ev predictioneval.OrderedRulesEvalu
 		// default is a DEFAULT_BOUNDS step admitted under DEFAULT. Without this
 		// a DEFAULT admission could sit on a step that took a draw at all — and
 		// the default half is documented to consume none. It pins WHICH HALF the
-		// step claims, and not the step's own draw fields, which stay unread
-		// per the boundary above.
+		// step claims; the block below then holds the step to that half's own
+		// shape.
 		if basisOK {
 			want := predictioneval.TraceStepDefaultBounds
 			if sel.Basis == predictioneval.SelectionDetailedRule {
@@ -359,6 +364,39 @@ func requireCoherentSelection(s *shapeCheck, ev predictioneval.OrderedRulesEvalu
 			}
 			s.require(last.Step == want, "SELECTION_CONTRADICTS_ADMITTING_STEP")
 		}
+		// The step's OWN fields, which the producer fixes per half. Both halves
+		// admit only with ComparatorMatched set, though it carries different
+		// things: the rule's comparator on a RULE_DRAW, and the in-bounds test
+		// on a DEFAULT_BOUNDS, which has no comparator. A RULE_DRAW that
+		// admitted took the draw and won it — it may or may not have SPENT a
+		// word, since a rate of exactly one succeeds without one — while a
+		// DEFAULT_BOUNDS admission takes no draw at all and spends nothing.
+		// These hold of the ADMITTING entry only: the producer writes a
+		// RULE_DRAW with BernoulliEvaluated false when entropy runs out, and
+		// that entry never admits. The entry is already in hand,
+		// and it is the witness the selection is being held to, so its own
+		// coherence is part of that witness rather than a separate audit.
+		switch last.Step {
+		case predictioneval.TraceStepRuleDraw:
+			s.require(last.ComparatorMatched && last.BernoulliEvaluated && last.BernoulliResult,
+				"ADMITTING_STEP_CONTRADICTS_ITS_KIND")
+		case predictioneval.TraceStepDefaultBounds:
+			s.require(last.ComparatorMatched && !last.BernoulliEvaluated && !last.BernoulliResult &&
+				last.RawWordIndex == -1 && last.RawWordValue == 0, "ADMITTING_STEP_CONTRADICTS_ITS_KIND")
+		}
+		// A word it claims to have spent is one the run says it consumed. -1 is
+		// the producer's "no word", so only a non-negative index is bounded.
+		if last.RawWordIndex >= 0 {
+			// Bounded twice, like every other index here: against the declared
+			// ceiling on the supplied trace, and against what the run says it
+			// consumed.
+			// The counter alone is not enough — nothing else constrains it, so
+			// on its own it is a free variable a forger sets to match.
+			s.require(last.RawWordIndex < predictioneval.MaxOrderedRulesDrawWords,
+				"ADMITTING_STEP_RAW_WORD_OUT_OF_RANGE")
+			s.require(last.RawWordIndex < ev.RawWordsConsumed, "ADMITTING_STEP_RAW_WORD_OUT_OF_RANGE")
+		}
+		s.require(last.RawWordIndex >= -1, "ADMITTING_STEP_RAW_WORD_OUT_OF_RANGE")
 	}
 
 	// The second record of the same admission. The producer mints a visit at the
@@ -653,8 +691,27 @@ func MapP3bAction(ev predictioneval.OrderedRulesEvaluation) ActionMapping {
 	s.require(ev.EvidenceLabel == predictioneval.OrderedRulesEvidenceLabel, "EVIDENCE_LABEL_FOREIGN")
 	s.require(ev.ModelVersion == predictioneval.OrderedRulesModelVersion, "MODEL_VERSION_FOREIGN")
 	s.require(ev.EntropySemanticsVersion == predictioneval.OrderedRulesEntropySemanticsVersion, "ENTROPY_SEMANTICS_FOREIGN")
+	// Both are closed vocabularies, and the two booleans below are EQUALITY
+	// tests — so a value outside its vocabulary reads as the negative state and
+	// quietly satisfies every `!admitted` and `!stakeKnown` requirement the arms
+	// make. Bounding them first is what makes those requirements mean what they
+	// say.
+	s.require(ev.Participation == predictioneval.ParticipationAdmitted ||
+		ev.Participation == predictioneval.ParticipationNotAdmitted, "PARTICIPATION_OUTSIDE_VOCABULARY")
+	s.require(ev.Stake.Presence == predictioneval.SuppliedKnown ||
+		ev.Stake.Presence == predictioneval.SuppliedMissing ||
+		ev.Stake.Presence == predictioneval.SuppliedInvalid, "STAKE_PRESENCE_OUTSIDE_VOCABULARY")
 	admitted := ev.Participation == predictioneval.ParticipationAdmitted
 	stakeKnown := ev.Stake.Presence == predictioneval.SuppliedKnown
+	// The producer initialises Stake to {MISSING, NOT_EVALUATED} at both of its
+	// construction sites and overwrites it ONLY where it admits, so every status
+	// but the two admitting ones carries MISSING. The two admitting arms below
+	// constrain the presence themselves.
+	switch ev.Status {
+	case predictioneval.StatusWouldAttempt, predictioneval.StatusParticipationAdmittedStakeUnknown:
+	default:
+		s.require(ev.Stake.Presence == predictioneval.SuppliedMissing, "STAKE_PRESENCE_CONTRADICTS_STATUS")
+	}
 	switch ev.Status {
 	case predictioneval.StatusWouldAttempt:
 		m.Class = ActionWouldAttempt
@@ -677,6 +734,16 @@ func MapP3bAction(ev predictioneval.OrderedRulesEvaluation) ActionMapping {
 		s.require(!stakeKnown, "STAKE_KNOWN_ON_UNKNOWN_STATUS")
 		s.require(ev.Reason == predictioneval.ReasonBalanceNotSupplied || ev.Reason == predictioneval.ReasonBalanceInvalid ||
 			ev.Reason == predictioneval.ReasonBalanceOutOfDomain, "STAKE_UNKNOWN_REASON_FOREIGN")
+		// The producer writes the presence and the reason together, in one
+		// switch: a balance that was not supplied is MISSING, one that was
+		// invalid or outside the u32 domain is INVALID. A pairing it does not
+		// write is a shape it did not produce.
+		switch ev.Reason {
+		case predictioneval.ReasonBalanceNotSupplied:
+			s.require(ev.Stake.Presence == predictioneval.SuppliedMissing, "STAKE_PRESENCE_CONTRADICTS_REASON")
+		case predictioneval.ReasonBalanceInvalid, predictioneval.ReasonBalanceOutOfDomain:
+			s.require(ev.Stake.Presence == predictioneval.SuppliedInvalid, "STAKE_PRESENCE_CONTRADICTS_REASON")
+		}
 	case predictioneval.StatusNoAttemptInSuppliedPrefix:
 		m.Class = ActionNoAttemptInSuppliedPrefix
 		s.require(!admitted, "PARTICIPATION_ADMITTED_ON_NO_ATTEMPT")

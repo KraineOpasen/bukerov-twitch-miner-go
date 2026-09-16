@@ -839,8 +839,45 @@ func classifySignals(recs []predictioneval.SourceRecord) []rawSignal {
 			// about what else the round carries; for every other kind here it
 			// returns before the version is looked at. Either way an unreadable
 			// fact matched to the episode is not evidence that no call was made.
+			// A CALL phase belongs to placement and to nothing else, on the one
+			// ground that is provable rather than inferred: observePlacementCallOf
+			// is the only writer of CALL_STARTED and CALL_RETURNED, and it always
+			// writes them on a placement fact. The producer's phase table does
+			// group them under a `// placement` comment, but that grouping binds
+			// no phase to a kind, so it is a naming convention and is not relied
+			// on here. A row of any other kind carrying a call phase is a pairing
+			// the producer cannot have written, and it is marked contradicted
+			// rather than positioned as a call, because only placement facts say
+			// where a call happened.
+			//
+			// The phase is read only on a row whose payload this package CAN
+			// read — the placement arm above orders its own tests the same way,
+			// and a payload version this package does not support carries no
+			// phase vocabulary it can judge.
+			//
+			// WHAT THIS DOES NOT DO, stated so the limit is not discovered: it
+			// does not make the coverage proof a defence against relabelling in
+			// general. The proof refuses the marks it names — an orphan return,
+			// an unreadable fact, an unnameable one — and a supplier who moves a
+			// row between kinds or phases can still erase a refusal two ways this
+			// does not reach. A row relabelled onto a pairing the producer CAN
+			// write (auto_decision + AUTO_DECIDED) is indistinguishable from
+			// honest data by any intrinsic test. An orphan CALL_RETURNED
+			// relabelled to CALL_STARTED becomes an unspent start, and nothing
+			// here requires a start to be spent: that one IS refusable on the
+			// producer's own terms, but only at the cost of making the placement
+			// seam's NOT_RETURNED outcome unreachable through this pipeline, so
+			// it is a product decision recorded for the owner rather than a fix
+			// taken here. Authenticating the RECORDS themselves is what would
+			// close the class: ObservationSHA256 is carried on every row and
+			// this package verifies no record digest. (It does verify plenty of
+			// its own — the factset, the registry, the ruleset, the resolution —
+			// but none of those binds a source row to its stored bytes.)
 			if r.PayloadUndecodable || r.PayloadVersion != predictioneval.SupportedPayloadVersion {
 				sig.undecodable = true
+			} else if r.Payload.Phase == predictioneval.PhaseCallStarted ||
+				r.Payload.Phase == predictioneval.PhaseCallReturned {
+				sig.unclassified = true
 			}
 		default:
 			// A kind this package does not read at all. Fail closed: a fact it

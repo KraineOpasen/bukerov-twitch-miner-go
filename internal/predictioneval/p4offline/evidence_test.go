@@ -1219,6 +1219,70 @@ func TestUnreadableEvidenceOnTheRoundNeverProvesNoCall(t *testing.T) {
 			})
 		}
 	})
+	t.Run("a known kind carrying a placement-only phase does not prove coverage", func(t *testing.T) {
+		// The exploit this refuses: take a CALL_RETURNED whose start is missing
+		// — an orphan, which breaks the coverage argument — and relabel its
+		// KIND to one that never carries a call phase. The producer writes
+		// call phases only on placement facts, so the pairing is one it cannot
+		// emit; leaving it unread would let a relabel erase the orphan and
+		// restore a proven boundary.
+		for _, kind := range []string{
+			predictioneval.KindAutoDecision, predictioneval.KindUserTerminal,
+			"channel_event", "schedule_decision", "user_prediction_made",
+			"round_cleanup", "manual_control",
+		} {
+			for _, phase := range []string{predictioneval.PhaseCallStarted, predictioneval.PhaseCallReturned} {
+				t.Run(kind+"/"+phase, func(t *testing.T) {
+					s := newSynth()
+					s.skippedAttempt("r1", "e1", 1)
+					s.add(s.fact(kind, phase, "r1", "e1", 0))
+					ep := singleEpisode(t, mustSelect(t, s.dataset()))
+					if ep.Boundary.NoCallCoverage.Proven ||
+						!containsString(ep.Boundary.NoCallCoverage.Reasons, "UNCLASSIFIED_FACT_ON_ROUND") {
+						t.Fatalf("a %s carrying %s is a pairing the producer cannot write: %+v", kind, phase, ep.Boundary)
+					}
+				})
+				t.Run(kind+"/"+phase+"/unreadable", func(t *testing.T) {
+					// The phase is judged only on a row this package can read.
+					// An unreadable one is refused for being unreadable, and its
+					// phase — which belongs to a vocabulary this package has not
+					// pinned for that version — is not named as contradicted.
+					for name, break_ := range map[string]func(*predictioneval.SourceRecord){
+						"undecodable": func(r *predictioneval.SourceRecord) { r.PayloadUndecodable = true },
+						"unsupported version": func(r *predictioneval.SourceRecord) {
+							r.PayloadVersion = predictioneval.SupportedPayloadVersion + 1
+						},
+					} {
+						t.Run(name, func(t *testing.T) {
+							s := newSynth()
+							s.skippedAttempt("r1", "e1", 1)
+							r := s.fact(kind, phase, "r1", "e1", 0)
+							break_(&r)
+							s.add(r)
+							ep := singleEpisode(t, mustSelect(t, s.dataset()))
+							if ep.Boundary.NoCallCoverage.Proven {
+								t.Fatalf("an unreadable row cannot prove coverage either: %+v", ep.Boundary)
+							}
+							if containsString(ep.Boundary.NoCallCoverage.Reasons, "UNCLASSIFIED_FACT_ON_ROUND") {
+								t.Fatalf("its phase must not be judged: %+v", ep.Boundary.NoCallCoverage.Reasons)
+							}
+						})
+					}
+				})
+			}
+		}
+	})
+	t.Run("a known kind carrying its own phase still proves coverage", func(t *testing.T) {
+		// The control: the same arm must not start refusing honest rows. An
+		// auto_decision carrying AUTO_DUE is exactly what the producer writes.
+		s := newSynth()
+		s.skippedAttempt("r1", "e1", 1)
+		s.add(s.fact(predictioneval.KindAutoDecision, predictioneval.PhaseAutoDue, "r1", "e1", 0))
+		ep := singleEpisode(t, mustSelect(t, s.dataset()))
+		if !ep.Boundary.NoCallCoverage.Proven {
+			t.Fatalf("an honest auto_decision row must not break coverage: %+v", ep.Boundary)
+		}
+	})
 	t.Run("a fact of a kind outside the vocabulary does not prove coverage", func(t *testing.T) {
 		s := newSynth()
 		s.skippedAttempt("r1", "e1", 1)

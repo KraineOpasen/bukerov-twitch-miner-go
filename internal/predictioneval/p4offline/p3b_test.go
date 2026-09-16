@@ -1063,6 +1063,190 @@ func TestP3bSelectionMustBeIntrinsicallyConsistent(t *testing.T) {
 			t.Fatalf("the default half of the mechanism stays legal: %+v", m)
 		}
 	})
+	t.Run("the admitting step must be shaped like the half it claims", func(t *testing.T) {
+		// The step is the witness, so its own fields have to be the ones the
+		// producer writes for that half. A RULE_DRAW that admits took the draw
+		// and won it; a DEFAULT_BOUNDS that admits took no draw at all and
+		// consumed no word. Neither pairing is one a forger can leave alone
+		// while editing the rest of the entry.
+		edit := func(ev *predictioneval.OrderedRulesEvaluation, f func(*predictioneval.OrderedRulesTraceEntry)) {
+			trace := append([]predictioneval.OrderedRulesTraceEntry(nil), ev.Trace...)
+			f(&trace[len(trace)-1])
+			ev.Trace = trace
+		}
+		t.Run("a rule draw that admitted without matching or drawing", func(t *testing.T) {
+			for _, tc := range []struct {
+				name string
+				on   func(*predictioneval.OrderedRulesTraceEntry)
+				want string
+			}{
+				{"a comparator that did not match", func(e *predictioneval.OrderedRulesTraceEntry) {
+					e.ComparatorMatched = false
+				}, "ADMITTING_STEP_CONTRADICTS_ITS_KIND"},
+				{"a draw that was never evaluated", func(e *predictioneval.OrderedRulesTraceEntry) {
+					e.BernoulliEvaluated = false
+				}, "ADMITTING_STEP_CONTRADICTS_ITS_KIND"},
+				{"a draw that failed", func(e *predictioneval.OrderedRulesTraceEntry) {
+					e.BernoulliResult = false
+				}, "ADMITTING_STEP_CONTRADICTS_ITS_KIND"},
+				{"a word past everything the run consumed", func(e *predictioneval.OrderedRulesTraceEntry) {
+					e.RawWordIndex = 1 << 30
+				}, "ADMITTING_STEP_RAW_WORD_OUT_OF_RANGE"},
+			} {
+				t.Run(tc.name, func(t *testing.T) {
+					ev := predictioneval.EvaluateOrderedRules(proj.Stream, cfgWithRule("a", predictioneval.ComparatorGe, 50, 100), trace)
+					if ev.Selected == nil || ev.Trace[len(ev.Trace)-1].Step != predictioneval.TraceStepRuleDraw {
+						t.Fatalf("fixture must admit on a rule draw: %+v", ev.Trace)
+					}
+					edit(&ev, tc.on)
+					if m := p4offline.MapP3bAction(ev); m.Legal || !containsString(m.Illegality, tc.want) {
+						t.Fatalf("want %s, got %+v", tc.want, m)
+					}
+				})
+			}
+		})
+		t.Run("each bound on the word index is pinned on its own", func(t *testing.T) {
+			// The two bounds mask each other on a tamper both catch, so each
+			// needs a shape only IT refuses: a counter co-forged to match the
+			// index leaves the declared ceiling as the only check, and an index
+			// inside the ceiling but past the count leaves the counter as the
+			// only one.
+			for _, tc := range []struct {
+				name            string
+				index, consumed int
+			}{
+				{"a counter co-forged to match an index past the ceiling", 1 << 30, 1<<30 + 1},
+				{"an index inside the ceiling but past what the run consumed", 5, 1},
+			} {
+				t.Run(tc.name, func(t *testing.T) {
+					ev := predictioneval.EvaluateOrderedRules(proj.Stream, cfgWithRule("a", predictioneval.ComparatorGe, 50, 100), trace)
+					if ev.Selected == nil {
+						t.Fatalf("fixture must admit: %q/%q", ev.Status, ev.Reason)
+					}
+					entries := append([]predictioneval.OrderedRulesTraceEntry(nil), ev.Trace...)
+					entries[len(entries)-1].RawWordIndex = tc.index
+					ev.Trace = entries
+					ev.RawWordsConsumed = tc.consumed
+					if m := p4offline.MapP3bAction(ev); m.Legal ||
+						!containsString(m.Illegality, "ADMITTING_STEP_RAW_WORD_OUT_OF_RANGE") {
+						t.Fatalf("want the word index refused: %+v", m)
+					}
+				})
+			}
+		})
+		t.Run("a default admission that took a draw", func(t *testing.T) {
+			for _, tc := range []struct {
+				name string
+				on   func(*predictioneval.OrderedRulesTraceEntry)
+				want string
+			}{
+				{"a draw the default half cannot take", func(e *predictioneval.OrderedRulesTraceEntry) {
+					e.BernoulliEvaluated = true
+				}, "ADMITTING_STEP_CONTRADICTS_ITS_KIND"},
+				{"a draw the default half cannot win", func(e *predictioneval.OrderedRulesTraceEntry) {
+					e.BernoulliResult = true
+				}, "ADMITTING_STEP_CONTRADICTS_ITS_KIND"},
+				{"a word the default half cannot spend", func(e *predictioneval.OrderedRulesTraceEntry) {
+					e.RawWordIndex = 3
+				}, "ADMITTING_STEP_CONTRADICTS_ITS_KIND"},
+				{"bounds it admitted outside of", func(e *predictioneval.OrderedRulesTraceEntry) {
+					e.ComparatorMatched = false
+				}, "ADMITTING_STEP_CONTRADICTS_ITS_KIND"},
+			} {
+				t.Run(tc.name, func(t *testing.T) {
+					ev := predictioneval.EvaluateOrderedRules(proj.Stream, cfgDefaultOnly("a", 0, 100), trace)
+					if ev.Selected == nil || ev.Trace[len(ev.Trace)-1].Step != predictioneval.TraceStepDefaultBounds {
+						t.Fatalf("fixture must admit by default: %+v", ev.Trace)
+					}
+					edit(&ev, tc.on)
+					if m := p4offline.MapP3bAction(ev); m.Legal || !containsString(m.Illegality, tc.want) {
+						t.Fatalf("want %s, got %+v", tc.want, m)
+					}
+				})
+			}
+		})
+	})
+	t.Run("participation and stake presence are held to their vocabularies", func(t *testing.T) {
+		// The arms derive booleans by EQUALITY — admitted, stakeKnown — so a
+		// value outside the vocabulary silently reads as the negative state and
+		// satisfies every `!admitted` / `!stakeKnown` requirement. Bounding the
+		// two vocabularies is what makes those requirements mean what they say.
+		for _, c := range carriers {
+			t.Run(c.name, func(t *testing.T) {
+				base := predictioneval.EvaluateOrderedRules(c.stream, cfgWithRule("a", predictioneval.ComparatorGe, 50, 100), trace)
+				if base.Status != c.native {
+					t.Fatalf("fixture: %q/%q", base.Status, base.Reason)
+				}
+				t.Run("a participation outside the vocabulary", func(t *testing.T) {
+					ev := base
+					ev.Participation = "FORGED"
+					if m := p4offline.MapP3bAction(ev); m.Legal ||
+						!containsString(m.Illegality, "PARTICIPATION_OUTSIDE_VOCABULARY") {
+						t.Fatalf("a foreign participation must fail closed: %+v", m)
+					}
+				})
+				t.Run("a stake presence outside the vocabulary", func(t *testing.T) {
+					ev := base
+					ev.Stake.Presence = "FORGED"
+					if m := p4offline.MapP3bAction(ev); m.Legal ||
+						!containsString(m.Illegality, "STAKE_PRESENCE_OUTSIDE_VOCABULARY") {
+						t.Fatalf("a foreign stake presence must fail closed: %+v", m)
+					}
+				})
+			})
+		}
+		t.Run("a presence no admission explains", func(t *testing.T) {
+			// The producer initialises Stake to {MISSING, NOT_EVALUATED} at both
+			// construction sites and overwrites it ONLY when it admits, so every
+			// status but the two admitting ones carries MISSING.
+			ev := predictioneval.EvaluateOrderedRules(proj.Stream, cfgDefaultOnly("a", 90, 100), trace)
+			if ev.Status == predictioneval.StatusWouldAttempt ||
+				ev.Status == predictioneval.StatusParticipationAdmittedStakeUnknown {
+				t.Fatalf("fixture must not admit: %q", ev.Status)
+			}
+			if ev.Stake.Presence != predictioneval.SuppliedMissing {
+				t.Fatalf("a non-admitting result carries MISSING: %+v", ev.Stake)
+			}
+			ev.Stake.Presence = predictioneval.SuppliedInvalid
+			if m := p4offline.MapP3bAction(ev); m.Legal ||
+				!containsString(m.Illegality, "STAKE_PRESENCE_CONTRADICTS_STATUS") {
+				t.Fatalf("only an admission explains a non-MISSING presence: %+v", m)
+			}
+		})
+		t.Run("a rate of exactly one still admits without spending a word", func(t *testing.T) {
+			// Names the false-refusal risk the admitting-step requirements
+			// introduce. A rate of exactly one succeeds WITHOUT drawing, so the
+			// step carries BernoulliEvaluated true and RawWordIndex -1 together
+			// — a pairing a naive "evaluated implies a word was spent" reading
+			// would refuse.
+			ev := predictioneval.EvaluateOrderedRules(proj.Stream, cfgWithRule("a", predictioneval.ComparatorGe, 50, 100), trace)
+			last := ev.Trace[len(ev.Trace)-1]
+			if last.Step != predictioneval.TraceStepRuleDraw || !last.BernoulliEvaluated || last.RawWordIndex != -1 {
+				t.Fatalf("fixture must admit on a draw that spent no word: %+v", last)
+			}
+			if m := p4offline.MapP3bAction(ev); !m.Legal || len(m.Illegality) != 0 {
+				t.Fatalf("an honest no-word admission must stay legal: %+v", m)
+			}
+		})
+		t.Run("a presence the reason contradicts", func(t *testing.T) {
+			// The producer writes the two together: a balance that was not
+			// supplied is MISSING, one invalid or out of the u32 domain is
+			// INVALID. It never writes NOT_SUPPLIED beside INVALID.
+			ev := predictioneval.EvaluateOrderedRules(carriers[1].stream, cfgWithRule("a", predictioneval.ComparatorGe, 50, 100), trace)
+			if ev.Status != predictioneval.StatusParticipationAdmittedStakeUnknown ||
+				ev.Reason != predictioneval.ReasonBalanceNotSupplied {
+				t.Fatalf("fixture must be the not-supplied arm: %q/%q", ev.Status, ev.Reason)
+			}
+			if ev.Stake.Presence != predictioneval.SuppliedMissing {
+				t.Fatalf("the producer pairs NOT_SUPPLIED with MISSING: %+v", ev.Stake)
+			}
+			ev.Stake.Presence = predictioneval.SuppliedInvalid
+			if m := p4offline.MapP3bAction(ev); m.Legal ||
+				!containsString(m.Illegality, "STAKE_PRESENCE_CONTRADICTS_REASON") {
+				t.Fatalf("a presence its reason contradicts must fail closed: %+v", m)
+			}
+		})
+	})
 	t.Run("a stop position is still named when no selection is carried", func(t *testing.T) {
 		// requireCoherentSelection returns early with no selection to judge, so
 		// the arm itself has to keep naming the missing stop position on that
