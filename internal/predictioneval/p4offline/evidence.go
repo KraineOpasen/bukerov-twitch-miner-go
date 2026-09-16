@@ -748,8 +748,6 @@ func indexSignals(recs []predictioneval.SourceRecord, knownEvents map[string]boo
 	return ix
 }
 
-// matching returns the signals bearing on the episode, each once, in causal
-// order.
 // eachMatching visits the signals matched to one episode, in index order and
 // without duplicates, WITHOUT materializing them.
 //
@@ -762,7 +760,7 @@ func indexSignals(recs []predictioneval.SourceRecord, knownEvents map[string]boo
 //
 // Absolute figures are environment-dependent — two independent measurements of
 // the same 12,288-record shape here differed by about 2.5x (2.3 GB and 6.7 GB)
-// — so what is pinned is the SHAPE: the old code grew about 15x per 4x input,
+// — so what is pinned is the SHAPE: the old code grew about 16x per 4x input,
 // this one grows about 4x, and the regression test asserts ratios rather than
 // byte counts for exactly that reason.
 //
@@ -1011,9 +1009,9 @@ func classifySignals(recs []predictioneval.SourceRecord) []rawSignal {
 			// ones have, and the producer's grouping comments are a naming
 			// convention rather than a contract. An orphan CALL_RETURNED
 			// relabelled to CALL_STARTED becomes an unspent start. That one IS
-			// refusable on the producer's own terms and IS now refused, by the
-			// pass at the end of this function, under the owner's D16
-			// disposition — at the stated cost of making the placement seam's
+			// refusable on the producer's own terms and IS now refused, for an
+			// AUTOMATIC start, by the pass at the end of this function, under
+			// the owner's D16 disposition — at the stated cost of making the placement seam's
 			// NOT_RETURNED outcome unreachable through this pipeline, which is
 			// why that status is now documented as reserved and non-emittable
 			// rather than deleted. This paragraph previously said the opposite,

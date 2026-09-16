@@ -248,8 +248,8 @@ func (s *shapeCheck) require(ok bool, name string) {
 // The four digests are unread for a DIFFERENT reason, and it is worth not
 // lumping them in. (DonorRevision used to be named here too. It is now READ,
 // beside its three sibling header constants — leaving it unchecked was an
-// omission rather than the decision this paragraph describes.) they are input bindings and a pinned provenance
-// header, not bookkeeping. See the note above MapP2Action — binding an
+// omission rather than the decision this paragraph describes.) They are input
+// bindings and a consumed-prefix attestation, not bookkeeping. See the note above MapP2Action — binding an
 // evaluation to the stream, config and entropy it claims is the caller's job,
 // not this map's.
 //
@@ -851,9 +851,11 @@ func (s *shapeCheck) finish(m ActionMapping) ActionMapping {
 //	                        scoped B inside an otherwise A field. It is not the
 //	                        only scoped entry: the counters, the stop fields,
 //	                        Trace and Visits are all read ONLY when a selection
-//	                        is carried, because requireCoherentSelection returns
-//	                        early without one and the terminal arms read none of
-//	                        them. On those arms an intrinsic relation does go
+//	                        is carried, with ONE exception: the WOULD_ATTEMPT
+//	                        arm reads HasStopPosition and CandidatesConsumed
+//	                        precisely when no selection is carried, which is
+//	                        what NO_CANDIDATE_REACHED exists for. The terminal
+//	                        arms read none of them. On those arms an intrinsic relation does go
 //	                        unused — every candidate iteration appends exactly
 //	                        one visit on every exit path, so len(Visits) equals
 //	                        CandidatesConsumed — and it is unchecked.
@@ -897,12 +899,15 @@ func (s *shapeCheck) finish(m ActionMapping) ActionMapping {
 //	                        empty on WOULD_ATTEMPT, whose arm sets no reason at
 //	                        all; and the CONSTANT on the out-of-domain arm,
 //	                        which builds the stake directly rather than through
-//	                        balanceReason. Those two arms are a SCOPED B in this
-//	                        matrix's usual sense: the TEXT is unbounded, but it
-//	                        is still required non-empty, because balanceReason
-//	                        falls back to a constant. The exemption once covered
-//	                        all four admitting arms flatly, on a justification
-//	                        true of two of them.
+//	                        balanceReason. Those three are fully bound. The
+//	                        REMAINING two admitting arms — BALANCE_INVALID and
+//	                        BALANCE_NOT_SUPPLIED, the only ones that go through
+//	                        balanceReason — are a SCOPED B: their text is the
+//	                        caller's and is unbounded, but it is still required
+//	                        NON-EMPTY, because balanceReason falls back to a
+//	                        constant. The exemption once covered all four
+//	                        admitting arms flatly, on a justification true of
+//	                        those two.
 //	A Value                 zero on every status but WOULD_ATTEMPT, which is the
 //	                        only arm that sizes a stake; the others write a
 //	                        literal that leaves it at its zero. On WOULD_ATTEMPT

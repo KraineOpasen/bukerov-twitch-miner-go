@@ -915,7 +915,11 @@ func TestUnreadableOrUnsupportedPlacementLeavesCoverageUnproven(t *testing.T) {
 		s.terminal("r1", "e1", 1, predictioneval.PhaseAutoDecided, "OK", env)
 		s.call("r1", "e1", 1, *env.FinalAmount, *env.ChoiceIndex)
 		ep := singleEpisode(t, mustSelect(t, s.dataset()))
-		if !ep.Boundary.NoCallCoverage.Proven {
+		// All three predicates, restored: an earlier edit dropped the boundary
+		// and exclusion halves while leaving the message claiming them, which
+		// is the weaker-assertion-with-the-stronger-message shape this suite
+		// exists to refuse.
+		if !ep.Boundary.NoCallCoverage.Proven || !ep.Boundary.Proven || ep.Excluded {
 			t.Fatalf("a readable, settled call after the cutoff is exactly what the boundary admits: %+v", ep)
 		}
 	})
