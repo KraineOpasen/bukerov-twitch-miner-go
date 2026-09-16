@@ -353,8 +353,14 @@ func TestPerCaseConfigBindingFollowsEachCasesOwnSettings(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	bb, _ := p4offline.BindP2Config(b)
-	bc, _ := p4offline.BindP2Config(c)
+	bb, err := p4offline.BindP2Config(b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bc, err := p4offline.BindP2Config(c)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if ba.ContractVersion != p4offline.P2ConfigBindingVersion || ba.Digest == "" {
 		t.Fatalf("%+v", ba)
 	}
@@ -393,7 +399,10 @@ func TestP2ConsumesNoEntropyAndIsDeterministic(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	b, _ := p4offline.EvaluateP2Case(fs)
+	b, err := p4offline.EvaluateP2Case(fs)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if a.Evaluation.Action != b.Evaluation.Action || a.Stake != b.Stake || a.Choice != b.Choice ||
 		a.Evaluation.CommonInputDigest != fs.Digest {
 		t.Fatalf("P2 must be a pure function of the factset, bound to it: %+v / %+v", a, b)

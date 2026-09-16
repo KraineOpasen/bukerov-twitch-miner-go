@@ -167,6 +167,17 @@ type NoCallCoverageProof struct {
 }
 
 // BoundaryProof is the COMMON_CUTOFF proof C < F for one episode.
+//
+// Proven is the CONJUNCTION: coverage proved AND the cutoff strictly before the
+// earliest call. A recorded call at or before the cutoff leaves it false with
+// C_NOT_BEFORE_F, so it is not the narrower "did a call go unrecorded"
+// question — that one is the sibling NoCallCoverage.Proven, and the two fields
+// share a name without sharing a meaning.
+//
+// It is also NOT a verdict on the episode. It can be true of a round the
+// selection excludes for another reason entirely — a manual or unattributed
+// intervention, for instance, whose start and return pair perfectly well. Read
+// it beside Excluded, never instead of it; the factset builder does.
 type BoundaryProof struct {
 	Rule                      string              `json:"rule"`
 	CutoffPosition            int64               `json:"cutoffPosition"`
@@ -569,6 +580,56 @@ type poolRound struct{ pool, round string }
 // roundTriple keys a call start by everything a non-automatic call names.
 type roundTriple struct{ pool, round, event string }
 
+// autoStartSlot is one recorded automatic call start: the attempt's full
+// native identity and the round the start was recorded on.
+//
+// The round is a COHERENCE check, not a disambiguator. An honest producer
+// mints the discriminator from a per-pool counter that never resets (an
+// atomic.Uint64 in the pool), so within one epoch, session and pool there is
+// exactly one attempt 1 and the identity alone already names it. What the
+// round adds is a refusal: supplied evidence in which a start and a return
+// carry the same attempt identity but disagree about the incarnation or the
+// public round is contradicted evidence, and a start settles only a return
+// that agrees with it. The identity half is kept whole — it is the native
+// AttemptKey tuple — so the refusal is layered on that identity rather than
+// replacing it. Two of that tuple's four components cannot discriminate here
+// in practice: a dataset carrying a foreign collector epoch or session is
+// refused whole, before any of this runs, so within an admitted session every
+// record already agrees on both. They are kept because the key is the native
+// identity, not a subset of it chosen for one caller.
+//
+// The cost is a constant factor, paid on every automatic placement fact: the
+// key holds five strings where the identity alone held two, it hashes the pool
+// twice, and starts that once shared one counter entry now occupy one entry per
+// round. It stays linear per record; it is not free.
+//
+// A slot holds AT MOST ONE start. The attempt discriminator names one call and
+// the producer writes one start per call, so a second start in the same slot is
+// not a second call to pair against — it is a fact the producer could not have
+// written, and it is refused rather than banked.
+type autoStartSlot struct {
+	attempt attemptStartKey
+	round   roundTriple
+}
+
+// autoStartTally is what one slot has seen. Both halves are needed and neither
+// substitutes for the other: recorded refuses a duplicate start even after the
+// first one has already been spent, and spent is what makes consumption
+// one-to-one.
+type autoStartTally struct{ recorded, spent bool }
+
+// autoStartSlotOf names the slot one automatic call fact belongs to. The
+// identity half is derived here from the record itself, so recording a start
+// and spending one cannot read it differently; the attempt discriminator and
+// the round are passed in, and both call sites pass the same per-record
+// values under the same guard.
+func autoStartSlotOf(r *predictioneval.SourceRecord, attempt int64, round roundTriple) autoStartSlot {
+	return autoStartSlot{
+		attemptStartKey{r.CollectorEpoch, r.CollectorSessionID, r.PoolInstanceID, attempt},
+		round,
+	}
+}
+
 // attemptStartKey keys an automatic call start by the attempt's FULL
 // identity. The automatic attempt counter restarts in every pool, so the
 // numeric id alone would pair one pool's orphan return with another pool's
@@ -654,12 +715,15 @@ func (ix signalIndex) matching(ep EpisodeIdentity) []rawSignal {
 // classifySignals reads every fact once and records what it signals.
 func classifySignals(recs []predictioneval.SourceRecord) []rawSignal {
 	out := make([]rawSignal, 0, len(recs))
-	// Recorded call starts, for orphan-return detection: keyed by the
-	// attempt's full identity (epoch, session, pool, id) for automatic calls
-	// — the automatic counter restarts per pool — and by round for calls
-	// without one. Counted, not flagged: the producer records one start per
-	// return, so a start settles ONE return and is spent doing it.
-	autoStarts := map[attemptStartKey]int{}
+	// Recorded call starts, for orphan-return detection: calls classified
+	// AUTOMATIC by the attempt's full native identity and the round they were
+	// recorded on (see autoStartSlot), every other call — manual or ambiguous,
+	// whether or not it carries an attempt id — by round alone. A start is SPENT
+	// rather than merely present: the producer records one start per return, so
+	// a start settles ONE return and is consumed doing it — which is what the
+	// automatic side's spent flag records, and what the non-automatic side's
+	// count records.
+	autoStarts := map[autoStartSlot]autoStartTally{}
 	otherStarts := map[roundTriple]int{}
 	for i := range recs {
 		r := &recs[i]
@@ -682,10 +746,9 @@ func classifySignals(recs []predictioneval.SourceRecord) []rawSignal {
 			// record that cannot be read. Its phase could be CALL_RETURNED and
 			// the start it would name could precede the cutoff, so it positions
 			// itself as a call of unknown shape AND breaks the no-call coverage
-			// argument, the way an undecodable fact of any kind does. The version
-			// test is placement-only: an unsupported version on an automatic row
-			// is already refused upstream, where materialization drops the
-			// attempt and seam 2 finds no usable first opportunity.
+			// argument, the way an unreadable fact of any kind does — the arm
+			// below applies the same version test to every other kind this
+			// package reads.
 			switch {
 			case r.PayloadUndecodable || r.PayloadVersion != predictioneval.SupportedPayloadVersion:
 				sig.call, sig.callKind = true, CallKindAmbiguous
@@ -701,18 +764,49 @@ func classifySignals(recs []predictioneval.SourceRecord) []rawSignal {
 					sig.callKind = CallKindAmbiguous
 				}
 				if sig.callKind == CallKindAuto {
-					autoStarts[attemptStartKey{r.CollectorEpoch, r.CollectorSessionID, r.PoolInstanceID, sig.attemptID}]++
+					// One start per call, and the attempt discriminator names
+					// the call: a SECOND start in the same slot is a fact the
+					// producer cannot have written. It declares placement as
+					// "the single Twitch placement call - one fact immediately
+					// before it and one immediately after. Never wraps, retries
+					// or alters it", and both of its call sites emit exactly
+					// that pair. Banking a second one would let it settle a
+					// return that has no start of its own, which is the very
+					// thing one-to-one consumption exists to refuse, so the
+					// contradicted fact is refused instead of counted.
+					slot := autoStartSlotOf(r, sig.attemptID, triple)
+					if t := autoStarts[slot]; t.recorded {
+						sig.unclassified = true
+					} else {
+						t.recorded = true
+						autoStarts[slot] = t
+					}
 				} else {
+					// No discriminator here, so two starts on one round are two
+					// calls the producer could have made — an operator can place
+					// again after a failed placement — and the count stands. The
+					// One count serves both manual and ambiguous calls, so a
+					// start of either kind settles a return of the other. That
+					// is contained rather than exploitable: such a start is
+					// itself a call signal, so the episode is excluded as a
+					// manual or unattributed intervention whichever way it
+					// pairs. The at-most-one rule above is stated of the AUTOMATIC emitter,
+					// which passes one captured incarnation and event id to both
+					// halves of its pair; the manual emitter resolves the
+					// incarnation separately for each half, so its two facts are
+					// not guaranteed to agree and are not held to that rule.
 					otherStarts[triple]++
 				}
 			case r.Payload.Phase == predictioneval.PhaseCallReturned:
-				// Spend one recorded start. A return that finds none has no start
-				// of its own, and the start it lacks could precede the cutoff.
+				// Spend one recorded start, and only one recorded on THIS round. A
+				// return that finds none has no start of its own, and the start it
+				// lacks could precede the cutoff.
 				started := false
 				if sig.attemptID > 0 && !sig.manual {
-					key := attemptStartKey{r.CollectorEpoch, r.CollectorSessionID, r.PoolInstanceID, sig.attemptID}
-					if autoStarts[key] > 0 {
-						autoStarts[key]--
+					slot := autoStartSlotOf(r, sig.attemptID, triple)
+					if t := autoStarts[slot]; t.recorded && !t.spent {
+						t.spent = true
+						autoStarts[slot] = t
 						started = true
 					}
 				} else if otherStarts[triple] > 0 {
@@ -723,16 +817,45 @@ func classifySignals(recs []predictioneval.SourceRecord) []rawSignal {
 					sig.orphanReturn = true
 				}
 			default:
-				// A placement fact in a phase outside the closed vocabulary
-				// is a call of unknown shape at its own position.
+				// A placement fact in a phase outside the closed vocabulary is a
+				// call of unknown shape at its own position — and a fact whose
+				// phase cannot be named is not evidence that no call was made:
+				// the producer cannot emit it, and it could be a return whose
+				// missing start precedes the cutoff. It positions itself and it
+				// breaks the coverage argument.
 				sig.call, sig.callKind = true, CallKindAmbiguous
+				sig.unclassified = true
 			}
 		case predictioneval.KindAutoDecision, predictioneval.KindUserTerminal, kindChannelEvent,
 			kindScheduleDecision, kindUserPredictionMade, kindRoundCleanup, kindManualControl:
-			if r.PayloadUndecodable {
+			// Unreadable either way: an undecodable payload, or one in a version
+			// this package cannot read. Every kind LISTED HERE is read the same
+			// way — the producer's source_unknown is not one of them and falls
+			// to the arm below — and for the coverage argument nothing
+			// downstream substitutes for it.
+			// Materialization does examine the version of an AUTOMATIC fact
+			// (materialize.go), but it excludes that fact at attempt level under
+			// its observation id, which is not a session refusal and says nothing
+			// about what else the round carries; for every other kind here it
+			// returns before the version is looked at. Either way an unreadable
+			// fact matched to the episode is not evidence that no call was made.
+			if r.PayloadUndecodable || r.PayloadVersion != predictioneval.SupportedPayloadVersion {
 				sig.undecodable = true
 			}
 		default:
+			// A kind this package does not read at all. Fail closed: a fact it
+			// cannot name is not evidence that no call was made.
+			//
+			// One kind the PRODUCER emits lands here rather than in the arm
+			// above — source_unknown, a routed Prediction-domain frame whose
+			// family the producer could not classify. Such a frame names no
+			// round, so it is matched to every episode on its POOL: refusing
+			// coverage for one costs every episode on that pool, not one
+			// round's — and a dataset may carry several pools, so it is not
+			// the whole session either. Whether an unreadable INBOUND frame should bear on the
+			// OUTBOUND-call coverage argument at all is a producer-kind policy
+			// question this package does not settle; it is recorded, and until
+			// it is settled the reading here stays the conservative one.
 			sig.unclassified = true
 		}
 		out = append(out, sig)

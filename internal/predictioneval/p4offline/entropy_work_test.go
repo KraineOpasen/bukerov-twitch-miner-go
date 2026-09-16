@@ -260,7 +260,7 @@ func TestWorkEntropyWordsMatchTheFullHMACAndHex16(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		text, _ := predictioneval.OrderedRulesHex64(w).MarshalText()
+		text := mustHex16(t, predictioneval.OrderedRulesHex64(w))
 		if string(text) != v.Hex16Word || string(text) != py.Vectors[i].Hex16Word {
 			t.Errorf("fixture %s run %s word %s: word %s, want %s", v.Fixture, v.RunIndex, v.WordIndex, text, v.Hex16Word)
 		}
@@ -270,7 +270,7 @@ func TestWorkEntropyWordsMatchTheFullHMACAndHex16(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if got, _ := words[word].MarshalText(); string(got) != v.Hex16Word {
+		if got := mustHex16(t, words[word]); string(got) != v.Hex16Word {
 			t.Errorf("fixture %s run %s: sequence word %s is %s, want %s", v.Fixture, v.RunIndex, v.WordIndex, got, v.Hex16Word)
 		}
 	}
@@ -286,7 +286,7 @@ func TestWorkEntropyWordsMatchTheFullHMACAndHex16(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	text, _ := predictioneval.OrderedRulesHex64(w).MarshalText()
+	text := mustHex16(t, predictioneval.OrderedRulesHex64(w))
 	if string(text) != ctl.HealthyHex16 {
 		t.Errorf("first-eight-bytes control: %s, healthy %s", text, ctl.HealthyHex16)
 	}
@@ -298,10 +298,10 @@ func TestWorkEntropyWordsMatchTheFullHMACAndHex16(t *testing.T) {
 	for i := 7; i >= 0; i-- {
 		le = le<<8 | uint64(mac[i])
 	}
-	if leText, _ := predictioneval.OrderedRulesHex64(le).MarshalText(); string(leText) != ctl.NegativeLittleEndianHex16 || string(leText) == string(text) {
+	if leText := mustHex16(t, predictioneval.OrderedRulesHex64(le)); string(leText) != ctl.NegativeLittleEndianHex16 || string(leText) == string(text) {
 		t.Errorf("little-endian control: the same bytes read the other way render %s, the control says %s", leText, ctl.NegativeLittleEndianHex16)
 	}
-	zero, _ := predictioneval.OrderedRulesHex64(0).MarshalText()
+	zero := mustHex16(t, predictioneval.OrderedRulesHex64(0))
 	if string(zero) != node.Controls.FixedWidthZero.HealthyZero {
 		t.Errorf("zero renders as %q, want %q", zero, node.Controls.FixedWidthZero.HealthyZero)
 	}
@@ -319,7 +319,7 @@ func TestWorkEntropyTraceAndValidationUseTheApprovedWords(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, _ := trace.Words[0].MarshalText(); string(got) != a.Hex16Word {
+	if got := mustHex16(t, trace.Words[0]); string(got) != a.Hex16Word {
 		t.Fatalf("trace word 0 is %s, the Work vector says %s", got, a.Hex16Word)
 	}
 	if err := p4offline.ValidateDrawTrace(coords, trace); err != nil {

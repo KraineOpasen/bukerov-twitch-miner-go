@@ -11,6 +11,7 @@ import (
 	"errors"
 	"math"
 	"os"
+	"sort"
 	"strings"
 	"testing"
 
@@ -799,4 +800,314 @@ func TestRulesetDocumentMustSpellEveryMandatoryKey(t *testing.T) {
 		t.Fatalf("a null detailed list means no detailed rules: %v", err)
 	}
 	mustVerify(t, rulesetFrom(t, cfg)) // absent detailed, the same thing
+}
+
+// sameStrings reports whether two name sets hold the same names, in any order.
+// Illegality is documented as naming EVERY contradiction found, so a shape that
+// contradicts two independent records of the same fact is expected to name both
+// — the assertion is an exact set, not a containment.
+func sameStrings(got, want []string) bool {
+	if len(got) != len(want) {
+		return false
+	}
+	g := append([]string(nil), got...)
+	w := append([]string(nil), want...)
+	sort.Strings(g)
+	sort.Strings(w)
+	for i := range g {
+		if g[i] != w[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// TestP3bSelectionMustBeIntrinsicallyConsistent pins the selection half of the
+// P3b mapping seam. A status that carries a selection is legal only if that
+// selection is one the native mechanism could have produced, judged by the
+// selection's OWN fields — the evaluator is not re-run and no other exported
+// field is re-derived here. The invariants come from the native contract:
+// candidate and outcome are slice indices with identities, the basis is one of
+// two named halves, and RuleIndex is the admitting rule's index or -1 for a
+// default admission (ordered_rules_types.go), which the producer pairs exactly
+// (ordered_rules.go admits under DETAILED_RULE only with an index >= 0 and
+// under DEFAULT only with -1).
+func TestP3bSelectionMustBeIntrinsicallyConsistent(t *testing.T) {
+	_, fs := selectedFactset(t, nil, nil)
+	proj, err := p4offline.ProjectP3bSingleCandidate(fs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	coords := synthCoords(fs, 0)
+	trace := mustDrawTrace(t, coords, 4)
+
+	missingBalance := proj.Stream
+	missingBalance.Candidates = append([]predictioneval.OrderedRulesCandidate(nil), proj.Stream.Candidates...)
+	missingBalance.Candidates[0].Balance = predictioneval.SuppliedInt64{Presence: predictioneval.SuppliedMissing, Reason: "test"}
+	reproj, err := predictioneval.ProjectOrderedRulesStream(
+		predictioneval.OrderedRulesSource{Scope: proj.Stream.Scope, Candidates: missingBalance.Candidates},
+		proj.Stream.Admission)
+	if err != nil {
+		t.Fatal(err)
+	}
+	missingBalance = reproj
+
+	carriers := []struct {
+		name   string
+		stream predictioneval.OrderedRulesStream
+		native predictioneval.OrderedRulesStatus
+	}{
+		{"would attempt", proj.Stream, predictioneval.StatusWouldAttempt},
+		{"stake unknown", missingBalance, predictioneval.StatusParticipationAdmittedStakeUnknown},
+	}
+	// A tamper may touch the evaluation as well as the selection, because these
+	// invariants relate one to the other. want is the EXACT set of illegalities
+	// the shape must produce: most fields are witnessed more than once — by a
+	// counter, by the admitting trace entry and by the admitting visit — and
+	// naming every one of them is the documented behaviour of Illegality rather
+	// than a defect. Each set is derived from which witnesses carry the tampered
+	// field AND from the suppression the guard applies — a field already named
+	// malformed is not named a second time by a relation that would compare it
+	// — rather than read back off a run.
+	tampers := []struct {
+		name string
+		on   func(*predictioneval.OrderedRulesEvaluation, *predictioneval.OrderedRulesSelection)
+		want []string
+	}{
+		{"a negative candidate index", func(_ *predictioneval.OrderedRulesEvaluation, sel *predictioneval.OrderedRulesSelection) {
+			sel.CandidateIndex = -1
+		}, []string{"SELECTION_CANDIDATE_INDEX_NEGATIVE", "SELECTION_CONTRADICTS_ADMITTING_TRACE", "SELECTION_CONTRADICTS_ADMITTING_VISIT"}},
+		{"a candidate index past the declared ceiling", func(_ *predictioneval.OrderedRulesEvaluation, sel *predictioneval.OrderedRulesSelection) {
+			sel.CandidateIndex = predictioneval.MaxOrderedRulesCandidates
+		}, []string{"SELECTION_CANDIDATE_INDEX_OVER_CEILING", "SELECTION_CONTRADICTS_ADMITTING_TRACE", "SELECTION_CONTRADICTS_ADMITTING_VISIT"}},
+		{"a negative outcome index", func(_ *predictioneval.OrderedRulesEvaluation, sel *predictioneval.OrderedRulesSelection) {
+			sel.OutcomeIndex = -1
+		}, []string{"SELECTION_OUTCOME_INDEX_NEGATIVE", "SELECTION_CONTRADICTS_ADMITTING_TRACE"}},
+		{"an outcome index past the declared ceiling", func(_ *predictioneval.OrderedRulesEvaluation, sel *predictioneval.OrderedRulesSelection) {
+			sel.OutcomeIndex = predictioneval.MaxOrderedRulesOutcomes
+		}, []string{"SELECTION_OUTCOME_INDEX_OVER_CEILING", "SELECTION_CONTRADICTS_ADMITTING_TRACE"}},
+		{"a candidate with no identity", func(_ *predictioneval.OrderedRulesEvaluation, sel *predictioneval.OrderedRulesSelection) {
+			sel.CandidateIdentity = ""
+		}, []string{"SELECTION_CANDIDATE_IDENTITY_EMPTY", "SELECTION_CONTRADICTS_ADMITTING_VISIT"}},
+		{"an outcome with no identity", func(_ *predictioneval.OrderedRulesEvaluation, sel *predictioneval.OrderedRulesSelection) {
+			sel.OutcomeIdentity = ""
+		}, []string{"SELECTION_OUTCOME_IDENTITY_EMPTY"}},
+		{"a basis outside the vocabulary", func(_ *predictioneval.OrderedRulesEvaluation, sel *predictioneval.OrderedRulesSelection) {
+			sel.Basis = "SOME_OTHER_BASIS"
+		}, []string{"SELECTION_BASIS_OUTSIDE_VOCABULARY"}},
+		{"a default admission naming a rule", func(_ *predictioneval.OrderedRulesEvaluation, sel *predictioneval.OrderedRulesSelection) {
+			sel.Basis, sel.RuleIndex = predictioneval.SelectionDefault, 0
+		}, []string{"SELECTION_BASIS_CONTRADICTS_RULE_INDEX", "SELECTION_CONTRADICTS_ADMITTING_STEP"}},
+		{"a detailed-rule admission naming no rule", func(_ *predictioneval.OrderedRulesEvaluation, sel *predictioneval.OrderedRulesSelection) {
+			sel.Basis, sel.RuleIndex = predictioneval.SelectionDetailedRule, -1
+		}, []string{"SELECTION_BASIS_CONTRADICTS_RULE_INDEX", "SELECTION_CONTRADICTS_ADMITTING_TRACE"}},
+		{"a detailed-rule admission naming an impossible rule", func(_ *predictioneval.OrderedRulesEvaluation, sel *predictioneval.OrderedRulesSelection) {
+			sel.Basis, sel.RuleIndex = predictioneval.SelectionDetailedRule, -5
+		}, []string{"SELECTION_BASIS_CONTRADICTS_RULE_INDEX", "SELECTION_CONTRADICTS_ADMITTING_TRACE"}},
+		{"a rule index past the declared ceiling", func(_ *predictioneval.OrderedRulesEvaluation, sel *predictioneval.OrderedRulesSelection) {
+			sel.Basis, sel.RuleIndex = predictioneval.SelectionDetailedRule, predictioneval.MaxOrderedRulesRules
+		}, []string{"SELECTION_RULE_INDEX_OVER_CEILING", "SELECTION_CONTRADICTS_ADMITTING_TRACE"}},
+		{"a candidate the traversal never reached", func(_ *predictioneval.OrderedRulesEvaluation, sel *predictioneval.OrderedRulesSelection) {
+			sel.CandidateIndex = 5
+		}, []string{"SELECTION_CONTRADICTS_CANDIDATES_CONSUMED", "SELECTION_CONTRADICTS_VISIT_COUNT", "SELECTION_CONTRADICTS_ADMITTING_TRACE", "SELECTION_CONTRADICTS_ADMITTING_VISIT"}},
+		{"a candidate earlier than the one stopped on", func(ev *predictioneval.OrderedRulesEvaluation, _ *predictioneval.OrderedRulesSelection) {
+			// The relation is an EQUALITY, so a candidate short of the stop is
+			// as contradicted as one past it. Nothing else moves: the selection
+			// still names the candidate the trace and the visit admitted on.
+			ev.CandidatesConsumed = 3
+		}, []string{"SELECTION_CONTRADICTS_CANDIDATES_CONSUMED"}},
+		{"a candidate other than the one stopped on", func(_ *predictioneval.OrderedRulesEvaluation, sel *predictioneval.OrderedRulesSelection) {
+			sel.CandidateIdentity = "cand-forged"
+		}, []string{"SELECTION_CONTRADICTS_STOPPED_CANDIDATE", "SELECTION_CONTRADICTS_ADMITTING_VISIT"}},
+		{"a position other than the one stopped at", func(_ *predictioneval.OrderedRulesEvaluation, sel *predictioneval.OrderedRulesSelection) {
+			sel.CandidatePosition += 999
+		}, []string{"SELECTION_CONTRADICTS_STOPPED_POSITION", "SELECTION_CONTRADICTS_TRACE_POSITION", "SELECTION_CONTRADICTS_ADMITTING_VISIT"}},
+		{"a rule the traversal never considered", func(_ *predictioneval.OrderedRulesEvaluation, sel *predictioneval.OrderedRulesSelection) {
+			sel.Basis, sel.RuleIndex = predictioneval.SelectionDetailedRule, 5
+		}, []string{"SELECTION_CONTRADICTS_RULES_CONSIDERED", "SELECTION_CONTRADICTS_ADMITTING_TRACE"}},
+		{"a rule exactly one past what the traversal counted", func(ev *predictioneval.OrderedRulesEvaluation, sel *predictioneval.OrderedRulesSelection) {
+			// The boundary form: the relation is strict, so the index EQUAL to
+			// the count is already one the traversal never walked.
+			sel.Basis, sel.RuleIndex = predictioneval.SelectionDetailedRule, ev.RulesConsidered
+		}, []string{"SELECTION_CONTRADICTS_RULES_CONSIDERED", "SELECTION_CONTRADICTS_ADMITTING_TRACE"}},
+		{"an outcome the traversal never considered", func(_ *predictioneval.OrderedRulesEvaluation, sel *predictioneval.OrderedRulesSelection) {
+			sel.OutcomeIndex = 5
+		}, []string{"SELECTION_CONTRADICTS_OUTCOMES_CONSIDERED", "SELECTION_CONTRADICTS_ADMITTING_TRACE"}},
+		{"an outcome exactly one past what the traversal counted", func(ev *predictioneval.OrderedRulesEvaluation, sel *predictioneval.OrderedRulesSelection) {
+			sel.OutcomeIndex = ev.OutcomesConsidered
+		}, []string{"SELECTION_CONTRADICTS_OUTCOMES_CONSIDERED", "SELECTION_CONTRADICTS_ADMITTING_TRACE"}},
+		{"a share the admitting step contradicts", func(_ *predictioneval.OrderedRulesEvaluation, sel *predictioneval.OrderedRulesSelection) {
+			sel.ShareBits ^= 1
+		}, []string{"SELECTION_CONTRADICTS_TRACE_SHARE"}},
+		{"an admission the evaluation recorded no step for", func(ev *predictioneval.OrderedRulesEvaluation, _ *predictioneval.OrderedRulesSelection) {
+			ev.Trace = nil
+		}, []string{"SELECTION_WITHOUT_ADMITTING_TRACE"}},
+		{"a last recorded step that admitted nothing", func(ev *predictioneval.OrderedRulesEvaluation, _ *predictioneval.OrderedRulesSelection) {
+			trace := append([]predictioneval.OrderedRulesTraceEntry(nil), ev.Trace...)
+			trace[len(trace)-1].Admitted = false
+			ev.Trace = trace
+		}, []string{"SELECTION_TRACE_STEP_NOT_ADMITTING"}},
+		{"a step the selection's basis contradicts", func(ev *predictioneval.OrderedRulesEvaluation, sel *predictioneval.OrderedRulesSelection) {
+			// The default half is documented to take NO draw, so a DEFAULT
+			// admission sitting on a RULE_DRAW step is a shape the mechanism
+			// cannot emit. (This fixture admits at rate 100%, which the donor
+			// answers without consuming a word, so the step it sits on took a
+			// draw without spending entropy — the step's own draw fields are
+			// deliberately not read here.) Every other compared field is
+			// co-edited to agree, so only the step is left to catch it.
+			sel.Basis, sel.RuleIndex = predictioneval.SelectionDefault, -1
+			trace := append([]predictioneval.OrderedRulesTraceEntry(nil), ev.Trace...)
+			trace[len(trace)-1].RuleIndex = -1
+			ev.Trace = trace
+		}, []string{"SELECTION_CONTRADICTS_ADMITTING_STEP"}},
+		{"a trace entry that alone contradicts the selection", func(ev *predictioneval.OrderedRulesEvaluation, _ *predictioneval.OrderedRulesSelection) {
+			trace := append([]predictioneval.OrderedRulesTraceEntry(nil), ev.Trace...)
+			trace[len(trace)-1].CandidateIndex += 7
+			ev.Trace = trace
+		}, []string{"SELECTION_CONTRADICTS_ADMITTING_TRACE"}},
+		{"an admission the evaluation recorded no visit for", func(ev *predictioneval.OrderedRulesEvaluation, _ *predictioneval.OrderedRulesSelection) {
+			// Both relations are contradicted and both are named: an evaluation
+			// with no visits at all has no admitting visit AND a visit count
+			// that cannot match the candidate the selection names.
+			ev.Visits = nil
+		}, []string{"SELECTION_CONTRADICTS_VISIT_COUNT", "SELECTION_WITHOUT_ADMITTING_VISIT"}},
+		{"a last visit that admitted nothing", func(ev *predictioneval.OrderedRulesEvaluation, _ *predictioneval.OrderedRulesSelection) {
+			visits := append([]predictioneval.OrderedRulesCandidateVisit(nil), ev.Visits...)
+			visits[len(visits)-1].Verdict = predictioneval.CandidateNoMatch
+			ev.Visits = visits
+		}, []string{"SELECTION_VISIT_NOT_ADMITTED"}},
+		{"no recorded step and a visit that admitted nothing", func(ev *predictioneval.OrderedRulesEvaluation, _ *predictioneval.OrderedRulesSelection) {
+			// The two witnesses are independent: a missing trace must not stop
+			// the visit from being read, which is what an early return here
+			// would do.
+			ev.Trace = nil
+			visits := append([]predictioneval.OrderedRulesCandidateVisit(nil), ev.Visits...)
+			visits[len(visits)-1].Verdict = predictioneval.CandidateNoMatch
+			ev.Visits = visits
+		}, []string{"SELECTION_WITHOUT_ADMITTING_TRACE", "SELECTION_VISIT_NOT_ADMITTED"}},
+		{"more visits recorded than the selection's candidate accounts for", func(ev *predictioneval.OrderedRulesEvaluation, _ *predictioneval.OrderedRulesSelection) {
+			// The boundary form: the relation is an EQUALITY, so a history
+			// LONGER than the admitting index is as contradicted as a shorter
+			// one. The extra visit is a copy of the admitting one, so nothing
+			// but the count can notice it.
+			visits := append([]predictioneval.OrderedRulesCandidateVisit(nil), ev.Visits...)
+			ev.Visits = append(visits, visits[len(visits)-1])
+		}, []string{"SELECTION_CONTRADICTS_VISIT_COUNT"}},
+		{"a visit naming a candidate the selection does not", func(ev *predictioneval.OrderedRulesEvaluation, _ *predictioneval.OrderedRulesSelection) {
+			visits := append([]predictioneval.OrderedRulesCandidateVisit(nil), ev.Visits...)
+			visits[len(visits)-1].CandidateIdentity = "visit-forged"
+			ev.Visits = visits
+		}, []string{"SELECTION_CONTRADICTS_ADMITTING_VISIT"}},
+	}
+
+	for _, c := range carriers {
+		t.Run(c.name, func(t *testing.T) {
+			base := predictioneval.EvaluateOrderedRules(c.stream, cfgWithRule("a", predictioneval.ComparatorGe, 50, 100), trace)
+			if base.Status != c.native {
+				t.Fatalf("fixture produced %q/%q, want %q", base.Status, base.Reason, c.native)
+			}
+			if base.Selected == nil {
+				t.Fatalf("this status must carry a selection: %+v", base)
+			}
+			if m := p4offline.MapP3bAction(base); !m.Legal {
+				t.Fatalf("the native selection must stay legal: %+v", m)
+			}
+			for _, tc := range tampers {
+				t.Run(tc.name, func(t *testing.T) {
+					ev := base
+					sel := *base.Selected
+					ev.Selected = &sel
+					tc.on(&ev, &sel)
+					m := p4offline.MapP3bAction(ev)
+					if m.Legal || m.Class != p4offline.ActionUnsupportedShape {
+						t.Fatalf("a selection the mechanism cannot produce must fail closed: %+v", m)
+					}
+					if !sameStrings(m.Illegality, tc.want) {
+						t.Fatalf("want exactly %v, got %v", tc.want, m.Illegality)
+					}
+				})
+			}
+		})
+	}
+
+	t.Run("a selection beside an evaluation that never stopped is refused", func(t *testing.T) {
+		// The producer records the stop before it mints a selection, so the two
+		// cannot disagree. Only the WOULD_ATTEMPT arm required a stop position
+		// of its own; a carried selection now requires it on either arm.
+		for _, c := range carriers {
+			t.Run(c.name, func(t *testing.T) {
+				ev := predictioneval.EvaluateOrderedRules(c.stream, cfgWithRule("a", predictioneval.ComparatorGe, 50, 100), trace)
+				if ev.Status != c.native || ev.Selected == nil {
+					t.Fatalf("fixture: %q/%q %+v", ev.Status, ev.Reason, ev.Selected)
+				}
+				sel := *ev.Selected
+				ev.Selected = &sel
+				ev.HasStopPosition = false
+				ev.StoppedAtPosition = sel.CandidatePosition
+				m := p4offline.MapP3bAction(ev)
+				if m.Legal || !sameStrings(m.Illegality, []string{"SELECTION_WITHOUT_STOP_POSITION"}) {
+					t.Fatalf("a selection without a stop position must fail closed: %+v", m)
+				}
+			})
+		}
+	})
+	t.Run("a legal default admission is untouched", func(t *testing.T) {
+		ev := predictioneval.EvaluateOrderedRules(proj.Stream, cfgDefaultOnly("a", 0, 100), trace)
+		if ev.Status != predictioneval.StatusWouldAttempt || ev.Selected == nil {
+			t.Fatalf("fixture must admit by default: %q/%q %+v", ev.Status, ev.Reason, ev.Selected)
+		}
+		if ev.Selected.Basis != predictioneval.SelectionDefault || ev.Selected.RuleIndex != -1 {
+			t.Fatalf("a default admission consumes no rule: %+v", ev.Selected)
+		}
+		if m := p4offline.MapP3bAction(ev); !m.Legal || m.Class != p4offline.ActionWouldAttempt {
+			t.Fatalf("the default half of the mechanism stays legal: %+v", m)
+		}
+	})
+	t.Run("a stop position is still named when no selection is carried", func(t *testing.T) {
+		// requireCoherentSelection returns early with no selection to judge, so
+		// the arm itself has to keep naming the missing stop position on that
+		// shape. Without the guard the contradiction goes unnamed entirely.
+		ev := predictioneval.EvaluateOrderedRules(proj.Stream, cfgWithRule("a", predictioneval.ComparatorGe, 50, 100), trace)
+		if ev.Status != predictioneval.StatusWouldAttempt {
+			t.Fatalf("fixture: %q/%q", ev.Status, ev.Reason)
+		}
+		ev.Selected = nil
+		ev.HasStopPosition = false
+		m := p4offline.MapP3bAction(ev)
+		if m.Legal || !sameStrings(m.Illegality, []string{"NO_SELECTION", "NO_CANDIDATE_REACHED"}) {
+			t.Fatalf("both contradictions must be named: %+v", m)
+		}
+	})
+	t.Run("a legitimate admission survives the wire", func(t *testing.T) {
+		// The invariants now relate the selection to fields that TRAVEL - the
+		// stop fields, the counters and the admitting trace entry, whose share
+		// and position both use the hex-word transport. A native admission that
+		// went out as JSON and came back must still be legal, on both carriers
+		// and on both halves of the mechanism: an invariant that only holds
+		// in-process would refuse honest evidence.
+		for _, c := range carriers {
+			for _, cfg := range []struct {
+				name  string
+				rules predictioneval.OrderedRulesConfig
+			}{
+				{"admitted by a rule", cfgWithRule("a", predictioneval.ComparatorGe, 50, 100)},
+				{"admitted by the default", cfgDefaultOnly("a", 0, 100)},
+			} {
+				t.Run(c.name+"/"+cfg.name, func(t *testing.T) {
+					ev := predictioneval.EvaluateOrderedRules(c.stream, cfg.rules, trace)
+					if ev.Selected == nil {
+						t.Fatalf("fixture must admit: %q/%q", ev.Status, ev.Reason)
+					}
+					var back predictioneval.OrderedRulesEvaluation
+					if err := json.Unmarshal(mustMarshal(t, ev), &back); err != nil {
+						t.Fatal(err)
+					}
+					m := p4offline.MapP3bAction(back)
+					if !m.Legal || len(m.Illegality) != 0 {
+						t.Fatalf("a round-tripped native admission must stay legal: %+v", m)
+					}
+				})
+			}
+		}
+	})
 }

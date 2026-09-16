@@ -797,6 +797,47 @@ func TestOneCallStartPairsAtMostOneReturn(t *testing.T) {
 			t.Fatalf("the honest one-start/one-return pair is untouched: %+v", ep)
 		}
 	})
+	t.Run("a second start for the same attempt cannot settle a second return", func(t *testing.T) {
+		// The producer writes ONE start per placement call: KindPlacement is
+		// declared as "the single Twitch placement call - one fact immediately
+		// before it and one immediately after. Never wraps, retries or alters
+		// it", and both call sites emit exactly that pair with no retry. Two
+		// starts carrying the SAME attempt discriminator on the same round are
+		// therefore a shape it cannot emit - and banking the second one would
+		// settle a return that has no start of its own, turning an episode the
+		// evidence excludes back into a scorable one.
+		s := newSynth()
+		s.placedAttempt("r1", "e1", 1)
+		s.placement("r1", "e1", 1, predictioneval.PhaseCallStarted, 50, 0, "OK", "NONE")
+		s.placement("r1", "e1", 1, predictioneval.PhaseCallReturned, 50, 0, "OK", "NONE")
+		ep := singleEpisode(t, mustSelect(t, s.dataset()))
+		if ep.Boundary.NoCallCoverage.Proven {
+			t.Fatalf("a duplicate start must not restore a proven coverage: %+v", ep.Boundary)
+		}
+		if !containsString(ep.Boundary.NoCallCoverage.Reasons, "UNCLASSIFIED_FACT_ON_ROUND") {
+			t.Fatalf("the duplicate start is the contradicted fact: %+v", ep.Boundary)
+		}
+		if !ep.Excluded || !containsString(ep.ExclusionReasons, "BOUNDARY_NOT_PROVEN") {
+			t.Fatalf("an unproven boundary excludes the episode: %+v", ep)
+		}
+	})
+	t.Run("two attempts on one round do not share a start", func(t *testing.T) {
+		// The round half of the slot is identical here, so only the native
+		// attempt identity can keep these apart: attempt 1 holds a start
+		// nothing returns, attempt 2 returns with no start of its own.
+		s := newSynth()
+		s.due("r1", "e1", 1)
+		s.terminal("r1", "e1", 1, predictioneval.PhaseAutoDecided, "OK", synthPlacedEnvelope())
+		s.placement("r1", "e1", 1, predictioneval.PhaseCallStarted, 50, 0, "OK", "NONE")
+		s.due("r1", "e1", 2)
+		s.terminal("r1", "e1", 2, predictioneval.PhaseAutoDecided, "OK", synthPlacedEnvelope())
+		s.placement("r1", "e1", 2, predictioneval.PhaseCallReturned, 50, 0, "OK", "NONE")
+		ep := singleEpisode(t, mustSelect(t, s.dataset()))
+		if ep.Boundary.NoCallCoverage.Proven ||
+			!containsString(ep.Boundary.NoCallCoverage.Reasons, "ORPHAN_CALL_RETURNED") {
+			t.Fatalf("one attempt's start cannot settle another attempt's return: %+v", ep.Boundary)
+		}
+	})
 	t.Run("each pool's own start settles only its own return", func(t *testing.T) {
 		s := newSynth()
 		s.placedAttempt("r1", "e1", 1)
@@ -937,6 +978,264 @@ func TestEarliestAutomaticRowWithoutAnIdentifierIsNotSubstituted(t *testing.T) {
 		}
 		if later.Quality.Quality == p4offline.QualityPrimaryScorable {
 			t.Fatalf("a superseded incarnation must not reach the primary cohort: %+v", later.Quality)
+		}
+	})
+}
+
+// episodeOnIncarnation picks one episode out of a selection by its incarnation.
+func episodeOnIncarnation(t *testing.T, sel p4offline.EvidenceSelection, incarnation string) p4episode {
+	t.Helper()
+	for i := range sel.Episodes {
+		if sel.Episodes[i].Episode.RoundIncarnationID == incarnation {
+			return sel.Episodes[i]
+		}
+	}
+	t.Fatalf("no episode on incarnation %q: %+v", incarnation, sel.Episodes)
+	return p4episode{}
+}
+
+// TestAStartCannotValidateAReturnFromAnotherRound pins the round half of call
+// pairing. The attempt counter is unique within a pool, so the identity alone
+// already names the attempt and the round is not there to disambiguate it: it
+// is there to refuse. A start and a return that agree on the attempt but
+// disagree about the incarnation or the public round are contradicted evidence,
+// and the return is left with no start of its own — a start that could precede
+// its own cutoff. The native AttemptKey identity is unchanged; this is an
+// association check layered on top of it, not a replacement for it.
+func TestAStartCannotValidateAReturnFromAnotherRound(t *testing.T) {
+	t.Run("another round's start does not settle this round's return", func(t *testing.T) {
+		s := newSynth()
+		// Round A holds an UNSPENT start: a CALL_STARTED with no return of its
+		// own. One-to-one consumption alone therefore leaves it available, and
+		// only the round association can stop round B from spending it.
+		s.due("rA", "eA", 1)
+		s.terminal("rA", "eA", 1, predictioneval.PhaseAutoDecided, "OK", synthPlacedEnvelope())
+		s.placement("rA", "eA", 1, predictioneval.PhaseCallStarted, 50, 0, "OK", "NONE")
+		// Round B in the SAME pool: its own usable attempt, plus a start-less
+		// return that reuses attempt id 1.
+		s.skippedAttempt("rB", "eB", 2)
+		s.placement("rB", "eB", 1, predictioneval.PhaseCallReturned, 50, 0, "OK", "NONE")
+		var roundB *p4episode
+		sel := mustSelect(t, s.dataset())
+		for i := range sel.Episodes {
+			if sel.Episodes[i].Episode.RoundIncarnationID == "rB" {
+				roundB = &sel.Episodes[i]
+			}
+		}
+		if roundB == nil {
+			t.Fatalf("no rB episode: %+v", sel.Episodes)
+		}
+		if roundB.Boundary.NoCallCoverage.Proven ||
+			!containsString(roundB.Boundary.NoCallCoverage.Reasons, "ORPHAN_CALL_RETURNED") {
+			t.Fatalf("a return on rB has no start of its own: %+v", roundB.Boundary)
+		}
+	})
+	t.Run("only the public event differs and the start still settles nothing", func(t *testing.T) {
+		// Both facts share the pool, the incarnation and the attempt id, so the
+		// EVENT component of the round half is the only thing left that can
+		// keep them apart. One incarnation is one episode whatever public event
+		// its facts name, so this is a single episode holding an unspent start
+		// and a return the start must not settle.
+		s := newSynth()
+		s.due("r1", "eA", 1)
+		s.terminal("r1", "eA", 1, predictioneval.PhaseAutoDecided, "OK", synthPlacedEnvelope())
+		s.placement("r1", "eA", 1, predictioneval.PhaseCallStarted, 50, 0, "OK", "NONE")
+		s.placement("r1", "eB", 1, predictioneval.PhaseCallReturned, 50, 0, "OK", "NONE")
+		ep := singleEpisode(t, mustSelect(t, s.dataset()))
+		if ep.Boundary.NoCallCoverage.Proven ||
+			!containsString(ep.Boundary.NoCallCoverage.Reasons, "ORPHAN_CALL_RETURNED") {
+			t.Fatalf("a start recorded on another public event settles nothing here: %+v", ep.Boundary)
+		}
+	})
+	t.Run("only the incarnation differs and the start still settles nothing", func(t *testing.T) {
+		// The mirror image: one public event, two incarnations of it, so the
+		// INCARNATION component is the only discriminator left.
+		s := newSynth()
+		s.due("rA", "e1", 1)
+		s.terminal("rA", "e1", 1, predictioneval.PhaseAutoDecided, "OK", synthPlacedEnvelope())
+		s.placement("rA", "e1", 1, predictioneval.PhaseCallStarted, 50, 0, "OK", "NONE")
+		s.skippedAttempt("rB", "e1", 2)
+		s.placement("rB", "e1", 1, predictioneval.PhaseCallReturned, 50, 0, "OK", "NONE")
+		ep := episodeOnIncarnation(t, mustSelect(t, s.dataset()), "rB")
+		if ep.Boundary.NoCallCoverage.Proven ||
+			!containsString(ep.Boundary.NoCallCoverage.Reasons, "ORPHAN_CALL_RETURNED") {
+			t.Fatalf("a start recorded on another incarnation settles nothing here: %+v", ep.Boundary)
+		}
+	})
+	t.Run("a round's own start still settles its own return", func(t *testing.T) {
+		s := newSynth()
+		s.placedAttempt("rA", "eA", 1)
+		s.placedAttempt("rB", "eB", 2)
+		sel := mustSelect(t, s.dataset())
+		if len(sel.Episodes) != 2 {
+			t.Fatalf("want two episodes: %+v", sel.Episodes)
+		}
+		for _, ep := range sel.Episodes {
+			if ep.Excluded || !ep.Boundary.NoCallCoverage.Proven {
+				t.Fatalf("each round's own pair is untouched: %+v", ep)
+			}
+		}
+	})
+	t.Run("a foreign round's return no longer spends this round's start", func(t *testing.T) {
+		// The direction a crafted dataset gains on: a decoy return naming
+		// another incarnation used to consume this round's start and starve
+		// the start's OWN return. The orphan belongs to the round that has no
+		// start, not to the round that has one.
+		s := newSynth()
+		s.due("rA", "eA", 1)
+		s.terminal("rA", "eA", 1, predictioneval.PhaseAutoDecided, "OK", synthPlacedEnvelope())
+		s.placement("rA", "eA", 1, predictioneval.PhaseCallStarted, 50, 0, "OK", "NONE")
+		s.skippedAttempt("rB", "eB", 2)
+		s.placement("rB", "eB", 1, predictioneval.PhaseCallReturned, 50, 0, "OK", "NONE")
+		s.placement("rA", "eA", 1, predictioneval.PhaseCallReturned, 50, 0, "OK", "NONE")
+		sel := mustSelect(t, s.dataset())
+		var a, b *p4episode
+		for i := range sel.Episodes {
+			switch sel.Episodes[i].Episode.RoundIncarnationID {
+			case "rA":
+				a = &sel.Episodes[i]
+			case "rB":
+				b = &sel.Episodes[i]
+			}
+		}
+		if a == nil || b == nil {
+			t.Fatalf("want both episodes: %+v", sel.Episodes)
+		}
+		if !a.Boundary.NoCallCoverage.Proven {
+			t.Fatalf("rA has a matched pair of its own; the decoy must not starve it: %+v", a.Boundary)
+		}
+		if b.Boundary.NoCallCoverage.Proven ||
+			!containsString(b.Boundary.NoCallCoverage.Reasons, "ORPHAN_CALL_RETURNED") {
+			t.Fatalf("the orphan belongs to rB, which has no start: %+v", b.Boundary)
+		}
+	})
+	t.Run("a start on another pool and another round settles nothing here", func(t *testing.T) {
+		// Same incarnation and public round in both pools, same attempt id:
+		// only the pool separates them. (The pool appears in both halves of
+		// the slot, so this pins the behaviour rather than which half carries
+		// it; the identity half is kept whole because it is the native
+		// AttemptKey.)
+		s := newSynth()
+		s.due("r1", "e1", 1)
+		s.terminal("r1", "e1", 1, predictioneval.PhaseAutoDecided, "OK", synthPlacedEnvelope())
+		s.placement("r1", "e1", 1, predictioneval.PhaseCallStarted, 50, 0, "OK", "NONE")
+		s.pool = "pool-b"
+		s.skippedAttempt("r1", "e1", 2)
+		s.placement("r1", "e1", 1, predictioneval.PhaseCallReturned, 50, 0, "OK", "NONE")
+		sel := mustSelect(t, s.dataset())
+		var other *p4episode
+		for i := range sel.Episodes {
+			if sel.Episodes[i].Episode.PoolInstanceID == "pool-b" {
+				other = &sel.Episodes[i]
+			}
+		}
+		if other == nil {
+			t.Fatalf("no pool-b episode: %+v", sel.Episodes)
+		}
+		if other.Boundary.NoCallCoverage.Proven ||
+			!containsString(other.Boundary.NoCallCoverage.Reasons, "ORPHAN_CALL_RETURNED") {
+			t.Fatalf("another pool's start is not this return's: %+v", other.Boundary)
+		}
+	})
+	t.Run("a start and a return disagreeing on pool and round do not pair", func(t *testing.T) {
+		s := newSynth()
+		s.due("r1", "e1", 1)
+		s.terminal("r1", "e1", 1, predictioneval.PhaseAutoDecided, "OK", synthPlacedEnvelope())
+		s.placement("r1", "e1", 1, predictioneval.PhaseCallStarted, 50, 0, "OK", "NONE")
+		s.pool = "pool-b"
+		s.skippedAttempt("r2", "e2", 1)
+		s.placement("r2", "e2", 1, predictioneval.PhaseCallReturned, 50, 0, "OK", "NONE")
+		var poolB *p4episode
+		sel := mustSelect(t, s.dataset())
+		for i := range sel.Episodes {
+			if sel.Episodes[i].Episode.PoolInstanceID == "pool-b" {
+				poolB = &sel.Episodes[i]
+			}
+		}
+		if poolB == nil || poolB.Boundary.NoCallCoverage.Proven ||
+			!containsString(poolB.Boundary.NoCallCoverage.Reasons, "ORPHAN_CALL_RETURNED") {
+			t.Fatalf("a start on another pool AND another round settles nothing here: %+v", poolB)
+		}
+	})
+}
+
+// TestUnreadableEvidenceOnTheRoundNeverProvesNoCall covers the remaining shapes
+// of the same guarantee: coverage is proven only when every fact matched to the
+// episode could actually be read. A placement phase outside the closed
+// vocabulary and an unsupported payload version on a non-placement fact are
+// both unreadable in that sense, and neither is examined anywhere downstream.
+func TestUnreadableEvidenceOnTheRoundNeverProvesNoCall(t *testing.T) {
+	t.Run("a placement phase outside the vocabulary does not prove coverage", func(t *testing.T) {
+		s := newSynth()
+		s.skippedAttempt("r1", "e1", 1)
+		r := s.fact(predictioneval.KindPlacement, "CALL_SOMETHING_ELSE", "r1", "e1", 1)
+		s.add(r)
+		ep := singleEpisode(t, mustSelect(t, s.dataset()))
+		if ep.Boundary.NoCallCoverage.Proven {
+			t.Fatalf("a phase the producer cannot emit is not readable evidence: %+v", ep.Boundary)
+		}
+		if !containsString(ep.Boundary.NoCallCoverage.Reasons, "UNCLASSIFIED_FACT_ON_ROUND") {
+			t.Fatalf("an unnameable phase is an unclassified fact: %+v", ep.Boundary.NoCallCoverage)
+		}
+		// The diagnostic position is still reported.
+		if !ep.Boundary.EarliestCallPresent || ep.Boundary.EarliestCallKind != p4offline.CallKindAmbiguous {
+			t.Fatalf("the row still positions itself as an ambiguous call: %+v", ep.Boundary)
+		}
+	})
+	t.Run("an unsupported payload version on a non-placement fact does not prove coverage", func(t *testing.T) {
+		s := newSynth()
+		s.skippedAttempt("r1", "e1", 1)
+		r := s.fact(predictioneval.KindUserTerminal, predictioneval.PhaseTerminalAdmitted, "r1", "e1", 0)
+		r.PayloadVersion = predictioneval.SupportedPayloadVersion + 1
+		s.add(r)
+		ep := singleEpisode(t, mustSelect(t, s.dataset()))
+		if ep.Boundary.NoCallCoverage.Proven ||
+			!containsString(ep.Boundary.NoCallCoverage.Reasons, "UNDECODABLE_FACT_ON_ROUND") {
+			t.Fatalf("an unreadable terminal fact on the round cannot prove there was no call: %+v", ep.Boundary)
+		}
+	})
+	t.Run("every kind read on the round is read the same way", func(t *testing.T) {
+		// The arm lists seven kinds. KindAutoDecision is among them on
+		// purpose: materialization does examine an automatic fact's version,
+		// but it excludes that fact at attempt level under its observation
+		// id, which is not a session refusal and says nothing about the rest
+		// of the round — so the coverage argument is still this package's.
+		for _, kind := range []string{
+			predictioneval.KindAutoDecision, predictioneval.KindUserTerminal,
+			"channel_event", "schedule_decision", "user_prediction_made",
+			"round_cleanup", "manual_control",
+		} {
+			t.Run(kind, func(t *testing.T) {
+				s := newSynth()
+				s.skippedAttempt("r1", "e1", 1)
+				r := s.fact(kind, "", "r1", "e1", 0)
+				r.PayloadVersion = predictioneval.SupportedPayloadVersion + 1
+				s.add(r)
+				ep := singleEpisode(t, mustSelect(t, s.dataset()))
+				if ep.Boundary.NoCallCoverage.Proven ||
+					!containsString(ep.Boundary.NoCallCoverage.Reasons, "UNDECODABLE_FACT_ON_ROUND") {
+					t.Fatalf("an unreadable %s on the round cannot prove there was no call: %+v", kind, ep.Boundary)
+				}
+			})
+		}
+	})
+	t.Run("a fact of a kind outside the vocabulary does not prove coverage", func(t *testing.T) {
+		s := newSynth()
+		s.skippedAttempt("r1", "e1", 1)
+		s.add(s.fact("some_other_kind", "", "r1", "e1", 0))
+		ep := singleEpisode(t, mustSelect(t, s.dataset()))
+		if ep.Boundary.NoCallCoverage.Proven ||
+			!containsString(ep.Boundary.NoCallCoverage.Reasons, "UNCLASSIFIED_FACT_ON_ROUND") {
+			t.Fatalf("a kind this package cannot name is unclassified evidence: %+v", ep.Boundary)
+		}
+	})
+	t.Run("a supported, readable round still proves coverage", func(t *testing.T) {
+		s := newSynth()
+		s.skippedAttempt("r1", "e1", 1)
+		s.userTerminal("r1", "e1", "OK", 0, 0)
+		ep := singleEpisode(t, mustSelect(t, s.dataset()))
+		if !ep.Boundary.NoCallCoverage.Proven || !ep.Boundary.Proven || ep.Excluded {
+			t.Fatalf("the healthy no-call round is untouched: %+v", ep)
 		}
 	})
 }

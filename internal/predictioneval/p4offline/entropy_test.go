@@ -140,11 +140,25 @@ func TestEntropyWordsMatchIndependentVectors(t *testing.T) {
 		if len(words) != int(v.Index)+1 {
 			t.Fatalf("asked for %d words, got %d", v.Index+1, len(words))
 		}
-		text, _ := words[v.Index].MarshalText()
+		text := mustHex16(t, words[v.Index])
 		if string(text) != v.Word {
 			t.Errorf("rendered word %s, want %s", text, v.Word)
 		}
 	}
+}
+
+// mustHex16 renders a word or fails the test. On the pinned implementation
+// OrderedRulesHex64.MarshalText returns a literal nil error, so this cannot
+// mask a real failure today; it is written this way so the tests below never
+// read a rendering whose error was discarded, and so a future implementation
+// that can fail is caught at the site instead of silently comparing "".
+func mustHex16(t *testing.T, w predictioneval.OrderedRulesHex64) []byte {
+	t.Helper()
+	text, err := w.MarshalText()
+	if err != nil {
+		t.Fatalf("MarshalText(%d): %v", uint64(w), err)
+	}
+	return text
 }
 
 // TestEntropySequencesAreSequentialFromZero pins that a run's words are the
@@ -161,7 +175,7 @@ func TestEntropySequencesAreSequentialFromZero(t *testing.T) {
 			t.Fatalf("got %d words, want %d", len(got), len(s.Words))
 		}
 		for i := range s.Words {
-			text, _ := got[i].MarshalText()
+			text := mustHex16(t, got[i])
 			if string(text) != s.Words[i] {
 				t.Errorf("word %d: got %s, want %s", i, text, s.Words[i])
 			}
@@ -295,7 +309,10 @@ func TestBuildDrawTraceDeclaresTheP3bSemanticsAndBindsTheCoordinates(t *testing.
 			t.Errorf("RunID %q does not name %q", trace.RunID, part)
 		}
 	}
-	want, _ := p4offline.GenerateEntropyWords(coords, 3)
+	want, err := p4offline.GenerateEntropyWords(coords, 3)
+	if err != nil {
+		t.Fatalf("GenerateEntropyWords: %v", err)
+	}
 	if len(trace.Words) != 3 || trace.Words[0] != want[0] || trace.Words[1] != want[1] || trace.Words[2] != want[2] {
 		t.Fatalf("trace words %v, want %v", trace.Words, want)
 	}
@@ -318,8 +335,8 @@ func TestBuildDrawTraceDeclaresTheP3bSemanticsAndBindsTheCoordinates(t *testing.
 	a.DatasetID, a.DatasetVersion = `d":version="v1`, "x"
 	b := okCoords(0)
 	b.DatasetID, b.DatasetVersion = "d", `v1":version="x`
-	ta, _ := p4offline.BuildDrawTrace(a, 1)
-	tb, _ := p4offline.BuildDrawTrace(b, 1)
+	ta := mustDrawTrace(t, a, 1)
+	tb := mustDrawTrace(t, b, 1)
 	if ta.RunID == tb.RunID {
 		t.Fatalf("run identities collide: %q", ta.RunID)
 	}

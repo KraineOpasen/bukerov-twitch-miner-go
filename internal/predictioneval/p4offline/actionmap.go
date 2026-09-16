@@ -153,6 +153,242 @@ func (s *shapeCheck) require(ok bool, name string) {
 	}
 }
 
+// requireCoherentSelection holds a carried P3b selection to the invariants the
+// native mechanism's own contract gives it: the candidate and the outcome are
+// slice indices inside the ceilings the producer refuses past and each carries
+// an identity, the basis is one of the two named halves of the mechanism, and
+// RuleIndex is the admitting rule's index under DETAILED_RULE or -1 under
+// DEFAULT — the producer admits under no other pairing (ordered_rules.go passes
+// the matched rule's index with DETAILED_RULE and a literal -1 with DEFAULT;
+// ordered_rules_types.go documents the -1).
+//
+// Every index the selection names is also one the traversal's OWN counters say
+// it reached, the candidate it names is the one the evaluation says it stopped
+// on, and the whole selection agrees with the evaluation's record of the step
+// that admitted it.
+//
+// These are intrinsic: nothing here re-runs the evaluator, recomputes a share
+// or a draw, or re-derives any field from an input this map does not take. A
+// selection that fails one of them is a shape the mechanism cannot have
+// produced.
+//
+// The set is BOUNDED BY WHAT THE EVALUATION ITSELF CARRIES, and it is worth
+// naming what witnesses what rather than calling it closed:
+//
+//	CandidateIdentity   its presence, StoppedAtCandidate, the admitting visit
+//	CandidatePosition   StoppedAtPosition, the admitting trace entry, the visit
+//	CandidateIndex      CandidatesConsumed, how many candidates were visited,
+//	                    the trace entry, the visit
+//	OutcomeIndex        OutcomesConsidered and the trace entry
+//	RuleIndex           Basis, RulesConsidered and the trace entry
+//	Basis               RuleIndex, and the admitting trace entry's own Step
+//	ShareBits           the trace's steps for the admitting slot, and nothing
+//	                    else; this reads the admitting one
+//	OutcomeIdentity     its presence, and nothing else
+//
+// Neither of the last two is an oversight, and they are limited by DIFFERENT
+// things. OutcomeIdentity is the cost of staying intrinsic: it is contradicted
+// only by the candidate's outcome vector, which lives in the STREAM and not in
+// the evaluation, and the trace deliberately carries indices rather than
+// identities. ShareBits may have intrinsic witnesses to spare, because the trace
+// stamps the same share on EVERY step of one evaluated slot — however many steps
+// that slot turns out to have, which on a rule that matches first time is one.
+// What limits it is not intrinsicness but the same O(len(Trace)) cost named
+// below; this reads the admitting step's copy.
+//
+// What it deliberately does NOT read, so that the boundary is stated rather than
+// discovered:
+//
+//   - the admitting trace entry's own draw fields — ComparatorMatched,
+//     BernoulliEvaluated, BernoulliResult, RawWordIndex, RawWordValue;
+//   - the admitting visit's BalanceUse, PoolTotalKnown, PoolTotal and
+//     RawWordsConsumedHere;
+//   - the CONTENTS of every trace entry and every visit except the last. Their
+//     COUNTS are not symmetric and the asymmetry is deliberate: the number of
+//     VISITS is pinned, because a candidate iteration appends exactly one visit
+//     on every one of its exit paths, so it is the admitting index plus one. The
+//     trace is read only for whether an entry exists at all. A candidate
+//     refused for too few outcomes appends a visit and NO trace entry, so no
+//     count relation against the trace follows from the selection's candidate
+//     index. One DOES hold — on a run that admitted, each rule the traversal
+//     reached appends exactly one RULE_* step, so those steps number
+//     RulesConsidered — and it is unread for a different reason: it is
+//     O(len(Trace)), and an honest run that exhausts the work budget retains
+//     MaxOrderedRulesWork entries;
+//   - BernoulliEvaluations and RawWordsConsumed, which are not read in any form,
+//     in relation or otherwise; and Stake.Value and Stake.Reason, of which the
+//     arms read only Presence;
+//   - Cutoff and Qualifications.
+//
+// Those are the traversal's own bookkeeping, or the caller's framing of the
+// input, rather than anything the selection claims; checking them would make
+// this a validator for every exported field of an evaluation instead of a
+// coherence check on the one thing it maps.
+//
+// The four digests and DonorRevision are unread for a DIFFERENT reason, and it
+// is worth not lumping them in: they are input bindings and a pinned provenance
+// header, not bookkeeping. See the note above MapP2Action — binding an
+// evaluation to the stream, config and entropy it claims is the caller's job,
+// not this map's.
+//
+// A shape that is self-consistent HERE may still be inconsistent THERE.
+//
+// And this is a SHAPE CHECK, not an authentication: every relation compares the
+// evaluation against itself, so a forger who edits a witness along with the
+// field it witnesses defeats that relation. What the relations buy is cost and
+// self-consistency. Provenance is established elsewhere — the caller that
+// scores a P3b case recomputes the evaluation and then binds it to the stream
+// and config digests.
+func requireCoherentSelection(s *shapeCheck, ev predictioneval.OrderedRulesEvaluation) {
+	sel := ev.Selected
+	if sel == nil {
+		return // the arm's own NO_SELECTION requirement already names this.
+	}
+	// An index addresses a slot in a stream the producer refuses past its
+	// declared ceilings (ordered_rules_types.go), so an index at or beyond one
+	// names a slot no traversal it ran could have reached. Bounding the indices
+	// here is also what keeps the counter relations below out of wrapping
+	// arithmetic: CandidatesConsumed-1 wraps, and a bounded index cannot meet a
+	// wrapped counter.
+	candOK := sel.CandidateIndex >= 0
+	s.require(candOK, "SELECTION_CANDIDATE_INDEX_NEGATIVE")
+	if candOK {
+		candOK = sel.CandidateIndex < predictioneval.MaxOrderedRulesCandidates
+		s.require(candOK, "SELECTION_CANDIDATE_INDEX_OVER_CEILING")
+	}
+	outOK := sel.OutcomeIndex >= 0
+	s.require(outOK, "SELECTION_OUTCOME_INDEX_NEGATIVE")
+	if outOK {
+		outOK = sel.OutcomeIndex < predictioneval.MaxOrderedRulesOutcomes
+		s.require(outOK, "SELECTION_OUTCOME_INDEX_OVER_CEILING")
+	}
+	s.require(sel.CandidateIdentity != "", "SELECTION_CANDIDATE_IDENTITY_EMPTY")
+	s.require(sel.OutcomeIdentity != "", "SELECTION_OUTCOME_IDENTITY_EMPTY")
+	ruleOK := false
+	basisOK := true
+	switch sel.Basis {
+	case predictioneval.SelectionDefault:
+		s.require(sel.RuleIndex == -1, "SELECTION_BASIS_CONTRADICTS_RULE_INDEX")
+	case predictioneval.SelectionDetailedRule:
+		ruleOK = sel.RuleIndex >= 0
+		s.require(ruleOK, "SELECTION_BASIS_CONTRADICTS_RULE_INDEX")
+		if ruleOK {
+			ruleOK = sel.RuleIndex < predictioneval.MaxOrderedRulesRules
+			s.require(ruleOK, "SELECTION_RULE_INDEX_OVER_CEILING")
+		}
+		if ruleOK {
+			// The admitting rule is one the traversal actually walked: the
+			// producer counts every rule it reaches on the way
+			// (RulesConsidered++ at the top of the rule loop) and admits with
+			// that same loop's index, so the counter has already passed the
+			// index it admits on. The counter is CUMULATIVE across candidates
+			// and outcomes, so this is a necessary condition and not an
+			// equality; the ceiling above is what bounds it per slot.
+			s.require(sel.RuleIndex < ev.RulesConsidered, "SELECTION_CONTRADICTS_RULES_CONSIDERED")
+		}
+	default:
+		basisOK = false
+		s.require(false, "SELECTION_BASIS_OUTSIDE_VOCABULARY")
+	}
+	// The selection names the candidate the traversal STOPPED on: the producer
+	// records the stop fields and mints the selection from the same candidate
+	// in the same iteration, so a selection naming a candidate the traversal
+	// never reached is a shape it cannot have produced. Still intrinsic — the
+	// evaluation is compared only against itself, nothing is recomputed. A
+	// field already named as malformed above is not named a second time here.
+	if candOK {
+		s.require(sel.CandidateIndex == ev.CandidatesConsumed-1, "SELECTION_CONTRADICTS_CANDIDATES_CONSUMED")
+		// The same index counted a second way. Every candidate iteration appends
+		// exactly one visit before it ends, on every one of its exit paths, and
+		// the admitting one appends last — so the admitting candidate's index is
+		// also one less than the number of visits recorded. A forger has to
+		// account for every candidate the traversal visited, not just the one it
+		// lands on — its COUNT, that is; the contents of the earlier visits are
+		// not read.
+		s.require(sel.CandidateIndex == len(ev.Visits)-1, "SELECTION_CONTRADICTS_VISIT_COUNT")
+	}
+	if sel.CandidateIdentity != "" {
+		s.require(sel.CandidateIdentity == ev.StoppedAtCandidate, "SELECTION_CONTRADICTS_STOPPED_CANDIDATE")
+	}
+	// The same relation on the outcome the selection names, against the same
+	// kind of cumulative counter.
+	if outOK {
+		s.require(sel.OutcomeIndex < ev.OutcomesConsidered, "SELECTION_CONTRADICTS_OUTCOMES_CONSIDERED")
+	}
+	// A selection exists only where the traversal stopped on the candidate it
+	// names: the producer records the stop BEFORE it mints the selection, so a
+	// selection beside an evaluation claiming no stop position is a shape it
+	// cannot emit — and without this the position relation below would compare
+	// against a field the evaluation says it never set.
+	s.require(ev.HasStopPosition, "SELECTION_WITHOUT_STOP_POSITION")
+	s.require(sel.CandidatePosition == ev.StoppedAtPosition, "SELECTION_CONTRADICTS_STOPPED_POSITION")
+
+	// The evaluation's own record of the step that admitted. The producer
+	// appends that step and admits from the same iteration — a matched draw
+	// breaks out of the rule loop and admits, a default admits immediately
+	// after its own entry, and neither appends again before returning — so the
+	// admitting step is the LAST trace entry and it was minted from the same
+	// candidate, outcome, rule, position and share as the selection. Comparing
+	// against it re-runs nothing; it is the evaluation contradicting itself.
+	// It is also the only record of a share: nothing else in the evaluation
+	// carries one, and the type's own documentation says the field travels the
+	// same way on the entry and on the selection. The trace stamps that share on
+	// every step of one evaluated slot, so the evaluation may hold several
+	// copies; this compares against the admitting one.
+	if len(ev.Trace) == 0 {
+		s.require(false, "SELECTION_WITHOUT_ADMITTING_TRACE")
+	} else {
+		last := ev.Trace[len(ev.Trace)-1]
+		s.require(last.Admitted, "SELECTION_TRACE_STEP_NOT_ADMITTING")
+		s.require(last.CandidateIndex == sel.CandidateIndex && last.OutcomeIndex == sel.OutcomeIndex &&
+			last.RuleIndex == sel.RuleIndex, "SELECTION_CONTRADICTS_ADMITTING_TRACE")
+		s.require(last.CandidatePosition == sel.CandidatePosition, "SELECTION_CONTRADICTS_TRACE_POSITION")
+		s.require(last.ShareBits == sel.ShareBits, "SELECTION_CONTRADICTS_TRACE_SHARE")
+		// The step and the basis are two names for WHICH HALF of the mechanism
+		// admitted, and the producer writes them together: a matched draw is a
+		// RULE_DRAW step admitted under DETAILED_RULE, the current outcome's
+		// default is a DEFAULT_BOUNDS step admitted under DEFAULT. Without this
+		// a DEFAULT admission could sit on a step that took a draw at all — and
+		// the default half is documented to consume none. It pins WHICH HALF the
+		// step claims, and not the step's own draw fields, which stay unread
+		// per the boundary above.
+		if basisOK {
+			want := predictioneval.TraceStepDefaultBounds
+			if sel.Basis == predictioneval.SelectionDetailedRule {
+				want = predictioneval.TraceStepRuleDraw
+			}
+			s.require(last.Step == want, "SELECTION_CONTRADICTS_ADMITTING_STEP")
+		}
+	}
+
+	// The second record of the same admission. The producer mints a visit at the
+	// top of each candidate iteration from the same candidate the selection is
+	// minted from, marks it ADMITTED, and appends no further visit after it, so
+	// the final visit names the admitting candidate.
+	//
+	// Its identity and position are a third copy of values the stop fields
+	// already carry. What it adds that nothing else in the evaluation does is
+	// that the last visit ADMITTED: an evaluation claiming an admission whose own
+	// per-candidate record says NO_MATCH is refused here and nowhere else. An
+	// evaluation that records NO visit is refused twice over — here, and by the
+	// count relation above, which such an evaluation also contradicts.
+	if len(ev.Visits) == 0 {
+		s.require(false, "SELECTION_WITHOUT_ADMITTING_VISIT")
+	} else {
+		v := ev.Visits[len(ev.Visits)-1]
+		s.require(v.Verdict == predictioneval.CandidateAdmitted, "SELECTION_VISIT_NOT_ADMITTED")
+		s.require(v.CandidateIndex == sel.CandidateIndex && v.CandidateIdentity == sel.CandidateIdentity &&
+			v.CandidatePosition == sel.CandidatePosition, "SELECTION_CONTRADICTS_ADMITTING_VISIT")
+	}
+}
+
+// Nothing here reads the evaluation's digests, so a DIRECT caller of an
+// exported Map function gets a shape check and no binding to a stream, a config
+// or an entropy trace. The package's own scorer does not rely on that: it
+// recomputes the evaluation, maps it, and then refuses the result unless those
+// digests match the projection and the verified ruleset. The binding is the
+// caller's, and it happens after the map has answered.
+//
 // MapP2Action maps a native P2 evaluation.
 func MapP2Action(ev predictioneval.Evaluation) ActionMapping {
 	m := ActionMapping{MapVersion: NativeActionMapVersion, Policy: PolicyP2, NativeAction: ev.Action}
@@ -424,13 +660,20 @@ func MapP3bAction(ev predictioneval.OrderedRulesEvaluation) ActionMapping {
 		m.Class = ActionWouldAttempt
 		s.require(admitted, "PARTICIPATION_NOT_ADMITTED")
 		s.require(ev.Selected != nil, "NO_SELECTION")
+		requireCoherentSelection(&s, ev)
 		s.require(stakeKnown, "STAKE_NOT_KNOWN")
 		s.require(ev.Reason == "", "REASON_ON_ATTEMPT")
-		s.require(ev.HasStopPosition && ev.CandidatesConsumed >= 1, "NO_CANDIDATE_REACHED")
+		// requireCoherentSelection requires HasStopPosition whenever a
+		// selection is CARRIED, so repeating it here unconditionally would
+		// report one contradiction under two names. It returns early when there
+		// is no selection, though, and that shape still needs the stop position
+		// named — hence the guard rather than a plain drop.
+		s.require((ev.Selected != nil || ev.HasStopPosition) && ev.CandidatesConsumed >= 1, "NO_CANDIDATE_REACHED")
 	case predictioneval.StatusParticipationAdmittedStakeUnknown:
 		m.Class = ActionParticipationAdmittedStakeUnknown
 		s.require(admitted, "PARTICIPATION_NOT_ADMITTED")
 		s.require(ev.Selected != nil, "NO_SELECTION")
+		requireCoherentSelection(&s, ev)
 		s.require(!stakeKnown, "STAKE_KNOWN_ON_UNKNOWN_STATUS")
 		s.require(ev.Reason == predictioneval.ReasonBalanceNotSupplied || ev.Reason == predictioneval.ReasonBalanceInvalid ||
 			ev.Reason == predictioneval.ReasonBalanceOutOfDomain, "STAKE_UNKNOWN_REASON_FOREIGN")
