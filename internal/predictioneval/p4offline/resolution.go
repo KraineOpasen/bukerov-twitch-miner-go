@@ -388,7 +388,8 @@ func VerifyResolutionArtifact(a ResolutionArtifact) error {
 			return errors.Join(ErrResolutionNotDerivable, errors.New("p4offline: an UNKNOWN artifact names a winner"))
 		}
 	default:
-		return errors.Join(ErrResolutionNotDerivable, errors.New("p4offline: outcome "+string(a.Outcome)+" is outside the vocabulary"))
+		return errors.Join(ErrResolutionNotDerivable, errors.New("p4offline: outcome of "+
+			suppliedTextExtent(string(a.Outcome))+" is outside the vocabulary"))
 	}
 	return nil
 }
@@ -413,16 +414,28 @@ func VerifyResolutionArtifact(a ResolutionArtifact) error {
 // is why the one site reached with unbounded caller content reports a count and
 // a total instead of calling this at all. See EvaluateP2Case.
 //
-// AND THAT IS WHY THIS REWRITE IS NOT SEPARATELY TESTABLE, stated rather than
-// left as an unexplained mutation survivor. Restoring the `+=` accumulation
-// leaves the suite green, because after the EvaluateP2Case repair no remaining
-// caller hands this an unbounded list: factset.go's session refusals come from
-// sessionRefusals, whose every member is a package constant or a producer
-// anomaly prefix; its exclusion reasons and resolution.go's refusals both go
-// through appendOnce over closed vocabularies; and the COMPLETE-beside check
-// passes at most six derived reasons. The quadratic is removed because a future
-// caller should not have to rediscover it, not because a current one reaches
-// it.
+// WHY THE ACCUMULATION HALF IS NOT SEPARATELY TESTABLE, and where the first
+// version of this argument was wrong. Restoring the `+=` accumulation leaves
+// the suite green, because no remaining caller hands this a list whose MEMBERS
+// are unbounded: resolution.go's refusals and the episode exclusion reasons
+// both go through appendOnce over closed vocabularies, and the COMPLETE-beside
+// check passes at most six derived reasons.
+//
+// The first version of that list also claimed sessionRefusals' members are all
+// package constants. They are: but its SESSION_P2_EXCLUSION members are emitted
+// once per excluded record with a plain append, so the list is unbounded in
+// COUNT even though every member is short -- an independent lane built a
+// 20,000-record foreign-session dataset and got an 840,098-byte refusal. That
+// is sub-proportional to the input rather than an amplification, so it is not a
+// blowup; it is a refusal that renders the caller's data, which is the thing
+// this package decided it does not do. That site now names the extent and the
+// distinct KINDS, and the claim here is narrowed to what it can carry.
+//
+// The empty-list guard below is a separate matter and IS testable: without it
+// `make([]byte, 0, -1)` panics. It has its own case.
+//
+// The quadratic is removed because a future caller should not have to
+// rediscover it, not because a current one reaches it.
 func joinReasons(rs []string) string {
 	if len(rs) == 0 {
 		return ""

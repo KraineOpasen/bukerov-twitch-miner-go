@@ -2,6 +2,7 @@ package p4offline
 
 import (
 	"errors"
+	"strconv"
 
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/predictioneval"
 )
@@ -359,12 +360,20 @@ func decisionOf(policy string, fs CommonFactset, resultDigest string, action Act
 	if err := VerifyCommonFactset(fs); err != nil {
 		return PolicyDecision{}, err
 	}
-	// Neither digest is gated for length on this path -- both arrive on plain
-	// exported fields -- so both are named by extent. See suppliedTextExtent.
+	// ONLY ONE OF THE TWO IS UNGATED, and an earlier version of this comment
+	// said neither was. VerifyCommonFactset ran three lines up and returns nil
+	// only after fs.Digest == commonFactsetDigest(fs), which is hexEncode of a
+	// SHA-256: exactly 64 lower-case hex characters of this package's own
+	// making. So the factset side IS gated, and reporting it by extent rendered
+	// the constant "64 bytes" for every input the gate can see -- turning a
+	// real diagnosis into a sentence that reads the same for every binding
+	// mismatch there is. It is named, exactly as derivedOpportunity already
+	// names it under the identical precondition. resultDigest is the ungated
+	// one: a plain exported field on the supplied result.
 	if resultDigest == "" || resultDigest != fs.Digest {
 		return PolicyDecision{}, errors.Join(ErrDecisionBinding,
 			errors.New("p4offline: result was evaluated over a factset digest of "+suppliedTextExtent(resultDigest)+
-				", not this factset's "+suppliedTextExtent(fs.Digest)))
+				", not this factset's "+strconv.Quote(fs.Digest)))
 	}
 	if action.Policy != policy || action.MapVersion != NativeActionMapVersion {
 		return PolicyDecision{}, errors.Join(ErrDecisionBinding, errors.New("p4offline: action mapping is not this policy's"))

@@ -453,9 +453,38 @@ func SelectEpisodes(ds predictioneval.SourceDataset) (EvidenceSelection, error) 
 		var earliest CallSignal
 		var haveCall bool
 		coverage := NoCallCoverageProof{Proven: true}
+		// The manual signals are deduplicated through a SEEN-SET, not through
+		// appendOnce, and the difference is the whole cost. appendOnce scans the
+		// accumulated list on every call, and an ObservationID is distinct per
+		// record in any well-formed dataset, so the scan never dedups anything
+		// and is pure O(M^2) in the manual facts matched to one episode.
+		// Measured on the fixtures' own manual-call shape, through the exported
+		// SelectEpisodes: 8,000 -> 131 ms, 16,000 -> 331 ms, 32,000 -> 1.56 s,
+		// 64,000 -> 7.31 s, i.e. ~4.7x per 2x input. With the set: 8.3 ms,
+		// 15.5 ms, 34.5 ms, 77.2 ms -- linear, and 95x faster at M = 64,000,
+		// with the list's contents and ORDER identical at every M.
+		//
+		// This corrects a disposition as well as a cost. The comment on
+		// eachMatching used to say the declared ingest ceiling was "the only
+		// real answer" to this residue. It was not: the set is, it changes no
+		// output, and an independent lane demonstrated that before this was
+		// written.
+		//
+		// THE COST HALF IS NOT SEPARATELY TESTABLE HERE, and that is stated
+		// rather than left as a mutation survivor. Reverting to appendOnce
+		// produces the SAME list, in the same order: what it costs is CPU, in
+		// the scan, and nothing in it allocates more. This suite asserts
+		// allocation ratios and never wall-clock -- a time threshold on shared
+		// CI is flaky and proves nothing about complexity -- so no assertion
+		// here can tell the two apart. What IS pinned is the property the
+		// scan was there for: reverting to a bare append, which drops the
+		// deduplication, fails the repeated-observation case beside the growth
+		// measurement.
+		seenManual := map[string]bool{}
 		signals.eachMatching(ep.Episode, func(sig rawSignal) {
-			if sig.manual {
-				ep.ManualSignals = appendOnce(ep.ManualSignals, sig.rec.ObservationID)
+			if sig.manual && !seenManual[sig.rec.ObservationID] {
+				seenManual[sig.rec.ObservationID] = true
+				ep.ManualSignals = append(ep.ManualSignals, sig.rec.ObservationID)
 			}
 			if sig.call {
 				c := CallSignal{
@@ -573,6 +602,39 @@ func SelectEpisodes(ds predictioneval.SourceDataset) (EvidenceSelection, error) 
 }
 
 // sessionRefusals is the session gate.
+// sessionRefusalKinds reduces a session-refusal list to its DISTINCT members,
+// so a refusal can name what went wrong without rendering one entry per
+// excluded record.
+//
+// Every member of the list is a package constant or a producer anomaly prefix,
+// so the distinct set is small and bounded by the vocabulary. The list itself
+// is NOT: sessionRefusals appends RefusalSessionP2Exclusion once per
+// session-level exclusion, and materialization emits one per foreign-session
+// record, so its length is the caller's dataset. An independent lane built a
+// 20,000-record foreign-session dataset and got an 840,098-byte refusal. That
+// is why the caller reports the extent beside these kinds rather than the list.
+//
+// The sort is DEFENCE IN DEPTH and is deliberately not separately tested: the
+// members enter in sessionRefusals' own statement order, which is fixed by the
+// source and not by the caller's records, so removing the sort changes nothing
+// any reachable input can observe. Writing a test for it would mean varying the
+// arrival order of records the producer requires to be in ascending causal
+// order. It is here so that a future member added inside a range loop cannot
+// make the refusal message depend on the dataset.
+func sessionRefusalKinds(rs []string) []string {
+	seen := map[string]bool{}
+	out := make([]string, 0, len(rs))
+	for _, r := range rs {
+		if seen[r] {
+			continue
+		}
+		seen[r] = true
+		out = append(out, r)
+	}
+	sort.Strings(out)
+	return out
+}
+
 func sessionRefusals(ds predictioneval.SourceDataset, pk predictioneval.PairedKnowledge) []string {
 	var out []string
 	src := ds.Source
@@ -812,12 +874,16 @@ func indexSignals(recs []predictioneval.SourceRecord, knownEvents map[string]boo
 // fail-closed answer. A declared ceiling on this ingest path is still the
 // follow-up the measurements argue for.
 //
-// ONE RESIDUE THIS DOES NOT REMOVE, beside the CPU one above: ManualSignals is
-// still accumulated per matched manual signal through appendOnce, so a
-// colliding-event dataset carrying many MANUAL calls keeps both quadratic
-// allocation and an O(M^2) scan. That list is exported output — it is what the
-// episode reports — so unlike the calls slice it is not free to drop, and the
-// declared ingest ceiling is the only real answer to it.
+// ONE RESIDUE THAT USED TO SURVIVE HERE, AND NO LONGER DOES. ManualSignals was
+// accumulated per matched manual signal through appendOnce, which scans the
+// whole accumulated list every time; observation ids are distinct per record,
+// so the scan deduplicated nothing and cost O(M^2) in the manual facts matched
+// to one episode. This comment used to conclude that the list is exported
+// output and therefore "not free to drop", and that a declared ingest ceiling
+// was "the only real answer to it". The second half was wrong: a seen-set
+// deduplicates identically, in the same order, for linear cost. It is at the
+// accumulation site, with the measurements. The CPU residue in the MATCHING
+// relation above is real and remains; this one was not the same thing.
 //
 // One honest note on the deduplication: no PRODUCTION consumer is
 // duplicate-sensitive. Seam 1 sets flags idempotently, collects manual signals

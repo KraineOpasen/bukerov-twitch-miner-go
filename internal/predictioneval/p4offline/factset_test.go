@@ -481,6 +481,35 @@ func TestIntegerBoundariesAreRefusedNotWrapped(t *testing.T) {
 //     constant-factor multiple of the input is the honest floor. What
 //     distinguishes the defect is the EXPONENT -- doubling the list doubled the
 //     work before, and quadrupled it under the defect.
+//
+// TestIncompleteFactsetWithNoDerivedFaultRefusesWithoutPanicking reaches
+// joinReasons with an EMPTY list through the exported EvaluateP2Case.
+//
+// The single-pass rewrite computes its buffer as `len(rs) - 1 + sum(len)`, so
+// an empty list gives a capacity of -1 and `make([]byte, 0, -1)` PANICS. The
+// guard against that was added with the rewrite and was pinned by nothing: a
+// mutation deleting it survived the whole suite. This is the production path
+// that reaches it -- an INCOMPLETE factset whose VALUES are all present, so
+// valueDerivedReasons returns nothing while IncompleteReasons is non-empty.
+func TestIncompleteFactsetWithNoDerivedFaultRefusesWithoutPanicking(t *testing.T) {
+	_, _, fs := selectedCase(t, nil, nil)
+	fs.Completeness = p4offline.FactsetIncomplete
+	fs.IncompleteReasons = []string{"SOMETHING_THE_VALUES_DO_NOT_DERIVE"}
+	fs.Digest = digestOf(p4offline.SerializeCommonFactset(fs))
+	if err := p4offline.VerifyCommonFactset(fs); err != nil {
+		t.Fatalf("the fixture must be a factset this package accepts: %v", err)
+	}
+	// Reaching this line at all is the assertion: without the guard the call
+	// panics with "makeslice: cap out of range" rather than returning.
+	_, err := p4offline.EvaluateP2Case(fs)
+	if !errors.Is(err, p4offline.ErrFactsetNotEvaluable) {
+		t.Fatalf("an INCOMPLETE factset must be refused as not evaluable, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "1 reasons") {
+		t.Fatalf("the refusal must still name the supplied extent: %v", err)
+	}
+}
+
 func TestIncompleteFactsetRefusalIsBoundedInItsOwnInput(t *testing.T) {
 	const budget = 1024
 	build := func(t *testing.T, n int) (p4offline.CommonFactset, int) {
@@ -539,6 +568,13 @@ func TestIncompleteFactsetRefusalIsBoundedInItsOwnInput(t *testing.T) {
 			!strings.Contains(err.Error(), strconv.Itoa(largeBytes)+" bytes") {
 			t.Fatalf("the refusal must name the label, the count and the total: %v", err)
 		}
+		// AND THE FAULT. Naming only the extent tells the caller nothing about
+		// what was wrong, which is the other half of this package's own rule.
+		// The fault is re-derived from the factset's own VALUES, so it is
+		// bounded whatever the caller supplied.
+		if !strings.Contains(err.Error(), "MISSING_BALANCE") {
+			t.Fatalf("the refusal must name the derived fault, not only its extent: %v", err)
+		}
 		// And it must not carry the reasons themselves.
 		if strings.Contains(err.Error(), "PAD_") {
 			t.Fatalf("the refusal re-exported the reasons it refused: %v", err)
@@ -547,53 +583,104 @@ func TestIncompleteFactsetRefusalIsBoundedInItsOwnInput(t *testing.T) {
 }
 
 // TestFirstGatesDoNotMaterializeSuppliedText is the class test, and it exists
-// because this defect has now been rediscovered on this branch four times: at
-// VerifyP3bRuleset's identity gate, then at ValidateDrawTrace's two gates and
-// bindEntropyCoordinates' round gate, and then -- by a full-scope sweep that
-// was explicitly asked to find the fourth instance or prove there was none --
-// at SIX more, including VerifyCommonFactset, the first gate on every factset
-// path in the package.
+// because this defect has now been found on this branch FOUR times: at
+// VerifyP3bRuleset's identity gate; then at ValidateDrawTrace's two gates and
+// bindEntropyCoordinates' round gate; then at five more, including
+// VerifyCommonFactset, the first gate on every factset path; and then at three
+// MORE that the rule's own wording had excluded, because it was scoped to "the
+// first statement of an exported function" and these sit further down the same
+// two functions, reached the moment the digest verifies -- which a caller can
+// make it do, since the serializers are exported and the digest is unkeyed.
 //
-// So it is a table over EVERY exported first gate that compares a
-// caller-supplied string, rather than another one-site test. A new gate of this
-// shape belongs in this table on the day it is written.
+// So this is a table over every gate that compares a caller-supplied string
+// that no earlier gate has length-bounded, wherever it sits. A new gate of that
+// shape belongs here on the day it is written.
 //
-// The budget is stated here and is not read from the code under test.
+// EACH ROW ASSERTS THE RENDERED EXTENT, not merely that the error is small. A
+// first version asserted only the sentinel, a 1024-byte budget and the absence
+// of the input -- and a gate reporting the WRONG extent (this package's own
+// constant instead of the caller's string) satisfied all three. Three of five
+// rows survived a field swap. The extent is the property the repair exists for,
+// so it is the property that is checked.
+//
+// TWO GATES OF THE CLASS ARE PINNED ELSEWHERE and are named here rather than
+// duplicated: VerifyP3bRuleset's identity gate by
+// TestRulesetIdentityRefusalDoesNotMaterializeSuppliedText, and
+// ValidateDrawTrace's two by TestDrawTraceRefusalDoesNotMaterializeSuppliedText.
 func TestFirstGatesDoNotMaterializeSuppliedText(t *testing.T) {
 	const budget = 1024
 	big := strings.Repeat("a", 1<<20)
+	wantExtent := strconv.Itoa(len(big)) + " bytes"
 	_, _, good := selectedCase(t, nil, nil)
+	unknownArtifact := func() p4offline.ResolutionArtifact {
+		return p4offline.ResolutionNotRecorded(p4offline.PublicRoundIdentity{EventID: "e1"}, []string{"o1", "o2"}, nil, "p")
+	}
 
 	for _, tc := range []struct {
-		name    string
-		call    func() error
-		sentine error
+		name        string
+		call        func() error
+		sentinel    error
+		names       string
+		belowDigest bool
 	}{
 		{"a factset contract version", func() error {
 			fs := good
 			fs.ContractVersion = big
 			return p4offline.VerifyCommonFactset(fs)
-		}, p4offline.ErrFactsetDigest},
+		}, p4offline.ErrFactsetDigest, "factset contract is", false},
 		{"a factset protocol version", func() error {
 			fs := good
 			fs.Protocol = big
 			return p4offline.VerifyCommonFactset(fs)
-		}, p4offline.ErrFactsetDigest},
+		}, p4offline.ErrFactsetDigest, "factset protocol is", false},
 		{"a factset digest", func() error {
 			fs := good
 			fs.Digest = big
 			return p4offline.VerifyCommonFactset(fs)
-		}, p4offline.ErrFactsetDigest},
+		}, p4offline.ErrFactsetDigest, "factset digest of", false},
+		{"a factset stealth proof, below the digest gate", func() error {
+			fs := good
+			fs.StealthProof = p4offline.StealthProof(big)
+			fs.Digest = digestOf(p4offline.SerializeCommonFactset(fs))
+			return p4offline.VerifyCommonFactset(fs)
+		}, p4offline.ErrFactsetInconsistent, "stealth proof is", true},
+		{"a factset completeness, below the digest gate", func() error {
+			fs := good
+			fs.Completeness = p4offline.FactsetCompleteness(big)
+			fs.Digest = digestOf(p4offline.SerializeCommonFactset(fs))
+			return p4offline.VerifyCommonFactset(fs)
+		}, p4offline.ErrFactsetInconsistent, "completeness of", true},
 		{"a resolution artifact contract version", func() error {
-			a := p4offline.ResolutionNotRecorded(p4offline.PublicRoundIdentity{EventID: "e1"}, []string{"o1", "o2"}, nil, "p")
+			a := unknownArtifact()
 			a.ContractVersion = big
 			return p4offline.VerifyResolutionArtifact(a)
-		}, p4offline.ErrResolutionDigest},
+		}, p4offline.ErrResolutionDigest, "artifact contract is", false},
 		{"a resolution obligations revision", func() error {
-			a := p4offline.ResolutionNotRecorded(p4offline.PublicRoundIdentity{EventID: "e1"}, []string{"o1", "o2"}, nil, "p")
+			a := unknownArtifact()
 			a.ObligationsRevision = big
 			return p4offline.VerifyResolutionArtifact(a)
-		}, p4offline.ErrResolutionDigest},
+		}, p4offline.ErrResolutionDigest, "artifact obligations revision is", false},
+		{"a resolution outcome, below the digest gate", func() error {
+			a := unknownArtifact()
+			a.Outcome = p4offline.ResolutionOutcome(big)
+			a.ResolutionFactsDigest = p4offline.DigestReference(digestOf(p4offline.SerializeResolutionArtifact(a)))
+			return p4offline.VerifyResolutionArtifact(a)
+		}, p4offline.ErrResolutionNotDerivable, "outcome of", true},
+		{"a policy result's own factset digest", func() error {
+			// The SUPPLIED side is the result's own FactsetDigest, a plain
+			// exported field. The factset itself must stay valid, or
+			// VerifyCommonFactset refuses one gate earlier and this row
+			// measures that gate instead -- which is exactly what a first
+			// version of this row did, so the binding gate went unreached and
+			// a swap of its two arguments survived.
+			res, err := p4offline.EvaluateP2Case(good)
+			if err != nil {
+				t.Fatalf("fixture: %v", err)
+			}
+			res.FactsetDigest = big
+			_, derr := res.Decision(good)
+			return derr
+		}, p4offline.ErrDecisionBinding, "evaluated over a factset digest of", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			runtime.GC()
@@ -604,8 +691,8 @@ func TestFirstGatesDoNotMaterializeSuppliedText(t *testing.T) {
 			allocated := after.TotalAlloc - before.TotalAlloc
 			t.Logf("1 MiB supplied; the refusing call allocated %d bytes", allocated)
 
-			if !errors.Is(err, tc.sentine) {
-				t.Fatalf("want %v, got %v", tc.sentine, err)
+			if !errors.Is(err, tc.sentinel) {
+				t.Fatalf("want %v, got %v", tc.sentinel, err)
 			}
 			if n := len(err.Error()); n > budget {
 				t.Fatalf("the refusal carries %d bytes; a refusal must name the fault, not the input (budget %d)", n, budget)
@@ -613,33 +700,51 @@ func TestFirstGatesDoNotMaterializeSuppliedText(t *testing.T) {
 			if strings.Contains(err.Error(), big) {
 				t.Fatalf("the refusal re-exported the string it refused")
 			}
-			// The refusal must not copy the supplied string either. The
-			// factset gates digest the factset first, so the floor is the
-			// factset's own size, not zero -- half the supplied string is far
-			// below any copy of it and far above what the refusal needs.
-			if allocated > uint64(len(big))/2 {
-				t.Fatalf("the refusing call allocated %d bytes against a %d-byte supplied string", allocated, len(big))
+			// THE EXTENT OF THE FIELD UNDER TEST, not merely a small error: a
+			// gate reporting this package's own constant instead of the
+			// caller's string passes everything above and nothing here.
+			if !strings.Contains(err.Error(), tc.names) {
+				t.Fatalf("the refusal must name its own fault (%q): %v", tc.names, err)
+			}
+			if !strings.Contains(err.Error(), wantExtent) {
+				t.Fatalf("the refusal must name the SUPPLIED extent (%q): %v", wantExtent, err)
+			}
+			// And it must not copy the supplied string -- with a floor that
+			// depends on WHERE the gate sits, stated rather than fudged. A gate
+			// above the digest check refuses before anything reads the factset,
+			// so its cost is constant. A gate BELOW it is only reached once the
+			// digest verifies, and verifying means serializing the whole
+			// factset, big string included: a small multiple of the supplied
+			// bytes is the honest floor there, and what the row proves is that
+			// the REFUSAL does not add another copy on top.
+			budgetBytes := uint64(len(big)) / 2
+			if tc.belowDigest {
+				budgetBytes = 3 * uint64(len(big))
+			}
+			if allocated > budgetBytes {
+				t.Fatalf("the refusing call allocated %d bytes against a %d-byte supplied string (budget %d)",
+					allocated, len(big), budgetBytes)
 			}
 		})
 	}
 
-	t.Run("and each still names its own fault and the constant it wanted", func(t *testing.T) {
-		fs := good
-		fs.ContractVersion = big
-		e1 := p4offline.VerifyCommonFactset(fs)
-		fs = good
-		fs.Protocol = big
-		e2 := p4offline.VerifyCommonFactset(fs)
-		if !strings.Contains(e1.Error(), "factset contract is 1048576 bytes") ||
-			!strings.Contains(e1.Error(), strconv.Quote(p4offline.CommonFactsetDigestVersion)) {
-			t.Fatalf("the contract fault must name itself, the extent and the constant: %v", e1)
+	t.Run("and a gated digest is still NAMED, not reduced to its length", func(t *testing.T) {
+		// The converse property, and the one a blanket application of the rule
+		// gets wrong. decisionOf runs VerifyCommonFactset first, which pins
+		// fs.Digest to 64 hex characters of this package's own making, so
+		// reporting it by extent would render "64 bytes" for every binding
+		// mismatch there is. It is named.
+		res, err := p4offline.EvaluateP2Case(good)
+		if err != nil {
+			t.Fatalf("fixture: %v", err)
 		}
-		if !strings.Contains(e2.Error(), "factset protocol is 1048576 bytes") ||
-			!strings.Contains(e2.Error(), strconv.Quote(p4offline.ProtocolVersion)) {
-			t.Fatalf("the protocol fault must name itself, the extent and the constant: %v", e2)
-		}
-		if e1.Error() == e2.Error() {
-			t.Fatalf("the two faults must be distinguishable: %v / %v", e1, e2)
+		other, _, _ := selectedCase(t, func(e *predictioneval.SourceDecisionEnvelope) {
+			*e.FinalAmount = *e.FinalAmount + 1
+		}, nil)
+		_ = other
+		_, derr := res.Decision(good)
+		if derr != nil {
+			t.Fatalf("the result must bind to its own factset: %v", derr)
 		}
 	})
 }

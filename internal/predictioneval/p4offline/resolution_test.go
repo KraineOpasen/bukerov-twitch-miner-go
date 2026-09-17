@@ -10,6 +10,7 @@ package p4offline_test
 
 import (
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/predictioneval"
@@ -329,4 +330,56 @@ func TestResolutionCannotBeReadFromTheP1Mirror(t *testing.T) {
 	if len(p4offline.ExtractResolutionReferences(ds, p4offline.PublicRoundIdentity{EventID: "other"})) != 0 {
 		t.Fatal("references are per round")
 	}
+}
+
+// TestJoinReasonsHandlesTheEmptyAndSingletonLists pins the one line of the
+// single-pass rewrite that IS separately testable, and that the site's own
+// "not separately testable" note over-scoped to cover.
+//
+// The rewrite computes the buffer size as `len(rs) - 1 + sum(len)`, so an empty
+// list gives n == -1 and `make([]byte, 0, -1)` PANICS. The empty case is
+// reached in production: VerifyResolutionArtifact's re-projection arm renders
+// re.Refusals, which can be empty for an internally consistent artifact whose
+// re-projection yields a different digest. Deleting the guard left the whole
+// suite green, and a one-line probe against that mutant panicked with
+// "makeslice: cap out of range".
+//
+// The expected values are the join's definition, stated here: comma-separated,
+// no leading or trailing comma, empty members preserved.
+func TestJoinReasonsHandlesTheEmptyAndSingletonLists(t *testing.T) {
+	// Reached through the exported seam rather than by calling the unexported
+	// helper: a REFUND artifact asserted without its proof re-projects to a
+	// different digest and renders its (empty) refusal list.
+	refund := p4offline.ResolutionNotRecorded(p4offline.PublicRoundIdentity{EventID: "e1"}, []string{"o1", "o2"}, nil, "p")
+	refund.Outcome = p4offline.ResolutionRefund
+	refund.Refusals = nil
+	refund.ResolutionFactsDigest = p4offline.DigestReference(digestOf(p4offline.SerializeResolutionArtifact(refund)))
+	err := p4offline.VerifyResolutionArtifact(refund)
+	if !errors.Is(err, p4offline.ErrResolutionNotDerivable) {
+		t.Fatalf("a REFUND asserted without its proof must be refused: %v", err)
+	}
+	// Reaching this line at all is the assertion: without the guard the call
+	// above panics rather than returning.
+	if err.Error() == "" {
+		t.Fatal("the refusal must say something")
+	}
+
+	t.Run("an empty refusal list renders as nothing, not as a comma", func(t *testing.T) {
+		if strings.Contains(err.Error(), "refusals ,") || strings.HasSuffix(err.Error(), ",") {
+			t.Fatalf("an empty list must render empty: %q", err.Error())
+		}
+	})
+	t.Run("a single refusal renders without a separator", func(t *testing.T) {
+		one := p4offline.ResolutionNotRecorded(p4offline.PublicRoundIdentity{EventID: "e1"}, []string{"o1", "o2"}, nil, "p")
+		one.Outcome = p4offline.ResolutionRefund
+		one.Refusals = []string{"ONE_REASON"}
+		one.ResolutionFactsDigest = p4offline.DigestReference(digestOf(p4offline.SerializeResolutionArtifact(one)))
+		e := p4offline.VerifyResolutionArtifact(one)
+		if !errors.Is(e, p4offline.ErrResolutionNotDerivable) {
+			t.Fatalf("got %v", e)
+		}
+		if strings.Contains(e.Error(), ",ONE_REASON") || strings.Contains(e.Error(), "ONE_REASON,") {
+			t.Fatalf("a single member carries no separator: %q", e.Error())
+		}
+	})
 }

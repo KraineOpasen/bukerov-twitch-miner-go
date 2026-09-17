@@ -813,9 +813,13 @@ func TestP2ActionMapRequiresACoherentExecutedPercentCap(t *testing.T) {
 // && B, "TAG")` -- and every existing case that names one of those tags
 // violates EVERY conjunct at once, because the fixtures are built by tampering
 // a whole stage. So a strictly weaker guard is indistinguishable from the real
-// one. A single-conjunct sweep over actionmap.go measured it: 66 mutants, 37
-// killed, 29 SURVIVED, 0 build failures -- and every survivor is in this half
-// of the map. Concretely, deleting `ev.Filter.Applied` from the FILTER_REJECTED
+// one. A single-conjunct sweep over actionmap.go measured it: 66 mutants,
+// 31 SURVIVED, 0 build failures. 28 of the 31 are in this half of the map, the
+// P2 exit arms; the other three are in MapP3bAction and are repaired beside
+// their own guards in p3b_test.go. An earlier version of this comment said 29
+// and "every survivor is in this half" -- the same finding, booked against the
+// wrong sweep, and corrected after independent review re-ran the sweep against
+// the parent commit. Concretely, deleting `ev.Filter.Applied` from the FILTER_REJECTED
 // arm lets a native evaluation whose filter answered "skip" but never actually
 // applied map legal, as a POLICY_SKIP with an exact-zero stake, with the whole
 // suite green.

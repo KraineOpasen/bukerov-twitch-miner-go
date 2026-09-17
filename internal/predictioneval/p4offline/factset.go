@@ -176,7 +176,8 @@ func lookupEpisode(ds predictioneval.SourceDataset, episode EpisodeIdentity) (Ep
 	}
 	if !sel.SessionAdmitted {
 		return EpisodeSelection{}, false, errors.Join(ErrEpisodeNotSelected,
-			errors.New("p4offline: session refused: "+joinReasons(sel.SessionRefusals)))
+			errors.New("p4offline: session refused: "+reasonListExtent(sel.SessionRefusals)+
+				": "+joinReasons(sessionRefusalKinds(sel.SessionRefusals))))
 	}
 	for i := range sel.Episodes {
 		ep := sel.Episodes[i]
@@ -443,8 +444,15 @@ func checkFactsetConsistency(fs CommonFactset) error {
 	inconsistent := func(what string) error {
 		return errors.Join(ErrFactsetInconsistent, errors.New("p4offline: "+what))
 	}
+	// SAME RULE, and this gate is why the rule is now stated by the OPERAND'S
+	// PROVENANCE rather than by the statement's position: it is not a first
+	// gate, it sits below the digest check, and it still reads a plain exported
+	// typed string that nothing bounds. `want` is derived from the settings by
+	// this package and is one of three short constants, so it is named; the
+	// supplied label is not. See suppliedTextExtent.
 	if want := deriveStealthProof(fs.Settings); fs.StealthProof != want {
-		return inconsistent("stealth proof is " + string(fs.StealthProof) + ", the settings derive " + string(want))
+		return inconsistent("stealth proof is " + suppliedTextExtent(string(fs.StealthProof)) +
+			", the settings derive " + strconv.Quote(string(want)))
 	}
 	switch fs.Completeness {
 	case FactsetComplete:
@@ -474,7 +482,8 @@ func checkFactsetConsistency(fs CommonFactset) error {
 			}
 		}
 	default:
-		return inconsistent("completeness " + string(fs.Completeness) + " is outside the vocabulary")
+		return inconsistent("completeness of " + suppliedTextExtent(string(fs.Completeness)) +
+			" is outside the vocabulary")
 	}
 	return nil
 }

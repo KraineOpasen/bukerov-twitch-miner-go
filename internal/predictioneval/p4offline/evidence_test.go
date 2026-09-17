@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"runtime"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/predictioneval"
@@ -1950,5 +1951,130 @@ func TestQualityRecordMethodsDoNotModifyTheReceiver(t *testing.T) {
 	}
 	if merged.Quality != p4offline.QualityExcluded {
 		t.Fatalf("the RETURNED record carries the lower quality: %+v", merged)
+	}
+}
+
+// TestManualSignalsDoNotCostQuadraticInTheirOwnCount is the receipt for the
+// second superlinear path found on this branch, and for a disposition this
+// package had written down and got wrong.
+//
+// ManualSignals was accumulated through appendOnce, which scans the whole
+// accumulated list on every call. An ObservationID is distinct per record in
+// any well-formed dataset, so the scan deduplicated nothing and cost O(M^2) in
+// the manual facts matched to one episode -- reached from the exported
+// SelectEpisodes, and so from every exported function that takes a
+// SourceDataset. The site's own comment concluded that a declared ingest
+// ceiling was "the only real answer" to it. It was not.
+//
+// The assertion is a GROWTH ratio, never wall-clock: what distinguishes the
+// defect is the exponent.
+func TestManualSignalsDoNotCostQuadraticInTheirOwnCount(t *testing.T) {
+	build := func(manual int) predictioneval.SourceDataset {
+		s := newSynth()
+		s.placedAttempt("r1", "e1", 1)
+		for i := 0; i < manual; i++ {
+			s.manualCall("r1", "e1", 50, 0)
+		}
+		return s.dataset()
+	}
+	measure := func(t *testing.T, ds predictioneval.SourceDataset) (uint64, int) {
+		t.Helper()
+		runtime.GC()
+		var a, b runtime.MemStats
+		runtime.ReadMemStats(&a)
+		sel, err := p4offline.SelectEpisodes(ds)
+		runtime.ReadMemStats(&b)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ep := singleEpisode(t, sel)
+		return b.TotalAlloc - a.TotalAlloc, len(ep.ManualSignals)
+	}
+
+	smallAlloc, smallN := measure(t, build(2048))
+	largeAlloc, largeN := measure(t, build(4096))
+	t.Logf("2048 manual calls -> %d bytes (%d signals); 4096 -> %d bytes (%d signals)",
+		smallAlloc, smallN, largeAlloc, largeN)
+
+	if smallN != 2048 || largeN != 4096 {
+		t.Fatalf("every distinct manual signal must be reported: %d / %d", smallN, largeN)
+	}
+	// Linear over a 2x input is ~2x; quadratic is ~4x.
+	if ratio := float64(largeAlloc) / float64(smallAlloc); ratio > 3 {
+		t.Fatalf("allocation grew %.1fx over a 2x input: the manual signals are being accumulated quadratically", ratio)
+	}
+
+	t.Run("and a repeated observation is still reported once", func(t *testing.T) {
+		// The deduplication is the property appendOnce was there for, and it
+		// has to survive the change. The producer cannot write a duplicate
+		// observation id, so this is built by hand.
+		s := newSynth()
+		s.placedAttempt("r1", "e1", 1)
+		dup := s.fact(predictioneval.KindPlacement, predictioneval.PhaseCallStarted, "r1", "e1", 0)
+		dup.Payload.Manual = ptrBool(true)
+		dup.ObservationID = "manual-twice"
+		s.add(dup)
+		again := dup
+		again.CollectorSequence = s.next()
+		s.add(again)
+
+		sel, err := p4offline.SelectEpisodes(s.dataset())
+		if err != nil {
+			t.Fatal(err)
+		}
+		ep := singleEpisode(t, sel)
+		seen := 0
+		for _, id := range ep.ManualSignals {
+			if id == "manual-twice" {
+				seen++
+			}
+		}
+		if seen != 1 {
+			t.Fatalf("one observation id is reported once, got %d in %v", seen, ep.ManualSignals)
+		}
+	})
+}
+
+// TestSessionRefusalsAreNamedByKindNotOncePerRecord pins the two properties of
+// the session-refusal rendering: it must not grow with the caller's record
+// count, and the kinds it names must be in a deterministic order.
+//
+// sessionRefusals appends SESSION_P2_EXCLUSION once per session-level
+// exclusion, and materialization emits one per foreign-session record, so the
+// list's LENGTH is the caller's dataset even though every member is a short
+// constant. Rendering it produced an 840,098-byte refusal for 20,000 records.
+// The refusal now names the extent and the distinct kinds.
+func TestSessionRefusalsAreNamedByKindNotOncePerRecord(t *testing.T) {
+	build := func(n int) predictioneval.SourceDataset {
+		s := newSynth()
+		s.placedAttempt("r1", "e1", 1)
+		ds := s.dataset()
+		for i := 0; i < n; i++ {
+			r := s.fact(predictioneval.KindAutoDecision, predictioneval.PhaseAutoDue, "r9", "e9", 0)
+			r.CollectorSessionID = "a-foreign-session"
+			r.ObservationID = ""
+			ds.Records = append(ds.Records, r)
+		}
+		return ds
+	}
+	small, _ := p4offline.BuildCommonFactset(build(64), p4offline.EpisodeIdentity{})
+	_ = small
+	errOf := func(n int) error {
+		_, err := p4offline.BuildCommonFactset(build(n), p4offline.EpisodeIdentity{})
+		return err
+	}
+	e1, e2 := errOf(64), errOf(4096)
+	if e1 == nil || e2 == nil {
+		t.Fatalf("a foreign-session dataset must be refused: %v / %v", e1, e2)
+	}
+	t.Logf("64 foreign records -> %d-byte refusal; 4096 -> %d-byte refusal", len(e1.Error()), len(e2.Error()))
+
+	// A 64x increase in the caller's records must not grow the refusal.
+	if len(e2.Error()) > len(e1.Error())+64 {
+		t.Fatalf("the refusal grew from %d to %d bytes with the caller's record count: %q",
+			len(e1.Error()), len(e2.Error()), e2.Error())
+	}
+	if !strings.Contains(e2.Error(), "reasons,") || !strings.Contains(e2.Error(), "bytes") {
+		t.Fatalf("the refusal must name the extent: %v", e2)
 	}
 }

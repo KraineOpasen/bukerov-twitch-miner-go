@@ -99,8 +99,16 @@ func EvaluateP2Case(fs CommonFactset) (P2CaseResult, error) {
 		// SUBSET of the supplied ones, so arbitrary padding is legal by this
 		// package's own rules -- and this is the exported entry point a caller
 		// reaches it through.
+		// THE FAULT AND THE EXTENT, which is the whole rule and not half of it.
+		// A first version reported only the extent, so an ordinary INCOMPLETE
+		// factset refused with "1 reasons, 15 bytes" and the caller lost the
+		// diagnosis entirely. valueDerivedReasons is the bounded answer: it is
+		// re-derived from the factset's own VALUES, returns at most six members
+		// drawn from closed vocabularies, and never touches the caller's
+		// IncompleteReasons -- which is the unbounded list, named by extent.
 		return P2CaseResult{}, errors.Join(ErrFactsetNotEvaluable,
-			errors.New("p4offline: factset is "+string(fs.Completeness)+": "+reasonListExtent(fs.IncompleteReasons)))
+			errors.New("p4offline: factset is "+string(fs.Completeness)+": "+
+				joinReasons(valueDerivedReasons(fs))+" ("+reasonListExtent(fs.IncompleteReasons)+" supplied)"))
 	}
 	binding, err := BindP2Config(fs)
 	if err != nil {

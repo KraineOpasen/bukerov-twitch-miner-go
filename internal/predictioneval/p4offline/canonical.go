@@ -64,20 +64,44 @@ func (c *canonical) digest() string {
 // refusal message.
 //
 // THE RULE THIS ENFORCES, written down once because it has now been rediscovered
-// four times on this branch. A gate that refuses caller-supplied text must name
-// the FAULT and the EXTENT, never the text. Concatenating it costs the caller's
-// whole string on the path where nothing has been validated yet, and every one
-// of these gates is the FIRST statement of an exported function -- so no bound,
-// no digest and no length check has run. Measured on a 64 MiB supplied string:
-// 134,234,440 bytes allocated and a 67,108,944-byte error, to report that a
-// string differs from a 20-byte compile-time constant.
+// FOUR times on this branch -- and stated on the fourth attempt in the only
+// terms that have survived review.
+//
+// THE RULE: any gate whose operand is a caller-supplied string that no earlier
+// gate has length-bounded must name the FAULT and the EXTENT, never the text.
+//
+// The scope is the OPERAND'S PROVENANCE, not the statement's position. An
+// earlier wording said "the FIRST statement of an exported function", and that
+// wording is exactly how the fourth round was missed: the repairs stopped at
+// the contract, protocol and digest gates, and three more sat further down the
+// same two functions -- CommonFactset's stealth-proof and completeness arms and
+// ResolutionArtifact's outcome arm -- reached the moment the digest verifies,
+// which a caller can make it do, because the serializers are exported and the
+// digest is an unkeyed SHA-256 that detects change and not origin.
+//
+// Measured on a 64 MiB supplied string: 134,234,440 bytes allocated and a
+// 67,108,944-byte error, to report that a string differs from a 20-byte
+// compile-time constant. On the three that the position-based wording missed:
+// 201,352,984 bytes for the completeness arm and 201,353,096 for the stealth
+// arm, each returning a 67 MB error.
+//
+// A constant this package owns IS named, deliberately: it is compile-time,
+// short, and naming it is the whole diagnosis.
 //
 // The constant being compared against IS quoted, deliberately: it is
 // compile-time, it is short, and naming it is the whole diagnosis.
 //
-// Repaired under this rule, in the order they were found: VerifyP3bRuleset's
-// identity gate (rulesetIdentityFault), ValidateDrawTrace's two gates,
-// bindEntropyCoordinates' round gate, and the five below.
+// Repaired under this rule, in the order they were found, NINE gates beside the
+// four that predate this helper: VerifyP3bRuleset's identity gate
+// (rulesetIdentityFault), ValidateDrawTrace's two gates and
+// bindEntropyCoordinates' round gate came first and are pinned by their own
+// tests; then six that call this helper -- three in VerifyCommonFactset, two in
+// VerifyResolutionArtifact, one in decisionOf; then the three the
+// position-based wording missed, which call it too.
+//
+// TestFirstGatesDoNotMaterializeSuppliedText is the registry for the gates
+// reachable through an exported verifier, and it NAMES where the earlier ones
+// are pinned rather than duplicating them.
 func suppliedTextExtent(s string) string {
 	return strconv.Itoa(len(s)) + " bytes"
 }

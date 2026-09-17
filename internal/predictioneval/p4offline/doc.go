@@ -275,8 +275,13 @@
 // package suite, with a byte-identical restore per mutant:
 //
 //   - The 26 compound `s.require` guards in actionmap.go: 66 mutants,
-//     **66 killed, 0 survived**. That half is closed. It was 29 survivors
-//     before this round, all of them in the P2 exit arms.
+//     **66 killed, 0 survived**. That half is closed. Before the repair it was
+//     **31 survivors of 66** -- 28 in the P2 exit arms and 3 in MapP3bAction's
+//     own guards (the two clauses of STOP_FIELDS_WITHOUT_STOP_POSITION and the
+//     count conjunct of NO_CANDIDATE_REACHED). An earlier version of this
+//     paragraph said 29, all in the P2 arms: the three P3b survivors were found
+//     and repaired, and then booked against the other sweep. Independent review
+//     re-ran the sweep against the parent commit and measured 31.
 //   - Every single-line `if` condition in all thirteen production files:
 //     141 mutants, 65 killed, **63 survived**, 13 that do not compile.
 //     entropy.go and actionmap.go are clean; the survivors are concentrated in
