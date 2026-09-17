@@ -114,12 +114,25 @@ func (c *canonical) digest() string {
 // reported. VerifyP3bRuleset checked its declared NATIVE digest for shape, an
 // O(1) test of 64 characters, BELOW the full-buffer SHA-256, the key walk, the
 // decode, the trailing scan and configsEqual: 167,771,494 bytes and 302 ms at a
-// 16 MiB declared identity, exactly 10.00x it, for a 137-byte error; 312 bytes
-// and 179 ns hoisted. And VerifySourceRoundRegistry -- repaired one round
+// 16 MiB declared identity, exactly 10.00x it, for a 137-byte error; hoisted,
+// 72 bytes in 3 allocations (312 with the message rendered), flat at 1 MiB and
+// at 16 MiB. And VerifySourceRoundRegistry -- repaired one round
 // earlier for its two CONSTANT clauses -- still flattened and re-reconciled
 // every claim above its DIGEST comparison: 203,719,320 bytes and 192.8 ms at
 // 16,000 claims, 100.0% of the cost of a valid verification, to refuse on 64
 // characters.
+//
+// A DIFFERENT CLASS ENTIRELY, recorded here because eight rounds of reviewing
+// THIS one walked straight past it, and so did two mechanical censuses -- 150
+// functions and 251 early returns, 539 materialization nodes. walkRulesetValue
+// recurses on a JSON array and nothing bounded the recursion, so a document
+// costing two bytes a level drove the walk to the runtime's 1 GB stack limit
+// and killed the process. It is not a cost defect: the resource is the STACK,
+// the amplifier is structural rather than a byte count, and `fatal error: stack
+// overflow` cannot be recovered, so it defeats a host's recover() and takes
+// every other verification in flight with it. Bounded at rulesetMaxNesting, and
+// the lesson is that "how expensive is this refusal" and "can this input reach
+// an unrecoverable state" are different questions asked of the same code.
 //
 // THE DISCRIMINATOR, which an independent judge supplied by clearing a site
 // this rule would otherwise have condemned: ask whether the product of the

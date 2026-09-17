@@ -287,6 +287,29 @@ var rulesetOptionalKeys = map[string][]string{
 // rulesetNullOK names the one path whose value may be null.
 const rulesetNullOK = "detailed"
 
+// rulesetMaxNesting is the deepest chain of open JSON containers the contract's
+// own documents form, and the depth past which the key walk refuses.
+//
+// WHY THIS EXISTS. walkRulesetValue recurses on a JSON array, and nothing stopped
+// it. A document of nested empty arrays is tiny per level, so a ruleset sitting
+// comfortably inside its own declared rulesetRawCeiling could drive the walk to
+// the runtime's 1 GB stack limit: an independent judge crashed the process from
+// outside this package with a 9,120,039-byte document against a ceiling of
+// 10,168,648, and `fatal error: stack overflow` cannot be recovered -- a host
+// that wraps this verifier in recover() still dies, and takes every other
+// verification in flight with it. That is the one outcome doc.go's "refusing,
+// typed and closed" promise cannot survive, so it is refused typed instead.
+//
+// THE VALUE IS MEASURED, NOT CHOSEN. A full contract document -- a configId, a
+// default with its points, and a detailed rule with its points -- forms exactly
+// four: the root object, the "detailed" array, a rule object inside it, and that
+// rule's "points" object. rulesetKeySets is what makes that a closed number:
+// every legal object path is one of its five keys, and an object at any other
+// path is already refused as having no place in the contract. So this bound
+// refuses no document the contract admits, and the test that pins it drives a
+// real one at exactly this depth rather than asserting the number.
+const rulesetMaxNesting = 4
+
 // rulesetStructuralAllowance is everything a raw ruleset document can hold
 // APART from its identifier: the JSON envelope, the default object, and a full
 // detailed list of MaxOrderedRulesRules rules, plus the widening a conformant
@@ -412,7 +435,12 @@ func VerifyP3bRuleset(r P3bRuleset) (VerifiedP3bRuleset, error) {
 	// being told its digest is not 64 hex digits. Measured from outside the
 	// package at ConfigID 1/4/16 MiB: 10,485,107 / 41,942,377 / 167,771,494
 	// bytes and 20.3 / 75.8 / 302.3 ms -- exactly 10.00x the declared identity
-	// -- for a 137-byte error. Hoisted: 312 bytes and 179 ns at 16 MiB.
+	// -- for a 137-byte error. Hoisted: 72 bytes in 3 allocations, which is what
+	// the test that pins this logs, or 312 bytes measured with the error message
+	// rendered. Both figures are of the same call and neither is wrong; the
+	// earlier text quoted 312 beside a test printing 72, which is the same
+	// quote-your-own-run defect this file corrected one comment earlier for an
+	// error size. Same at 1 MiB and at 16 MiB: the point is that it is FLAT.
 	//
 	// ONE CONSEQUENCE, a precedence shift rather than a behaviour change, stated
 	// here the way evaluateProjected states its own: a ruleset wrong in BOTH
@@ -489,10 +517,14 @@ func checkRulesetKeys(raw []byte) error {
 	if d, ok := tok.(json.Delim); !ok || d != '{' {
 		return errors.New("p4offline: raw ruleset document is not a JSON object")
 	}
-	return walkRulesetObject(dec, "")
+	return walkRulesetObject(dec, "", 1)
 }
 
-func walkRulesetObject(dec *json.Decoder, path string) error {
+func walkRulesetObject(dec *json.Decoder, path string, depth int) error {
+	if depth > rulesetMaxNesting {
+		return errors.New("p4offline: ruleset document nests past " + strconv.Itoa(rulesetMaxNesting) +
+			" containers at " + pathName(path))
+	}
 	allowed, known := rulesetKeySets[path]
 	if !known {
 		return errors.New("p4offline: an object at " + pathName(path) + " has no place in the contract")
@@ -554,13 +586,13 @@ func walkRulesetObject(dec *json.Decoder, path string) error {
 		if path != "" {
 			child = path + "." + key
 		}
-		if err := walkRulesetValue(dec, child, child == rulesetNullOK); err != nil {
+		if err := walkRulesetValue(dec, child, child == rulesetNullOK, depth); err != nil {
 			return err
 		}
 	}
 }
 
-func walkRulesetValue(dec *json.Decoder, path string, nullOK bool) error {
+func walkRulesetValue(dec *json.Decoder, path string, nullOK bool, depth int) error {
 	tok, err := dec.Token()
 	if err != nil {
 		return err
@@ -577,10 +609,19 @@ func walkRulesetValue(dec *json.Decoder, path string, nullOK bool) error {
 	}
 	switch d {
 	case '{':
-		return walkRulesetObject(dec, path)
+		return walkRulesetObject(dec, path, depth+1)
 	case '[':
+		// THE RECURSIVE ARM, and the one that had no bound. An array is itself an
+		// open container, so it is counted before its elements are walked -- and
+		// the elements recurse through here, so a chain of arrays is charged one
+		// level each. The object arm above was never the exposure: an object at a
+		// path rulesetKeySets does not name is refused on entry.
+		if depth+1 > rulesetMaxNesting {
+			return errors.New("p4offline: ruleset document nests past " + strconv.Itoa(rulesetMaxNesting) +
+				" containers at " + pathName(path))
+		}
 		for dec.More() {
-			if err := walkRulesetValue(dec, path, false); err != nil {
+			if err := walkRulesetValue(dec, path, false, depth+1); err != nil {
 				return err
 			}
 		}
@@ -792,9 +833,21 @@ func bindEntropyCoordinates(coords EntropyCoordinates, fs CommonFactset) error {
 		return errors.Join(ErrP3bBinding,
 			errors.New("p4offline: entropy factset digest "+strconv.Quote(coords.CommonFactsetDigest)+" is not this factset's "+strconv.Quote(want)))
 	}
-	// The digest gate above quotes both sides deliberately: isDigestReference
-	// holds each to 71 bytes, and naming them IS the diagnosis. This gate
-	// quotes neither, for the opposite reason. The coordinate side is bounded
+	// The digest gate above quotes both sides deliberately, and the bound that
+	// makes that safe is NOT the same for the two of them -- which the previous
+	// wording got wrong, in exactly this branch's recorded failure mode C
+	// (clearing a site by naming a bound that does not apply to the operand).
+	// isDigestReference holds the COORDINATE side to 71 bytes, inside
+	// checkEntropyCoordinates, three lines up. The other side is
+	// DigestReference(fs.Digest), a prefix on a plain exported field, and
+	// nothing on THIS function's own path bounds it. What holds is a caller
+	// invariant: all three call sites of bindEntropyCoordinates sit below
+	// ProjectP3bSingleCandidate, whose first statement is VerifyCommonFactset,
+	// which pins fs.Digest to 64 hex characters of this package's own making.
+	// Moving this function above that verification requires turning this quote
+	// into a fault-and-extent form FIRST; the invariant is what is load-bearing,
+	// not the shape of the operand. This gate quotes neither side, for the
+	// opposite reason. The coordinate side is bounded
 	// -- checkEntropyCoordinates ran first -- but the FACTSET's round is bounded
 	// by nothing in this package: VerifyCommonFactset checks the two contract
 	// strings, the digest and the label consistency, and no length. So every

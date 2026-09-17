@@ -5,12 +5,14 @@ package p4offline_test
 // native core; and the P3b half of the action map.
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"math"
 	"os"
+	"os/exec"
 	"reflect"
 	"runtime"
 	"sort"
@@ -2934,6 +2936,115 @@ func TestEntropyBindingRefusalDoesNotMaterializeTheFactsetRound(t *testing.T) {
 //
 // The assertion is an allocation ratio against the document the caller supplied,
 // never wall-clock.
+// deepRulesetChildEnv marks the re-executed child of
+// TestRulesetNestingIsBoundedBeforeItRecurses. The shape under test used to kill
+// the process with `fatal error: stack overflow`, which recover() cannot catch,
+// so it cannot be driven in the parent.
+const deepRulesetChildEnv = "P4OFFLINE_DEEP_RULESET_CHILD"
+
+// deeplyNestedRuleset builds a ruleset whose "detailed" value is n nested arrays
+// and whose declared identity is large enough that the document sits INSIDE its
+// own rulesetRawCeiling -- which is the whole point: the caller raises its own
+// ceiling, so document size never refuses this shape. Every other gate above the
+// key walk is satisfied, so the walk is genuinely reached.
+func deeplyNestedRuleset(n int) p4offline.P3bRuleset {
+	// ceiling = rulesetStructuralAllowance + 6*len(ConfigID); solve for an id
+	// that admits the document, with a wide margin.
+	id := strings.Repeat("i", (2*n)/5+1<<19)
+	body := `{"configId":"` + id + `","hasDefault":true,"detailed":` +
+		strings.Repeat("[", n) + strings.Repeat("]", n) +
+		`,"default":{"rawMinPercent":0,"rawMaxPercent":1,"points":{"maxValue":0,"rawPercent":1}}}`
+	raw := []byte(body)
+	sum := sha256.Sum256(raw)
+	return p4offline.P3bRuleset{
+		RulesetID:          id,
+		RawBytes:           raw,
+		RawSHA256:          hex.EncodeToString(sum[:]),
+		NativeConfigDigest: strings.Repeat("0", 64),
+		Config:             predictioneval.OrderedRulesConfig{ConfigID: id},
+	}
+}
+
+// TestRulesetNestingIsBoundedBeforeItRecurses pins the bound on the walk's one
+// recursive arm.
+//
+// THE DEFECT THIS CLOSES WAS NOT A COST DEFECT, which is why eight rounds of
+// refusal-cost review walked past it, and why two mechanical censuses -- 150
+// functions and 251 early returns, 539 materialization nodes -- did not see it
+// either. walkRulesetValue recurses on a JSON array and nothing bounded the
+// recursion. Nested empty arrays cost two bytes a level, so a document sitting
+// comfortably inside its own declared ceiling drove the walk to the runtime's
+// 1 GB stack limit: an independent judge terminated the process from outside
+// this package with a 9,120,039-byte document against a ceiling of 10,168,648.
+//
+// `fatal error: stack overflow` is not recoverable. A host that wraps this
+// verifier in recover() still dies, and every other verification in flight dies
+// with it -- the one outcome doc.go's "refusing, typed and closed" promise
+// cannot survive. NOTHING IN THIS PACKAGE'S TESTS DRIVES NESTING DEPTH; every
+// ruleset fixture is built from a typed config, which can only produce the
+// contract's own shape. That is the coverage gap, and this test is it.
+func TestRulesetNestingIsBoundedBeforeItRecurses(t *testing.T) {
+	if os.Getenv(deepRulesetChildEnv) == "1" {
+		// THE CHILD. Depth 4,000,000 -- past the 3,800,000 at which the
+		// unbounded walk died, and well past the 3,000,000 it survived.
+		_, err := p4offline.VerifyP3bRuleset(deeplyNestedRuleset(4_000_000))
+		if !errors.Is(err, p4offline.ErrRulesetRawDecode) {
+			t.Fatalf("the child must get a TYPED refusal, got %v", err)
+		}
+		return
+	}
+
+	t.Run("the contract's own deepest document is admitted", func(t *testing.T) {
+		// THE FALSE-REFUSAL CONTROL, and the reason the bound is measured rather
+		// than chosen: a full document -- configId, default with points, and a
+		// detailed rule with points -- forms exactly the deepest chain the
+		// contract allows. If the bound were one too tight, this fails.
+		// cfgWithRule carries BOTH a detailed rule and a default, each with its
+		// own points object, so its document forms the contract's deepest legal
+		// chain: root object, "detailed" array, rule object, "points" object.
+		full := cfgWithRule("deep", predictioneval.ComparatorGe, 50, 100)
+		if _, err := p4offline.VerifyP3bRuleset(rulesetFrom(t, full)); err != nil {
+			t.Fatalf("the contract's own deepest document must verify: %v", err)
+		}
+	})
+
+	t.Run("a document past the bound is refused typed, naming the depth and not the document", func(t *testing.T) {
+		rs := deeplyNestedRuleset(64)
+		_, err := p4offline.VerifyP3bRuleset(rs)
+		if !errors.Is(err, p4offline.ErrRulesetRawDecode) {
+			t.Fatalf("want ErrRulesetRawDecode, got %v", err)
+		}
+		msg := err.Error()
+		if !strings.Contains(msg, "nests past") {
+			t.Fatalf("the refusal must name the depth bound: %s", msg)
+		}
+		if len(msg) > 1024 {
+			t.Fatalf("the refusal is %d bytes: it carried the document", len(msg))
+		}
+		if strings.Contains(msg, rs.RulesetID) {
+			t.Fatal("the refusal must not carry the supplied identity")
+		}
+	})
+
+	t.Run("and the shape that used to kill the process now refuses", func(t *testing.T) {
+		// RUN IN A SUBPROCESS, deliberately. A fatal error cannot be recovered,
+		// so if this regressed, an in-process assertion would take the whole
+		// test binary down and report nothing useful.
+		if testing.Short() {
+			t.Skip("builds a ~9 MB document and re-executes the test binary")
+		}
+		cmd := exec.Command(os.Args[0], "-test.run=^TestRulesetNestingIsBoundedBeforeItRecurses$", "-test.v")
+		cmd.Env = append(os.Environ(), deepRulesetChildEnv+"=1")
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("the child died on a shape that must refuse: %v\n%s", err, out)
+		}
+		if bytes.Contains(out, []byte("stack overflow")) {
+			t.Fatalf("the child overflowed its stack:\n%s", out)
+		}
+	})
+}
+
 func TestNativeDigestShapeIsJudgedBeforeTheDocumentIsRead(t *testing.T) {
 	big := strings.Repeat("c", 1<<20)
 	rs := rulesetFrom(t, cfgDefaultOnly(big, 0, 1))
