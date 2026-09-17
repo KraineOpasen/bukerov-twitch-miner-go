@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"errors"
 	"strconv"
+	"unicode/utf8"
 
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/predictioneval"
 )
@@ -162,6 +163,16 @@ func EntropyMessage(coords EntropyCoordinates, index uint64) []byte {
 	)
 }
 
+// checkEntropyCoordinates is the one gate every drawing function passes
+// through, so it is where an identity that cannot be carried is refused.
+//
+// The UTF-8 test is not decoration. Every exported field of a [P3bCaseResult]
+// carries a JSON tag, and Go's encoder replaces an invalid sequence with
+// U+FFFD, so coordinates holding invalid UTF-8 are MACed over bytes their own
+// declared encoding does not preserve: the stored form names a different
+// identity than the one that drew, and two distinct invalid sequences collapse
+// onto the same encoded string. The digest coordinate needs no such test --
+// it is already held to lower-case hex -- and the trajectory is numeric.
 func checkEntropyCoordinates(coords EntropyCoordinates) error {
 	if coords.Trajectory >= TrajectoryCount {
 		return errors.Join(ErrEntropyCoordinates,
@@ -171,8 +182,14 @@ func checkEntropyCoordinates(coords EntropyCoordinates) error {
 	if coords.DatasetID == "" || len(coords.DatasetID) > maxEntropyIdentityBytes {
 		return errors.Join(ErrEntropyCoordinates, errors.New("p4offline: dataset identity is empty or over-long"))
 	}
+	if !utf8.ValidString(coords.DatasetID) {
+		return errors.Join(ErrEntropyCoordinates, errors.New("p4offline: dataset identity is not valid UTF-8"))
+	}
 	if coords.DatasetVersion == "" || len(coords.DatasetVersion) > maxEntropyIdentityBytes {
 		return errors.Join(ErrEntropyCoordinates, errors.New("p4offline: dataset version is empty or over-long"))
+	}
+	if !utf8.ValidString(coords.DatasetVersion) {
+		return errors.Join(ErrEntropyCoordinates, errors.New("p4offline: dataset version is not valid UTF-8"))
 	}
 	if !isDigestReference(coords.CommonFactsetDigest) {
 		return errors.Join(ErrEntropyCoordinates,
@@ -180,6 +197,9 @@ func checkEntropyCoordinates(coords EntropyCoordinates) error {
 	}
 	if coords.PairedOpportunityID == "" || len(coords.PairedOpportunityID) > maxEntropyIdentityBytes {
 		return errors.Join(ErrEntropyCoordinates, errors.New("p4offline: paired opportunity identity is empty or over-long"))
+	}
+	if !utf8.ValidString(coords.PairedOpportunityID) {
+		return errors.Join(ErrEntropyCoordinates, errors.New("p4offline: paired opportunity identity is not valid UTF-8"))
 	}
 	return nil
 }

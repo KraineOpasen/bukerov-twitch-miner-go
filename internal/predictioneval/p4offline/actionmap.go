@@ -800,7 +800,11 @@ func (s *shapeCheck) finish(m ActionMapping) ActionMapping {
 //	                        the index the selection admits on.
 //	A BernoulliEvaluations  at least one on a DETAILED_RULE admission; the
 //	                        producer advances it below the rate branch.
-//	A RawWordsConsumed      one of the two bounds on the admitting word index.
+//	A RawWordsConsumed      bounded on its own range, for every status, and
+//	                        additionally one of the two bounds on the admitting
+//	                        word index. The own-range test was added after the
+//	                        index test was found to skip it entirely whenever
+//	                        the admitting step consumed no word.
 //	A Trace, Visits         the two admitting witnesses.
 //	B StreamDigest, ConfigDigest, EntropyDigest, ConsumedInputDigest
 //	                        input bindings and a consumed-prefix attestation.
@@ -935,6 +939,25 @@ func MapP3bAction(ev predictioneval.OrderedRulesEvaluation) ActionMapping {
 	// four are constants the producer stamps, so leaving one unchecked lets an
 	// evaluation claim a donor this model was not derived from.
 	s.require(ev.DonorRevision == predictioneval.OrderedRulesDonorRevision, "DONOR_REVISION_FOREIGN")
+	// The consumed-word counter, bounded on its OWN range and independently of
+	// any trace entry.
+	//
+	// It used to be read only as the second bound on the admitting word index,
+	// inside `if last.RawWordIndex >= 0`. That left it entirely unread on every
+	// admission whose final step consumed no word -- the whole DEFAULT half, and
+	// a RULE_DRAW at a rate of exactly one -- and on every terminal status,
+	// while the matrix classified it load-bearing. A field the matrix claims to
+	// read and a reachable path does not is precisely the defect the matrix
+	// exists to make impossible, so the bound is stated here, once, for every
+	// status rather than inside one arm.
+	//
+	// The range is the producer's own: `cursor` starts at zero, is only ever
+	// incremented, never passes len(words), and a supplied trace longer than
+	// MaxOrderedRulesDrawWords is refused before the traversal. The refusal
+	// paths write the counter from that same cursor, which is why this is not
+	// scoped to admissions.
+	s.require(ev.RawWordsConsumed >= 0 && ev.RawWordsConsumed <= predictioneval.MaxOrderedRulesDrawWords,
+		"EVALUATION_RAW_WORDS_CONSUMED_OUT_OF_RANGE")
 	// Both are closed vocabularies, and the two booleans below are EQUALITY
 	// tests — so a value outside its vocabulary reads as the negative state and
 	// quietly satisfies every `!admitted` and `!stakeKnown` requirement the arms

@@ -39,6 +39,11 @@ var (
 	// ErrRulesetIdentity is a ruleset whose identity is empty or differs from
 	// its config's identity.
 	ErrRulesetIdentity = errors.New("p4offline: ruleset identity is missing or does not match its config")
+	// ErrRulesetRawSize is a raw document past the declared ceiling. It is
+	// separate from ErrRulesetRawHash because it is refused BEFORE the hash:
+	// the point of the ceiling is not to reject a wrong hash, it is to decline
+	// to spend the hash at all.
+	ErrRulesetRawSize = errors.New("p4offline: raw ruleset bytes are past the declared ceiling")
 	// ErrRulesetRawHash is a ruleset whose raw bytes are absent or do not hash
 	// to the declared SHA-256.
 	ErrRulesetRawHash = errors.New("p4offline: raw ruleset bytes do not match the declared SHA-256")
@@ -282,6 +287,30 @@ var rulesetOptionalKeys = map[string][]string{
 // rulesetNullOK names the one path whose value may be null.
 const rulesetNullOK = "detailed"
 
+// MaxRulesetRawBytes is the declared ceiling on a supplied raw ruleset
+// document, inclusive.
+//
+// WHY A CEILING EXISTS HERE. This package verifies artifacts a supplier
+// controls, and the native core's ceilings bound the DECODED config, not the
+// bytes carrying it. A tiny valid config followed by an arbitrarily long run
+// of whitespace decodes cleanly, trims to nothing and satisfies every native
+// bound, while this package pays for the whole buffer twice before the bounded
+// core is reached -- once in the full-buffer SHA-256, once in the full-buffer
+// trailing scan. Declining oversized bytes first is the cheapest place to
+// refuse, and it is a refusal, never a truncation.
+//
+// WHY THIS NUMBER. The widest document the contract can legitimately carry is
+// a full detailed list -- MaxOrderedRulesRules rules, each a fixed-shape object
+// of roughly 150 bytes -- beside an identifier at MaxOrderedRulesIdentifierBytes.
+// TestRulesetRawDocumentIsCappedBeforeItIsHashed builds exactly that document
+// and reports its size rather than leaving the figure to this comment: 18,696
+// bytes, 56x inside the ceiling. An identifier that JSON escaping expands by
+// the worst-case six adds at most another 20 KiB, which still leaves better
+// than twenty times. So the ceiling cannot refuse an honest document -- and
+// that direction matters at least as much as the other, because a ceiling
+// below what the contract allows would be a fail-closed defect of its own.
+const MaxRulesetRawBytes = 1 << 20
+
 // VerifyP3bRuleset checks every binding of a supplied ruleset.
 func VerifyP3bRuleset(r P3bRuleset) (VerifiedP3bRuleset, error) {
 	if r.RulesetID == "" || r.Config.ConfigID != r.RulesetID {
@@ -290,6 +319,14 @@ func VerifyP3bRuleset(r P3bRuleset) (VerifiedP3bRuleset, error) {
 	}
 	if len(r.RawBytes) == 0 {
 		return VerifiedP3bRuleset{}, errors.Join(ErrRulesetRawHash, errors.New("p4offline: no raw ruleset bytes supplied"))
+	}
+	// Before the hash, deliberately: see MaxRulesetRawBytes. Nothing below
+	// bounds the CARRIER, only the decoded config, so this is the one place a
+	// supplier-controlled buffer stops being paid for.
+	if len(r.RawBytes) > MaxRulesetRawBytes {
+		return VerifiedP3bRuleset{}, errors.Join(ErrRulesetRawSize,
+			errors.New("p4offline: "+strconv.Itoa(len(r.RawBytes))+" raw bytes supplied; the ceiling is "+
+				strconv.Itoa(MaxRulesetRawBytes)))
 	}
 	if !isCanonicalHex(r.RawSHA256, 64) {
 		return VerifiedP3bRuleset{}, errors.Join(ErrRulesetRawHash,

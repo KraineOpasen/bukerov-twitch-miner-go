@@ -366,3 +366,53 @@ func TestEntropyIdentitiesAreBounded(t *testing.T) {
 		}
 	}
 }
+
+// TestEntropyIdentitiesMustBeEncodable pins that a coordinate identity the
+// package's own declared encoding cannot carry is refused before it is MACed.
+//
+// The three identity fields were bounded for emptiness and byte length only.
+// Go's JSON encoder replaces an invalid UTF-8 sequence with U+FFFD, and every
+// exported field of a P3bCaseResult carries a JSON tag, so coordinates holding
+// invalid UTF-8 are MACed over bytes their own declared encoding does not
+// preserve: the stored form names a different identity than the one that drew.
+// Two distinct invalid sequences also collapse onto the same encoded string, so
+// the damage is not only that a result cannot be re-derived -- distinct
+// identities stop being distinguishable in the representation the type
+// declares. Refused at the coordinate gate, which is the one place every
+// drawing function already passes through.
+func TestEntropyIdentitiesMustBeEncodable(t *testing.T) {
+	_, fs := selectedFactset(t, nil, nil)
+	good := synthCoords(fs, 0)
+	if _, err := p4offline.EntropyMAC(good, 0); err != nil {
+		t.Fatalf("the honest coordinates must stay accepted: %v", err)
+	}
+	for _, tc := range []struct {
+		name string
+		edit func(*p4offline.EntropyCoordinates)
+	}{
+		{"dataset id", func(c *p4offline.EntropyCoordinates) { c.DatasetID = "d\xff" }},
+		{"dataset version", func(c *p4offline.EntropyCoordinates) { c.DatasetVersion = "v\xff" }},
+		{"paired opportunity id", func(c *p4offline.EntropyCoordinates) { c.PairedOpportunityID = "o\xff" }},
+		{"a lone surrogate half", func(c *p4offline.EntropyCoordinates) { c.DatasetID = "d\xed\xa0\x80" }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			coords := good
+			tc.edit(&coords)
+			if _, err := p4offline.EntropyMAC(coords, 0); !errors.Is(err, p4offline.ErrEntropyCoordinates) {
+				t.Fatalf("an identity the declared encoding cannot carry must be refused, got %v", err)
+			}
+			if _, err := p4offline.GenerateEntropyWords(coords, 1); !errors.Is(err, p4offline.ErrEntropyCoordinates) {
+				t.Fatalf("the drawing path must refuse it too, got %v", err)
+			}
+		})
+	}
+	// The false-refusal control: multi-byte UTF-8 is legitimate and stays
+	// accepted. The oracle vectors in this file already depend on it.
+	for _, id := range []string{"датасет", "データ", "éte", "🎲"} {
+		coords := good
+		coords.DatasetID = id
+		if _, err := p4offline.EntropyMAC(coords, 0); err != nil {
+			t.Fatalf("valid multi-byte identity %q must stay accepted: %v", id, err)
+		}
+	}
+}

@@ -51,6 +51,7 @@ var allowedDirectImports = map[string]string{
 	"math":                                  "float bit patterns for exact comparison and digests",
 	"sort":                                  "deterministic ordering, independent of map iteration",
 	"strconv":                               "rendering numbers without fmt",
+	"unicode/utf8":                          "refusing a supplied identity the declared JSON encoding cannot carry",
 	modulePath + "/internal/predictioneval": "the P2 and P3b contracts this package adapts",
 }
 
