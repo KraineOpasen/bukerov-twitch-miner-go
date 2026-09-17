@@ -583,14 +583,16 @@ func TestIncompleteFactsetRefusalIsBoundedInItsOwnInput(t *testing.T) {
 }
 
 // TestFirstGatesDoNotMaterializeSuppliedText is the class test, and it exists
-// because this defect has now been found on this branch FOUR times: at
+// because this defect has now been found on this branch FIVE times: at
 // VerifyP3bRuleset's identity gate; then at ValidateDrawTrace's two gates and
-// bindEntropyCoordinates' round gate; then at five more, including
-// VerifyCommonFactset, the first gate on every factset path; and then at three
-// MORE that the rule's own wording had excluded, because it was scoped to "the
-// first statement of an exported function" and these sit further down the same
-// two functions, reached the moment the digest verifies -- which a caller can
-// make it do, since the serializers are exported and the digest is unkeyed.
+// bindEntropyCoordinates' round gate; then at six more, including
+// VerifyCommonFactset, the first gate on every factset path; then at three MORE
+// that the rule's own wording had excluded, because it was scoped to "the first
+// statement of an exported function" and these sit further down the same two
+// functions, reached the moment the digest verifies -- which a caller can make
+// it do, since the serializers are exported and the digest is unkeyed; and then
+// at a site that is not a gate at all, the derivation argument Decision builds
+// before decisionOf's first statement runs.
 //
 // So this is a table over every gate that compares a caller-supplied string
 // that no earlier gate has length-bounded, wherever it sits. A new gate of that
@@ -603,10 +605,16 @@ func TestIncompleteFactsetRefusalIsBoundedInItsOwnInput(t *testing.T) {
 // rows survived a field swap. The extent is the property the repair exists for,
 // so it is the property that is checked.
 //
-// TWO GATES OF THE CLASS ARE PINNED ELSEWHERE and are named here rather than
-// duplicated: VerifyP3bRuleset's identity gate by
-// TestRulesetIdentityRefusalDoesNotMaterializeSuppliedText, and
-// ValidateDrawTrace's two by TestDrawTraceRefusalDoesNotMaterializeSuppliedText.
+// FIVE SITES OF THE CLASS ARE PINNED ELSEWHERE and are named here rather than
+// duplicated, so this registry reports its whole inventory:
+//
+//	VerifyP3bRuleset's identity gate  TestRulesetIdentityRefusalDoesNotMaterializeSuppliedText
+//	ValidateDrawTrace's two gates     TestDrawTraceRefusalDoesNotMaterializeSuppliedText
+//	bindEntropyCoordinates' round     TestEntropyBindingRefusalDoesNotMaterializeTheFactsetRound
+//	Decision's derivation thunk       TestDecisionDoesNotBuildItsDerivationBeforeItsGates
+//
+// With the nine rows below that is fourteen sites. canonical.go carries the
+// same inventory beside the rule.
 func TestFirstGatesDoNotMaterializeSuppliedText(t *testing.T) {
 	const budget = 1024
 	big := strings.Repeat("a", 1<<20)
@@ -729,22 +737,93 @@ func TestFirstGatesDoNotMaterializeSuppliedText(t *testing.T) {
 	}
 
 	t.Run("and a gated digest is still NAMED, not reduced to its length", func(t *testing.T) {
-		// The converse property, and the one a blanket application of the rule
+		// THE CONVERSE PROPERTY, and the one a blanket application of the rule
 		// gets wrong. decisionOf runs VerifyCommonFactset first, which pins
 		// fs.Digest to 64 hex characters of this package's own making, so
 		// reporting it by extent would render "64 bytes" for every binding
-		// mismatch there is. It is named.
+		// mismatch there is. It must be NAMED.
+		//
+		// A first version of this subtest drove a MATCHING binding and asserted
+		// only that it succeeded, so it produced no refusal message at all and
+		// reverting the repair survived the whole suite. It drives a real
+		// mismatch now.
 		res, err := p4offline.EvaluateP2Case(good)
 		if err != nil {
 			t.Fatalf("fixture: %v", err)
 		}
-		other, _, _ := selectedCase(t, func(e *predictioneval.SourceDecisionEnvelope) {
-			*e.FinalAmount = *e.FinalAmount + 1
-		}, nil)
-		_ = other
-		_, derr := res.Decision(good)
-		if derr != nil {
-			t.Fatalf("the result must bind to its own factset: %v", derr)
+		// A second factset that is well-formed and DIFFERENT. The change has to
+		// be one the factset actually carries -- it is outcome-free, so editing
+		// the recorded envelope does not move its digest, which a first version
+		// of this subtest discovered the hard way.
+		otherFs := good
+		otherFs.Balance = good.Balance + 1
+		otherFs.Digest = digestOf(p4offline.SerializeCommonFactset(otherFs))
+		if err := p4offline.VerifyCommonFactset(otherFs); err != nil {
+			t.Fatalf("the second fixture must verify: %v", err)
+		}
+		if otherFs.Digest == good.Digest {
+			t.Fatal("the two fixtures must differ, or there is no mismatch to report")
+		}
+		_, derr := res.Decision(otherFs)
+		if !errors.Is(derr, p4offline.ErrDecisionBinding) {
+			t.Fatalf("a foreign factset must be a binding fault: %v", derr)
+		}
+		if !strings.Contains(derr.Error(), otherFs.Digest) {
+			t.Fatalf("the factset's own digest is gated to 64 hex and must be NAMED: %v", derr)
+		}
+		if !strings.Contains(derr.Error(), strconv.Itoa(len(res.FactsetDigest))+" bytes") {
+			t.Fatalf("the supplied result digest must be reported by extent: %v", derr)
+		}
+	})
+
+	t.Run("and each refusal still names the constant it wanted", func(t *testing.T) {
+		// THE OTHER HALF OF THE RULE. Naming the package-owned constant is what
+		// makes the refusal a diagnosis rather than a size report, and
+		// canonical.go says so twice -- but the table above asserts only the
+		// fault wording and the supplied extent, so six mutants that replace a
+		// quoted constant with a literal survived it.
+		fs := good
+		fs.ContractVersion = big
+		e1 := p4offline.VerifyCommonFactset(fs)
+		fs = good
+		fs.Protocol = big
+		e2 := p4offline.VerifyCommonFactset(fs)
+		fs = good
+		fs.Digest = big
+		e3 := p4offline.VerifyCommonFactset(fs)
+		fs = good
+		fs.StealthProof = p4offline.StealthProof(big)
+		fs.Digest = digestOf(p4offline.SerializeCommonFactset(fs))
+		e4 := p4offline.VerifyCommonFactset(fs)
+
+		a := unknownArtifact()
+		a.ContractVersion = big
+		e5 := p4offline.VerifyResolutionArtifact(a)
+		a = unknownArtifact()
+		a.ObligationsRevision = big
+		e6 := p4offline.VerifyResolutionArtifact(a)
+
+		for _, tc := range []struct {
+			err  error
+			want string
+		}{
+			{e1, strconv.Quote(p4offline.CommonFactsetDigestVersion)},
+			{e2, strconv.Quote(p4offline.ProtocolVersion)},
+			{e4, strconv.Quote(string(p4offline.StealthProofOff))},
+			{e5, strconv.Quote(p4offline.ResolutionFactsDigestVersion)},
+			{e6, strconv.Quote(p4offline.ResolutionObligationsRevision)},
+		} {
+			if tc.err == nil || !strings.Contains(tc.err.Error(), tc.want) {
+				t.Fatalf("the refusal must name the constant it wanted (%s): %v", tc.want, tc.err)
+			}
+		}
+		// The digest gate names the digest this package computed, which is not
+		// a compile-time constant but is its own 64 hex characters.
+		if e3 == nil || !strings.Contains(e3.Error(), "which digest to \"") {
+			t.Fatalf("the digest fault must name the digest the values produce: %v", e3)
+		}
+		if e1.Error() == e2.Error() {
+			t.Fatalf("the two faults must be distinguishable: %v / %v", e1, e2)
 		}
 	})
 }

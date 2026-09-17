@@ -180,7 +180,8 @@ func EvaluateP2Case(fs CommonFactset) (P2CaseResult, error) {
 // exactly what [EvaluateP2Case] produced: a binding contradiction is named
 // first, an underived result second.
 func (r P2CaseResult) Decision(fs CommonFactset) (PolicyDecision, error) {
-	d, err := decisionOf(PolicyP2, fs, r.FactsetDigest, r.Action, r.Choice, r.Stake, p2Derivation(r.Binding.Digest))
+	d, err := decisionOf(PolicyP2, fs, r.FactsetDigest, r.Action, r.Choice, r.Stake,
+		func() string { return p2Derivation(r.Binding.Digest) })
 	if err != nil {
 		return PolicyDecision{}, err
 	}

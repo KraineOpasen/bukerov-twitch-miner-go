@@ -355,8 +355,24 @@ func placementEvidenceWitness(p PlacementEvidence) string {
 }
 
 // decisionOf binds a policy result to the factset it was evaluated over.
+//
+// THE DERIVATION ARRIVES AS A THUNK, NOT A STRING, and that is the whole point
+// of the signature. Go evaluates call arguments before the call, so a
+// derivation built at the call site is fully materialized BEFORE the first gate
+// below runs -- and both callers build theirs from plain exported fields of a
+// caller-supplied result that nothing has length-bounded. An independent sweep
+// reached it through the exported P3bCaseResult.Decision with a 1 MiB ruleset
+// id and measured 3,686,696 bytes allocated on a call that then refuses.
+//
+// This is the FIFTH instance of the same class on this branch, and it is the
+// one that says what the rule really is. It had been scoped to "the first
+// statement of an exported function" and then to "any gate whose operand is
+// caller-supplied": this site is neither. The scope that survives is the one
+// stated on suppliedTextExtent -- materialization on a path that has not yet
+// bounded what it is materializing, wherever it sits and whether or not it is
+// a gate.
 func decisionOf(policy string, fs CommonFactset, resultDigest string, action ActionMapping, choice PolicyChoice,
-	stake Int64Fact, derivation string) (PolicyDecision, error) {
+	stake Int64Fact, derivation func() string) (PolicyDecision, error) {
 	if err := VerifyCommonFactset(fs); err != nil {
 		return PolicyDecision{}, err
 	}
@@ -384,7 +400,7 @@ func decisionOf(policy string, fs CommonFactset, resultDigest string, action Act
 		FactsetDigest:  fs.Digest,
 		EventID:        fs.Episode.EventID,
 		CutoffPosition: fs.CutoffPosition,
-		Derivation:     derivation,
+		Derivation:     derivation(),
 		OutcomeIDs:     outcomeIDs(fs),
 		Action:         action,
 		Choice:         choice,

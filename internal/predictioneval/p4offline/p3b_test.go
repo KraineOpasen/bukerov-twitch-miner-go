@@ -3089,3 +3089,73 @@ func refusalReasonIsInP4Vocabulary(reason string) bool {
 	ev := predictioneval.OrderedRulesEvaluation{Status: predictioneval.StatusRefused, Reason: reason}
 	return !containsString(p4offline.MapP3bAction(ev).Illegality, "REFUSAL_REASON_FOREIGN")
 }
+
+// TestDecisionDoesNotBuildItsDerivationBeforeItsGates is the receipt for the
+// FIFTH instance of the refusal-cost class, and for the rule's third and
+// final scoping.
+//
+// P3bCaseResult and P2CaseResult have every field exported but their witness,
+// so any caller constructs one -- and doc.go's own replay path says a stored
+// result is re-evaluated rather than trusted. Decision built its derivation
+// string from those fields as a CALL ARGUMENT, and Go evaluates arguments
+// before the call, so it was fully materialized before decisionOf's first gate
+// ran. Measured by an independent sweep: 3,686,696 bytes allocated on a 1 MiB
+// ruleset id, on a call that then refuses.
+//
+// Neither of the rule's earlier scopings covered it: it is not the first
+// statement of an exported function, and it is not a gate. decisionOf takes a
+// thunk now, so the derivation is built only once the gates have passed.
+func TestDecisionDoesNotBuildItsDerivationBeforeItsGates(t *testing.T) {
+	_, fs := selectedFactset(t, nil, nil)
+	rs := mustVerify(t, rulesetFrom(t, cfgDefaultOnly("c1", 0, 1)))
+	res, err := p4offline.EvaluateP3bCase(fs, rs, synthCoords(fs, 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	big := strings.Repeat("a", 1<<20)
+
+	for _, tc := range []struct {
+		name string
+		edit func(*p4offline.P3bCaseResult)
+	}{
+		{"an over-long ruleset id", func(r *p4offline.P3bCaseResult) { r.RulesetID = big }},
+		{"an over-long run identity", func(r *p4offline.P3bCaseResult) { r.Trace.RunID = big }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			bad := res
+			tc.edit(&bad)
+			// The factset side is deliberately made to disagree, so the call
+			// refuses at decisionOf's binding gate -- the point being that it
+			// refuses WITHOUT having built the derivation first.
+			bad.FactsetDigest = strings.Repeat("ab", 32)
+
+			runtime.GC()
+			var before, after runtime.MemStats
+			runtime.ReadMemStats(&before)
+			_, derr := bad.Decision(fs)
+			runtime.ReadMemStats(&after)
+			allocated := after.TotalAlloc - before.TotalAlloc
+			t.Logf("1 MiB supplied; the refusing call allocated %d bytes", allocated)
+
+			if !errors.Is(derr, p4offline.ErrDecisionBinding) {
+				t.Fatalf("want ErrDecisionBinding, got %v", derr)
+			}
+			if allocated > uint64(len(big))/2 {
+				t.Fatalf("the refusing call allocated %d bytes against a %d-byte supplied field: the derivation was built before the gates",
+					allocated, len(big))
+			}
+		})
+	}
+
+	t.Run("and a decision that passes its gates still carries its derivation", func(t *testing.T) {
+		// The thunk must not cost the derivation itself: a legitimate decision
+		// still names the ruleset and the run it came from.
+		d, err := res.Decision(fs)
+		if err != nil {
+			t.Fatalf("the result must bind to its own factset: %v", err)
+		}
+		if !strings.Contains(d.Derivation, "ruleset=") || !strings.Contains(d.Derivation, "run=") {
+			t.Fatalf("the derivation must still name the ruleset and the run: %q", d.Derivation)
+		}
+	})
+}

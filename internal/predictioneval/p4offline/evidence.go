@@ -685,17 +685,47 @@ func sessionRefusals(ds predictioneval.SourceDataset, pk predictioneval.PairedKn
 }
 
 // p2ExclusionsFor collects the P2 refusals attributable to one attempt.
+//
+// THE OBSERVATION IDS ARE INDEXED, not re-scanned per exclusion, and this is the
+// third superlinear accumulation found on this seam. The nested form walked the
+// whole observation slice for EVERY exclusion whose key did not match -- with
+// the emptiness test inside the inner loop, so an exclusion carrying no
+// observation id walked it doing nothing, and a match did not break. Both
+// operands grow with the caller's dataset (one excluded entry per refused
+// record, one observation per record naming the attempt), so the cost was
+// O(|excluded| x |obs|) per excluded episode: quadratic in one dataset, through
+// the exported SelectEpisodes.
+//
+// The set is built once per call. Callers reach this once per episode whose
+// first opportunity has no materialized attempt, so the index is not hoisted
+// further: `obs` is that episode's own list and differs per call.
+//
+// LIKE THE MANUAL-SIGNAL REPAIR, THIS IS NOT SEPARATELY TESTABLE, and that is
+// stated rather than left as a mutation survivor. Reverting to the nested scan
+// produces the SAME attribution: what it costs is CPU, and it allocates nothing
+// extra, so an allocation ratio -- the only kind of cost assertion this suite
+// makes, because a wall-clock threshold on shared CI is flaky and proves
+// nothing about complexity -- cannot tell the two apart. What IS pinned is the
+// answer: the attribution test drives both directions of the predicate, and the
+// growth test asserts the ATTRIBUTION is unchanged beside its ratio.
 func p2ExclusionsFor(excluded []predictioneval.Exclusion, key predictioneval.AttemptKey, obs []string) []string {
 	var out []string
-	for _, e := range excluded {
-		if e.Key != nil && *e.Key == key {
-			out = appendOnce(out, e.Reason)
-			continue
+	byObservation := make(map[string]bool, len(obs))
+	for _, id := range obs {
+		if id != "" {
+			byObservation[id] = true
 		}
-		for _, id := range obs {
-			if e.ObservationID != "" && e.ObservationID == id {
-				out = appendOnce(out, e.Reason)
-			}
+	}
+	// The emptiness test lives in the index build above, not here: a map that
+	// never holds "" cannot match an exclusion carrying "". Keeping both was a
+	// redundant guard, and a mutation dropping this one survived because it
+	// could not change an answer.
+	for _, e := range excluded {
+		switch {
+		case e.Key != nil && *e.Key == key:
+			out = appendOnce(out, e.Reason)
+		case byObservation[e.ObservationID]:
+			out = appendOnce(out, e.Reason)
 		}
 	}
 	return out

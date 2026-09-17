@@ -281,7 +281,9 @@
 //     count conjunct of NO_CANDIDATE_REACHED). An earlier version of this
 //     paragraph said 29, all in the P2 arms: the three P3b survivors were found
 //     and repaired, and then booked against the other sweep. Independent review
-//     re-ran the sweep against the parent commit and measured 31.
+//     re-ran the sweep against the commit BEFORE the repair -- actionmap.go's
+//     bytes are unchanged since, so only a pre-repair test suite shows the
+//     survivors -- and measured 31.
 //   - Every single-line `if` condition in all thirteen production files:
 //     141 mutants, 65 killed, **63 survived**, 13 that do not compile.
 //     entropy.go and actionmap.go are clean; the survivors are concentrated in

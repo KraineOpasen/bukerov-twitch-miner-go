@@ -67,17 +67,30 @@ func (c *canonical) digest() string {
 // FOUR times on this branch -- and stated on the fourth attempt in the only
 // terms that have survived review.
 //
-// THE RULE: any gate whose operand is a caller-supplied string that no earlier
-// gate has length-bounded must name the FAULT and the EXTENT, never the text.
+// THE RULE: no expression may MATERIALIZE caller-supplied text on a path that
+// has not already bounded that text. Where the text must be spoken about, name
+// the FAULT and the EXTENT instead.
 //
-// The scope is the OPERAND'S PROVENANCE, not the statement's position. An
-// earlier wording said "the FIRST statement of an exported function", and that
-// wording is exactly how the fourth round was missed: the repairs stopped at
-// the contract, protocol and digest gates, and three more sat further down the
-// same two functions -- CommonFactset's stealth-proof and completeness arms and
-// ResolutionArtifact's outcome arm -- reached the moment the digest verifies,
-// which a caller can make it do, because the serializers are exported and the
-// digest is an unkeyed SHA-256 that detects change and not origin.
+// The scope has been wrong twice and each wording is recorded, because each one
+// is how the next round was missed:
+//
+//   - "the FIRST statement of an exported function" missed three arms sitting
+//     further down the same two functions -- CommonFactset's stealth-proof and
+//     completeness arms and ResolutionArtifact's outcome arm -- reached the
+//     moment the digest verifies, which a caller can make it do, because the
+//     serializers are exported and the digest is an unkeyed SHA-256 that
+//     detects change and not origin.
+//   - "any GATE whose operand is caller-supplied" then missed the fifth
+//     instance, which is not a gate at all: the derivation argument that
+//     P3bCaseResult.Decision builds for decisionOf. Go evaluates arguments
+//     before the call, so it was fully built before decisionOf's first gate
+//     ran -- 3,686,696 bytes on a 1 MiB ruleset id, for a call that then
+//     refuses. decisionOf now takes that derivation as a thunk.
+//
+// So the scope is neither position nor gate-ness. It is MATERIALIZATION ON AN
+// UNGATED PATH: a concatenation, a quote, a conversion, a join, an argument
+// expression -- anywhere, gate or not. What matters is whether the bound has
+// already run on the path that reaches it.
 //
 // Measured on a 64 MiB supplied string: 134,234,440 bytes allocated and a
 // 67,108,944-byte error, to report that a string differs from a 20-byte
@@ -85,23 +98,34 @@ func (c *canonical) digest() string {
 // 201,352,984 bytes for the completeness arm and 201,353,096 for the stealth
 // arm, each returning a 67 MB error.
 //
-// A constant this package owns IS named, deliberately: it is compile-time,
-// short, and naming it is the whole diagnosis.
+// A constant this package OWNS is quoted, deliberately: it is compile-time and
+// short, and naming it is the whole diagnosis. So is a digest this package has
+// just computed, which is its own 64 hex characters whatever the caller sent.
 //
-// The constant being compared against IS quoted, deliberately: it is
-// compile-time, it is short, and naming it is the whole diagnosis.
+// THE INVENTORY, counted once so the next reader does not have to re-derive it.
+// THIRTEEN sites are repaired under this rule:
 //
-// Repaired under this rule, in the order they were found, NINE gates beside the
-// four that predate this helper: VerifyP3bRuleset's identity gate
-// (rulesetIdentityFault), ValidateDrawTrace's two gates and
-// bindEntropyCoordinates' round gate came first and are pinned by their own
-// tests; then six that call this helper -- three in VerifyCommonFactset, two in
-// VerifyResolutionArtifact, one in decisionOf; then the three the
-// position-based wording missed, which call it too.
+//	4 predate this helper and have their own tests --
+//	    VerifyP3bRuleset's identity gate (rulesetIdentityFault),
+//	    ValidateDrawTrace's two gates,
+//	    bindEntropyCoordinates' round gate.
+//	9 call this helper --
+//	    3 in VerifyCommonFactset (contract, protocol, digest),
+//	    1 in VerifyCommonFactset's stealth-proof arm,
+//	    1 in checkFactsetConsistency's completeness arm,
+//	    2 in VerifyResolutionArtifact (contract, obligations),
+//	    1 in its outcome arm,
+//	    1 in decisionOf.
 //
-// TestFirstGatesDoNotMaterializeSuppliedText is the registry for the gates
-// reachable through an exported verifier, and it NAMES where the earlier ones
-// are pinned rather than duplicating them.
+// A fourteenth site is repaired under the same rule WITHOUT this helper,
+// because it is not a gate and there is nothing to name: decisionOf takes its
+// derivation as a thunk so the caller's text is never built on the refusing
+// path. That is the fifth instance, and the reason the rule above is scoped to
+// materialization rather than to gates.
+//
+// TestFirstGatesDoNotMaterializeSuppliedText is the registry for the nine
+// reachable through an exported verifier. It names where the other five are
+// pinned rather than duplicating them.
 func suppliedTextExtent(s string) string {
 	return strconv.Itoa(len(s)) + " bytes"
 }

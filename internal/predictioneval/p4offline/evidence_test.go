@@ -2057,8 +2057,6 @@ func TestSessionRefusalsAreNamedByKindNotOncePerRecord(t *testing.T) {
 		}
 		return ds
 	}
-	small, _ := p4offline.BuildCommonFactset(build(64), p4offline.EpisodeIdentity{})
-	_ = small
 	errOf := func(n int) error {
 		_, err := p4offline.BuildCommonFactset(build(n), p4offline.EpisodeIdentity{})
 		return err
@@ -2077,4 +2075,67 @@ func TestSessionRefusalsAreNamedByKindNotOncePerRecord(t *testing.T) {
 	if !strings.Contains(e2.Error(), "reasons,") || !strings.Contains(e2.Error(), "bytes") {
 		t.Fatalf("the refusal must name the extent: %v", e2)
 	}
+}
+
+// TestP2ExclusionAttributionIsNotQuadraticInTheDataset is the receipt for the
+// THIRD superlinear accumulation found on this seam, and the reason the
+// package's account of that seam had to be corrected twice.
+//
+// p2ExclusionsFor walked the whole observation slice for EVERY exclusion whose
+// key did not match -- with the emptiness test inside the inner loop, so an
+// exclusion carrying no observation id walked it doing nothing, and a match did
+// not break. Both operands grow with the caller's dataset, so the cost was
+// O(|excluded| x |obs|) per excluded episode: quadratic in one dataset, through
+// the exported SelectEpisodes.
+//
+// WHAT THIS TEST CAN AND CANNOT SEE, stated because the difference matters.
+// The ratio below is ALLOCATION, and the nested scan allocated nothing extra --
+// its cost was CPU. So this test does not discriminate the repair; the argument
+// for that is at the site. What it does hold is the shape of the seam around
+// it, and the subtest holds the ANSWER: the index must attribute exactly what
+// the nested scan attributed.
+func TestP2ExclusionAttributionIsNotQuadraticInTheDataset(t *testing.T) {
+	// K automatic rows naming one attempt that never gets a terminal envelope,
+	// so the first opportunity is unusable and the attribution runs; each row is
+	// also producer-excluded, so both operands grow together.
+	build := func(k int) predictioneval.SourceDataset {
+		s := newSynth()
+		for i := 0; i < k; i++ {
+			r := s.fact(predictioneval.KindAutoDecision, predictioneval.PhaseAutoDue, "r1", "e1", 1)
+			r.PayloadUndecodable = true
+			s.add(r)
+		}
+		return s.dataset()
+	}
+	measure := func(t *testing.T, ds predictioneval.SourceDataset) uint64 {
+		t.Helper()
+		runtime.GC()
+		var a, b runtime.MemStats
+		runtime.ReadMemStats(&a)
+		if _, err := p4offline.SelectEpisodes(ds); err != nil {
+			t.Fatal(err)
+		}
+		runtime.ReadMemStats(&b)
+		return b.TotalAlloc - a.TotalAlloc
+	}
+
+	small := measure(t, build(2048))
+	large := measure(t, build(4096))
+	t.Logf("2048 rows -> %d bytes; 4096 -> %d bytes", small, large)
+	if ratio := float64(large) / float64(small); ratio > 3 {
+		t.Fatalf("allocation grew %.1fx over a 2x input: the attribution is rescanning per exclusion", ratio)
+	}
+
+	t.Run("and the attribution is unchanged", func(t *testing.T) {
+		// The index must not change WHICH reasons are attributed: the seen-set
+		// answers the same question the nested scan did.
+		sel, err := p4offline.SelectEpisodes(build(4))
+		if err != nil {
+			t.Fatal(err)
+		}
+		ep := singleEpisode(t, sel)
+		if len(ep.P2Exclusions) != 1 || ep.P2Exclusions[0] != predictioneval.ExclusionPayloadUndecodable {
+			t.Fatalf("the episode must carry exactly its own refusal, got %v", ep.P2Exclusions)
+		}
+	})
 }

@@ -912,9 +912,11 @@ func EvaluateP3bCase(fs CommonFactset, rs VerifiedP3bRuleset, coords EntropyCoor
 // identity and the core's entropy digest, so decisions of different
 // rulesets or runs on one case are distinguishable.
 func (r P3bCaseResult) Decision(fs CommonFactset) (PolicyDecision, error) {
-	d, err := decisionOf(PolicyP3b, fs, r.FactsetDigest, r.Action, r.Choice, r.Stake,
-		PolicyP3b+":ruleset="+strconv.Quote(r.RulesetID)+":raw="+r.RulesetRawSHA256+":native="+r.NativeConfigDigest+
-			":run="+strconv.Quote(r.Trace.RunID)+":entropy="+r.Trace.EntropyDigest)
+	d, err := decisionOf(PolicyP3b, fs, r.FactsetDigest, r.Action, r.Choice, r.Stake, func() string {
+		return PolicyP3b + ":ruleset=" + strconv.Quote(r.RulesetID) + ":raw=" + r.RulesetRawSHA256 +
+			":native=" + r.NativeConfigDigest + ":run=" + strconv.Quote(r.Trace.RunID) +
+			":entropy=" + r.Trace.EntropyDigest
+	})
 	if err != nil {
 		return PolicyDecision{}, err
 	}
