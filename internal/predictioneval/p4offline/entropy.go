@@ -174,19 +174,38 @@ func EntropyMessage(coords EntropyCoordinates, index uint64) []byte {
 // onto the same encoded string. The digest coordinate needs no such test --
 // it is already held to lower-case hex -- and the trajectory is numeric.
 //
-// A LIMIT OF THE SHAPE, not of the test. Two of the three identities are
-// supplied by the caller, but PairedOpportunityID is DERIVED: bindEntropyCoordinates
-// requires it to equal the episode's EventID, which this package carries
-// verbatim from supplied records and validates for encoding nowhere. So a
-// record source carrying a non-UTF-8 event identity makes the P3b path return
-// an ERROR rather than a recorded ProjectionRefusal -- and an error takes the
-// case out of the comparison silently, which is the one outcome a
-// denominator-disciplined study cannot afford. This widens a class that already
-// existed here (empty and over-long identities have always been hard errors)
-// rather than creating one, and JSON-decoded records cannot carry invalid
-// UTF-8, so it is judged unreachable through the real ingest path. If a
-// non-JSON record source is ever admitted, the right disposition is a recorded
-// refusal, not this error.
+// WHERE THE DERIVED IDENTITY COMES FROM, and what that does and does not imply.
+// Two of the three identities are supplied by the caller; PairedOpportunityID is
+// DERIVED -- bindEntropyCoordinates requires it to equal the episode's EventID,
+// which this package carries verbatim from supplied records and validates for
+// encoding nowhere. EventID is not a payload field: it is a SQL TEXT column, and
+// SQLite does not hold TEXT to UTF-8, so the JSON-decoding argument that covers
+// the payload does not cover it.
+//
+// That is as far as it goes, and an earlier version of this comment went
+// further in both directions. Both extra steps were wrong:
+//
+//   - It is NOT reachable through this build's collector. The only production
+//     writer takes the value off a JSON-decoded frame, where Go has already
+//     replaced any invalid sequence with U+FFFD, and it refuses an identifier
+//     over the same 4096-byte bound this gate applies rather than truncating it.
+//     Editing a written row closes itself: the observation digest covers
+//     EventID, a mismatch forces the session to INTEGRITY_ERROR, the reader then
+//     returns no records at all, and the session is refused outright. The class
+//     is reachable only from a store this build's collector did not write.
+//   - An error here is NOT a silent drop from the comparison. AssessCaseQuality
+//     is given the DATASET, not the evaluation, and has its own branch for a
+//     factset that never reached a decision: with both policy slots empty it
+//     still records an enumerated quality and reason. The same seam already
+//     returns a plain error for the two commonest evidential facts there are --
+//     a missing balance and a stage never reached -- so there is no
+//     errors-are-only-for-caller-faults rule here for this one to breach.
+//
+// The disposition therefore stays an error, and stays deliberate. Converting it
+// into a recorded refusal would trade a loud refusal of a store this build did
+// not write for a quiet non-counting record of one, which is the wrong
+// direction. What would justify revisiting it is a non-collector record source
+// being admitted on purpose -- an owner decision, not a mechanical one.
 func checkEntropyCoordinates(coords EntropyCoordinates) error {
 	if coords.Trajectory >= TrajectoryCount {
 		return errors.Join(ErrEntropyCoordinates,

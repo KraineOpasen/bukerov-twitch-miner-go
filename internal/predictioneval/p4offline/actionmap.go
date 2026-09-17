@@ -232,7 +232,8 @@ func (s *shapeCheck) require(ok bool, name string) {
 //     read, in one direction only: a DETAILED_RULE selection requires at least
 //     one, because the producer increments it below the rate branch and so
 //     advances it even where the rate is exactly one and no word is drawn. The
-//     converse is not asserted — a DEFAULT selection may carry any count,
+//     converse is not asserted here — a DEFAULT selection may carry any count
+//     this arm is concerned with, the header range apart,
 //     since rules that failed on an earlier outcome advance it too;
 //   - the admitting step's RawWordValue on a RULE_DRAW that really DREW,
 //     because the evaluation says WHICH word was drawn and never what that
@@ -317,7 +318,8 @@ func requireCoherentSelection(s *shapeCheck, ev predictioneval.OrderedRulesEvalu
 		// word is drawn. Every detailed-rule admission has therefore passed it
 		// at least once. The converse does NOT hold and is not asserted: rules
 		// that failed on an earlier outcome advance the counter and the default
-		// half still admits, so a DEFAULT selection may carry any count.
+		// half still admits, so a DEFAULT selection may carry any count inside
+		// the range the header already bounds it to.
 		s.require(ev.BernoulliEvaluations >= 1, "SELECTION_BASIS_CONTRADICTS_BERNOULLI_COUNT")
 	default:
 		basisOK = false
@@ -799,12 +801,20 @@ func (s *shapeCheck) finish(m ActionMapping) ActionMapping {
 //	A Selected              present exactly on the two admitting statuses.
 //	A HasStopPosition, StoppedAtCandidate, StoppedAtPosition
 //	                        the stop the producer records before minting a
-//	                        selection, so the two cannot disagree.
+//	                        selection, so the two cannot disagree — and, since
+//	                        that record is written at the top of the candidate
+//	                        loop rather than beside the selection, held on EVERY
+//	                        status: present exactly when a candidate was
+//	                        consumed, and blank together when none was. The
+//	                        POSITION's sign is deliberately unheld; a scope may
+//	                        declare negative positions.
 //	A CandidatesConsumed, OutcomesConsidered, RulesConsidered
 //	                        each bounded on its own producer range, at the top
 //	                        of MapP3bAction and for every status, and
 //	                        additionally -- where a selection exists -- required
-//	                        to have passed the index that selection admits on.
+//	                        to have reached the index that selection admits on
+//	                        — an equality for CandidatesConsumed, a strict
+//	                        inequality for the other two.
 //	                        The own-range tests came later: the index relations
 //	                        are inside requireCoherentSelection, so they left all
 //	                        three unread on every terminal status and on the
@@ -818,7 +828,14 @@ func (s *shapeCheck) finish(m ActionMapping) ActionMapping {
 //	                        word index. The own-range test was added after the
 //	                        index test was found to skip it entirely whenever
 //	                        the admitting step consumed no word.
-//	A Trace, Visits         the two admitting witnesses.
+//	A Trace, Visits         the two admitting witnesses — and, on every status,
+//	                        Visits is held to one entry per candidate consumed,
+//	                        which is what every exit path of the candidate loop
+//	                        appends. Trace is held only where the producer fixes
+//	                        it: empty on a refusal that never entered the loop.
+//	                        It is NOT tied to the candidate count, because a
+//	                        candidate refused for too few outcomes appends a
+//	                        visit and no trace entry.
 //	B StreamDigest, ConfigDigest, EntropyDigest, ConsumedInputDigest
 //	                        input bindings and a consumed-prefix attestation.
 //	                        They say WHICH inputs produced this, never what the
@@ -866,16 +883,15 @@ func (s *shapeCheck) finish(m ActionMapping) ActionMapping {
 //	                        is deliberately unread — the evaluation says WHICH
 //	                        word was drawn, never what it was — which is a
 //	                        scoped B inside an otherwise A field. It is not the
-//	                        only scoped entry: the counters, the stop fields,
-//	                        Trace and Visits are all read ONLY when a selection
-//	                        is carried, with ONE exception: the WOULD_ATTEMPT
-//	                        arm reads HasStopPosition and CandidatesConsumed
-//	                        precisely when no selection is carried, which is
-//	                        what NO_CANDIDATE_REACHED exists for. The terminal
-//	                        arms read none of them. On those arms an intrinsic relation does go
-//	                        unused — every candidate iteration appends exactly
-//	                        one visit on every exit path, so len(Visits) equals
-//	                        CandidatesConsumed — and it is unchecked.
+//	                        only scoped entry. The counters, the stop fields,
+//	                        Trace and Visits WERE read only when a selection was
+//	                        carried, which left them unread on every terminal
+//	                        status; the header now reads all of them on every
+//	                        status, and requireCoherentSelection keeps the
+//	                        relations that need an index to point at. The
+//	                        visit-per-iteration relation this entry used to name
+//	                        as unchecked — len(Visits) equals CandidatesConsumed
+//	                        — is one of the header relations.
 //	  The CONTENTS of every non-final entry are B: a candidate refused for too
 //	  few outcomes appends a visit and no trace entry, so no count relation
 //	  against the trace follows from the selection, and reading them would be
@@ -971,8 +987,11 @@ func MapP3bAction(ev predictioneval.OrderedRulesEvaluation) ActionMapping {
 	// That bound is the SUPPLIED TRACE's length, and it is deliberately the
 	// looser of the two available. Every consumed word sits inside the same
 	// work-guarded rule loop, so the reachable maximum is really
-	// MaxOrderedRulesWork -- a quarter of this ceiling, measured at 260,112 on
-	// a traversal driven to its budget. The tighter bound is not asserted here
+	// MaxOrderedRulesWork -- a quarter of this ceiling. The largest value a
+	// traversal can actually reach is 260,112, short of the budget itself
+	// because the last candidate stops mid-rule; that figure is derived from the
+	// loop's arithmetic, not measured by anything in this repository, and is
+	// named here as a derivation. The tighter bound is not asserted here
 	// because it rests on a per-iteration accounting argument rather than on a
 	// single producer assignment, and the cost of being wrong about it is a
 	// refusal of honest output. The looseness is fail-OPEN and is stated rather
@@ -990,7 +1009,7 @@ func MapP3bAction(ev predictioneval.OrderedRulesEvaluation) ActionMapping {
 		"EVALUATION_RAW_WORDS_CONSUMED_OUT_OF_RANGE")
 	// The four cumulative counters, on their own ranges, for the same reason and
 	// found by asking the same question of the rest of the matrix: every one of
-	// them is read ONLY inside requireCoherentSelection, so on a terminal status
+	// them WAS read only inside requireCoherentSelection, so on a terminal status
 	// -- which carries no selection -- and on the DEFAULT half -- where the
 	// detailed-rule arm never runs -- all four went unread while the matrix
 	// classified them load-bearing. Three of the four were still unread after
@@ -1017,11 +1036,12 @@ func MapP3bAction(ev predictioneval.OrderedRulesEvaluation) ActionMapping {
 	// names every failed predicate, frameAction frames that list, and
 	// p3bResultWitness frames the action -- so adding an identifier moves the
 	// witness digest of a stored result whose action was ALREADY illegal. No
-	// legitimate run is affected: the sweep behind these bounds took 4,746
-	// producer evaluations and mapped each one twice, raw and after a JSON
-	// round trip -- 9,492 mappings, no refusal -- so nothing the producer emits
-	// reaches a new identifier. And a stored result is re-evaluated rather than
-	// trusted, which is the property that makes this benign rather than lucky.
+	// legitimate run is affected, and the check that says so lives in this
+	// repository rather than in a review that is not here: every relation added
+	// on this path has a producer-driven control asserting that the shapes
+	// EvaluateOrderedRules really emits still map legal. And a stored result is
+	// re-evaluated rather than trusted, which is the property that makes this
+	// benign rather than lucky.
 	s.require(ev.CandidatesConsumed >= 0 && ev.CandidatesConsumed <= predictioneval.MaxOrderedRulesCandidates,
 		"EVALUATION_CANDIDATES_CONSUMED_OUT_OF_RANGE")
 	s.require(ev.OutcomesConsidered >= 0 &&
@@ -1031,6 +1051,38 @@ func MapP3bAction(ev predictioneval.OrderedRulesEvaluation) ActionMapping {
 		"EVALUATION_RULES_CONSIDERED_OUT_OF_RANGE")
 	s.require(ev.BernoulliEvaluations >= 0 && ev.BernoulliEvaluations <= predictioneval.MaxOrderedRulesWork,
 		"EVALUATION_BERNOULLI_EVALUATIONS_OUT_OF_RANGE")
+
+	// The traversal state, held on EVERY status rather than only where a
+	// selection carries it.
+	//
+	// The stop fields, Trace and Visits were read only inside
+	// requireCoherentSelection, which returns at once when Selected is nil. On
+	// the three terminal statuses they were therefore unread, and a refusal that
+	// declined to read its input could carry a ghost stop, an admitting trace
+	// entry and an ADMITTED visit and still map legal. That is the same class
+	// the counter bounds above closed, one level out: a field the matrix calls
+	// load-bearing that a whole reachable path never reads.
+	//
+	// Three relations, each from one adjacent block of producer assignments at
+	// the top of the candidate loop -- CandidatesConsumed = ci+1,
+	// StoppedAtCandidate, StoppedAtPosition, HasStopPosition = true -- plus the
+	// fact that every one of that loop's exit paths appends exactly one visit.
+	// The package already stakes two identifiers inside requireCoherentSelection
+	// on that same visit-per-iteration accounting, so this adds no new class of
+	// assumption; it only stops scoping it to shapes that carry a selection.
+	//
+	// What is deliberately NOT asserted, because honest output breaks it:
+	// nothing about StoppedAtPosition's SIGN (a scope may declare negative
+	// positions, and a candidate at -99 is legal), and nothing tying Trace to
+	// CandidatesConsumed (a candidate refused for too few outcomes appends a
+	// visit and no trace entry).
+	s.require(len(ev.Visits) == ev.CandidatesConsumed, "VISIT_COUNT_CONTRADICTS_CANDIDATES_CONSUMED")
+	s.require(ev.HasStopPosition == (ev.CandidatesConsumed >= 1),
+		"STOP_POSITION_CONTRADICTS_CANDIDATES_CONSUMED")
+	if !ev.HasStopPosition {
+		s.require(ev.StoppedAtCandidate == "" && ev.StoppedAtPosition == 0,
+			"STOP_FIELDS_WITHOUT_STOP_POSITION")
+	}
 	// Both are closed vocabularies, and the two booleans below are EQUALITY
 	// tests — so a value outside its vocabulary reads as the negative state and
 	// quietly satisfies every `!admitted` and `!stakeKnown` requirement the arms
@@ -1131,6 +1183,11 @@ func MapP3bAction(ev predictioneval.OrderedRulesEvaluation) ActionMapping {
 		s.require(ev.Reason == "", "REASON_ON_NO_ATTEMPT")
 	case predictioneval.StatusUnknownInput:
 		m.Class = ActionUnknownInput
+		// All three sites that write this status sit BELOW the stop block, and
+		// each appends its visit before returning, so reaching any of them
+		// requires being inside an iteration. Unlike NO_ATTEMPT, this status has
+		// no zero-candidate escape -- an empty candidate list never reaches it.
+		s.require(ev.HasStopPosition, "UNKNOWN_INPUT_WITHOUT_STOP_POSITION")
 		s.require(!admitted, "PARTICIPATION_ADMITTED_ON_UNKNOWN_INPUT")
 		s.require(ev.Selected == nil, "SELECTION_ON_UNKNOWN_INPUT")
 		s.require(!stakeKnown, "STAKE_ON_UNKNOWN_INPUT")
@@ -1140,6 +1197,23 @@ func MapP3bAction(ev predictioneval.OrderedRulesEvaluation) ActionMapping {
 		}
 	case predictioneval.StatusRefused:
 		m.Class = ActionRefused
+		// The REASON decides the tier, because the reason is what distinguishes
+		// the two writers. refuse() is called at exactly three sites carrying
+		// exactly two reasons; the other twelve are emitted only before the
+		// candidate loop, from a constructor that builds a fresh result and can
+		// therefore carry no traversal state at all.
+		//
+		// Guarded on the closed vocabulary so an out-of-vocabulary reason is
+		// named once by REFUSAL_REASON_FOREIGN below and not twice here. That
+		// also makes this fail-OPEN on a reason neither branch recognises.
+		switch {
+		case ev.Reason == predictioneval.ReasonWorkBudgetExceeded ||
+			ev.Reason == predictioneval.ReasonAttemptRateOutOfDomain:
+			s.require(ev.HasStopPosition, "MID_TRAVERSAL_REFUSAL_WITHOUT_STOP")
+		case refusalReasons[ev.Reason]:
+			s.require(!ev.HasStopPosition && ev.StoppedAtCandidate == "" && ev.StoppedAtPosition == 0 &&
+				len(ev.Trace) == 0 && len(ev.Visits) == 0, "UNREAD_REFUSAL_CARRIES_TRAVERSAL_STATE")
+		}
 		s.require(!admitted, "PARTICIPATION_ADMITTED_ON_REFUSAL")
 		s.require(ev.Selected == nil, "SELECTION_ON_REFUSAL")
 		s.require(!stakeKnown, "STAKE_ON_REFUSAL")

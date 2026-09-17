@@ -916,7 +916,7 @@ func TestP3bSelectionMustBeIntrinsicallyConsistent(t *testing.T) {
 			// as contradicted as one past it. Nothing else moves: the selection
 			// still names the candidate the trace and the visit admitted on.
 			ev.CandidatesConsumed = 3
-		}, []string{"SELECTION_CONTRADICTS_CANDIDATES_CONSUMED"}},
+		}, []string{"VISIT_COUNT_CONTRADICTS_CANDIDATES_CONSUMED", "SELECTION_CONTRADICTS_CANDIDATES_CONSUMED"}},
 		{"a candidate other than the one stopped on", func(_ *predictioneval.OrderedRulesEvaluation, sel *predictioneval.OrderedRulesSelection) {
 			sel.CandidateIdentity = "cand-forged"
 		}, []string{"SELECTION_CONTRADICTS_STOPPED_CANDIDATE", "SELECTION_CONTRADICTS_ADMITTING_VISIT"}},
@@ -971,7 +971,7 @@ func TestP3bSelectionMustBeIntrinsicallyConsistent(t *testing.T) {
 			// with no visits at all has no admitting visit AND a visit count
 			// that cannot match the candidate the selection names.
 			ev.Visits = nil
-		}, []string{"SELECTION_CONTRADICTS_VISIT_COUNT", "SELECTION_WITHOUT_ADMITTING_VISIT"}},
+		}, []string{"VISIT_COUNT_CONTRADICTS_CANDIDATES_CONSUMED", "SELECTION_CONTRADICTS_VISIT_COUNT", "SELECTION_WITHOUT_ADMITTING_VISIT"}},
 		{"a last visit that admitted nothing", func(ev *predictioneval.OrderedRulesEvaluation, _ *predictioneval.OrderedRulesSelection) {
 			visits := append([]predictioneval.OrderedRulesCandidateVisit(nil), ev.Visits...)
 			visits[len(visits)-1].Verdict = predictioneval.CandidateNoMatch
@@ -993,7 +993,7 @@ func TestP3bSelectionMustBeIntrinsicallyConsistent(t *testing.T) {
 			// but the count can notice it.
 			visits := append([]predictioneval.OrderedRulesCandidateVisit(nil), ev.Visits...)
 			ev.Visits = append(visits, visits[len(visits)-1])
-		}, []string{"SELECTION_CONTRADICTS_VISIT_COUNT"}},
+		}, []string{"VISIT_COUNT_CONTRADICTS_CANDIDATES_CONSUMED", "SELECTION_CONTRADICTS_VISIT_COUNT"}},
 		{"a visit naming a candidate the selection does not", func(ev *predictioneval.OrderedRulesEvaluation, _ *predictioneval.OrderedRulesSelection) {
 			visits := append([]predictioneval.OrderedRulesCandidateVisit(nil), ev.Visits...)
 			visits[len(visits)-1].CandidateIdentity = "visit-forged"
@@ -1046,7 +1046,13 @@ func TestP3bSelectionMustBeIntrinsicallyConsistent(t *testing.T) {
 				ev.HasStopPosition = false
 				ev.StoppedAtPosition = sel.CandidatePosition
 				m := p4offline.MapP3bAction(ev)
-				if m.Legal || !sameStrings(m.Illegality, []string{"SELECTION_WITHOUT_STOP_POSITION"}) {
+				// Clearing the stop also contradicts the traversal state the
+				// producer wrote beside it, which is now named on every status
+				// rather than only where a selection carries it.
+				if m.Legal || !sameStrings(m.Illegality, []string{
+					"STOP_POSITION_CONTRADICTS_CANDIDATES_CONSUMED",
+					"STOP_FIELDS_WITHOUT_STOP_POSITION",
+					"SELECTION_WITHOUT_STOP_POSITION"}) {
 					t.Fatalf("a selection without a stop position must fail closed: %+v", m)
 				}
 			})
@@ -1271,7 +1277,10 @@ func TestP3bSelectionMustBeIntrinsicallyConsistent(t *testing.T) {
 		ev.Selected = nil
 		ev.HasStopPosition = false
 		m := p4offline.MapP3bAction(ev)
-		if m.Legal || !sameStrings(m.Illegality, []string{"NO_SELECTION", "NO_CANDIDATE_REACHED"}) {
+		if m.Legal || !sameStrings(m.Illegality, []string{
+			"STOP_POSITION_CONTRADICTS_CANDIDATES_CONSUMED",
+			"STOP_FIELDS_WITHOUT_STOP_POSITION",
+			"NO_SELECTION", "NO_CANDIDATE_REACHED"}) {
 			t.Fatalf("both contradictions must be named: %+v", m)
 		}
 	})
@@ -1409,7 +1418,8 @@ func TestP3bEvaluationMustNotContradictItsOwnBookkeeping(t *testing.T) {
 	t.Run("a default admission is held to no such count", func(t *testing.T) {
 		// The converse does NOT hold and must not be asserted: detailed rules
 		// that failed on an earlier outcome advance the counter and the default
-		// still admits, so a default admission may carry any count.
+		// still admits, so a default admission may carry any count inside the
+		// range the header bounds every status to.
 		ev := predictioneval.EvaluateOrderedRules(proj.Stream, cfgDefaultOnly("a", 0, 100), trace)
 		if ev.Selected == nil || ev.Selected.Basis != predictioneval.SelectionDefault {
 			t.Fatalf("fixture must admit by default: %+v", ev.Selected)
@@ -1558,6 +1568,24 @@ func TestP3bEvaluationMustNotContradictItsOwnBookkeeping(t *testing.T) {
 			}
 			return ev
 		}
+		midTraversal := func(t *testing.T) predictioneval.OrderedRulesEvaluation {
+			// A mid-traversal refusal: it carries a stop and one visit per
+			// candidate consumed, which is the shape the producer writes when
+			// the work budget stops it. This package's single-candidate
+			// projection cannot reach that budget, so the status/reason pair is
+			// set on traversal state the producer wrote.
+			t.Helper()
+			ev := predictioneval.EvaluateOrderedRules(proj.Stream, cfgDefaultOnly("a", 95, 100), trace)
+			if ev.Status != predictioneval.StatusNoAttemptInSuppliedPrefix || ev.CandidatesConsumed == 0 {
+				t.Fatalf("fixture must have walked candidates: %q/%q %+v", ev.Status, ev.Reason, ev)
+			}
+			ev.Status = predictioneval.StatusRefused
+			ev.Reason = predictioneval.ReasonWorkBudgetExceeded
+			if m := p4offline.MapP3bAction(ev); !m.Legal {
+				t.Fatalf("the untouched mid-traversal shape must stay legal: %+v", m)
+			}
+			return ev
+		}
 		defaultAdmission := func(t *testing.T) predictioneval.OrderedRulesEvaluation {
 			t.Helper()
 			ev := predictioneval.EvaluateOrderedRules(proj.Stream, cfgDefaultOnly("a", 0, 100), trace)
@@ -1567,21 +1595,34 @@ func TestP3bEvaluationMustNotContradictItsOwnBookkeeping(t *testing.T) {
 			}
 			return ev
 		}
+		// The literals above are the contract's numbers. If the contract ever
+		// moves one, this fails here rather than silently re-pinning the guard
+		// to whatever the code now says.
+		if predictioneval.MaxOrderedRulesCandidates != 128 || predictioneval.MaxOrderedRulesOutcomes != 64 ||
+			predictioneval.MaxOrderedRulesWork != 1<<18 {
+			t.Fatalf("the declared ceilings moved: candidates %d, outcomes %d, work %d",
+				predictioneval.MaxOrderedRulesCandidates, predictioneval.MaxOrderedRulesOutcomes,
+				predictioneval.MaxOrderedRulesWork)
+		}
 		for _, c := range []struct {
 			name string
 			set  func(*predictioneval.OrderedRulesEvaluation, int)
 			max  int
 			want string
 		}{
+			// The ceilings are LITERALS, not the constant expressions the code
+			// uses. Written as predictioneval.MaxOrderedRulesCandidates the
+			// expectation would agree with the code by construction, and a
+			// substitution between two constants that happen to share a value
+			// -- Candidates and Rules are both 128 -- would be invisible.
 			{"candidates consumed", func(e *predictioneval.OrderedRulesEvaluation, v int) { e.CandidatesConsumed = v },
-				predictioneval.MaxOrderedRulesCandidates, "EVALUATION_CANDIDATES_CONSUMED_OUT_OF_RANGE"},
+				128, "EVALUATION_CANDIDATES_CONSUMED_OUT_OF_RANGE"},
 			{"outcomes considered", func(e *predictioneval.OrderedRulesEvaluation, v int) { e.OutcomesConsidered = v },
-				predictioneval.MaxOrderedRulesCandidates * predictioneval.MaxOrderedRulesOutcomes,
-				"EVALUATION_OUTCOMES_CONSIDERED_OUT_OF_RANGE"},
+				128 * 64, "EVALUATION_OUTCOMES_CONSIDERED_OUT_OF_RANGE"},
 			{"rules considered", func(e *predictioneval.OrderedRulesEvaluation, v int) { e.RulesConsidered = v },
-				predictioneval.MaxOrderedRulesWork, "EVALUATION_RULES_CONSIDERED_OUT_OF_RANGE"},
+				1 << 18, "EVALUATION_RULES_CONSIDERED_OUT_OF_RANGE"},
 			{"bernoulli evaluations", func(e *predictioneval.OrderedRulesEvaluation, v int) { e.BernoulliEvaluations = v },
-				predictioneval.MaxOrderedRulesWork, "EVALUATION_BERNOULLI_EVALUATIONS_OUT_OF_RANGE"},
+				1 << 18, "EVALUATION_BERNOULLI_EVALUATIONS_OUT_OF_RANGE"},
 		} {
 			t.Run(c.name, func(t *testing.T) {
 				for _, base := range []struct {
@@ -1609,15 +1650,34 @@ func TestP3bEvaluationMustNotContradictItsOwnBookkeeping(t *testing.T) {
 						}
 					})
 				}
-				t.Run("the extremes the producer can write stay legal", func(t *testing.T) {
-					// The false-refusal control, on the fixture that constrains
-					// these counters least, so only the new range can answer.
-					for _, v := range []int{0, c.max} {
-						ev := terminal(t)
-						c.set(&ev, v)
-						if m := p4offline.MapP3bAction(ev); !m.Legal {
-							t.Fatalf("a count of %d is inside the producer's range: %+v", v, m)
-						}
+				t.Run("both ends of the declared range are admitted", func(t *testing.T) {
+					// The control that stops a bound being narrowed, and it is
+					// named for what it does rather than for what an earlier
+					// version claimed. That version asserted "the extremes the
+					// producer can write stay legal" on a PRE-TRAVERSAL refusal,
+					// where the producer writes zero and nothing else -- so its
+					// ceiling half asserted that a shape the producer cannot
+					// write stays legal, which is a gap, not a control.
+					//
+					// The base here is a shape the producer really emits: a
+					// mid-traversal refusal carries a stop and one visit per
+					// candidate consumed. The ceiling case keeps that accounting
+					// true by padding the visits with it, so the only predicate
+					// left to answer is the range itself.
+					zero := terminal(t)
+					c.set(&zero, 0)
+					if m := p4offline.MapP3bAction(zero); !m.Legal {
+						t.Fatalf("zero is inside the producer's range: %+v", m)
+					}
+					atCeiling := midTraversal(t)
+					c.set(&atCeiling, c.max)
+					if c.want == "EVALUATION_CANDIDATES_CONSUMED_OUT_OF_RANGE" {
+						visits := make([]predictioneval.OrderedRulesCandidateVisit, c.max)
+						copy(visits, atCeiling.Visits)
+						atCeiling.Visits = visits
+					}
+					if m := p4offline.MapP3bAction(atCeiling); !m.Legal {
+						t.Fatalf("the declared ceiling %d must be admitted: %+v", c.max, m)
 					}
 				})
 			})
@@ -2155,26 +2215,42 @@ func TestP3bTerminalReasonsTheProducerEmitsStayLegal(t *testing.T) {
 }
 
 // TestRulesetRawDocumentIsCappedBeforeItIsHashed pins the ceiling on the raw
-// ruleset document.
+// ruleset document, from BOTH sides.
 //
 // The only size test was "not empty". A tiny valid config followed by an
-// arbitrarily long run of whitespace decodes cleanly, trims to nothing and
-// satisfies every native rule-count and text ceiling -- so nothing downstream
-// bounds it, while this package pays for the whole buffer twice before the
-// bounded core is reached: once in the full-buffer SHA-256, once in the
+// arbitrarily long whitespace tail decoded cleanly, trimmed to nothing,
+// satisfied every native ceiling, and still cost a full-buffer SHA-256 and a
 // full-buffer trailing scan.
 //
-// The ceiling is DERIVED from the identifier the document declares, and the
-// case that pins why is "a large identifier raises the ceiling with it". A flat
+// THE EXPECTED CEILING IS STATED HERE, as literals, and not read back from the
+// code. An earlier version exposed the code's own rulesetRawCeiling to the test
+// binary and computed the boundary from it, on the rationale that restating the
+// formula would be tautological. That was exactly backwards: a restated formula
+// is an independent expectation that fails when the code's changes, while a
+// shim calling the function under test can never disagree with it. Nothing then
+// failed if the allowance grew to 1<<24 or the sixfold became six hundred --
+// the direction that loses the protection the ceiling exists for.
+//
+// The ceiling is derived from the identifier the document declares. A flat
 // mebibyte was tried first and refused a document the contract admits: ConfigID
-// carries no per-string length bound, the producer says so explicitly and pins
-// identifiers of a mebibyte and more as legal in its own suite. That control is
-// the regression test for over-refusal, which is the worse direction here.
+// carries no per-string length bound, and the producer says so and charges it
+// only against its aggregate budget. "A large identifier raises the ceiling with
+// it" is the regression control for that over-refusal, which is the worse
+// direction here.
 func TestRulesetRawDocumentIsCappedBeforeItIsHashed(t *testing.T) {
+	// The expectation, independent of the implementation: one mebibyte of
+	// structure, plus JSON escaping's worst case of six bytes per identifier
+	// byte. Both numbers come from the contract, not from p3b.go.
+	const allowance = 1 << 20
+	const perIdentifierByte = 6
+	wantCeiling := func(cfg predictioneval.OrderedRulesConfig) int {
+		return allowance + perIdentifierByte*len(cfg.ConfigID)
+	}
+
 	cfg := cfgDefaultOnly("x", 95, 100)
 	base := rulesetFrom(t, cfg)
 	mustVerify(t, base)
-	ceiling := p4offline.RulesetRawCeilingForTest(cfg)
+	ceiling := wantCeiling(cfg)
 
 	rehash := func(raw []byte) p4offline.P3bRuleset {
 		sum := sha256.Sum256(raw)
@@ -2188,16 +2264,16 @@ func TestRulesetRawDocumentIsCappedBeforeItIsHashed(t *testing.T) {
 		return append(raw, []byte(strings.Repeat(" ", to-len(raw)))...)
 	}
 
-	t.Run("a whitespace tail past this ruleset's ceiling is refused", func(t *testing.T) {
+	t.Run("a whitespace tail one byte past the stated ceiling is refused", func(t *testing.T) {
+		// Fails if the allowance or the per-byte factor grows.
 		if _, err := p4offline.VerifyP3bRuleset(rehash(pad(ceiling + 1))); !errors.Is(err, p4offline.ErrRulesetRawSize) {
-			t.Fatalf("want ErrRulesetRawSize, got %v", err)
+			t.Fatalf("want ErrRulesetRawSize at %d bytes, got %v", ceiling+1, err)
 		}
 	})
-	t.Run("a document exactly at the ceiling is admitted", func(t *testing.T) {
-		// The boundary is inclusive, so the largest admitted document is not
-		// refused. This case fails under a `>=` comparison.
+	t.Run("a document at exactly the stated ceiling is admitted", func(t *testing.T) {
+		// Fails if either shrinks, and if the comparison becomes exclusive.
 		if _, err := p4offline.VerifyP3bRuleset(rehash(pad(ceiling))); err != nil {
-			t.Fatalf("a document at the ceiling must be admitted: %v", err)
+			t.Fatalf("a document at %d bytes must be admitted: %v", ceiling, err)
 		}
 	})
 	t.Run("the size is judged before the hash", func(t *testing.T) {
@@ -2217,80 +2293,366 @@ func TestRulesetRawDocumentIsCappedBeforeItIsHashed(t *testing.T) {
 	})
 	t.Run("a large identifier raises the ceiling with it", func(t *testing.T) {
 		// THE REGRESSION CONTROL. ConfigID carries no per-string length bound:
-		// the producer declines to invent one and charges it only against
-		// MaxOrderedRulesAggregateBytes, and its own suite pins identifiers of
-		// a mebibyte and beyond as legal. A ceiling that did not scale refused
-		// exactly this document.
+		// the producer declines to invent one and charges it only against its
+		// aggregate budget, and its own suite pins a mebibyte identifier as
+		// legal. A ceiling that did not scale refused exactly this document.
 		big := strings.Repeat("i", 1<<20)
 		bigCfg := cfgDefaultOnly(big, 95, 100)
 		r := rulesetFrom(t, bigCfg)
-		if len(r.RawBytes) <= p4offline.RulesetRawCeilingForTest(cfg) {
+		if len(r.RawBytes) <= ceiling {
 			t.Fatalf("fixture is not larger than a small ruleset's ceiling (%d bytes)", len(r.RawBytes))
 		}
 		if _, err := p4offline.VerifyP3bRuleset(r); err != nil {
 			t.Fatalf("an identifier the contract admits must not be refused: %v", err)
 		}
-		t.Logf("a %d-byte identifier carries a %d-byte document against a ceiling of %d",
-			len(big), len(r.RawBytes), p4offline.RulesetRawCeilingForTest(bigCfg))
+		t.Logf("a %d-byte identifier carries a %d-byte document against a stated ceiling of %d",
+			len(big), len(r.RawBytes), wantCeiling(bigCfg))
 	})
-	t.Run("the widest verifiable document is admitted", func(t *testing.T) {
-		// Measured, not argued, and verified through the real entry point so
-		// "legal" is established by the contract rather than by this test's
-		// own opinion. Every numeric field is at its WIDEST rendering that
-		// still verifies: the attempt rate stays at 100 because any lower rate
-		// needs a Bernoulli draw, and the digest probe supplies no entropy.
-		widest := cfgWithRule(strings.Repeat("i", predictioneval.MaxOrderedRulesIdentifierBytes),
-			predictioneval.ComparatorGe, 33.333333333333336, 100)
-		widest.Detailed[0].Points = predictioneval.OrderedRulesPoints{MaxValue: 4294967295, RawPercent: 99.99999999999999}
-		widest.Default.Points = predictioneval.OrderedRulesPoints{MaxValue: 4294967295, RawPercent: 99.99999999999999}
+	t.Run("the allowance covers the widest body the contract permits", func(t *testing.T) {
+		// Measured at the real worst case, not at json.Marshal's. The contract
+		// admits any float in range, so the widest rendering is a full-precision
+		// exponent form at 23 bytes -- not the 18-byte value a convenient
+		// fixture produces -- and it admits every key and string token written
+		// as \u escapes, which json.Marshal never emits. An earlier version
+		// measured neither and understated the widest body several-fold.
+		widest := cfgWithRule("x", predictioneval.ComparatorGe, 1.2345678901234567e-308, 100)
+		widest.Detailed[0].Points = predictioneval.OrderedRulesPoints{
+			MaxValue: 4294967295, RawPercent: 1.2345678901234567e-308}
+		widest.Default = predictioneval.OrderedRulesDefault{
+			RawMinPercent: 1.2345678901234567e-308, RawMaxPercent: 1.2345678901234567e-308,
+			Points: predictioneval.OrderedRulesPoints{MaxValue: 4294967295, RawPercent: 1.2345678901234567e-308}}
 		rule := widest.Detailed[0]
 		for len(widest.Detailed) < predictioneval.MaxOrderedRulesRules {
 			widest.Detailed = append(widest.Detailed, rule)
 		}
-		r := rulesetFrom(t, widest)
-		if _, err := p4offline.VerifyP3bRuleset(r); err != nil {
-			t.Fatalf("the widest document the contract admits must verify: %v", err)
-		}
-		t.Logf("widest verifiable document %d bytes against its ceiling of %d",
-			len(r.RawBytes), p4offline.RulesetRawCeilingForTest(widest))
-	})
-	t.Run("the structural allowance covers the widest document that exists", func(t *testing.T) {
-		// The case above stops at a rate of 100 because of the probe, not
-		// because the contract stops there. This one takes every float to full
-		// precision and checks the SIZE alone, so the allowance is not sized
-		// against a document narrower than the contract permits.
-		widest := cfgWithRule("x", predictioneval.ComparatorGe, 33.333333333333336, 66.66666666666667)
-		widest.Detailed[0].Points = predictioneval.OrderedRulesPoints{MaxValue: 4294967295, RawPercent: 99.99999999999999}
-		widest.Default = predictioneval.OrderedRulesDefault{RawMinPercent: 33.333333333333336, RawMaxPercent: 66.66666666666667,
-			Points: predictioneval.OrderedRulesPoints{MaxValue: 4294967295, RawPercent: 99.99999999999999}}
-		rule := widest.Detailed[0]
-		for len(widest.Detailed) < predictioneval.MaxOrderedRulesRules {
-			widest.Detailed = append(widest.Detailed, rule)
-		}
-		raw := mustMarshal(t, widest)
-		// The identifier is charged separately and scales the ceiling, so what
-		// the fixed allowance must cover is everything BUT the identifier.
-		body := len(raw) - len(widest.ConfigID)
-		if body >= p4offline.RulesetStructuralAllowanceForTest {
-			t.Fatalf("the structural allowance %d does not cover a %d-byte body",
-				p4offline.RulesetStructuralAllowanceForTest, body)
-		}
-		t.Logf("widest body %d bytes against an allowance of %d (%.0fx headroom)",
-			body, p4offline.RulesetStructuralAllowanceForTest,
-			float64(p4offline.RulesetStructuralAllowanceForTest)/float64(body))
-		// A document need not arrive compact. A formatter's indentation is the
-		// one legitimate source of bulk the compact measurement above misses,
-		// so it is measured too rather than assumed small.
-		indented, err := json.MarshalIndent(widest, "", "    ")
+		compact := mustMarshal(t, widest)
+		indented, err := json.MarshalIndent(widest, "", "        ")
 		if err != nil {
 			t.Fatal(err)
 		}
-		if ibody := len(indented) - len(widest.ConfigID); ibody >= p4offline.RulesetStructuralAllowanceForTest {
-			t.Fatalf("the allowance %d does not cover a %d-byte indented body",
-				p4offline.RulesetStructuralAllowanceForTest, ibody)
-		} else {
-			t.Logf("indented body %d bytes (%.0fx headroom)", ibody,
-				float64(p4offline.RulesetStructuralAllowanceForTest)/float64(ibody))
+		// Every key and enum token escaped six-fold is the widest a conformant
+		// encoder can write the same document; measured rather than assumed by
+		// charging each of them at its escaped width.
+		escaped := len(indented) + 5*countRulesetTokenBytes(indented)
+		body := escaped - len(widest.ConfigID)
+		if body >= allowance {
+			t.Fatalf("the stated allowance %d does not cover a %d-byte body", allowance, body)
+		}
+		t.Logf("widest body: compact %d, indented %d, indented+escaped %d, against an allowance of %d (%.1fx)",
+			len(compact)-len(widest.ConfigID), len(indented)-len(widest.ConfigID), body,
+			allowance, float64(allowance)/float64(body))
+		// And it must still verify: an allowance that covered only documents the
+		// contract refuses would prove nothing.
+		if _, err := p4offline.VerifyP3bRuleset(rulesetFrom(t, widest)); err != nil {
+			t.Fatalf("the widest document the contract permits must verify: %v", err)
+		}
+	})
+}
+
+// countRulesetTokenBytes counts the bytes inside JSON string tokens, which are
+// the ones a conformant encoder may write as \uXXXX escapes at six bytes each.
+func countRulesetTokenBytes(doc []byte) int {
+	n, inString, escaped := 0, false, false
+	for _, b := range doc {
+		switch {
+		case escaped:
+			escaped = false
+		case b == '\\' && inString:
+			escaped = true
+		case b == '"':
+			inString = !inString
+		case inString:
+			n++
+		}
+	}
+	return n
+}
+
+// TestRulesetIdentityRefusalDoesNotMaterializeSuppliedText pins that the FIRST
+// gate of VerifyP3bRuleset refuses without re-exporting the text it refuses.
+//
+// The gate compared two identifiers and, on a mismatch, built its error by
+// quoting BOTH of them. That happens before the raw-byte ceiling is evaluated
+// and before the native core is ever called, so on that path no bound of any
+// kind governs the work: a 64 MiB identifier cost 476 ms and 235 MB of
+// allocation to report that two strings differ.
+//
+// The expectation is not this package's invention. The native producer found
+// and repaired the same defect in its own gate and wrote the rule down
+// (ordered_rules.go, on a 125 MiB config identifier beside a wrong contract
+// version: "1.23 seconds and allocated 251,662,352 bytes -- to compare two
+// short strings and find them different. It is 3.8 microseconds and nothing
+// now"), which is why orderedRulesUnreadRefusal re-exports none of the
+// supplied text. This gate now follows the same rule: it reports the FAULT and
+// the lengths, never the values.
+func TestRulesetIdentityRefusalDoesNotMaterializeSuppliedText(t *testing.T) {
+	// A mebibyte is far below the sizes that made this expensive, and far above
+	// any bound an error message should carry. The assertion is a fixed budget,
+	// stated here and not read from the code under test.
+	const budget = 1024
+	big := strings.Repeat("a", 1<<20)
+
+	for _, tc := range []struct {
+		name string
+		r    p4offline.P3bRuleset
+	}{
+		{"an over-long config id that does not match the ruleset id", p4offline.P3bRuleset{
+			RulesetID: "wanted-id",
+			Config:    predictioneval.OrderedRulesConfig{ConfigID: big},
+			RawBytes:  []byte("{}"),
+		}},
+		{"an over-long ruleset id that does not match the config id", p4offline.P3bRuleset{
+			RulesetID: big,
+			Config:    predictioneval.OrderedRulesConfig{ConfigID: "wanted-id"},
+			RawBytes:  []byte("{}"),
+		}},
+		{"an over-long ruleset id with no config id at all", p4offline.P3bRuleset{
+			RulesetID: big,
+			RawBytes:  []byte("{}"),
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := p4offline.VerifyP3bRuleset(tc.r)
+			if !errors.Is(err, p4offline.ErrRulesetIdentity) {
+				t.Fatalf("want ErrRulesetIdentity, got %v", err)
+			}
+			if n := len(err.Error()); n > budget {
+				t.Fatalf("the refusal carries %d bytes; a refusal must name the fault, not the input (budget %d)", n, budget)
+			}
+		})
+	}
+
+	t.Run("the refusal still says which side is wrong", func(t *testing.T) {
+		// Declining to quote the values must not cost the diagnosis: the reader
+		// of the error still has to be able to tell the two faults apart.
+		empty := p4offline.P3bRuleset{Config: predictioneval.OrderedRulesConfig{ConfigID: "x"}, RawBytes: []byte("{}")}
+		mismatch := p4offline.P3bRuleset{RulesetID: "a", Config: predictioneval.OrderedRulesConfig{ConfigID: "b"}, RawBytes: []byte("{}")}
+		_, e1 := p4offline.VerifyP3bRuleset(empty)
+		_, e2 := p4offline.VerifyP3bRuleset(mismatch)
+		if e1 == nil || e2 == nil || e1.Error() == e2.Error() {
+			t.Fatalf("an empty identity and a mismatched one must be distinguishable: %v / %v", e1, e2)
+		}
+	})
+}
+
+// TestP3bTerminalStatusesCarryTheTraversalStateTheProducerWrote closes the last
+// open half of the seam-C matrix: five fields classified VALIDATED_LOAD_BEARING
+// that were read only inside requireCoherentSelection, which returns at once
+// when no selection is carried. On NO_ATTEMPT_IN_SUPPLIED_PREFIX, UNKNOWN_INPUT
+// and REFUSED they were therefore unread entirely.
+//
+// Every relation below is the producer's, read off its writers. The four stop
+// and count fields are written in one adjacent block at the top of the candidate
+// loop (CandidatesConsumed = ci+1, StoppedAtCandidate, StoppedAtPosition,
+// HasStopPosition = true), and every one of that loop's exit paths appends
+// exactly one visit -- which is what makes len(Visits) == CandidatesConsumed an
+// invariant on EVERY terminal path, not only some.
+//
+// The REFUSED split is keyed on the REASON, not on a tier name, because the
+// reason is what distinguishes the two writers: refuse() is called at exactly
+// three sites with exactly two reasons (WORK_BUDGET_EXCEEDED twice,
+// ATTEMPT_RATE_OUT_OF_DOMAIN once); every other refusal reason is emitted only
+// before the loop, from a constructor that builds a fresh result. That is three
+// call sites in one producer function, so a future mid-traversal refusal reusing
+// one of the twelve pre-traversal reason names would break this -- named here
+// so the next person to add one sees what their reason choice now means.
+func TestP3bTerminalStatusesCarryTheTraversalStateTheProducerWrote(t *testing.T) {
+	_, fs := selectedFactset(t, nil, nil)
+	proj, err := p4offline.ProjectP3bSingleCandidate(fs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	coords := synthCoords(fs, 0)
+	trace := mustDrawTrace(t, coords, 4)
+
+	native := func(t *testing.T, cfg predictioneval.OrderedRulesConfig, tr predictioneval.SuppliedDrawTrace,
+		want predictioneval.OrderedRulesStatus) predictioneval.OrderedRulesEvaluation {
+		t.Helper()
+		ev := predictioneval.EvaluateOrderedRules(proj.Stream, cfg, tr)
+		if ev.Status != want {
+			t.Fatalf("fixture must be %q, got %q/%q", want, ev.Status, ev.Reason)
+		}
+		if m := p4offline.MapP3bAction(ev); !m.Legal {
+			t.Fatalf("the untouched producer output must stay legal: %+v", m)
+		}
+		return ev
+	}
+	noDefault := predictioneval.OrderedRulesConfig{ConfigID: "nodefault"}
+	noEntropy := predictioneval.SuppliedDrawTrace{RunID: "r",
+		EntropySemanticsVersion: predictioneval.OrderedRulesEntropySemanticsVersion}
+
+	t.Run("an unread refusal cannot carry traversal state", func(t *testing.T) {
+		// Counterexample 1: a refusal that declined to read the input, forged to
+		// carry a ghost stop, an admitting trace entry and an ADMITTED visit.
+		ev := native(t, noDefault, trace, predictioneval.StatusRefused)
+		if ev.HasStopPosition || len(ev.Trace) != 0 || len(ev.Visits) != 0 {
+			t.Fatalf("fixture must refuse before the traversal: %+v", ev)
+		}
+		ev.HasStopPosition = true
+		ev.StoppedAtCandidate = "GHOST-CANDIDATE"
+		ev.StoppedAtPosition = 424242
+		ev.Trace = []predictioneval.OrderedRulesTraceEntry{{Step: predictioneval.TraceStepRuleDraw,
+			Admitted: true, RawWordIndex: 999999}}
+		ev.Visits = []predictioneval.OrderedRulesCandidateVisit{{Verdict: predictioneval.CandidateAdmitted}}
+		if m := p4offline.MapP3bAction(ev); m.Legal ||
+			!containsString(m.Illegality, "UNREAD_REFUSAL_CARRIES_TRAVERSAL_STATE") {
+			t.Fatalf("want UNREAD_REFUSAL_CARRIES_TRAVERSAL_STATE: %+v", m)
+		}
+	})
+
+	t.Run("a visit count that contradicts the candidates consumed", func(t *testing.T) {
+		// Counterexample 2, in the direction the producer can never write.
+		ev := native(t, cfgDefaultOnly("a", 95, 100), trace, predictioneval.StatusNoAttemptInSuppliedPrefix)
+		if ev.CandidatesConsumed == 0 || len(ev.Visits) != ev.CandidatesConsumed {
+			t.Fatalf("fixture must have walked candidates: %+v", ev)
+		}
+		ev.Visits = nil
+		ev.Trace = nil
+		if m := p4offline.MapP3bAction(ev); m.Legal ||
+			!containsString(m.Illegality, "VISIT_COUNT_CONTRADICTS_CANDIDATES_CONSUMED") {
+			t.Fatalf("want VISIT_COUNT_CONTRADICTS_CANDIDATES_CONSUMED: %+v", m)
+		}
+	})
+
+	t.Run("a cleared stop beside candidates the traversal consumed", func(t *testing.T) {
+		ev := native(t, cfgDefaultOnly("a", 95, 100), trace, predictioneval.StatusNoAttemptInSuppliedPrefix)
+		ev.HasStopPosition = false
+		if m := p4offline.MapP3bAction(ev); m.Legal ||
+			!containsString(m.Illegality, "STOP_POSITION_CONTRADICTS_CANDIDATES_CONSUMED") {
+			t.Fatalf("want STOP_POSITION_CONTRADICTS_CANDIDATES_CONSUMED: %+v", m)
+		}
+	})
+
+	t.Run("stop fields beside no stop at all", func(t *testing.T) {
+		// Counterexample 3's other half: the ghost stop on a shape that really
+		// did stop nowhere.
+		ev := native(t, noDefault, trace, predictioneval.StatusRefused)
+		ev.StoppedAtCandidate = "GHOST"
+		ev.StoppedAtPosition = -99
+		if m := p4offline.MapP3bAction(ev); m.Legal ||
+			!containsString(m.Illegality, "STOP_FIELDS_WITHOUT_STOP_POSITION") {
+			t.Fatalf("want STOP_FIELDS_WITHOUT_STOP_POSITION: %+v", m)
+		}
+	})
+
+	t.Run("an unknown input that claims it never entered the loop", func(t *testing.T) {
+		// Counterexample 3: every UNKNOWN_INPUT site is below the stop block, so
+		// the producer sets the stop before any of them can be reached.
+		ev := native(t, cfgWithRule("a", predictioneval.ComparatorGe, 50, 50), noEntropy,
+			predictioneval.StatusUnknownInput)
+		if !ev.HasStopPosition {
+			t.Fatalf("fixture must carry a stop: %+v", ev)
+		}
+		ev.HasStopPosition = false
+		ev.StoppedAtCandidate = ""
+		ev.StoppedAtPosition = 0
+		ev.CandidatesConsumed = 0
+		ev.Visits = nil
+		if m := p4offline.MapP3bAction(ev); m.Legal ||
+			!containsString(m.Illegality, "UNKNOWN_INPUT_WITHOUT_STOP_POSITION") {
+			t.Fatalf("want UNKNOWN_INPUT_WITHOUT_STOP_POSITION: %+v", m)
+		}
+	})
+
+	t.Run("a mid-traversal refusal that claims it never entered the loop", func(t *testing.T) {
+		// WORK_BUDGET_EXCEEDED is the only REACHABLE mid-traversal refusal, and it
+		// carries a stop and a visit per candidate consumed -- driven for real at
+		// 32 candidates x 64 outcomes x 128 rules it yields hasStop=true,
+		// stopCand="c31", stopPos=32, trace=262144, visits=32, cand=32.
+		//
+		// THIS PACKAGE CANNOT REACH IT, and the reason is the protocol, not an
+		// omission: the P3b seam projects exactly ONE candidate, so the most work a
+		// projection can buy is MaxOrderedRulesOutcomes x MaxOrderedRulesRules,
+		// about thirty times under the budget. The status/reason pair is therefore
+		// set here, on top of traversal state the producer wrote, and the control
+		// below pins that the untouched shape is admitted.
+		ev := native(t, cfgDefaultOnly("a", 95, 100), trace, predictioneval.StatusNoAttemptInSuppliedPrefix)
+		ev.Status = predictioneval.StatusRefused
+		ev.Reason = predictioneval.ReasonWorkBudgetExceeded
+		if m := p4offline.MapP3bAction(ev); !m.Legal {
+			t.Fatalf("a mid-traversal refusal carrying its traversal state is admitted: %+v", m)
+		}
+		ev.HasStopPosition = false
+		ev.StoppedAtCandidate = ""
+		ev.StoppedAtPosition = 0
+		ev.CandidatesConsumed = 0
+		ev.Visits = nil
+		if m := p4offline.MapP3bAction(ev); m.Legal ||
+			!containsString(m.Illegality, "MID_TRAVERSAL_REFUSAL_WITHOUT_STOP") {
+			t.Fatalf("want MID_TRAVERSAL_REFUSAL_WITHOUT_STOP: %+v", m)
+		}
+	})
+
+	t.Run("the two tiers are told apart by the reason, not by the shape", func(t *testing.T) {
+		// The discriminator: the SAME traversal state is admitted under a
+		// mid-traversal reason and refused under a pre-traversal one. Without this
+		// the two arms could both be satisfied by a single weaker predicate.
+		ev := native(t, cfgDefaultOnly("a", 95, 100), trace, predictioneval.StatusNoAttemptInSuppliedPrefix)
+		ev.Status = predictioneval.StatusRefused
+		ev.Reason = predictioneval.ReasonWorkBudgetExceeded
+		if m := p4offline.MapP3bAction(ev); !m.Legal {
+			t.Fatalf("mid-traversal reason must admit this shape: %+v", m)
+		}
+		ev.Reason = predictioneval.ReasonConfigDefaultNotSupplied
+		if m := p4offline.MapP3bAction(ev); m.Legal ||
+			!containsString(m.Illegality, "UNREAD_REFUSAL_CARRIES_TRAVERSAL_STATE") {
+			t.Fatalf("a pre-traversal reason must refuse the same shape: %+v", m)
+		}
+	})
+
+	t.Run("more visits than the traversal consumed candidates", func(t *testing.T) {
+		// The other direction of the same accounting. Without it the relation
+		// could be weakened from an equality to a lower bound and nothing on a
+		// terminal status would notice.
+		ev := native(t, cfgDefaultOnly("a", 95, 100), trace, predictioneval.StatusNoAttemptInSuppliedPrefix)
+		ev.Visits = append(append([]predictioneval.OrderedRulesCandidateVisit(nil), ev.Visits...), ev.Visits[0])
+		if m := p4offline.MapP3bAction(ev); m.Legal ||
+			!containsString(m.Illegality, "VISIT_COUNT_CONTRADICTS_CANDIDATES_CONSUMED") {
+			t.Fatalf("want VISIT_COUNT_CONTRADICTS_CANDIDATES_CONSUMED: %+v", m)
+		}
+	})
+
+	t.Run("a refusal reason outside the vocabulary is named once, not twice", func(t *testing.T) {
+		// The tier split is keyed on the reason, so a reason in NEITHER tier
+		// must fall through rather than be judged by the pre-traversal rule.
+		// That is a deliberate fail-open: such a shape is already named by
+		// REFUSAL_REASON_FOREIGN, and naming it again here would report one
+		// contradiction as two. Pinned because nothing else holds the choice.
+		ev := native(t, cfgDefaultOnly("a", 95, 100), trace, predictioneval.StatusNoAttemptInSuppliedPrefix)
+		ev.Status = predictioneval.StatusRefused
+		ev.Reason = "FORGED"
+		m := p4offline.MapP3bAction(ev)
+		if m.Legal || !containsString(m.Illegality, "REFUSAL_REASON_FOREIGN") {
+			t.Fatalf("a foreign refusal reason must fail closed: %+v", m)
+		}
+		if containsString(m.Illegality, "UNREAD_REFUSAL_CARRIES_TRAVERSAL_STATE") {
+			t.Fatalf("a reason in neither tier must not be judged by the pre-traversal rule: %+v", m)
+		}
+	})
+
+	t.Run("every terminal shape the producer really emits stays legal", func(t *testing.T) {
+		// The false-refusal control, and the one that matters most here: these
+		// relations are the easiest place in the package to refuse honest output.
+		for _, tc := range []struct {
+			name  string
+			cfg   predictioneval.OrderedRulesConfig
+			trace predictioneval.SuppliedDrawTrace
+		}{
+			{"no attempt in prefix", cfgDefaultOnly("a", 95, 100), trace},
+			{"entropy exhausted", cfgWithRule("a", predictioneval.ComparatorGe, 50, 50), noEntropy},
+			{"config default not supplied", noDefault, trace},
+			{"config out of domain", cfgWithRule("a", predictioneval.ComparatorGe, 50, 1000), trace},
+			{"entropy semantics mismatch", cfgWithRule("a", predictioneval.ComparatorGe, 50, 100),
+				predictioneval.SuppliedDrawTrace{RunID: "r", EntropySemanticsVersion: "other/v0", Words: trace.Words}},
+			{"a default admission", cfgDefaultOnly("a", 0, 100), trace},
+			{"a detailed-rule admission", cfgWithRule("a", predictioneval.ComparatorGe, 50, 100), trace},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				ev := predictioneval.EvaluateOrderedRules(proj.Stream, tc.cfg, tc.trace)
+				if m := p4offline.MapP3bAction(ev); !m.Legal {
+					t.Fatalf("producer %q/%q must map legal: %+v", ev.Status, ev.Reason, m)
+				}
+			})
 		}
 	})
 }

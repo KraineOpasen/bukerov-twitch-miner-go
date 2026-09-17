@@ -289,11 +289,12 @@ const rulesetNullOK = "detailed"
 
 // rulesetStructuralAllowance is everything a raw ruleset document can hold
 // APART from its identifier: the JSON envelope, the default object, and a full
-// detailed list -- MaxOrderedRulesRules rules, each a fixed-shape object whose
-// widest rendering (every float at full precision, MaxValue at ten digits) is
-// about 200 bytes -- plus room for the whitespace a formatter may insert.
-// TestRulesetRawDocumentIsCappedBeforeItIsHashed builds that widest document
-// and reports its measured size rather than leaving the figure to this comment.
+// detailed list of MaxOrderedRulesRules rules, plus the widening a conformant
+// encoder may apply: indentation, and every key and string token written as a
+// six-byte \u escape. TestRulesetRawDocumentIsCappedBeforeItIsHashed builds that
+// document and reports its size rather than leaving the figure here; at the time
+// of writing it measures about 100 KB, a tenfold margin. It is stated as a
+// margin and not as a bound: the test is what has to keep holding.
 const rulesetStructuralAllowance = 1 << 20
 
 // rulesetRawCeiling is the largest raw document the ruleset this call DECLARES
@@ -304,8 +305,9 @@ const rulesetStructuralAllowance = 1 << 20
 // ConfigID carries NO per-string length bound -- the producer says so and gives
 // the reason ("inventing a limit no other rule applies would refuse input
 // nothing else refuses", ordered_rules.go), charges it only against
-// MaxOrderedRulesAggregateBytes, and pins identifiers of a mebibyte and more as
-// legal in its own suite. A flat mebibyte therefore refused a document the
+// MaxOrderedRulesAggregateBytes, and pins a mebibyte identifier as legal in its
+// own suite. Larger ones are argued there rather than pinned, and the producer
+// says so itself, so this does not claim more than its source does. A flat mebibyte therefore refused a document the
 // contract admits, which is a fail-closed defect worse than the unbounded work
 // it was added to stop. The ceiling now SCALES with the identifier the document
 // declares, so it cannot refuse a large legal one, while a small identifier
@@ -328,14 +330,67 @@ const rulesetStructuralAllowance = 1 << 20
 // 32-bit int would need an identifier past 358 MB, which the caller would have
 // had to materialize first.
 func rulesetRawCeiling(cfg predictioneval.OrderedRulesConfig) int {
-	return rulesetStructuralAllowance + 6*len(cfg.ConfigID)
+	// Capped at the identifier the native core can still digest, so the ceiling
+	// is bounded above by a constant rather than being unbounded in a field the
+	// caller declares. The bound is MaxOrderedRulesAggregateBytes because that
+	// is the ONLY limit that exists on ConfigID anywhere, and it is a RAW-length
+	// one: the producer charges `b.other += len(cfg.ConfigID) + len(d.RunID)`
+	// and compares `other` against the full constant. The sixfold JSON charge
+	// applies to the stream total, not to this field -- "two inputs, two
+	// ceilings" in the producer's own words.
+	//
+	// STATED, because it decides whether this is a repair or a defect: a tighter
+	// absolute cap WOULD refuse honest input. An identifier at the aggregate
+	// bound, written entirely as \u escapes, is a legal 805,306,353-byte
+	// document that verifies; capping the term at anything below
+	// 6*MaxOrderedRulesAggregateBytes refuses it. The sixfold is reachable by
+	// legal input, not slack.
+	//
+	// ALSO STATED: this cap carries no behavioural test. Its whole effect is a
+	// six-byte difference at an identifier one byte past the aggregate bound,
+	// observable only on a document of roughly 806 MB, so no test at a sane cost
+	// can reach it. It is adopted because it costs legal input exactly nothing
+	// and makes the guarantee statable, not because a test proves it.
+	id := len(cfg.ConfigID)
+	if id > predictioneval.MaxOrderedRulesAggregateBytes {
+		id = predictioneval.MaxOrderedRulesAggregateBytes
+	}
+	return rulesetStructuralAllowance + 6*id
+}
+
+// rulesetIdentityFault names the identity fault WITHOUT re-exporting either
+// identifier.
+//
+// The gate that calls it is the first thing VerifyP3bRuleset does, ahead of the
+// raw-byte ceiling and of every native gate, so on this path nothing bounds the
+// work at all. Quoting the two supplied identifiers there cost 476 ms and 235 MB
+// of allocation on a 64 MiB config id -- to report that two strings differ.
+//
+// The native producer found the same defect in its own gate and wrote the rule
+// down: a 125 MiB identifier beside a wrong contract version "cost 1.23 seconds
+// and allocated 251,662,352 bytes -- to compare two short strings and find them
+// different. It is 3.8 microseconds and nothing now" (ordered_rules.go), which
+// is why orderedRulesUnreadRefusal re-exports none of the supplied text. This
+// reports the fault and the LENGTHS, which are O(1) on a string header, and
+// keeps the three faults distinguishable.
+func rulesetIdentityFault(r P3bRuleset) string {
+	switch {
+	case r.RulesetID == "":
+		return "p4offline: ruleset id is empty"
+	case r.Config.ConfigID == "":
+		return "p4offline: config id is empty beside a ruleset id of " +
+			strconv.Itoa(len(r.RulesetID)) + " bytes"
+	default:
+		return "p4offline: ruleset id and config id differ, at " +
+			strconv.Itoa(len(r.RulesetID)) + " and " +
+			strconv.Itoa(len(r.Config.ConfigID)) + " bytes"
+	}
 }
 
 // VerifyP3bRuleset checks every binding of a supplied ruleset.
 func VerifyP3bRuleset(r P3bRuleset) (VerifiedP3bRuleset, error) {
 	if r.RulesetID == "" || r.Config.ConfigID != r.RulesetID {
-		return VerifiedP3bRuleset{}, errors.Join(ErrRulesetIdentity,
-			errors.New("p4offline: ruleset id "+strconv.Quote(r.RulesetID)+", config id "+strconv.Quote(r.Config.ConfigID)))
+		return VerifiedP3bRuleset{}, errors.Join(ErrRulesetIdentity, errors.New(rulesetIdentityFault(r)))
 	}
 	if len(r.RawBytes) == 0 {
 		return VerifiedP3bRuleset{}, errors.Join(ErrRulesetRawHash, errors.New("p4offline: no raw ruleset bytes supplied"))
