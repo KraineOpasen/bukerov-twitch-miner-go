@@ -64,8 +64,11 @@ func (c *canonical) digest() string {
 // refusal message.
 //
 // THE RULE THIS ENFORCES, written down once because it has now been rediscovered
-// FOUR times on this branch -- and stated on the fourth attempt in the only
-// terms that have survived review.
+// SIX times on this branch -- and stated on the third scoping, in the only terms
+// that have survived review. The headline said FOUR and "the fourth attempt"
+// for two rounds after its own body said five and said the scope had been wrong
+// twice; a reader meets this sentence first, so it was the one sentence in the
+// package a claim sweep could least afford to skip, and it skipped it twice.
 //
 // THE RULE: no expression may MATERIALIZE caller-supplied text on a path that
 // has not already bounded that text. Where the text must be spoken about, name
@@ -91,6 +94,18 @@ func (c *canonical) digest() string {
 // UNGATED PATH: a concatenation, a quote, a conversion, a join, an argument
 // expression -- anywhere, gate or not. What matters is whether the bound has
 // already run on the path that reaches it.
+//
+// THE SIXTH INSTANCE DID NOT BREAK THAT WORDING. It broke the way the wording
+// was APPLIED, which is worth separating, because the first five rounds were
+// each a scope that was too narrow and this one was not. It sat at the same
+// call site as the fifth, one gate later: the thunk moved the derivation behind
+// decisionOf's binding gates, and asking "has a bound run on the path that
+// reaches it?" gave the answer "yes, the gates above" -- true, and beside the
+// point, because a LATER check refuses every caller-built result in one string
+// comparison. So the question the rule asks is sharpened rather than rescoped:
+// a materialization must not precede any gate that can refuse WITHOUT it.
+// Measured: 75,527,248 bytes on a 16 MiB ruleset id, 4.50x the input, for a
+// refusal that costs O(1).
 //
 // Measured on a 64 MiB supplied string: 134,234,440 bytes allocated and a
 // 67,108,944-byte error, to report that a string differs from a 20-byte
@@ -119,13 +134,26 @@ func (c *canonical) digest() string {
 //
 // A fourteenth site is repaired under the same rule WITHOUT this helper,
 // because it is not a gate and there is nothing to name: decisionOf takes its
-// derivation as a thunk so the caller's text is never built on the refusing
-// path. That is the fifth instance, and the reason the rule above is scoped to
-// materialization rather than to gates. It is one seam with TWO production
-// callers -- P2CaseResult.Decision and P3bCaseResult.Decision -- and its test
-// drives both, because a repair that lives at three places and is pinned at
-// one leaves the other free to regress in silence. It did: an independent lane
-// reverted the P2 caller alone and the whole suite passed.
+// derivation as a thunk, so the caller's text is not built before the gates
+// ABOVE that thunk. That is the fifth instance, and the reason the rule above
+// is scoped to materialization rather than to gates. It is one seam with TWO
+// production callers -- P2CaseResult.Decision and P3bCaseResult.Decision --
+// and its test drives both, because a repair that lives at three places and is
+// pinned at one leaves the other free to regress in silence. It did: an
+// independent lane reverted the P2 caller alone and the whole suite passed.
+//
+// THE SENTENCE THAT USED TO STAND HERE SAID "never built on the refusing
+// path", and it was FALSE for a whole refusing path -- the underived one. A
+// caller cannot set the unexported witness, so every result built outside this
+// package refuses at the mint check; that check ran AFTER the derivation and
+// after the decision was framed, and three independent probes measured
+// 4,748,224 / 18,903,904 / 75,527,120 bytes for a 1 / 4 / 16 MiB ruleset id, on
+// a 99-byte refusal. That is the SIXTH instance. It is repaired at the seam
+// rather than at the fields: decisionOf takes the mint check as a predicate and
+// runs it below its own gates and above the materialization, so every field
+// feeding either derivation is covered at once -- the ruleset id measured here,
+// and equally RulesetRawSHA256, NativeConfigDigest, the two trace identities
+// and P2's Binding.Digest, none of which any gate bounds either.
 //
 // TestFirstGatesDoNotMaterializeSuppliedText is the registry for the nine
 // reachable through an exported verifier. It names where the other five are

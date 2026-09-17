@@ -3189,6 +3189,97 @@ func TestDecisionDoesNotBuildItsDerivationBeforeItsGates(t *testing.T) {
 		}
 	})
 
+	t.Run("and a result this package did not mint costs nothing to refuse", func(t *testing.T) {
+		// THE SIXTH INSTANCE, at the same call site as the fifth, one gate
+		// later. The thunk stopped the derivation being built before
+		// decisionOf's binding gates; it did not stop it being built before the
+		// check that refuses a result this package never minted. Both methods
+		// used to mint the whole decision -- derivation and canonical witness
+		// framing -- and only then ask whether the result was theirs.
+		//
+		// witness is unexported, so a value built OUTSIDE this package always
+		// refuses, and refuses in one string comparison: derived() is
+		// `witness != "" && ...` and Go short-circuits. An independent sweep
+		// measured 75,527,248 bytes on a 16 MiB ruleset id -- 4.50x the input
+		// -- for a refusal that costs O(1). The binding gate is deliberately
+		// made to PASS here, which is exactly what the sibling case above does
+		// not do: it drives the O(1) binding refusal, so it never reached this.
+		for _, tc := range []struct {
+			name string
+			call func() (p4offline.PolicyDecision, error)
+		}{
+			{"P3b", func() (p4offline.PolicyDecision, error) {
+				return p4offline.P3bCaseResult{
+					Policy:        p4offline.PolicyP3b,
+					FactsetDigest: fs.Digest,
+					RulesetID:     big,
+					Action: p4offline.ActionMapping{
+						Policy: p4offline.PolicyP3b, MapVersion: p4offline.NativeActionMapVersion,
+						Class: p4offline.ActionPolicySkip, Legal: true,
+					},
+					Stake: p4offline.KnownInt64(0),
+				}.Decision(fs)
+			}},
+			{"P2", func() (p4offline.PolicyDecision, error) {
+				var r p4offline.P2CaseResult
+				r.Policy = p4offline.PolicyP2
+				r.FactsetDigest = fs.Digest
+				r.Binding.Digest = big
+				r.Action = p4offline.ActionMapping{
+					Policy: p4offline.PolicyP2, MapVersion: p4offline.NativeActionMapVersion,
+					Class: p4offline.ActionPolicySkip, Legal: true,
+				}
+				r.Stake = p4offline.KnownInt64(0)
+				return r.Decision(fs)
+			}},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				runtime.GC()
+				var before, after runtime.MemStats
+				runtime.ReadMemStats(&before)
+				_, derr := tc.call()
+				runtime.ReadMemStats(&after)
+				allocated := after.TotalAlloc - before.TotalAlloc
+				t.Logf("1 MiB supplied; the refusing call allocated %d bytes", allocated)
+
+				if !errors.Is(derr, p4offline.ErrResultNotDerived) {
+					t.Fatalf("want ErrResultNotDerived, got %v", derr)
+				}
+				if allocated > uint64(len(big))/2 {
+					t.Fatalf("the refusing call allocated %d bytes against a %d-byte supplied field: the decision was minted before the result was checked",
+						allocated, len(big))
+				}
+			})
+		}
+	})
+
+	t.Run("and a binding contradiction is still named before an underived result", func(t *testing.T) {
+		// THE ORDER IS PART OF THE SEAM, and it is what makes the obvious form
+		// of the repair above wrong. Both methods document that a binding
+		// contradiction is named FIRST and an underived result second. A
+		// witness test at the TOP of the method would bound the cost just as
+		// well and would invert this for every caller-built value -- turning
+		// every binding fault on one into ErrResultNotDerived. Nothing pinned
+		// the order before, so that inversion would have passed the suite. The
+		// check therefore sits below the binding gates and above the
+		// materialization, and this case is why.
+		_, derr := p4offline.P3bCaseResult{
+			Policy:        p4offline.PolicyP3b,
+			FactsetDigest: strings.Repeat("ab", 32),
+			Action: p4offline.ActionMapping{
+				Policy: p4offline.PolicyP3b, MapVersion: p4offline.NativeActionMapVersion,
+				Class: p4offline.ActionPolicySkip, Legal: true,
+			},
+			Stake: p4offline.KnownInt64(0),
+		}.Decision(fs)
+		if !errors.Is(derr, p4offline.ErrDecisionBinding) {
+			t.Fatalf("a witness-less result with a foreign digest must be a BINDING fault first: %v", derr)
+		}
+		if errors.Is(derr, p4offline.ErrResultNotDerived) {
+			t.Fatalf("the underived verdict must not pre-empt the binding one: %v", derr)
+		}
+	})
+
 	t.Run("and a decision that passes its gates still carries its derivation", func(t *testing.T) {
 		// The thunk must not cost the derivation itself: a legitimate decision
 		// still names the ruleset and the run it came from.
@@ -3196,8 +3287,19 @@ func TestDecisionDoesNotBuildItsDerivationBeforeItsGates(t *testing.T) {
 		if err != nil {
 			t.Fatalf("the result must bind to its own factset: %v", err)
 		}
-		if !strings.Contains(d.Derivation, "ruleset=") || !strings.Contains(d.Derivation, "run=") {
-			t.Fatalf("the derivation must still name the ruleset and the run: %q", d.Derivation)
+		// BY VALUE, and quoted, not by shape. `Contains(d, "ruleset=")` is true
+		// with or without the quoting, so dropping strconv.Quote from the
+		// ruleset id survived the whole suite while the sibling token on the
+		// same line was killed -- the two halves of one line asymmetrically
+		// covered. The quoting is the delimiter-forgery guard: unquoted, a
+		// ruleset id containing ":run=" renders a derivation another (ruleset,
+		// run) pair could also render, and Derivation is a value the payout
+		// seam compares.
+		if !strings.Contains(d.Derivation, ":ruleset="+strconv.Quote(res.RulesetID)) {
+			t.Fatalf("the derivation must name the ruleset BY VALUE and quoted: %q", d.Derivation)
+		}
+		if !strings.Contains(d.Derivation, ":run="+strconv.Quote(res.Trace.RunID)) {
+			t.Fatalf("the derivation must name the run BY VALUE and quoted: %q", d.Derivation)
 		}
 	})
 }

@@ -371,8 +371,13 @@ func placementEvidenceWitness(p PlacementEvidence) string {
 // stated on suppliedTextExtent -- materialization on a path that has not yet
 // bounded what it is materializing, wherever it sits and whether or not it is
 // a gate.
+//
+// AND THE THUNK ALONE WAS NOT THE WHOLE REPAIR. The sixth instance was the
+// same call site one gate later: see the mint check below. A thunk moves a
+// materialization behind the gates it is written above; it says nothing about
+// the gates it is written below.
 func decisionOf(policy string, fs CommonFactset, resultDigest string, action ActionMapping, choice PolicyChoice,
-	stake Int64Fact, derivation func() string) (PolicyDecision, error) {
+	stake Int64Fact, derivation func() string, minted func() bool) (PolicyDecision, error) {
 	if err := VerifyCommonFactset(fs); err != nil {
 		return PolicyDecision{}, err
 	}
@@ -393,6 +398,24 @@ func decisionOf(policy string, fs CommonFactset, resultDigest string, action Act
 	}
 	if action.Policy != policy || action.MapVersion != NativeActionMapVersion {
 		return PolicyDecision{}, errors.Join(ErrDecisionBinding, errors.New("p4offline: action mapping is not this policy's"))
+	}
+	// THE SIXTH INSTANCE OF THE CLASS WAS HERE, one gate later than the fifth.
+	// The thunk stopped the derivation being built before the gates ABOVE ran;
+	// it did not stop it being built before the check that actually refuses a
+	// caller-built result. Both callers used to mint the whole decision --
+	// derivation and canonical witness framing -- and only then ask whether the
+	// result was theirs at all. A caller cannot set the unexported witness, so
+	// any result built outside this package refuses here for certain, in ONE
+	// string comparison: an independent sweep measured 75,527,248 bytes on a
+	// 16 MiB ruleset id, 4.50x the input, for a refusal that costs O(1).
+	//
+	// The check moves in here rather than to the top of the callers, and the
+	// ORDER is the reason. Both methods document that a binding contradiction
+	// is named FIRST and an underived result second, and a witness test at the
+	// top of the method inverts exactly that for the input this repair is
+	// about. So it sits below the binding gates, above the materialization.
+	if !minted() {
+		return PolicyDecision{}, ErrResultNotDerived
 	}
 	d := PolicyDecision{
 		Policy:         policy,

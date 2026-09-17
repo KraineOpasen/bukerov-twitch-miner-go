@@ -402,6 +402,39 @@ func TestQualityRecordsAreClosedMonotoneAndDetached(t *testing.T) {
 	if p4offline.NewQualityRecord().Merge(q).Quality != p4offline.QualityDescriptiveOnly {
 		t.Fatal("merge takes the lower quality whichever side it is on")
 	}
+	t.Run("merging keeps every reason once, in first-seen order", func(t *testing.T) {
+		// THE PROPERTY THE REPAIR HAD TO PRESERVE. Merge used appendOnce in a
+		// loop, which scans the accumulated list on every call -- O(n*m) in two
+		// slices the caller owns, measured through this exported method at
+		// ~4.6x per 2x input (3.7 ms at 2,000 distinct reasons, 223 ms at
+		// 16,000). It is the fourth superlinear accumulation found on this
+		// branch. The seen-set that replaced it is CPU-only, so reverting it
+		// survives any allocation-ratio assertion and this suite makes none
+		// about wall-clock; what is pinned instead is the ANSWER -- the same
+		// list, deduplicated, in the same order -- exactly as the
+		// manual-signal repair in evidence.go is pinned.
+		var left, right p4offline.QualityRecord
+		left.Quality = p4offline.QualityDescriptiveOnly
+		left.Reasons = []string{"a", "b", "c"}
+		right.Quality = p4offline.QualityDescriptiveOnly
+		right.Reasons = []string{"b", "d", "a", "d", "e"}
+
+		got := left.Merge(right).Reasons
+		want := []string{"a", "b", "c", "d", "e"}
+		if len(got) != len(want) {
+			t.Fatalf("every reason exactly once, in first-seen order: got %v, want %v", got, want)
+		}
+		for i := range want {
+			if got[i] != want[i] {
+				t.Fatalf("every reason exactly once, in first-seen order: got %v, want %v", got, want)
+			}
+		}
+		// And the caller's own slices are untouched: normalised() detaches.
+		if len(left.Reasons) != 3 || len(right.Reasons) != 5 {
+			t.Fatalf("merge must not write through to either operand: %v / %v", left.Reasons, right.Reasons)
+		}
+	})
+
 	t.Run("the zero value and a decoded record are EXCLUDED, not immune", func(t *testing.T) {
 		var zero p4offline.QualityRecord
 		if got := zero.Downgrade(p4offline.QualityExcluded, "x"); got.Quality != p4offline.QualityExcluded ||

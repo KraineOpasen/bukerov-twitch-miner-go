@@ -583,7 +583,7 @@ func TestIncompleteFactsetRefusalIsBoundedInItsOwnInput(t *testing.T) {
 }
 
 // TestFirstGatesDoNotMaterializeSuppliedText is the class test, and it exists
-// because this defect has now been found on this branch FIVE times: at
+// because this defect has now been found on this branch SIX times: at
 // VerifyP3bRuleset's identity gate; then at ValidateDrawTrace's two gates and
 // bindEntropyCoordinates' round gate; then at six more, including
 // VerifyCommonFactset, the first gate on every factset path; then at three MORE
@@ -612,9 +612,14 @@ func TestIncompleteFactsetRefusalIsBoundedInItsOwnInput(t *testing.T) {
 //	ValidateDrawTrace's two gates     TestDrawTraceRefusalDoesNotMaterializeSuppliedText
 //	bindEntropyCoordinates' round     TestEntropyBindingRefusalDoesNotMaterializeTheFactsetRound
 //	Decision's derivation thunk       TestDecisionDoesNotBuildItsDerivationBeforeItsGates
+//	  (BOTH callers -- P2CaseResult.Decision and P3bCaseResult.Decision -- and
+//	  the mint check below them, which is the sixth instance)
 //
 // With the nine rows below that is fourteen sites. canonical.go carries the
-// same inventory beside the rule.
+// same inventory beside the rule. The Decision row used to name one test while
+// that test drove ONE of its two callers; a lane reverted the other and the
+// whole suite passed, so the row promised more than it held. It names what it
+// covers now.
 func TestFirstGatesDoNotMaterializeSuppliedText(t *testing.T) {
 	const budget = 1024
 	big := strings.Repeat("a", 1<<20)

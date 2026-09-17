@@ -916,12 +916,9 @@ func (r P3bCaseResult) Decision(fs CommonFactset) (PolicyDecision, error) {
 		return PolicyP3b + ":ruleset=" + strconv.Quote(r.RulesetID) + ":raw=" + r.RulesetRawSHA256 +
 			":native=" + r.NativeConfigDigest + ":run=" + strconv.Quote(r.Trace.RunID) +
 			":entropy=" + r.Trace.EntropyDigest
-	})
+	}, r.derived)
 	if err != nil {
 		return PolicyDecision{}, err
-	}
-	if !r.derived() {
-		return PolicyDecision{}, ErrResultNotDerived
 	}
 	return d, nil
 }
