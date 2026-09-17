@@ -403,6 +403,28 @@ func VerifyP3bRuleset(r P3bRuleset) (VerifiedP3bRuleset, error) {
 			errors.New("p4offline: "+strconv.Itoa(len(r.RawBytes))+" raw bytes supplied; this ruleset's ceiling is "+
 				strconv.Itoa(ceiling)))
 	}
+	// THE EIGHTH INSTANCE OF THE CLASS, and the same failure mode as the sixth:
+	// repaired at one gate and left at the next. Both of this ruleset's declared
+	// digests are checked for SHAPE by an O(1) test that reads 64 characters and
+	// nothing else -- but the native one used to sit below the full-buffer
+	// SHA-256, the key walk, the decode, the trailing scan and configsEqual. So
+	// a ruleset declaring a 10-byte native digest paid for all of that before
+	// being told its digest is not 64 hex digits. Measured from outside the
+	// package at ConfigID 1/4/16 MiB: 10,485,107 / 41,942,377 / 167,771,494
+	// bytes and 20.3 / 75.8 / 302.3 ms -- exactly 10.00x the declared identity
+	// -- for a 137-byte error. Hoisted: 312 bytes and 179 ns at 16 MiB.
+	//
+	// ONE CONSEQUENCE, a precedence shift rather than a behaviour change, stated
+	// here the way evaluateProjected states its own: a ruleset wrong in BOTH
+	// ways -- a malformed native digest AND bad raw bytes -- now comes back as
+	// ErrRulesetNativeDigest where it used to come back as ErrRulesetRawHash,
+	// ErrRulesetRawDecode or ErrRulesetConfigMismatch. No ruleset moves between
+	// verified and refused; a caller switching on the sentinel sees a different
+	// one for that class.
+	if !isCanonicalHex(r.NativeConfigDigest, 64) {
+		return VerifiedP3bRuleset{}, errors.Join(ErrRulesetNativeDigest,
+			errors.New("p4offline: declared native digest is not 64 lower-case hex digits"))
+	}
 	if !isCanonicalHex(r.RawSHA256, 64) {
 		return VerifiedP3bRuleset{}, errors.Join(ErrRulesetRawHash,
 			errors.New("p4offline: declared raw hash is not 64 lower-case hex digits"))
@@ -426,10 +448,6 @@ func VerifyP3bRuleset(r P3bRuleset) (VerifiedP3bRuleset, error) {
 	}
 	if !configsEqual(decoded, r.Config) {
 		return VerifiedP3bRuleset{}, ErrRulesetConfigMismatch
-	}
-	if !isCanonicalHex(r.NativeConfigDigest, 64) {
-		return VerifiedP3bRuleset{}, errors.Join(ErrRulesetNativeDigest,
-			errors.New("p4offline: declared native digest is not 64 lower-case hex digits"))
 	}
 	// The core's own digest is observable only through an evaluation, so a
 	// tiny fixed probe — two equal outcomes, a zero balance, no entropy — is

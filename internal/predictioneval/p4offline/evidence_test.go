@@ -1726,6 +1726,46 @@ func TestRegistryRefusesOnItsConstantsBeforeItReconciles(t *testing.T) {
 	// Well above anything the two comparisons legitimately need, and orders
 	// below the reconciliation the defect paid for at this n.
 	const budget = 64 * 1024
+
+	t.Run("and a present but wrong digest is judged before the reconciliation", func(t *testing.T) {
+		// THE SAME FUNCTION, ONE GATE LATER, and the reason this subtest exists
+		// is that the repair above stopped where the finding did. Framing the
+		// entries to digest them is O(n) and unavoidable; flattening every claim
+		// and RE-RECONCILING them is a second, independent pass whose product is
+		// thrown away the moment the digest disagrees. Judged at 24,641,243 /
+		// 50,923,867 / 101,334,414 / 203,719,320 bytes for n = 2,000 / 4,000 /
+		// 8,000 / 16,000 -- 100.0% of a VALID verification at every n.
+		//
+		// THE ASSERTION IS A RATIO, NOT THE ABSOLUTE BUDGET ABOVE, and that is
+		// deliberate: registryDigest is legitimately O(n), so this refusal
+		// cannot be free the way the two constant clauses are. What it must not
+		// do is cost as much as verifying the registry outright.
+		bad := valid
+		bad.Digest = strings.Repeat("f", len(valid.Digest))
+		if bad.Digest == valid.Digest {
+			t.Fatal("the fixture digest must differ, or there is no mismatch to judge")
+		}
+
+		refused := measure(bad)
+		runtime.GC()
+		var a, b runtime.MemStats
+		runtime.ReadMemStats(&a)
+		if err := p4offline.VerifySourceRoundRegistry(valid); err != nil {
+			t.Fatalf("the valid registry must still verify: %v", err)
+		}
+		runtime.ReadMemStats(&b)
+		full := b.TotalAlloc - a.TotalAlloc
+		t.Logf("%d claims; refusing a wrong digest allocated %d bytes against %d for a full verification (%.2fx)",
+			n, refused, full, float64(refused)/float64(full))
+
+		if full == 0 {
+			t.Fatal("a full verification must allocate something, or the ratio is meaningless")
+		}
+		if refused*10 > full*7 {
+			t.Fatalf("refusing on a digest cost %d bytes against %d for a full verification: the registry was reconciled before its digest was judged",
+				refused, full)
+		}
+	})
 	for _, tc := range []struct {
 		name string
 		edit func(*p4offline.SourceRoundRegistry)

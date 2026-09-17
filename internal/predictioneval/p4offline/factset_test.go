@@ -583,7 +583,7 @@ func TestIncompleteFactsetRefusalIsBoundedInItsOwnInput(t *testing.T) {
 }
 
 // TestFirstGatesDoNotMaterializeSuppliedText is the class test, and it exists
-// because this defect has now been found on this branch SEVEN times: at
+// because this defect has now been found in EIGHT successive review rounds: at
 // VerifyP3bRuleset's identity gate; then at ValidateDrawTrace's two gates and
 // bindEntropyCoordinates' round gate; then at six more, including
 // VerifyCommonFactset, the first gate on every factset path; then at three MORE
@@ -607,32 +607,45 @@ func TestIncompleteFactsetRefusalIsBoundedInItsOwnInput(t *testing.T) {
 // rows survived a field swap. The extent is the property the repair exists for,
 // so it is the property that is checked.
 //
-// FIVE SITES OF THE CLASS ARE PINNED ELSEWHERE and are named here rather than
-// duplicated, so this registry reports its whole inventory:
+// SIX SITES OF THE CLASS ARE PINNED ELSEWHERE, in the five rows below -- one
+// row covers two gates -- and they are named here rather than duplicated:
 //
 //	VerifyP3bRuleset's identity gate  TestRulesetIdentityRefusalDoesNotMaterializeSuppliedText
 //	ValidateDrawTrace's two gates     TestDrawTraceRefusalDoesNotMaterializeSuppliedText
 //	bindEntropyCoordinates' round     TestEntropyBindingRefusalDoesNotMaterializeTheFactsetRound
 //	Decision's derivation thunk       TestDecisionDoesNotBuildItsDerivationBeforeItsGates
-//	walkRulesetObject's key gate      TestRulesetKeyRefusalsDoNotMaterializeTheSuppliedKey
 //	  (BOTH callers -- P2CaseResult.Decision and P3bCaseResult.Decision -- and
-//	  the mint check below them, which is the sixth instance)
+//	  the mint check below them)
+//	walkRulesetObject's key gate      TestRulesetKeyRefusalsDoNotMaterializeTheSuppliedKey
 //
-// With the nine rows below that is FIFTEEN sites. canonical.go carries the same
-// inventory beside the rule, and both counts are now read off the source by a
-// scan rather than written from memory.
+// With the nine rows below that is FIFTEEN sites: 9 + 6. Every number in this
+// paragraph is from a scan of the source -- 9 table rows, 10 production call
+// sites of suppliedTextExtent, of which one (walkRulesetObject's) needs a raw
+// document and a raised ceiling to reach and so is pinned elsewhere. canonical.go
+// carries the same inventory beside the rule.
+//
+// THE PREVIOUS VERSION OF THIS PARAGRAPH GOT TWO OF THOSE NUMBERS WRONG, in the
+// same edit that claimed they were read off the source by a scan. It said FIVE
+// sites where the rows name six, because a row was added without rescanning;
+// and the new row was inserted ABOVE the indented continuation belonging to the
+// Decision row, so the parenthetical about two callers and a mint check read as
+// if it described walkRulesetObject, which has one caller and no mint check.
+// Claiming a scan is not performing one.
 //
 // WHAT THIS TABLE IS NOT. It is the registry for the sites reachable as a plain
-// first-gate comparison through an exported verifier; it is NOT a proof that
-// the class is enumerated. An earlier version of this comment said it covered
-// every such gate "wherever it sits" and called its inventory whole. That claim
-// was FALSE while walkRulesetObject's key gate sat outside it, and an auditor
-// reading it as an enumeration would have been misled about what is proven. The
-// class has been found seven times; the honest statement is that every site
-// KNOWN to it is listed here or named above, not that no eighth exists. The Decision row used to name one test while
-// that test drove ONE of its two callers; a lane reverted the other and the
-// whole suite passed, so the row promised more than it held. It names what it
-// covers now.
+// first-gate comparison through an exported verifier. It is NOT a proof that the
+// class is enumerated, and no test can be one. An earlier version said it
+// covered every such gate "wherever it sits" and called its inventory whole;
+// that was false while walkRulesetObject's key gate sat outside it, and an
+// auditor reading it as an enumeration would have been misled about what is
+// proven. The class has now been found in EIGHT successive review rounds;
+// canonical.go carries the site counts, because it is where the rule lives and
+// one place should own them. The honest statement is that every site KNOWN to
+// this branch is listed here or named above -- not that no further one exists.
+//
+// The Decision row used to name one test while that test drove ONE of its two
+// callers; a lane reverted the other and the whole suite passed, so the row
+// promised more than it held. It names what it covers now.
 func TestFirstGatesDoNotMaterializeSuppliedText(t *testing.T) {
 	const budget = 1024
 	big := strings.Repeat("a", 1<<20)

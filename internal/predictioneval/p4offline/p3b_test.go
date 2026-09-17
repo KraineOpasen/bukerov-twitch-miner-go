@@ -2915,7 +2915,71 @@ func TestEntropyBindingRefusalDoesNotMaterializeTheFactsetRound(t *testing.T) {
 // key token to compare it at all, so a large key costs a large decode however
 // the refusal is worded; what the repair removes is re-exporting that key into
 // the error, which is the part with no bound and no purpose. Judged: 9.50x ->
-// 5.00x allocation, 1,048,734 -> 175 bytes of error.
+// 5.00x allocation, and 1,048,734 -> 225 bytes of error. (An earlier version of
+// this line said 175, which is the figure the report that raised the finding
+// quoted rather than the figure this test logs. The test prints its own: run it
+// with -v and it says `error is 225 bytes`.)
+// TestNativeDigestShapeIsJudgedBeforeTheDocumentIsRead is the EIGHTH round's
+// instance, and it is the same failure mode as the sixth: the repair stopped at
+// the gate that was reported.
+//
+// Both digests a ruleset declares are checked for SHAPE by an O(1) test that
+// reads 64 characters. The RAW one is checked above the hash, correctly. The
+// NATIVE one used to sit below the full-buffer SHA-256, the key walk, the
+// decode, the trailing scan and configsEqual -- so a ruleset declaring a
+// 10-byte native digest paid for every one of those before being told its
+// digest is not 64 hex digits. Measured from outside the package at ConfigID
+// 1/4/16 MiB: 10,485,107 / 41,942,377 / 167,771,494 bytes and 20.3 / 75.8 /
+// 302.3 ms, exactly 10.00x the declared identity, for a 137-byte error.
+//
+// The assertion is an allocation ratio against the document the caller supplied,
+// never wall-clock.
+func TestNativeDigestShapeIsJudgedBeforeTheDocumentIsRead(t *testing.T) {
+	big := strings.Repeat("c", 1<<20)
+	rs := rulesetFrom(t, cfgDefaultOnly(big, 0, 1))
+	supplied := len(rs.RawBytes)
+	rs.NativeConfigDigest = "not-64-lower-case-hex"
+
+	runtime.GC()
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	_, err := p4offline.VerifyP3bRuleset(rs)
+	runtime.ReadMemStats(&after)
+	allocated := after.TotalAlloc - before.TotalAlloc
+	t.Logf("supplied a %d-byte document; the refusing call allocated %d bytes", supplied, allocated)
+
+	if !errors.Is(err, p4offline.ErrRulesetNativeDigest) {
+		t.Fatalf("a malformed native digest must be refused as one, got %v", err)
+	}
+	if allocated > uint64(supplied)/2 {
+		t.Fatalf("the refusing call allocated %d bytes against a %d-byte document: the document was read before the digest's shape was judged",
+			allocated, supplied)
+	}
+
+	t.Run("and the precedence shift it causes is the stated one", func(t *testing.T) {
+		// A ruleset wrong in BOTH ways now reports the native-digest fault
+		// where it used to report a raw-bytes one. No ruleset moves between
+		// verified and refused; this pins which sentinel a caller sees, so the
+		// shift cannot happen again silently.
+		both := rulesetFrom(t, cfgDefaultOnly("c1", 0, 1))
+		both.RawSHA256 = strings.Repeat("0", 64)
+		both.NativeConfigDigest = "not-64-lower-case-hex"
+		_, err := p4offline.VerifyP3bRuleset(both)
+		if !errors.Is(err, p4offline.ErrRulesetNativeDigest) {
+			t.Fatalf("the native-digest shape fault is named first now: %v", err)
+		}
+		if errors.Is(err, p4offline.ErrRulesetRawHash) {
+			t.Fatalf("the raw-hash fault must no longer pre-empt it: %v", err)
+		}
+	})
+
+	t.Run("and a legitimate ruleset is still verified", func(t *testing.T) {
+		if _, err := p4offline.VerifyP3bRuleset(rulesetFrom(t, cfgDefaultOnly("c1", 0, 1))); err != nil {
+			t.Fatalf("a legitimate ruleset must still verify: %v", err)
+		}
+	})
+}
+
 func TestRulesetKeyRefusalsDoNotMaterializeTheSuppliedKey(t *testing.T) {
 	const budget = 1024
 	big := strings.Repeat("k", 1<<20)
@@ -2931,6 +2995,14 @@ func TestRulesetKeyRefusalsDoNotMaterializeTheSuppliedKey(t *testing.T) {
 			RawBytes:  raw,
 			RawSHA256: hex.EncodeToString(sum[:]),
 			Config:    predictioneval.OrderedRulesConfig{ConfigID: big},
+			// SHAPE-VALID, DELIBERATELY, and this line is a receipt rather than
+			// boilerplate. The native-digest SHAPE gate was hoisted above the
+			// hash to close the eighth instance of the refusal-cost class, and
+			// this fixture used to leave the field empty -- so after the hoist
+			// both rows below refused one gate EARLIER and never reached the key
+			// walk they exist to test. The value is wrong on purpose; it only
+			// has to be 64 lower-case hex digits to get past the shape gate.
+			NativeConfigDigest: strings.Repeat("0", 64),
 		}
 	}
 

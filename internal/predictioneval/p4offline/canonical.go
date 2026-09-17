@@ -64,8 +64,8 @@ func (c *canonical) digest() string {
 // refusal message.
 //
 // THE RULE THIS ENFORCES, written down once because it has now been rediscovered
-// SEVEN times on this branch -- and stated on the third scoping, in the only
-// terms that have survived review. The headline said FOUR and "the fourth
+// EIGHT successive review rounds on this branch -- and stated on the third
+// scoping, in the only terms that have survived review. The headline said FOUR and "the fourth
 // attempt" for two rounds after its own body said five and said the scope had
 // been wrong twice; a reader meets this sentence first, so it was the one
 // sentence in the package a claim sweep could least afford to skip, and it
@@ -108,6 +108,27 @@ func (c *canonical) digest() string {
 // Measured: 75,527,248 bytes on a 16 MiB ruleset id, 4.50x the input, for a
 // refusal that costs O(1).
 //
+// THE EIGHTH ROUND FOUND TWO MORE, BOTH OF THE SECOND KIND, and both in code
+// this branch had repaired one gate earlier -- which is now the single most
+// common way an instance survives: the repair stops at the gate that was
+// reported. VerifyP3bRuleset checked its declared NATIVE digest for shape, an
+// O(1) test of 64 characters, BELOW the full-buffer SHA-256, the key walk, the
+// decode, the trailing scan and configsEqual: 167,771,494 bytes and 302 ms at a
+// 16 MiB declared identity, exactly 10.00x it, for a 137-byte error; 312 bytes
+// and 179 ns hoisted. And VerifySourceRoundRegistry -- repaired one round
+// earlier for its two CONSTANT clauses -- still flattened and re-reconciled
+// every claim above its DIGEST comparison: 203,719,320 bytes and 192.8 ms at
+// 16,000 claims, 100.0% of the cost of a valid verification, to refuse on 64
+// characters.
+//
+// THE DISCRIMINATOR, which an independent judge supplied by clearing a site
+// this rule would otherwise have condemned: ask whether the product of the
+// materialization is DISCARDED on the refusing path. At both sites above it is.
+// At AssessDenominatorMembership the re-derived quality record costs the same
+// 100% of its own computation on a refusal -- but that record IS the answer the
+// refusal returns, which its own doc makes the contract. Work that the refusal
+// consumes is not this class; work the refusal throws away is.
+//
 // THE SEVENTH WAS CLEARED BY NAME BY A SWEEP, which is a failure mode worth
 // recording separately from a scope being too narrow. walkRulesetObject's
 // unknown-key gate re-exported the caller's JSON key; a sweep declared it
@@ -141,10 +162,16 @@ func (c *canonical) digest() string {
 // contract-spelling check one line below, and a review that read the two arms
 // as the same defect was wrong about which one the caller controls.
 //
-// THE INVENTORY, counted once so the next reader does not have to re-derive it.
-// The counts below are read off the source by a scan, not written from memory,
-// because four consecutive rounds each found one of them wrong. FOURTEEN sites
-// are repaired under this rule:
+// THE INVENTORY, counted once so the next reader does not have to re-derive it,
+// and split by which half of the rule each site is under. Five consecutive
+// rounds each found one of these counts wrong, so they are read off the source
+// by a scan -- and the round after the FIRST time that sentence appeared, two of
+// them were wrong again, because the sentence was written and the scan was not
+// run. It is run now: 10 production call sites of suppliedTextExtent, 9 rows in
+// the class table.
+//
+// FOURTEEN sites are repaired under the TEXT half -- do not materialize
+// caller-supplied text on a path that has not bounded it:
 //
 //	4 predate this helper and have their own tests --
 //	    VerifyP3bRuleset's identity gate (rulesetIdentityFault),
@@ -159,7 +186,14 @@ func (c *canonical) digest() string {
 //	    1 in decisionOf,
 //	    1 in walkRulesetObject's unknown-key gate.
 //
-// A fifteenth site is repaired under the same rule WITHOUT this helper,
+// FIVE sites are repaired under the WORK half -- do not do work above a gate
+// that can refuse without it, when the refusing path throws that work away:
+// decisionOf's mint check (one seam, both Decision callers),
+// VerifySourceRoundRegistry's two constant clauses and, one round later, its
+// digest comparison, evaluateProjected's word-array copy above the two identity
+// gates, and VerifyP3bRuleset's native-digest shape gate.
+//
+// A fifteenth text site is repaired under the same rule WITHOUT this helper,
 // because it is not a gate and there is nothing to name: decisionOf takes its
 // derivation as a thunk, so the caller's text is not built before the gates
 // ABOVE that thunk. That is the fifth instance, and the reason the rule above
