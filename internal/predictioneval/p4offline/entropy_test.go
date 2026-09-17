@@ -406,13 +406,25 @@ func TestEntropyIdentitiesMustBeEncodable(t *testing.T) {
 			}
 		})
 	}
-	// The false-refusal control: multi-byte UTF-8 is legitimate and stays
-	// accepted. The oracle vectors in this file already depend on it.
+	// The false-refusal control, over EVERY field the guard touches and BOTH
+	// entry points -- an earlier version varied only the dataset id through
+	// only the MAC, which left two of the three guarded fields with no
+	// legitimate-input case at all. Multi-byte UTF-8 is legitimate: the oracle
+	// vectors in this file already depend on it.
 	for _, id := range []string{"датасет", "データ", "éte", "🎲"} {
-		coords := good
-		coords.DatasetID = id
-		if _, err := p4offline.EntropyMAC(coords, 0); err != nil {
-			t.Fatalf("valid multi-byte identity %q must stay accepted: %v", id, err)
+		for name, set := range map[string]func(*p4offline.EntropyCoordinates){
+			"dataset id":            func(c *p4offline.EntropyCoordinates) { c.DatasetID = id },
+			"dataset version":       func(c *p4offline.EntropyCoordinates) { c.DatasetVersion = id },
+			"paired opportunity id": func(c *p4offline.EntropyCoordinates) { c.PairedOpportunityID = id },
+		} {
+			coords := good
+			set(&coords)
+			if _, err := p4offline.EntropyMAC(coords, 0); err != nil {
+				t.Fatalf("valid multi-byte %s %q must stay accepted by the MAC: %v", name, id, err)
+			}
+			if _, err := p4offline.GenerateEntropyWords(coords, 1); err != nil {
+				t.Fatalf("valid multi-byte %s %q must stay accepted by the drawing path: %v", name, id, err)
+			}
 		}
 	}
 }

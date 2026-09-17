@@ -1528,6 +1528,101 @@ func TestP3bEvaluationMustNotContradictItsOwnBookkeeping(t *testing.T) {
 			})
 		}
 	})
+	t.Run("every cumulative counter is bounded on its own range", func(t *testing.T) {
+		// The same defect as the consumed-word counter below, in its three
+		// siblings, found only because that repair prompted the question
+		// "which OTHER class-A field is read on some paths and not others?".
+		// All four are read exclusively inside requireCoherentSelection, so on
+		// every terminal status -- which carries no selection -- and on the
+		// DEFAULT half -- where the detailed-rule arm never runs -- they went
+		// entirely unread while the matrix classified them load-bearing.
+		//
+		// Every ceiling is the producer's own, read off the writer:
+		//   CandidatesConsumed  = ci+1 over a candidate list the input gate
+		//                         refuses past MaxOrderedRulesCandidates.
+		//   OutcomesConsidered  one per outcome of one candidate, and the same
+		//                         gate refuses any candidate past
+		//                         MaxOrderedRulesOutcomes, so the product bounds it.
+		//   RulesConsidered     incremented immediately AFTER the work++ that
+		//                         refuses past MaxOrderedRulesWork.
+		//   BernoulliEvaluations in that same work-guarded rule loop.
+		terminal := func(t *testing.T) predictioneval.OrderedRulesEvaluation {
+			t.Helper()
+			ev := predictioneval.EvaluateOrderedRules(proj.Stream,
+				predictioneval.OrderedRulesConfig{ConfigID: "nodefault"}, trace)
+			if ev.Status != predictioneval.StatusRefused || ev.Selected != nil {
+				t.Fatalf("fixture must refuse without a selection: %q/%q", ev.Status, ev.Reason)
+			}
+			if m := p4offline.MapP3bAction(ev); !m.Legal {
+				t.Fatalf("the untouched refusal must stay legal: %+v", m)
+			}
+			return ev
+		}
+		defaultAdmission := func(t *testing.T) predictioneval.OrderedRulesEvaluation {
+			t.Helper()
+			ev := predictioneval.EvaluateOrderedRules(proj.Stream, cfgDefaultOnly("a", 0, 100), trace)
+			if ev.Status != predictioneval.StatusWouldAttempt || ev.Selected == nil ||
+				ev.Selected.Basis != predictioneval.SelectionDefault {
+				t.Fatalf("fixture must admit by default: %q/%q", ev.Status, ev.Reason)
+			}
+			return ev
+		}
+		for _, c := range []struct {
+			name string
+			set  func(*predictioneval.OrderedRulesEvaluation, int)
+			max  int
+			want string
+		}{
+			{"candidates consumed", func(e *predictioneval.OrderedRulesEvaluation, v int) { e.CandidatesConsumed = v },
+				predictioneval.MaxOrderedRulesCandidates, "EVALUATION_CANDIDATES_CONSUMED_OUT_OF_RANGE"},
+			{"outcomes considered", func(e *predictioneval.OrderedRulesEvaluation, v int) { e.OutcomesConsidered = v },
+				predictioneval.MaxOrderedRulesCandidates * predictioneval.MaxOrderedRulesOutcomes,
+				"EVALUATION_OUTCOMES_CONSIDERED_OUT_OF_RANGE"},
+			{"rules considered", func(e *predictioneval.OrderedRulesEvaluation, v int) { e.RulesConsidered = v },
+				predictioneval.MaxOrderedRulesWork, "EVALUATION_RULES_CONSIDERED_OUT_OF_RANGE"},
+			{"bernoulli evaluations", func(e *predictioneval.OrderedRulesEvaluation, v int) { e.BernoulliEvaluations = v },
+				predictioneval.MaxOrderedRulesWork, "EVALUATION_BERNOULLI_EVALUATIONS_OUT_OF_RANGE"},
+		} {
+			t.Run(c.name, func(t *testing.T) {
+				for _, base := range []struct {
+					name string
+					make func(*testing.T) predictioneval.OrderedRulesEvaluation
+				}{
+					{"on a terminal status", terminal},
+					{"on a default admission", defaultAdmission},
+				} {
+					t.Run(base.name, func(t *testing.T) {
+						for _, bad := range []struct {
+							name string
+							v    int
+						}{
+							{"negative", -1},
+							{"past its ceiling", c.max + 1},
+						} {
+							t.Run(bad.name, func(t *testing.T) {
+								ev := base.make(t)
+								c.set(&ev, bad.v)
+								if m := p4offline.MapP3bAction(ev); m.Legal || !containsString(m.Illegality, c.want) {
+									t.Fatalf("want %s: %+v", c.want, m)
+								}
+							})
+						}
+					})
+				}
+				t.Run("the extremes the producer can write stay legal", func(t *testing.T) {
+					// The false-refusal control, on the fixture that constrains
+					// these counters least, so only the new range can answer.
+					for _, v := range []int{0, c.max} {
+						ev := terminal(t)
+						c.set(&ev, v)
+						if m := p4offline.MapP3bAction(ev); !m.Legal {
+							t.Fatalf("a count of %d is inside the producer's range: %+v", v, m)
+						}
+					}
+				})
+			})
+		}
+	})
 	t.Run("the consumed-word counter is bounded on its own", func(t *testing.T) {
 		// The counter was read ONLY as the second bound on the admitting word
 		// index, inside `if last.RawWordIndex >= 0`. Every admission whose final
@@ -1540,8 +1635,9 @@ func TestP3bEvaluationMustNotContradictItsOwnBookkeeping(t *testing.T) {
 		// incremented, never passes len(words), and a trace longer than
 		// MaxOrderedRulesDrawWords is refused before the traversal. So both
 		// shapes below are producer-impossible, and the bound holds on EVERY
-		// status, not only on an admission -- the refusal paths write the counter
-		// from the same cursor.
+		// status, not only on an admission. The terminal case below refuses
+		// PRE-traversal, where the counter is never assigned at all and carries
+		// Go's zero; only the mid-traversal refusals write it from the cursor.
 		for _, tc := range []struct {
 			name  string
 			count int
@@ -2058,20 +2154,27 @@ func TestP3bTerminalReasonsTheProducerEmitsStayLegal(t *testing.T) {
 	t.Logf("reached %d distinct producer status/reason pairs: %v", len(reached), reached)
 }
 
-// TestRulesetRawDocumentIsCappedBeforeItIsHashed pins the declared ceiling on
-// the raw ruleset document.
+// TestRulesetRawDocumentIsCappedBeforeItIsHashed pins the ceiling on the raw
+// ruleset document.
 //
 // The only size test was "not empty". A tiny valid config followed by an
-// arbitrarily long run of whitespace decodes cleanly, trims to nothing, and
+// arbitrarily long run of whitespace decodes cleanly, trims to nothing and
 // satisfies every native rule-count and text ceiling -- so nothing downstream
 // bounds it, while this package pays for the whole buffer twice before the
 // bounded core is reached: once in the full-buffer SHA-256, once in the
-// full-buffer trailing scan. This package verifies SUPPLIED artifacts, so that
-// is a resource lever a supplier controls, and it is refused by size first.
+// full-buffer trailing scan.
+//
+// The ceiling is DERIVED from the identifier the document declares, and the
+// case that pins why is "a large identifier raises the ceiling with it". A flat
+// mebibyte was tried first and refused a document the contract admits: ConfigID
+// carries no per-string length bound, the producer says so explicitly and pins
+// identifiers of a mebibyte and more as legal in its own suite. That control is
+// the regression test for over-refusal, which is the worse direction here.
 func TestRulesetRawDocumentIsCappedBeforeItIsHashed(t *testing.T) {
 	cfg := cfgDefaultOnly("x", 95, 100)
 	base := rulesetFrom(t, cfg)
 	mustVerify(t, base)
+	ceiling := p4offline.RulesetRawCeilingForTest(cfg)
 
 	rehash := func(raw []byte) p4offline.P3bRuleset {
 		sum := sha256.Sum256(raw)
@@ -2085,35 +2188,109 @@ func TestRulesetRawDocumentIsCappedBeforeItIsHashed(t *testing.T) {
 		return append(raw, []byte(strings.Repeat(" ", to-len(raw)))...)
 	}
 
-	t.Run("a document past the ceiling is refused", func(t *testing.T) {
-		if _, err := p4offline.VerifyP3bRuleset(rehash(pad(p4offline.MaxRulesetRawBytes + 1))); !errors.Is(err, p4offline.ErrRulesetRawSize) {
+	t.Run("a whitespace tail past this ruleset's ceiling is refused", func(t *testing.T) {
+		if _, err := p4offline.VerifyP3bRuleset(rehash(pad(ceiling + 1))); !errors.Is(err, p4offline.ErrRulesetRawSize) {
 			t.Fatalf("want ErrRulesetRawSize, got %v", err)
 		}
 	})
 	t.Run("a document exactly at the ceiling is admitted", func(t *testing.T) {
-		// The false-refusal control on the boundary itself: the ceiling is
-		// inclusive, so the largest admitted document is not refused.
-		if _, err := p4offline.VerifyP3bRuleset(rehash(pad(p4offline.MaxRulesetRawBytes))); err != nil {
+		// The boundary is inclusive, so the largest admitted document is not
+		// refused. This case fails under a `>=` comparison.
+		if _, err := p4offline.VerifyP3bRuleset(rehash(pad(ceiling))); err != nil {
 			t.Fatalf("a document at the ceiling must be admitted: %v", err)
 		}
 	})
-	t.Run("the ceiling leaves room for the largest document the contract allows", func(t *testing.T) {
-		// A ceiling below what the contract can legitimately carry would be a
-		// fail-closed defect of its own, so the headroom is measured, not
-		// asserted in prose. The widest legal document is a full detailed
-		// list beside the longest identifier the native core admits.
+	t.Run("the size is judged before the hash", func(t *testing.T) {
+		// Without this the ordering is only claimed: every other case rehashes
+		// correctly, so all of them would pass identically with the size test
+		// moved below the SHA-256. An oversized document carrying a DELIBERATELY
+		// WRONG hash must report the size, because the hash is never spent.
+		r := rehash(pad(ceiling + 1))
+		r.RawSHA256 = strings.Repeat("0", 64)
+		_, err := p4offline.VerifyP3bRuleset(r)
+		if !errors.Is(err, p4offline.ErrRulesetRawSize) {
+			t.Fatalf("want ErrRulesetRawSize, got %v", err)
+		}
+		if errors.Is(err, p4offline.ErrRulesetRawHash) {
+			t.Fatalf("the hash was spent on bytes the size already refused: %v", err)
+		}
+	})
+	t.Run("a large identifier raises the ceiling with it", func(t *testing.T) {
+		// THE REGRESSION CONTROL. ConfigID carries no per-string length bound:
+		// the producer declines to invent one and charges it only against
+		// MaxOrderedRulesAggregateBytes, and its own suite pins identifiers of
+		// a mebibyte and beyond as legal. A ceiling that did not scale refused
+		// exactly this document.
+		big := strings.Repeat("i", 1<<20)
+		bigCfg := cfgDefaultOnly(big, 95, 100)
+		r := rulesetFrom(t, bigCfg)
+		if len(r.RawBytes) <= p4offline.RulesetRawCeilingForTest(cfg) {
+			t.Fatalf("fixture is not larger than a small ruleset's ceiling (%d bytes)", len(r.RawBytes))
+		}
+		if _, err := p4offline.VerifyP3bRuleset(r); err != nil {
+			t.Fatalf("an identifier the contract admits must not be refused: %v", err)
+		}
+		t.Logf("a %d-byte identifier carries a %d-byte document against a ceiling of %d",
+			len(big), len(r.RawBytes), p4offline.RulesetRawCeilingForTest(bigCfg))
+	})
+	t.Run("the widest verifiable document is admitted", func(t *testing.T) {
+		// Measured, not argued, and verified through the real entry point so
+		// "legal" is established by the contract rather than by this test's
+		// own opinion. Every numeric field is at its WIDEST rendering that
+		// still verifies: the attempt rate stays at 100 because any lower rate
+		// needs a Bernoulli draw, and the digest probe supplies no entropy.
 		widest := cfgWithRule(strings.Repeat("i", predictioneval.MaxOrderedRulesIdentifierBytes),
-			predictioneval.ComparatorGe, 50, 100)
+			predictioneval.ComparatorGe, 33.333333333333336, 100)
+		widest.Detailed[0].Points = predictioneval.OrderedRulesPoints{MaxValue: 4294967295, RawPercent: 99.99999999999999}
+		widest.Default.Points = predictioneval.OrderedRulesPoints{MaxValue: 4294967295, RawPercent: 99.99999999999999}
+		rule := widest.Detailed[0]
+		for len(widest.Detailed) < predictioneval.MaxOrderedRulesRules {
+			widest.Detailed = append(widest.Detailed, rule)
+		}
+		r := rulesetFrom(t, widest)
+		if _, err := p4offline.VerifyP3bRuleset(r); err != nil {
+			t.Fatalf("the widest document the contract admits must verify: %v", err)
+		}
+		t.Logf("widest verifiable document %d bytes against its ceiling of %d",
+			len(r.RawBytes), p4offline.RulesetRawCeilingForTest(widest))
+	})
+	t.Run("the structural allowance covers the widest document that exists", func(t *testing.T) {
+		// The case above stops at a rate of 100 because of the probe, not
+		// because the contract stops there. This one takes every float to full
+		// precision and checks the SIZE alone, so the allowance is not sized
+		// against a document narrower than the contract permits.
+		widest := cfgWithRule("x", predictioneval.ComparatorGe, 33.333333333333336, 66.66666666666667)
+		widest.Detailed[0].Points = predictioneval.OrderedRulesPoints{MaxValue: 4294967295, RawPercent: 99.99999999999999}
+		widest.Default = predictioneval.OrderedRulesDefault{RawMinPercent: 33.333333333333336, RawMaxPercent: 66.66666666666667,
+			Points: predictioneval.OrderedRulesPoints{MaxValue: 4294967295, RawPercent: 99.99999999999999}}
 		rule := widest.Detailed[0]
 		for len(widest.Detailed) < predictioneval.MaxOrderedRulesRules {
 			widest.Detailed = append(widest.Detailed, rule)
 		}
 		raw := mustMarshal(t, widest)
-		if len(raw) >= p4offline.MaxRulesetRawBytes {
-			t.Fatalf("the ceiling %d does not admit the widest legal document (%d bytes)",
-				p4offline.MaxRulesetRawBytes, len(raw))
+		// The identifier is charged separately and scales the ceiling, so what
+		// the fixed allowance must cover is everything BUT the identifier.
+		body := len(raw) - len(widest.ConfigID)
+		if body >= p4offline.RulesetStructuralAllowanceForTest {
+			t.Fatalf("the structural allowance %d does not cover a %d-byte body",
+				p4offline.RulesetStructuralAllowanceForTest, body)
 		}
-		t.Logf("widest legal document %d bytes against a ceiling of %d (%.1fx headroom)",
-			len(raw), p4offline.MaxRulesetRawBytes, float64(p4offline.MaxRulesetRawBytes)/float64(len(raw)))
+		t.Logf("widest body %d bytes against an allowance of %d (%.0fx headroom)",
+			body, p4offline.RulesetStructuralAllowanceForTest,
+			float64(p4offline.RulesetStructuralAllowanceForTest)/float64(body))
+		// A document need not arrive compact. A formatter's indentation is the
+		// one legitimate source of bulk the compact measurement above misses,
+		// so it is measured too rather than assumed small.
+		indented, err := json.MarshalIndent(widest, "", "    ")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if ibody := len(indented) - len(widest.ConfigID); ibody >= p4offline.RulesetStructuralAllowanceForTest {
+			t.Fatalf("the allowance %d does not cover a %d-byte indented body",
+				p4offline.RulesetStructuralAllowanceForTest, ibody)
+		} else {
+			t.Logf("indented body %d bytes (%.0fx headroom)", ibody,
+				float64(p4offline.RulesetStructuralAllowanceForTest)/float64(ibody))
+		}
 	})
 }

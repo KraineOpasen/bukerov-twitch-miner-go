@@ -223,8 +223,11 @@ func (s *shapeCheck) require(ok bool, name string) {
 //     it to its vocabulary. THE ARMS, by contrast, now read both: the value is
 //     required zero wherever no stake was sized, and the reason is bound on
 //     every non-admitting status and on two of the four admitting ones — see
-//     the field matrix. RawWordsConsumed IS read, but only as one of the two
-//     bounds on the admitting step's word index. BernoulliEvaluations was
+//     the field matrix. RawWordsConsumed IS read, twice: on its own range, at
+//     the top of MapP3bAction and for every status, and again as one of the two
+//     bounds on the admitting step's word index. The own-range test is the
+//     later of the two and exists because the index test skipped the field
+//     entirely whenever the admitting step consumed no word. BernoulliEvaluations was
 //     listed here as read "in no form, in relation or otherwise" and now IS
 //     read, in one direction only: a DETAILED_RULE selection requires at least
 //     one, because the producer increments it below the rate branch and so
@@ -429,8 +432,10 @@ func requireCoherentSelection(s *shapeCheck, ev predictioneval.OrderedRulesEvalu
 			// Bounded twice, like every other index here: against the declared
 			// ceiling on the supplied trace, and against what the run says it
 			// consumed.
-			// The counter alone is not enough — nothing else constrains it, so
-			// on its own it is a free variable a forger sets to match.
+			// The counter alone is not enough. It is now held to its own range
+			// at the top of this function, but that leaves it free WITHIN the
+			// range, so on its own it is still a value a forger sets to match
+			// the index beside it.
 			// Each bound reports under its OWN name. They shared one, and
 			// require appends without deduplicating, so a shape both refuse
 			// named the same identifier twice and said which bound failed
@@ -796,10 +801,18 @@ func (s *shapeCheck) finish(m ActionMapping) ActionMapping {
 //	                        the stop the producer records before minting a
 //	                        selection, so the two cannot disagree.
 //	A CandidatesConsumed, OutcomesConsidered, RulesConsidered
-//	                        cumulative counters that must already have passed
-//	                        the index the selection admits on.
-//	A BernoulliEvaluations  at least one on a DETAILED_RULE admission; the
-//	                        producer advances it below the rate branch.
+//	                        each bounded on its own producer range, at the top
+//	                        of MapP3bAction and for every status, and
+//	                        additionally -- where a selection exists -- required
+//	                        to have passed the index that selection admits on.
+//	                        The own-range tests came later: the index relations
+//	                        are inside requireCoherentSelection, so they left all
+//	                        three unread on every terminal status and on the
+//	                        DEFAULT half.
+//	A BernoulliEvaluations  bounded on its own producer range for every status,
+//	                        and at least one on a DETAILED_RULE admission; the
+//	                        producer advances it below the rate branch, inside
+//	                        the work-guarded rule loop.
 //	A RawWordsConsumed      bounded on its own range, for every status, and
 //	                        additionally one of the two bounds on the admitting
 //	                        word index. The own-range test was added after the
@@ -953,11 +966,71 @@ func MapP3bAction(ev predictioneval.OrderedRulesEvaluation) ActionMapping {
 	//
 	// The range is the producer's own: `cursor` starts at zero, is only ever
 	// incremented, never passes len(words), and a supplied trace longer than
-	// MaxOrderedRulesDrawWords is refused before the traversal. The refusal
-	// paths write the counter from that same cursor, which is why this is not
-	// scoped to admissions.
+	// MaxOrderedRulesDrawWords is refused before the traversal.
+	//
+	// That bound is the SUPPLIED TRACE's length, and it is deliberately the
+	// looser of the two available. Every consumed word sits inside the same
+	// work-guarded rule loop, so the reachable maximum is really
+	// MaxOrderedRulesWork -- a quarter of this ceiling, measured at 260,112 on
+	// a traversal driven to its budget. The tighter bound is not asserted here
+	// because it rests on a per-iteration accounting argument rather than on a
+	// single producer assignment, and the cost of being wrong about it is a
+	// refusal of honest output. The looseness is fail-OPEN and is stated rather
+	// than left to be discovered.
+	//
+	// The reason this is not scoped to admissions is worth stating exactly,
+	// because the obvious version of it is wrong. The MID-traversal refusals do
+	// write the counter from that same cursor. The PRE-traversal ones never
+	// assign it at all -- `cursor` is not even declared yet -- so it carries
+	// Go's zero. Both land inside the range, which is what this needs, but by
+	// two different mechanisms rather than one. The terminal fixture beside
+	// this guard refuses pre-traversal, on the arm the simpler claim is false
+	// about.
 	s.require(ev.RawWordsConsumed >= 0 && ev.RawWordsConsumed <= predictioneval.MaxOrderedRulesDrawWords,
 		"EVALUATION_RAW_WORDS_CONSUMED_OUT_OF_RANGE")
+	// The four cumulative counters, on their own ranges, for the same reason and
+	// found by asking the same question of the rest of the matrix: every one of
+	// them is read ONLY inside requireCoherentSelection, so on a terminal status
+	// -- which carries no selection -- and on the DEFAULT half -- where the
+	// detailed-rule arm never runs -- all four went unread while the matrix
+	// classified them load-bearing. Three of the four were still unread after
+	// the RawWordsConsumed repair, which is the honest measure of how easily
+	// this class hides: fixing one instance did not surface its siblings.
+	//
+	// Each ceiling is the producer's, read off the writer rather than inferred:
+	//   - CandidatesConsumed is `ci + 1` over a candidate list
+	//     orderedRulesInputCountReason refuses past MaxOrderedRulesCandidates,
+	//     and that gate is the first statement of the evaluator;
+	//   - OutcomesConsidered advances once per outcome of one candidate, and the
+	//     same gate refuses any candidate carrying more than
+	//     MaxOrderedRulesOutcomes, so the product bounds the total;
+	//   - RulesConsidered is incremented immediately AFTER the work++ that
+	//     refuses past MaxOrderedRulesWork, so it can never outrun that budget;
+	//   - BernoulliEvaluations advances inside that same work-guarded rule loop.
+	//
+	// These are NECESSARY conditions and nothing more. A counter inside its
+	// range is not thereby consistent with the traversal that claims it; the
+	// relations that tie a counter to an index stay where they are, in the
+	// selection arms, because only a selection names an index to tie it to.
+	//
+	// One consequence worth naming, in a file this does not touch. Illegality
+	// names every failed predicate, frameAction frames that list, and
+	// p3bResultWitness frames the action -- so adding an identifier moves the
+	// witness digest of a stored result whose action was ALREADY illegal. No
+	// legitimate run is affected: the sweep behind these bounds took 4,746
+	// producer evaluations and mapped each one twice, raw and after a JSON
+	// round trip -- 9,492 mappings, no refusal -- so nothing the producer emits
+	// reaches a new identifier. And a stored result is re-evaluated rather than
+	// trusted, which is the property that makes this benign rather than lucky.
+	s.require(ev.CandidatesConsumed >= 0 && ev.CandidatesConsumed <= predictioneval.MaxOrderedRulesCandidates,
+		"EVALUATION_CANDIDATES_CONSUMED_OUT_OF_RANGE")
+	s.require(ev.OutcomesConsidered >= 0 &&
+		ev.OutcomesConsidered <= predictioneval.MaxOrderedRulesCandidates*predictioneval.MaxOrderedRulesOutcomes,
+		"EVALUATION_OUTCOMES_CONSIDERED_OUT_OF_RANGE")
+	s.require(ev.RulesConsidered >= 0 && ev.RulesConsidered <= predictioneval.MaxOrderedRulesWork,
+		"EVALUATION_RULES_CONSIDERED_OUT_OF_RANGE")
+	s.require(ev.BernoulliEvaluations >= 0 && ev.BernoulliEvaluations <= predictioneval.MaxOrderedRulesWork,
+		"EVALUATION_BERNOULLI_EVALUATIONS_OUT_OF_RANGE")
 	// Both are closed vocabularies, and the two booleans below are EQUALITY
 	// tests — so a value outside its vocabulary reads as the negative state and
 	// quietly satisfies every `!admitted` and `!stakeKnown` requirement the arms

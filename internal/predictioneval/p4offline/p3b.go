@@ -287,29 +287,49 @@ var rulesetOptionalKeys = map[string][]string{
 // rulesetNullOK names the one path whose value may be null.
 const rulesetNullOK = "detailed"
 
-// MaxRulesetRawBytes is the declared ceiling on a supplied raw ruleset
-// document, inclusive.
+// rulesetStructuralAllowance is everything a raw ruleset document can hold
+// APART from its identifier: the JSON envelope, the default object, and a full
+// detailed list -- MaxOrderedRulesRules rules, each a fixed-shape object whose
+// widest rendering (every float at full precision, MaxValue at ten digits) is
+// about 200 bytes -- plus room for the whitespace a formatter may insert.
+// TestRulesetRawDocumentIsCappedBeforeItIsHashed builds that widest document
+// and reports its measured size rather than leaving the figure to this comment.
+const rulesetStructuralAllowance = 1 << 20
+
+// rulesetRawCeiling is the largest raw document the ruleset this call DECLARES
+// could legitimately occupy. It is O(1) and is applied before the hash.
 //
-// WHY A CEILING EXISTS HERE. This package verifies artifacts a supplier
-// controls, and the native core's ceilings bound the DECODED config, not the
-// bytes carrying it. A tiny valid config followed by an arbitrarily long run
-// of whitespace decodes cleanly, trims to nothing and satisfies every native
-// bound, while this package pays for the whole buffer twice before the bounded
-// core is reached -- once in the full-buffer SHA-256, once in the full-buffer
-// trailing scan. Declining oversized bytes first is the cheapest place to
-// refuse, and it is a refusal, never a truncation.
+// WHY THE CEILING IS DERIVED AND NOT A CONSTANT. A flat ceiling was tried here
+// first and was wrong in the direction that matters: it refused honest input.
+// ConfigID carries NO per-string length bound -- the producer says so and gives
+// the reason ("inventing a limit no other rule applies would refuse input
+// nothing else refuses", ordered_rules.go), charges it only against
+// MaxOrderedRulesAggregateBytes, and pins identifiers of a mebibyte and more as
+// legal in its own suite. A flat mebibyte therefore refused a document the
+// contract admits, which is a fail-closed defect worse than the unbounded work
+// it was added to stop. The ceiling now SCALES with the identifier the document
+// declares, so it cannot refuse a large legal one, while a small identifier
+// still buys only a small document.
 //
-// WHY THIS NUMBER. The widest document the contract can legitimately carry is
-// a full detailed list -- MaxOrderedRulesRules rules, each a fixed-shape object
-// of roughly 150 bytes -- beside an identifier at MaxOrderedRulesIdentifierBytes.
-// TestRulesetRawDocumentIsCappedBeforeItIsHashed builds exactly that document
-// and reports its size rather than leaving the figure to this comment: 18,696
-// bytes, 56x inside the ceiling. An identifier that JSON escaping expands by
-// the worst-case six adds at most another 20 KiB, which still leaves better
-// than twenty times. So the ceiling cannot refuse an honest document -- and
-// that direction matters at least as much as the other, because a ceiling
-// below what the contract allows would be a fail-closed defect of its own.
-const MaxRulesetRawBytes = 1 << 20
+// The six is JSON escaping's worst case per byte -- the same charge the
+// producer applies when it bounds encoded rather than raw width.
+//
+// WHAT THIS DOES NOT DO, stated rather than discovered. The ceiling is derived
+// from the SUPPLIED config, which is not yet known to match the raw bytes. A
+// supplier can therefore raise their own ceiling by declaring a huge ConfigID
+// -- but then they must actually carry those bytes, or configsEqual below
+// refuses, and if they do carry them the document is legitimately that large.
+// So the work this bounds is bounded by a size the contract already admits,
+// not by a smaller number this package would have had to invent. It also does
+// not bound what the CALLER already allocated: the raw bytes arrive
+// materialized, so what is declined here is the linear work over them -- the
+// hash, the key walk, the decode and the trailing scan -- not their memory.
+// The multiplication cannot overflow an int on any platform this builds for: a
+// 32-bit int would need an identifier past 358 MB, which the caller would have
+// had to materialize first.
+func rulesetRawCeiling(cfg predictioneval.OrderedRulesConfig) int {
+	return rulesetStructuralAllowance + 6*len(cfg.ConfigID)
+}
 
 // VerifyP3bRuleset checks every binding of a supplied ruleset.
 func VerifyP3bRuleset(r P3bRuleset) (VerifiedP3bRuleset, error) {
@@ -320,13 +340,13 @@ func VerifyP3bRuleset(r P3bRuleset) (VerifiedP3bRuleset, error) {
 	if len(r.RawBytes) == 0 {
 		return VerifiedP3bRuleset{}, errors.Join(ErrRulesetRawHash, errors.New("p4offline: no raw ruleset bytes supplied"))
 	}
-	// Before the hash, deliberately: see MaxRulesetRawBytes. Nothing below
-	// bounds the CARRIER, only the decoded config, so this is the one place a
+	// Before the hash, deliberately: see rulesetRawCeiling. Nothing below bounds
+	// the CARRIER, only the decoded config, so this is the one place a
 	// supplier-controlled buffer stops being paid for.
-	if len(r.RawBytes) > MaxRulesetRawBytes {
+	if ceiling := rulesetRawCeiling(r.Config); len(r.RawBytes) > ceiling {
 		return VerifiedP3bRuleset{}, errors.Join(ErrRulesetRawSize,
-			errors.New("p4offline: "+strconv.Itoa(len(r.RawBytes))+" raw bytes supplied; the ceiling is "+
-				strconv.Itoa(MaxRulesetRawBytes)))
+			errors.New("p4offline: "+strconv.Itoa(len(r.RawBytes))+" raw bytes supplied; this ruleset's ceiling is "+
+				strconv.Itoa(ceiling)))
 	}
 	if !isCanonicalHex(r.RawSHA256, 64) {
 		return VerifiedP3bRuleset{}, errors.Join(ErrRulesetRawHash,

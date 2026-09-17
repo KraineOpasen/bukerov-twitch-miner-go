@@ -131,8 +131,8 @@ type EntropyCoordinates struct {
 // Entropy refusals.
 var (
 	// ErrEntropyCoordinates is a trajectory at or past TrajectoryCount, an
-	// empty or over-long identity, or a factset digest not spelled as a
-	// "sha256:" reference.
+	// empty, over-long or not-valid-UTF-8 identity, or a factset digest not
+	// spelled as a "sha256:" reference.
 	ErrEntropyCoordinates = errors.New("p4offline: entropy coordinates are outside the protocol")
 	// ErrEntropyCount is a negative word count or one past the P3b trace
 	// ceiling.
@@ -173,6 +173,20 @@ func EntropyMessage(coords EntropyCoordinates, index uint64) []byte {
 // identity than the one that drew, and two distinct invalid sequences collapse
 // onto the same encoded string. The digest coordinate needs no such test --
 // it is already held to lower-case hex -- and the trajectory is numeric.
+//
+// A LIMIT OF THE SHAPE, not of the test. Two of the three identities are
+// supplied by the caller, but PairedOpportunityID is DERIVED: bindEntropyCoordinates
+// requires it to equal the episode's EventID, which this package carries
+// verbatim from supplied records and validates for encoding nowhere. So a
+// record source carrying a non-UTF-8 event identity makes the P3b path return
+// an ERROR rather than a recorded ProjectionRefusal -- and an error takes the
+// case out of the comparison silently, which is the one outcome a
+// denominator-disciplined study cannot afford. This widens a class that already
+// existed here (empty and over-long identities have always been hard errors)
+// rather than creating one, and JSON-decoded records cannot carry invalid
+// UTF-8, so it is judged unreachable through the real ingest path. If a
+// non-JSON record source is ever admitted, the right disposition is a recorded
+// refusal, not this error.
 func checkEntropyCoordinates(coords EntropyCoordinates) error {
 	if coords.Trajectory >= TrajectoryCount {
 		return errors.Join(ErrEntropyCoordinates,
