@@ -513,6 +513,19 @@ func derivePlacement(policy PolicyDecision, factual FactualPlacement, proof *Pla
 		reason(PlacementReasonFactualNotDerived)
 		return out
 	}
+	// FOUR CLAUSES, AND ONLY THE FIRST THREE ARE DISCRIMINABLE FROM OUTSIDE
+	// THIS PACKAGE. An independent lane deleted the CutoffPosition clause and
+	// the whole suite stayed green; reproduced here. That is not a missing
+	// test, and a test is not the right answer to it: both values are derived
+	// from the SAME factset, and a FactualPlacement carries a producer-only
+	// witness, so factual.derived() above refuses a hand-built one before this
+	// line is reached. There is no input outside this package that skews the
+	// cutoff alone -- a skewed one is refused as FACTUAL_PLACEMENT_NOT_DERIVED
+	// one barrier earlier. The clause is defence in depth against a future
+	// caller INSIDE the package, and manufacturing a test for it would mean
+	// expanding the production API to defeat the witness, which is worse than
+	// the gap. Recorded as an argument rather than left as an unexplained
+	// mutation survivor.
 	if policy.FactsetDigest != factual.FactsetDigest || policy.Attempt != factual.Attempt ||
 		policy.EventID != factual.EventID || policy.CutoffPosition != factual.CutoffPosition {
 		reason(PlacementReasonCaseBindingMismatch)

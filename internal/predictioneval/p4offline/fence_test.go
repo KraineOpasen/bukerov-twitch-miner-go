@@ -3,9 +3,9 @@ package p4offline_test
 // THE DEPENDENCY FENCE.
 //
 // This package claims to be a pure function of its arguments: no database,
-// no network, no clock, no environment, no global RNG, no goroutines. The
-// claim is enforced mechanically over the WHOLE transitive import graph of
-// the production files, by four rules:
+// no network, no clock, no environment, no global RNG, no goroutines. Five
+// rules enforce it; the first four work over the WHOLE transitive import
+// graph of the production files, and the fifth over their syntax:
 //
 //	Rule A — the only first-party import is internal/predictioneval, whose
 //	         own fence already excludes every capability package.
@@ -13,6 +13,23 @@ package p4offline_test
 //	Rule C — the transitive closure contains no capability package.
 //	Rule D — every reachable standard-library package is pinned, so a
 //	         package nobody thought to deny cannot arrive unnoticed.
+//	Rule E — no production file contains a `go` statement.
+//
+// RULE E EXISTS BECAUSE THE SENTENCE ABOVE WAS FIVE-SIXTHS TRUE. Five of the
+// six clauses are import-borne, so Rules A–D really do decide them: two
+// independent verifiers confirmed that adding `import "time"` or
+// `import "sync"` to a production file fails Rule B in 0.04 s. The sixth is
+// not. A `go` statement and a channel need NO import, so a goroutine
+// launched on a hot path — probed by adding one to (*canonical).digest —
+// passed all four rules, `go vet`, `gofmt` and the whole package suite under
+// -race, with the fence's own log line byte-identical. The clause was a
+// convention presented as a machine check.
+//
+// What Rule E is NOT: it is a syntactic check over THIS package's production
+// files, not a proof that nothing in the closure ever starts a goroutine.
+// That stronger claim is not made, and does not need to be — Rules B and D
+// pin the closure, so anything that could start one would have to arrive as a
+// reviewed import first.
 //
 // HONEST RESIDUE: crypto/sha256 transitively reaches internal/poll, io/fs,
 // os, syscall and time through the FIPS-140 integrity check and the entropy
@@ -28,6 +45,7 @@ package p4offline_test
 // appeared, and update the pin in the same commit as the upgrade.
 
 import (
+	"go/ast"
 	"go/build"
 	"go/parser"
 	"go/token"
@@ -203,6 +221,16 @@ var knownStdlibClosure = []string{
 func TestP4OfflineDependencyFence(t *testing.T) {
 	direct := directImportsOfProductionFiles(t, ".")
 
+	// Rule E, before the import rules, because it is the one the header used
+	// to assert and nothing checked.
+	if sites, files := goStatementsInProductionFiles(t, "."); len(sites) != 0 {
+		t.Errorf("the production files start goroutines at %v; this package claims to have none, and Rule E is what makes that claim a check", sites)
+	} else if files == 0 {
+		t.Fatal("no production files were parsed; Rule E would pass vacuously")
+	} else {
+		t.Logf("Rule E: %d production files carry no go statement", files)
+	}
+
 	for _, imp := range direct {
 		if _, ok := allowedDirectImports[imp]; !ok {
 			t.Errorf("the production files import %q, which is not on the purity allowlist", imp)
@@ -278,6 +306,55 @@ func TestTheFenceWouldActuallyCatchAForbiddenImport(t *testing.T) {
 	}
 }
 
+// TestRuleEWouldActuallyCatchAGoroutine is Rule E's own control, and it is the
+// reason Rule E is a check rather than a second assertion. A `go` statement
+// needs no import, so nothing in Rules A–D, in `go vet`, in `gofmt` or in the
+// -race suite observes one: that was measured, on a goroutine added to a hot
+// path, before this rule existed.
+//
+// The scanner is run against a file written into a temporary directory rather
+// than against this package, so the control never mutates the tree it guards.
+func TestRuleEWouldActuallyCatchAGoroutine(t *testing.T) {
+	dir := t.TempDir()
+	const withGoroutine = `package probe
+
+var sink = make(chan int, 1)
+
+func probe() int {
+	go func() { sink <- 1 }()
+	return <-sink
+}
+`
+	if err := os.WriteFile(filepath.Join(dir, "probe.go"), []byte(withGoroutine), 0o600); err != nil {
+		t.Fatalf("write probe: %v", err)
+	}
+	if sites, files := goStatementsInProductionFiles(t, dir); len(sites) != 1 || files != 1 {
+		t.Fatalf("Rule E saw %d go statements in %d files, want 1 in 1; the goroutine clause is an assertion again", len(sites), files)
+	}
+
+	// And the negative half: a file with a channel, a package-level mutable
+	// map and no `go` statement must pass, so Rule E is not merely failing on
+	// everything.
+	clean := t.TempDir()
+	const withoutGoroutine = `package probe
+
+var sink = make(chan int, 1)
+var memo = map[string]string{}
+
+func probe() int {
+	sink <- 1
+	memo["k"] = "v"
+	return <-sink
+}
+`
+	if err := os.WriteFile(filepath.Join(clean, "probe.go"), []byte(withoutGoroutine), 0o600); err != nil {
+		t.Fatalf("write probe: %v", err)
+	}
+	if sites, files := goStatementsInProductionFiles(t, clean); len(sites) != 0 || files != 1 {
+		t.Fatalf("Rule E reported %v in %d files for a file with no go statement", sites, files)
+	}
+}
+
 // TestTheDocumentedResidueIsAttributableToItsRoots checks the residue
 // paragraph's claim about WHERE each entry comes from.
 func TestTheDocumentedResidueIsAttributableToItsRoots(t *testing.T) {
@@ -302,6 +379,37 @@ func TestTheDocumentedResidueIsAttributableToItsRoots(t *testing.T) {
 			}
 		}
 	}
+}
+
+// goStatementsInProductionFiles is Rule E: it parses each production file in
+// full -- not ImportsOnly, which is what let this escape -- and fails on any
+// `go` statement. SkipObjectResolution keeps the parse cheap; a GoStmt is a
+// syntactic node, so no type information is needed to find one.
+func goStatementsInProductionFiles(t *testing.T, dir string) (sites []string, files int) {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("read package dir: %v", err)
+	}
+	fset := token.NewFileSet()
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		files++
+		f, err := parser.ParseFile(fset, filepath.Join(dir, name), nil, parser.SkipObjectResolution)
+		if err != nil {
+			t.Fatalf("parse %s: %v", name, err)
+		}
+		ast.Inspect(f, func(n ast.Node) bool {
+			if g, ok := n.(*ast.GoStmt); ok {
+				sites = append(sites, name+":"+fset.Position(g.Go).String())
+			}
+			return true
+		})
+	}
+	return sites, files
 }
 
 func directImportsOfProductionFiles(t *testing.T, dir string) []string {

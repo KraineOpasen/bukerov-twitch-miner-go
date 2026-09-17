@@ -96,8 +96,19 @@ var (
 // CommonFactset is the outcome-free input set of one selected opportunity.
 //
 // Every field is an INPUT the decision read, or the identity of where it was
-// read. No recorded choice, amount, verdict, stake, clamp, terminal reason,
-// placement, payout or observed realization has a field here.
+// read. No recorded choice, amount, verdict, stake, clamp, terminal DECISION
+// reason, placement, payout or observed realization has a field here.
+//
+// ONE VALUE COMES FROM THE TERMINAL SIDE, and the earlier wording of this
+// sentence -- "terminal reason", unqualified -- denied it. PreDecisionExit is
+// the terminal fact's ReasonCode, carried verbatim by the P2 projector, which
+// places it on the INPUTS side of its causal cut: it is the witnessed reason
+// an attempt ended BEFORE Calculate, so there was no decision for it to leak.
+// It is non-empty only on a factset whose Completeness is PRE_DECISION_EXIT,
+// which [EvaluateP2Case] and [ProjectP3bSingleCandidate] both refuse with
+// ErrFactsetNotEvaluable, so it reaches no policy input and no entropy
+// coordinate. The exclusion above is about the reason a DECIDED attempt
+// recorded; this is the reason there was no decision.
 type CommonFactset struct {
 	ContractVersion string `json:"contractVersion"`
 	Protocol        string `json:"protocol"`

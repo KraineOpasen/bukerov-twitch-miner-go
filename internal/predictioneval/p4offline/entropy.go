@@ -334,8 +334,16 @@ func BuildDrawTrace(coords EntropyCoordinates, count int) (predictioneval.Suppli
 	}, nil
 }
 
-// ValidateEntropyWords recomputes every word and refuses the first mismatch
-// by index.
+// ValidateEntropyWords recomputes every word SUPPLIED, at its index, and
+// refuses the first mismatch.
+//
+// IT DOES NOT BIND THE COUNT, and the difference decides what a caller may
+// conclude. Any correct PREFIX validates, including an empty list and a nil
+// one: for a truncated schedule the loop simply runs fewer times and returns
+// nil, so "the 16-word schedule verified" is not a conclusion this function
+// supports. Use [ValidateDrawTrace] to validate a WHOLE schedule — its run
+// identity embeds the word count, so a truncation is refused as a run-identity
+// fault. The evaluation path goes through that one.
 func ValidateEntropyWords(coords EntropyCoordinates, words []predictioneval.OrderedRulesHex64) error {
 	if err := checkEntropyCoordinates(coords); err != nil {
 		return err
@@ -359,14 +367,26 @@ func ValidateDrawTrace(coords EntropyCoordinates, trace predictioneval.SuppliedD
 	if err := checkEntropyCoordinates(coords); err != nil {
 		return err
 	}
+	// NEITHER of these two fields is bounded anywhere on this path, and that is
+	// why neither is quoted. checkEntropyCoordinates above bounds the three
+	// COORDINATE identities and ValidateEntropyWords below bounds the word
+	// slice; the trace's own semantics version and run identity are plain
+	// caller-supplied strings that nothing reaches. Quoting them cost 1.67 GB
+	// of allocation and a 268 MB error on a 64 MiB input -- to report that two
+	// version strings differ. The rule is the one rulesetIdentityFault records
+	// and the native producer wrote down before either of us: a refusal names
+	// the fault and the LENGTHS, never the text it is refusing. The constant
+	// the core consumes IS quoted, because it is a compile-time constant and
+	// naming it is the whole diagnosis.
 	if trace.EntropySemanticsVersion != predictioneval.OrderedRulesEntropySemanticsVersion {
 		return errors.Join(ErrEntropyTrace,
-			errors.New("p4offline: trace declares semantics "+strconv.Quote(trace.EntropySemanticsVersion)+
-				", the core consumes only "+strconv.Quote(predictioneval.OrderedRulesEntropySemanticsVersion)))
+			errors.New("p4offline: trace declares semantics of "+strconv.Itoa(len(trace.EntropySemanticsVersion))+
+				" bytes, the core consumes only "+strconv.Quote(predictioneval.OrderedRulesEntropySemanticsVersion)))
 	}
 	if want := entropyRunID(coords, len(trace.Words)); trace.RunID != want {
 		return errors.Join(ErrEntropyTrace,
-			errors.New("p4offline: trace run identity "+strconv.Quote(trace.RunID)+" is not "+strconv.Quote(want)))
+			errors.New("p4offline: trace run identity is "+strconv.Itoa(len(trace.RunID))+
+				" bytes and is not this run's, which is "+strconv.Itoa(len(want))+" bytes"))
 	}
 	return ValidateEntropyWords(coords, trace.Words)
 }

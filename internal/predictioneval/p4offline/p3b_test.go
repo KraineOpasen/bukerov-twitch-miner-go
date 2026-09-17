@@ -12,6 +12,7 @@ import (
 	"math"
 	"os"
 	"reflect"
+	"runtime"
 	"sort"
 	"strings"
 	"testing"
@@ -1394,7 +1395,13 @@ func TestP3bEvaluationMustNotContradictItsOwnBookkeeping(t *testing.T) {
 		// the evaluation never attests to it.
 		ev := predictioneval.EvaluateOrderedRules(proj.Stream, cfgWithRule("a", predictioneval.ComparatorGe, 50, 50), trace)
 		if ev.Status != predictioneval.StatusWouldAttempt || ev.Selected == nil {
-			t.Skipf("this trace did not admit at 50%%: %q/%q", ev.Status, ev.Reason)
+			// FATAL, not SKIP. This subtest is the control that stops the guard
+			// above being widened into "RawWordValue is always zero". Its whole
+			// body is conditional on the fixture admitting, so a skip here
+			// would delete the control and report a pass -- exactly hiding the
+			// regression it was written for. Everywhere else in this package a
+			// fixture precondition is fatal; this was the one exception.
+			t.Fatalf("fixture must admit at 50%%: %q/%q", ev.Status, ev.Reason)
 		}
 		last := ev.Trace[len(ev.Trace)-1]
 		if last.RawWordIndex < 0 {
@@ -2500,6 +2507,50 @@ func TestP3bTerminalStatusesCarryTheTraversalStateTheProducerWrote(t *testing.T)
 		}
 	})
 
+	t.Run("each clause of the unread-refusal guard is pinned on its own", func(t *testing.T) {
+		// ONE CLAUSE AT A TIME, which the case above does not do. Tampering all
+		// five fields together cannot tell the guard from a strictly weaker
+		// one: an independent lane deleted `!ev.HasStopPosition &&` -- a clause
+		// THIS branch added -- and the whole package suite stayed green,
+		// because the four remaining clauses still caught the all-five forgery.
+		// A defence-in-depth clause whose removal a sibling clause masks is an
+		// unprotected barrier, not an equivalent mutant.
+		for _, tc := range []struct {
+			name string
+			edit func(*predictioneval.OrderedRulesEvaluation)
+		}{
+			{"a stop position alone", func(e *predictioneval.OrderedRulesEvaluation) {
+				e.HasStopPosition = true
+			}},
+			{"a stopped candidate alone", func(e *predictioneval.OrderedRulesEvaluation) {
+				e.StoppedAtCandidate = "GHOST-CANDIDATE"
+			}},
+			{"a stopped position value alone", func(e *predictioneval.OrderedRulesEvaluation) {
+				e.StoppedAtPosition = 424242
+			}},
+			{"a trace entry alone", func(e *predictioneval.OrderedRulesEvaluation) {
+				e.Trace = []predictioneval.OrderedRulesTraceEntry{{Step: predictioneval.TraceStepDefaultBounds,
+					RawWordIndex: -1}}
+			}},
+			{"a visit alone", func(e *predictioneval.OrderedRulesEvaluation) {
+				e.Visits = []predictioneval.OrderedRulesCandidateVisit{{Verdict: predictioneval.CandidateAdmitted}}
+			}},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				ev := native(t, noDefault, trace, predictioneval.StatusRefused)
+				tc.edit(&ev)
+				m := p4offline.MapP3bAction(ev)
+				// The arm's OWN identifier must be named. Other relations may
+				// fire beside it -- a lone stop also contradicts the candidate
+				// count -- and that is fine; what must not happen is this
+				// clause going unnamed.
+				if m.Legal || !containsString(m.Illegality, "UNREAD_REFUSAL_CARRIES_TRAVERSAL_STATE") {
+					t.Fatalf("want UNREAD_REFUSAL_CARRIES_TRAVERSAL_STATE for %s: %+v", tc.name, m)
+				}
+			})
+		}
+	})
+
 	t.Run("a visit count that contradicts the candidates consumed", func(t *testing.T) {
 		// Counterexample 2, in the direction the producer can never write.
 		ev := native(t, cfgDefaultOnly("a", 95, 100), trace, predictioneval.StatusNoAttemptInSuppliedPrefix)
@@ -2520,6 +2571,48 @@ func TestP3bTerminalStatusesCarryTheTraversalStateTheProducerWrote(t *testing.T)
 		if m := p4offline.MapP3bAction(ev); m.Legal ||
 			!containsString(m.Illegality, "STOP_POSITION_CONTRADICTS_CANDIDATES_CONSUMED") {
 			t.Fatalf("want STOP_POSITION_CONTRADICTS_CANDIDATES_CONSUMED: %+v", m)
+		}
+	})
+
+	t.Run("a stop that names no candidate", func(t *testing.T) {
+		// The other half of the same entry, and the half that was asserted in
+		// the matrix and enforced nowhere. "Blank together when none was" was
+		// held; "present exactly when a candidate was consumed" was held only
+		// where a SELECTION names the candidate, i.e. on the two admitting
+		// statuses, inside requireCoherentSelection -- which returns at once
+		// when Selected is nil. On every terminal status the non-blank half was
+		// unread.
+		//
+		// The producer cannot write this. orderedRulesStreamInvariantsBroken
+		// refuses any candidate whose Identity is empty
+		// (ordered_rules.go:799, checkIdentifierPresent) BEFORE the traversal
+		// begins, and the traversal writes StoppedAtCandidate = c.Identity in
+		// the same adjacent block that sets HasStopPosition = true
+		// (ordered_rules.go:1544-1547). So a stop with no candidate is a
+		// contradiction in the evidence, on every status.
+		for _, tc := range []struct {
+			name string
+			ev   func(t *testing.T) predictioneval.OrderedRulesEvaluation
+		}{
+			{"no attempt in the supplied prefix", func(t *testing.T) predictioneval.OrderedRulesEvaluation {
+				return native(t, cfgDefaultOnly("a", 95, 100), trace, predictioneval.StatusNoAttemptInSuppliedPrefix)
+			}},
+			{"unknown input", func(t *testing.T) predictioneval.OrderedRulesEvaluation {
+				return native(t, cfgWithRule("a", predictioneval.ComparatorGe, 50, 50), noEntropy,
+					predictioneval.StatusUnknownInput)
+			}},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				ev := tc.ev(t)
+				if !ev.HasStopPosition || ev.StoppedAtCandidate == "" {
+					t.Fatalf("fixture must carry a named stop: %+v", ev)
+				}
+				ev.StoppedAtCandidate = ""
+				if m := p4offline.MapP3bAction(ev); m.Legal ||
+					!containsString(m.Illegality, "STOP_CANDIDATE_MISSING_WITH_STOP_POSITION") {
+					t.Fatalf("want STOP_CANDIDATE_MISSING_WITH_STOP_POSITION: %+v", m)
+				}
+			})
 		}
 	})
 
@@ -2655,4 +2748,191 @@ func TestP3bTerminalStatusesCarryTheTraversalStateTheProducerWrote(t *testing.T)
 			})
 		}
 	})
+}
+
+// TestEntropyBindingRefusalDoesNotMaterializeTheFactsetRound is the third
+// sibling of the same defect class as
+// TestRulesetIdentityRefusalDoesNotMaterializeSuppliedText. bindEntropyCoordinates
+// compares the coordinates' opportunity against the FACTSET's round. The
+// coordinate side is bounded at MaxOrderedRulesIdentifierBytes by
+// checkEntropyCoordinates, which runs first; the factset side is bounded by
+// nothing in this package -- VerifyCommonFactset checks the two contract
+// strings, the digest and the label consistency, and no length. So every
+// factset whose round exceeds the coordinate bound NECESSARILY fails this
+// equality and, before the repair, necessarily paid to quote the whole thing.
+//
+// The path is the exported one: EvaluateP3bCase takes the projection-refused
+// branch and binds the coordinates there.
+func TestEntropyBindingRefusalDoesNotMaterializeTheFactsetRound(t *testing.T) {
+	const budget = 1024
+	big := strings.Repeat("a", 1<<20)
+
+	_, fs := selectedFactset(t, nil, nil)
+	fs.Episode.EventID = big
+	fs.Digest = digestOf(p4offline.SerializeCommonFactset(fs))
+	if err := p4offline.VerifyCommonFactset(fs); err != nil {
+		t.Fatalf("the fixture must be a factset the package accepts: %v", err)
+	}
+
+	coords := p4offline.EntropyCoordinates{
+		DatasetID:           "d",
+		DatasetVersion:      "v1",
+		CommonFactsetDigest: p4offline.DigestReference(fs.Digest),
+		PairedOpportunityID: "round",
+	}
+	rs := mustVerify(t, rulesetFrom(t, cfgDefaultOnly("c1", 0, 1)))
+
+	_, err := p4offline.EvaluateP3bCase(fs, rs, coords)
+	if !errors.Is(err, p4offline.ErrP3bBinding) {
+		t.Fatalf("want ErrP3bBinding, got %v", err)
+	}
+	if n := len(err.Error()); n > budget {
+		t.Fatalf("the refusal carries %d bytes; a refusal must name the fault, not the factset's round (budget %d)", n, budget)
+	}
+
+	t.Run("the refusal still tells the two binding faults apart", func(t *testing.T) {
+		_, small := selectedFactset(t, nil, nil)
+		wrongDigest := synthCoords(small, 0)
+		wrongDigest.CommonFactsetDigest = p4offline.DigestReference(strings.Repeat("ab", 32))
+		wrongRound := synthCoords(small, 0)
+		wrongRound.PairedOpportunityID = "not-this-round"
+		e1 := p4offline.ValidateDrawTrace(wrongDigest, predictioneval.SuppliedDrawTrace{})
+		_, e2 := p4offline.EvaluateP3bCase(small, rs, wrongRound)
+		if e2 == nil || !errors.Is(e2, p4offline.ErrP3bBinding) {
+			t.Fatalf("a foreign round must still be refused as a binding fault: %v", e2)
+		}
+		if e1 != nil && e1.Error() == e2.Error() {
+			t.Fatalf("the two faults must be distinguishable: %v / %v", e1, e2)
+		}
+	})
+}
+
+// TestOverLongTraceIsRefusedBeforeItIsCopied pins the ORDER of two steps that
+// both have to happen. evaluateProjected must detach the caller's word array
+// before validating it, because the native core consumes the words it is
+// handed without copying -- so the array that is checked has to be the array
+// that is read. But the detachment used to happen before the gate whose only
+// job is to refuse an over-long array, so a slice far past the declared
+// ceiling was duplicated in full on its way to being refused.
+//
+// The assertion is an allocation RATIO against the supplied array, never a
+// wall-clock threshold: a time bound on shared CI proves nothing and flakes.
+func TestOverLongTraceIsRefusedBeforeItIsCopied(t *testing.T) {
+	_, fs := selectedFactset(t, nil, nil)
+	rs := mustVerify(t, rulesetFrom(t, cfgDefaultOnly("c1", 0, 1)))
+	coords := synthCoords(fs, 0)
+
+	// Four times the declared ceiling: big enough that a full copy is
+	// unmistakable against allocator noise, small enough for shared CI.
+	const words = 4 * predictioneval.MaxOrderedRulesDrawWords
+	const suppliedBytes = words * 8
+	trace := predictioneval.SuppliedDrawTrace{
+		EntropySemanticsVersion: predictioneval.OrderedRulesEntropySemanticsVersion,
+		Words:                   make([]predictioneval.OrderedRulesHex64, words),
+	}
+
+	runtime.GC()
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	_, err := p4offline.EvaluateP3bWithTrace(fs, rs, coords, trace)
+	runtime.ReadMemStats(&after)
+	allocated := after.TotalAlloc - before.TotalAlloc
+	t.Logf("supplied %d words (%d bytes); the refusing call allocated %d bytes", words, suppliedBytes, allocated)
+
+	if !errors.Is(err, p4offline.ErrEntropyCount) {
+		t.Fatalf("an array past the ceiling must be refused as a count fault, got %v", err)
+	}
+	// Half the supplied array is far above anything the refusal legitimately
+	// needs and far below the full copy the defect made.
+	if allocated > suppliedBytes/2 {
+		t.Fatalf("the refusing call allocated %d bytes against a %d-byte supplied array: the array was copied before it was judged",
+			allocated, suppliedBytes)
+	}
+
+	t.Run("a trace the package itself draws is still admitted", func(t *testing.T) {
+		// The gate must not become the reason legal input is refused. This is
+		// the false-refusal control, and it runs on the trace this very
+		// projection needs rather than on a hand-picked number.
+		//
+		// STATED rather than left to be found: admission at EXACTLY
+		// MaxOrderedRulesDrawWords is not exercised here, because drawing a
+		// ceiling-sized schedule costs 2^20 HMAC-SHA256 computations and this
+		// suite runs under -race. The ceiling itself is pinned from both sides
+		// by entropy_test.go's count table (0.. admitted, ceiling+1 refused),
+		// which is where that boundary belongs.
+		if _, err := p4offline.EvaluateP3bCase(fs, rs, coords); err != nil {
+			t.Fatalf("the projection's own trace must be admitted: %v", err)
+		}
+	})
+}
+
+// TestAnUnreadRefusalStillCarriesWhatTheProducerEarned is the control for a
+// correction, not for a repair: the seam-C matrix used to assert that the
+// producer withholds its digests, cutoff and qualifications on every unread
+// refusal, so a refusal carrying them was producer-impossible. An independent
+// lane executed the producer and showed otherwise, and this test keeps the
+// corrected reading honest by driving the shape the matrix called impossible.
+//
+// It also pins the property the REFUSED arm actually depends on, which is the
+// narrower one that survived: neither pre-traversal helper can carry TRAVERSAL
+// state, because every site of both sits above the candidate loop's first
+// write.
+func TestAnUnreadRefusalStillCarriesWhatTheProducerEarned(t *testing.T) {
+	_, fs := selectedFactset(t, nil, nil)
+	proj, err := p4offline.ProjectP3bSingleCandidate(fs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	coords := synthCoords(fs, 0)
+	trace := mustDrawTrace(t, coords, 4)
+
+	// An unencodable config id: the producer refuses with
+	// SUPPLIED_TEXT_NOT_ENCODABLE from the LOCAL closure, below the
+	// derived-field assignment.
+	cfg := cfgDefaultOnly("a", 0, 1)
+	cfg.ConfigID = "cfg-\xff\xfe"
+	ev := predictioneval.EvaluateOrderedRules(proj.Stream, cfg, trace)
+	if ev.Status != predictioneval.StatusRefused || ev.Reason != predictioneval.ReasonSuppliedTextNotEncodable {
+		t.Fatalf("fixture must be the unencodable-text refusal, got %q/%q", ev.Status, ev.Reason)
+	}
+	if !refusalReasonIsInP4Vocabulary(ev.Reason) {
+		t.Fatalf("the reason must be one p4offline recognises: %q", ev.Reason)
+	}
+
+	// The shape the matrix called producer-impossible.
+	if ev.StreamDigest == "" {
+		t.Fatalf("this refusal carries the stream digest it computed; the matrix said it does not")
+	}
+	if len(ev.Qualifications) == 0 {
+		t.Fatalf("this refusal carries the qualifications it derived; the matrix said it does not")
+	}
+	// And it maps legal, because none of those three can make an admitted
+	// shape unadmitted or the reverse -- which is the reason these fields are
+	// class B, and the only reason that was ever true.
+	if m := p4offline.MapP3bAction(ev); !m.Legal {
+		t.Fatalf("ordinary producer output must map legal: %+v", m)
+	}
+
+	t.Run("and still carries no traversal state", func(t *testing.T) {
+		// The property the REFUSED arm does depend on. Both pre-traversal
+		// helpers are unreachable once the loop has begun.
+		if ev.HasStopPosition || ev.StoppedAtCandidate != "" || ev.StoppedAtPosition != 0 ||
+			len(ev.Trace) != 0 || len(ev.Visits) != 0 || ev.CandidatesConsumed != 0 {
+			t.Fatalf("a refusal decided before the traversal carries no traversal state: %+v", ev)
+		}
+		ev.HasStopPosition = true
+		ev.StoppedAtCandidate = "GHOST"
+		if m := p4offline.MapP3bAction(ev); m.Legal ||
+			!containsString(m.Illegality, "UNREAD_REFUSAL_CARRIES_TRAVERSAL_STATE") {
+			t.Fatalf("want UNREAD_REFUSAL_CARRIES_TRAVERSAL_STATE: %+v", m)
+		}
+	})
+}
+
+// refusalReasonIsInP4Vocabulary asks the map itself whether a reason is one it
+// recognises, without reaching into the package: an unrecognised reason is
+// named REFUSAL_REASON_FOREIGN.
+func refusalReasonIsInP4Vocabulary(reason string) bool {
+	ev := predictioneval.OrderedRulesEvaluation{Status: predictioneval.StatusRefused, Reason: reason}
+	return !containsString(p4offline.MapP3bAction(ev).Illegality, "REFUSAL_REASON_FOREIGN")
 }

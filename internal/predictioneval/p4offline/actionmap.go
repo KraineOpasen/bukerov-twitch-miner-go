@@ -131,6 +131,20 @@ const (
 )
 
 // ActionMapping is one native action mapped, with its legality.
+//
+// IT CARRIES NO CASE AND NO BINDING. A mapping says what a supplied evaluation
+// SHAPE is; it does not say which stream, config or entropy run produced that
+// evaluation, and there is no field here for a caller to check one against.
+// Reading `m.Class == ActionWouldAttempt && m.Legal` as "this policy would have
+// attempted on THIS case" is therefore a step the type does not support: an
+// evaluation produced over a different candidate stream maps to exactly the
+// same fully-populated, legal-looking value.
+//
+// What makes the package's own use safe is not this type. A [PolicyDecision]
+// can be minted only by [P2CaseResult.Decision] / [P3bCaseResult.Decision]
+// from the evaluator's own witnessed result, and the scorer binds the
+// evaluation's digests to the projection and the verified ruleset AFTER
+// mapping. A caller who consumes an ActionMapping directly has neither.
 type ActionMapping struct {
 	MapVersion   string      `json:"mapVersion"`
 	Policy       string      `json:"policy"`
@@ -498,14 +512,13 @@ func requireCoherentSelection(s *shapeCheck, ev predictioneval.OrderedRulesEvalu
 	}
 }
 
-// Nothing here reads the evaluation's digests, so a DIRECT caller of an
-// exported Map function gets a shape check and no binding to a stream, a config
-// or an entropy trace. The package's own scorer does not rely on that: it
-// recomputes the evaluation, maps it, and then refuses the result unless those
-// digests match the projection and the verified ruleset. The binding is the
-// caller's, and it happens after the map has answered.
-//
-// MapP2Action maps a native P2 evaluation.
+// MapP2Action maps a native P2 evaluation. IT IS A SHAPE CHECK AND NOT A
+// BINDING: nothing here reads the evaluation's digests, so a direct caller
+// gets no tie to a stream, a config or an entropy trace, and the returned
+// [ActionMapping] has no field that names the case. See that type's doc; the
+// package's own scorer recomputes the evaluation, maps it, and only then
+// refuses the result unless the digests match the projection and the verified
+// ruleset.
 func MapP2Action(ev predictioneval.Evaluation) ActionMapping {
 	m := ActionMapping{MapVersion: NativeActionMapVersion, Policy: PolicyP2, NativeAction: ev.Action}
 	const (
@@ -840,21 +853,43 @@ func (s *shapeCheck) finish(m ActionMapping) ActionMapping {
 //	                        input bindings and a consumed-prefix attestation.
 //	                        They say WHICH inputs produced this, never what the
 //	                        action is; the scorer binds them after mapping, and
-//	                        nothing here derives a value from them. NOTE what
-//	                        this does NOT say: the producer withholds them on
-//	                        its unread refusal tier, so an evaluation that
-//	                        carries a digest its own refusal reason could not
-//	                        have earned is producer-impossible and still maps
-//	                        legal. The CLASS is unaffected, which is why these
-//	                        stay B, but the attestation tier is not checked.
+//	                        nothing here derives a value from them. That is the
+//	                        whole reason they stay B, and it is the only reason:
+//	                        no digest can make an admitted shape unadmitted or
+//	                        the reverse.
+//
+//	                        THIS ENTRY USED TO GIVE A SECOND REASON AND IT WAS
+//	                        FALSE. It said the producer withholds these on its
+//	                        unread refusal tier, so a refusal carrying a digest
+//	                        it could not have earned was producer-impossible.
+//	                        The producer does not tier them that way, and an
+//	                        independent lane executed the counterexample. There
+//	                        are TWO pre-traversal helpers, not one: the
+//	                        package-level orderedRulesUnreadRefusal builds a
+//	                        FRESH result and carries nothing, while the local
+//	                        refuseUnread closure deliberately keeps what was
+//	                        earned — the producer's own comment calls that the
+//	                        distinction the convention exists to carry, and its
+//	                        StreamDigest is in the result literal from the
+//	                        start. DRAW_WORDS_OVER_BOUND, RULE_COUNT_OVER_BOUND
+//	                        and SUPPLIED_TEXT_NOT_ENCODABLE reach the closure,
+//	                        and STREAM_INVARIANT_VIOLATED reaches BOTH helpers
+//	                        from different sites — so the reason does not even
+//	                        determine the tier. A refusal carrying a stream
+//	                        digest is ordinary producer output.
 //	B Cutoff, Qualifications
-//	                        derived fields. They are assigned only once the
-//	                        stream is shown derivable, NOT carried through every
-//	                        refusal — an earlier repair in the producer removed
-//	                        exactly that, so an unread-tier refusal carrying an
-//	                        established cutoff is likewise producer-impossible
-//	                        and likewise unchecked. Neither can make an admitted
-//	                        shape unadmitted or the reverse.
+//	                        derived fields, and the same correction applies to
+//	                        them, one step narrower. They are assigned once the
+//	                        stream is shown derivable, and the three closure
+//	                        refusals above that assignment therefore carry
+//	                        neither — but SUPPLIED_TEXT_NOT_ENCODABLE sits BELOW
+//	                        it, so a REFUSED evaluation carrying an established
+//	                        cutoff and a qualifications list is exactly what the
+//	                        producer emits for an unencodable ConfigID. It was
+//	                        called producer-impossible here; it is not.
+//	                        They stay B for the reason that was always true:
+//	                        neither can make an admitted shape unadmitted or the
+//	                        reverse.
 //
 // OrderedRulesSelection (8) — 8 A, 0 B
 //
@@ -1082,6 +1117,24 @@ func MapP3bAction(ev predictioneval.OrderedRulesEvaluation) ActionMapping {
 	if !ev.HasStopPosition {
 		s.require(ev.StoppedAtCandidate == "" && ev.StoppedAtPosition == 0,
 			"STOP_FIELDS_WITHOUT_STOP_POSITION")
+	} else {
+		// The OTHER half of the same entry, and the half that used to be
+		// asserted in the matrix and enforced nowhere. "Blank together when
+		// none was" was held; "present exactly when a candidate was consumed"
+		// was held only where a SELECTION names the candidate -- inside
+		// requireCoherentSelection, which returns at once when Selected is nil
+		// -- so on all three terminal statuses it was unread, and an
+		// independent lane mapped that shape legal on each of them.
+		//
+		// The ceiling is the producer's own, read off the writer:
+		// orderedRulesStreamInvariantsBroken refuses a candidate whose Identity
+		// is empty BEFORE the traversal begins, and the traversal writes
+		// StoppedAtCandidate = c.Identity in the same adjacent block that sets
+		// HasStopPosition = true. The POSITION is deliberately not bounded here
+		// beside it: c.Position is a supplied interval coordinate with no
+		// producer-fixed sign, and the relations that tie it to an index stay
+		// in the selection arms, where an index exists to tie it to.
+		s.require(ev.StoppedAtCandidate != "", "STOP_CANDIDATE_MISSING_WITH_STOP_POSITION")
 	}
 	// Both are closed vocabularies, and the two booleans below are EQUALITY
 	// tests — so a value outside its vocabulary reads as the negative state and
@@ -1198,10 +1251,27 @@ func MapP3bAction(ev predictioneval.OrderedRulesEvaluation) ActionMapping {
 	case predictioneval.StatusRefused:
 		m.Class = ActionRefused
 		// The REASON decides the tier, because the reason is what distinguishes
-		// the two writers. refuse() is called at exactly three sites carrying
-		// exactly two reasons; the other twelve are emitted only before the
-		// candidate loop, from a constructor that builds a fresh result and can
-		// therefore carry no traversal state at all.
+		// the MID-TRAVERSAL writer from the pre-traversal ones. refuse() is
+		// called at exactly three sites carrying exactly two reasons; every
+		// other refusal is emitted before the candidate loop begins.
+		//
+		// WHAT THIS CLAIM IS AND IS NOT, corrected after an independent lane
+		// executed the producer and showed the earlier wording false. The
+		// earlier version said the other twelve come "from a constructor that
+		// builds a fresh result". There are TWO pre-traversal helpers: the
+		// package-level orderedRulesUnreadRefusal, which does build a fresh
+		// result, and a local refuseUnread closure that deliberately KEEPS what
+		// the call had already earned -- the stream digest always, and the
+		// cutoff and qualifications for the one site below the derived-field
+		// assignment. So the twelve do not all carry nothing.
+		//
+		// The predicate below is nevertheless right, and it is right for a
+		// reason that survives the correction: what it tests is TRAVERSAL
+		// state, and both helpers are unreachable once the candidate loop has
+		// begun. All four closure sites sit above the loop's first write, so
+		// neither helper can return a stop, a trace entry or a visit. A digest
+		// or a cutoff on a refusal is ordinary producer output and is not
+		// tested here.
 		//
 		// Guarded on the closed vocabulary so an out-of-vocabulary reason is
 		// named once by REFUSAL_REASON_FOREIGN below and not twice here. That

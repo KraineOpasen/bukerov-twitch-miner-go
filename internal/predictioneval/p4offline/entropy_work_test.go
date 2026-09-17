@@ -18,6 +18,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"os"
 	"strconv"
 	"testing"
@@ -330,7 +331,13 @@ func TestWorkEntropyTraceAndValidationUseTheApprovedWords(t *testing.T) {
 	if err := foreign.UnmarshalText([]byte(b.Hex16Word)); err != nil {
 		t.Fatal(err)
 	}
-	if err := p4offline.ValidateEntropyWords(coords, []predictioneval.OrderedRulesHex64{foreign}); err == nil {
-		t.Fatalf("fixture B's word must not validate under fixture A's coordinates")
+	// The SENTINEL, not merely non-nil: several distinct errors can come out of
+	// this validator (a count out of range, a coordinate out of protocol, a
+	// word mismatch), and only the last one is what this test is named for. A
+	// regression that refused fixture B for a coordinate-domain reason would
+	// otherwise pass while proving nothing about the WORD.
+	werr := p4offline.ValidateEntropyWords(coords, []predictioneval.OrderedRulesHex64{foreign})
+	if !errors.Is(werr, p4offline.ErrEntropyWordMismatch) {
+		t.Fatalf("fixture B's word must not validate under fixture A's coordinates, and must fail as a word mismatch: %v", werr)
 	}
 }

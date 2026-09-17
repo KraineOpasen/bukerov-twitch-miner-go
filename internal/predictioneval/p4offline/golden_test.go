@@ -61,7 +61,12 @@ func TestP2ConfigBindingDigestMatchesTheIndependentGolden(t *testing.T) {
 		t.Fatal(err)
 	}
 	if b.Model.PlatformIntBits != 64 {
-		t.Skipf("the golden was derived for a 64-bit int platform; this platform has %d", b.Model.PlatformIntBits)
+		// FATAL, not SKIP, for the same reason as the control in p3b_test.go:
+		// a skip is reported as a pass, so on a platform this golden does not
+		// describe the suite would go green having checked nothing. Every
+		// target in the Makefile is 64-bit, so this is unreachable there; if it
+		// ever fires, the right response is a second golden, not a silent pass.
+		t.Fatalf("the golden was derived for a 64-bit int platform; this platform has %d", b.Model.PlatformIntBits)
 	}
 	if b.Digest != g.SHA256 {
 		t.Fatalf("digest %s, oracle %s", b.Digest, g.SHA256)

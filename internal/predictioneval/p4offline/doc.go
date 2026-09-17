@@ -187,7 +187,10 @@
 // network, no clock, no environment, no global RNG, no goroutines. The only
 // first-party import is the predictioneval package itself, whose own fence
 // already excludes every capability package. TestP4OfflineDependencyFence
-// enforces this package's fence over its whole transitive import graph.
+// enforces the first five clauses over this package's whole transitive import
+// graph, and the sixth over its syntax: a goroutine needs no import, so that
+// clause used to be a convention this sentence presented as a machine check.
+// It is now Rule E, and Rule E has its own control.
 //
 // # Reconciled readings and remaining implementation limitations
 //
@@ -234,6 +237,41 @@
 //     incarnation and no round any episode of the session carries (admitted
 //     or excluded), on the same pool. The last rule can only exclude an
 //     episode or break its boundary, never admit one.
+//
+// # Sharp edges on the exported surface, not repaired here
+//
+// An independent misuse-resistance review found three exported shapes whose
+// correct use depends on reading a doc comment. Each is documented at its own
+// declaration and pinned by a test so it cannot drift; none is REDESIGNED
+// here, because each fix changes an approved public seam and that is an owner
+// decision, not a mechanical one:
+//
+//   - [ProveCommonCutoff] takes the cutoff as a bare int64 with no presence
+//     bit, so an absent cutoff reads as position 0 and the predicate reports
+//     BOUNDARY_PROVEN. It fails OPEN. The fix is a presence-carrying cutoff
+//     and a reachable [BoundaryCutoffUnknown]; it would also refuse a shape
+//     nothing in the producer forbids, since an observation id is a plain
+//     TEXT column;
+//   - [QualityRecord.Downgrade] and [QualityRecord.Merge] return a new record
+//     and a discarded result compiles silently, leaving the record at the TOP
+//     of the ladder — the inverse of its safety property. The fix is a
+//     pointer receiver or a value-returning name;
+//   - [PayoutEvidence.PrimaryDenominatorMember] and
+//     [PayoutEvidence.PlacedBetDenominatorMember] read as the denominator
+//     answer and are only the payout seam's CONDITION;
+//     [AssessDenominatorMembership] applies four more. The cheap path is the
+//     wrong one. The fix is a name that reads wrong at the call site, which
+//     would move a JSON key and so the artifact's framing.
+//
+// One further limit, on the tests rather than the code: several multi-clause
+// fail-closed guards are exercised only by cases that violate every clause at
+// once, so an individual clause's removal is masked by an outer barrier. Where
+// the outer barrier is a producer-only witness, no discriminating input exists
+// outside this package and the equivalence is argued at the site
+// (derivePlacement's case binding, sameMapping). Where one does exist it is
+// now pinned per clause (the unread-refusal guard in [MapP3bAction], the
+// COMPLETE factset invariant). The remaining sites named by review and not
+// yet split are in placement.go, quality.go and evidence.go.
 //
 // Nothing here was checked against real P1/P1.5 data: no production dataset
 // is proven available, no dataset window (T0/T1) or dataset binding is

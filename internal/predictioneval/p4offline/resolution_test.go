@@ -112,17 +112,33 @@ func forgedWinnerArtifact(winner string) p4offline.ResolutionArtifact {
 // is not enough: a WINNER_KNOWN or REFUND artifact must be exactly what
 // projecting its own facts produces.
 func TestResolutionVerificationRederivesTheOutcome(t *testing.T) {
+	// THE FIXTURE GUARD, and what it is and is not. forgedWinnerArtifact sets
+	// ResolutionFactsDigest from SerializeResolutionArtifact, and that field is
+	// not itself serialized, so re-running the same pure function over the same
+	// value is f(x) == f(x): it holds for ANY implementation of the serializer,
+	// including one whose whole body is `return []byte("x")`. An independent
+	// lane executed that mutant and this line did not fire; the ONE test that
+	// did fire is the independent Python golden. So the guard is stated for
+	// what it actually is -- internal consistency of the fixture, not a check
+	// on the framing -- and the framing is pinned where it really is pinned.
 	forged := forgedWinnerArtifact("o2")
 	if got := p4offline.DigestReference(digestOf(p4offline.SerializeResolutionArtifact(forged))); got != forged.ResolutionFactsDigest {
-		t.Fatalf("fixture: the forged digest must be consistent")
+		t.Fatalf("fixture: the forged artifact must be internally consistent")
 	}
 	if err := p4offline.VerifyResolutionArtifact(forged); !errors.Is(err, p4offline.ErrResolutionNotDerivable) {
 		t.Fatalf("got %v", err)
 	}
-	// A genuine artifact serializes to the bytes its digest covers.
+	// A genuine artifact serializes to the bytes its digest covers. Same shape
+	// as the fixture guard above and the same limit: resolutionDigest IS
+	// DigestReference(sha256Hex(SerializeResolutionArtifact(a))), so this
+	// cannot disagree with the code. It is kept as a regression guard on the
+	// two being WIRED together -- if ProjectResolution ever stopped setting the
+	// field from the serializer, this fires -- and the framing itself is
+	// pinned by TestResolutionArtifactDigestMatchesTheIndependentGolden, which
+	// is the only assertion in this file that a rewritten serializer breaks.
 	a := p4offline.ProjectResolution(goodWinnerEvidence())
 	if p4offline.DigestReference(digestOf(p4offline.SerializeResolutionArtifact(a))) != a.ResolutionFactsDigest {
-		t.Fatal("the exported serialization is not what the digest covers")
+		t.Fatal("ProjectResolution no longer digests what SerializeResolutionArtifact frames")
 	}
 	// A REFUND asserted without its proof is refused the same way.
 	refund := p4offline.ResolutionNotRecorded(p4offline.PublicRoundIdentity{EventID: "e1"}, []string{"o1", "o2"}, nil, "p")

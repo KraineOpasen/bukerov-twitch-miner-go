@@ -752,18 +752,38 @@ func bindEntropyCoordinates(coords EntropyCoordinates, fs CommonFactset) error {
 		return errors.Join(ErrP3bBinding,
 			errors.New("p4offline: entropy factset digest "+strconv.Quote(coords.CommonFactsetDigest)+" is not this factset's "+strconv.Quote(want)))
 	}
+	// The digest gate above quotes both sides deliberately: isDigestReference
+	// holds each to 71 bytes, and naming them IS the diagnosis. This gate
+	// quotes neither, for the opposite reason. The coordinate side is bounded
+	// -- checkEntropyCoordinates ran first -- but the FACTSET's round is bounded
+	// by nothing in this package: VerifyCommonFactset checks the two contract
+	// strings, the digest and the label consistency, and no length. So every
+	// factset whose round exceeds the coordinate bound necessarily fails this
+	// equality, and quoting it made the refusal cost 2.47 GB of allocation on a
+	// 64 MiB round, reached through the exported EvaluateP3bCase. Same rule as
+	// rulesetIdentityFault and ValidateDrawTrace: the fault and the lengths.
 	if coords.PairedOpportunityID != fs.Episode.EventID {
 		return errors.Join(ErrP3bBinding,
-			errors.New("p4offline: entropy paired opportunity "+strconv.Quote(coords.PairedOpportunityID)+" is not the factset's round "+strconv.Quote(fs.Episode.EventID)))
+			errors.New("p4offline: entropy paired opportunity of "+strconv.Itoa(len(coords.PairedOpportunityID))+
+				" bytes is not the factset's round of "+strconv.Itoa(len(fs.Episode.EventID))+" bytes"))
 	}
 	return nil
 }
 
 func evaluateProjected(fs CommonFactset, proj P3bProjection, rs VerifiedP3bRuleset,
 	coords EntropyCoordinates, trace predictioneval.SuppliedDrawTrace) (P3bCaseResult, error) {
+	// The COUNT is judged before the copy, and the order is the whole point.
 	// The core consumes the words it is handed without copying, so the words
-	// are detached from the caller's array FIRST and only the detached copy
-	// is validated and consumed: nothing the caller holds is read twice.
+	// must be detached from the caller's array before they are validated and
+	// consumed -- otherwise the array that is checked is not the array that is
+	// read. But detaching FIRST meant a supplied slice 64x past the declared
+	// ceiling was duplicated in full before the gate whose only job is to
+	// refuse it: 512 MB copied to refuse 512 MB. A slice header's length
+	// cannot be changed under a value receiver, so reading it before the copy
+	// costs the detachment property nothing.
+	if err := checkEntropyCount(len(trace.Words)); err != nil {
+		return P3bCaseResult{}, err
+	}
 	trace.Words = append([]predictioneval.OrderedRulesHex64(nil), trace.Words...)
 	if err := ValidateDrawTrace(coords, trace); err != nil {
 		return P3bCaseResult{}, err

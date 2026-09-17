@@ -178,6 +178,26 @@ type NoCallCoverageProof struct {
 // selection excludes for another reason entirely — a manual or unattributed
 // intervention, for instance, whose start and return pair perfectly well. Read
 // it beside Excluded, never instead of it; the factset builder does.
+//
+// AND IT PRESUPPOSES A CUTOFF, which the sentence above states as though it
+// could not be missing. [ProveCommonCutoff] takes the cutoff as a bare int64
+// with no presence bit, so it cannot tell "no cutoff" from "a cutoff at
+// position 0": called with a zero, or a negative, it reports BOUNDARY_PROVEN
+// on evidence that proves nothing. That is the most permissive value the
+// parameter can take, so the mistake fails OPEN. The vocabulary already names
+// the honest verdict — [BoundaryCutoffUnknown] — but the predicate never
+// returns it; [SelectEpisodes] records it by hand on the branch where the
+// first opportunity is unusable, which is why this package's own path is
+// safe.
+//
+// So correct use of the exported predicate requires knowledge its signature
+// does not carry, and a caller who has no cutoff must not call it. Carrying
+// the presence in the signature would be the real fix, and it would change an
+// approved seam's shape and refuse a shape nothing in the producer forbids (an
+// observation id is a plain TEXT column, so an empty one is storable). That is
+// an owner decision, not a mechanical one; it is recorded as a limitation
+// rather than taken here, and the behaviour is pinned by a test so it cannot
+// drift while the decision is outstanding.
 type BoundaryProof struct {
 	Rule                      string              `json:"rule"`
 	CutoffPosition            int64               `json:"cutoffPosition"`
@@ -1212,7 +1232,7 @@ func ReconcileSourceRounds(claims []SourceRoundClaim) SourceRoundRegistry {
 	sort.Strings(ids)
 	for _, id := range ids {
 		cs := groups[id]
-		sort.Slice(cs, func(a, b int) bool { return claimKey(cs[a]) < claimKey(cs[b]) })
+		sortClaimsByKey(cs)
 		entry := SourceRoundEntry{EventID: id, Claims: cs}
 		identical := true
 		for _, c := range cs[1:] {
@@ -1235,7 +1255,7 @@ func ReconcileSourceRounds(claims []SourceRoundClaim) SourceRoundRegistry {
 		}
 		out.Entries = append(out.Entries, entry)
 	}
-	sort.Slice(invalid, func(a, b int) bool { return claimKey(invalid[a]) < claimKey(invalid[b]) })
+	sortClaimsByKey(invalid)
 	for _, c := range invalid {
 		out.Entries = append(out.Entries, SourceRoundEntry{EventID: c.Episode.EventID, Status: SourceRoundInvalid, Claims: []SourceRoundClaim{c}})
 	}
@@ -1335,6 +1355,39 @@ func (reg SourceRoundRegistry) isCanonical(claim SourceRoundClaim) bool {
 }
 
 // claimKey renders a claim canonically for ordering and digesting.
+// sortClaimsByKey orders claims by claimKey, framing each claim's key ONCE.
+//
+// The key is not an accessor: claimKey builds a fresh length-prefixed framing
+// of the whole claim and hex-encodes it, so it costs and allocates about twice
+// the claim's own bytes. Computing it inside the comparator re-framed every
+// claim about 2*log2(n) times -- measured at 91x the input over 8,192 claims on
+// one shared round, which is exactly the adversarial-but-legal shape
+// ReconcileSourceRounds exists to handle, and which VerifySourceRoundRegistry
+// pays again for every case AssessDenominatorMembership judges.
+//
+// claimKey is a pure function of the claim, so decorating does not change WHICH
+// claim sorts first; the test beside this asserts that against a reversed
+// input. sort.SliceStable is not needed and is not used: the keys are total on
+// the claims this orders, because a claim's whole value is framed into its key,
+// so equal keys mean equal claims.
+func sortClaimsByKey(cs []SourceRoundClaim) {
+	if len(cs) < 2 {
+		return
+	}
+	keys := make([]string, len(cs))
+	idx := make([]int, len(cs))
+	for i := range cs {
+		keys[i] = claimKey(cs[i])
+		idx[i] = i
+	}
+	sort.Slice(idx, func(a, b int) bool { return keys[idx[a]] < keys[idx[b]] })
+	sorted := make([]SourceRoundClaim, len(cs))
+	for i, j := range idx {
+		sorted[i] = cs[j]
+	}
+	copy(cs, sorted)
+}
+
 func claimKey(c SourceRoundClaim) string {
 	var k canonical
 	k.str(c.Episode.String())

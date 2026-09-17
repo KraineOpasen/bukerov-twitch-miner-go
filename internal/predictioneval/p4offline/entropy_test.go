@@ -428,3 +428,98 @@ func TestEntropyIdentitiesMustBeEncodable(t *testing.T) {
 		}
 	}
 }
+
+// TestDrawTraceRefusalDoesNotMaterializeSuppliedText is the sibling of
+// TestRulesetIdentityRefusalDoesNotMaterializeSuppliedText in p3b_test.go, and
+// it exists because that repair was applied at one gate and not at its
+// siblings. ValidateDrawTrace reads two caller-supplied strings that NOTHING on
+// this path bounds: checkEntropyCoordinates bounds the three COORDINATE
+// identities, and checkEntropyCount bounds the word slice, but neither reaches
+// the trace's own semantics version or run identity. Both gates quoted them
+// before refusing.
+//
+// The budget is stated here and is not read from the code under test.
+func TestDrawTraceRefusalDoesNotMaterializeSuppliedText(t *testing.T) {
+	const budget = 1024
+	big := strings.Repeat("a", 1<<20)
+
+	for _, tc := range []struct {
+		name  string
+		trace predictioneval.SuppliedDrawTrace
+	}{
+		{"an over-long semantics version", predictioneval.SuppliedDrawTrace{
+			EntropySemanticsVersion: big,
+		}},
+		{"an over-long run identity beside the right semantics", predictioneval.SuppliedDrawTrace{
+			EntropySemanticsVersion: predictioneval.OrderedRulesEntropySemanticsVersion,
+			RunID:                   big,
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := p4offline.ValidateDrawTrace(okCoords(0), tc.trace)
+			if !errors.Is(err, p4offline.ErrEntropyTrace) {
+				t.Fatalf("want ErrEntropyTrace, got %v", err)
+			}
+			if n := len(err.Error()); n > budget {
+				t.Fatalf("the refusal carries %d bytes; a refusal must name the fault, not the input (budget %d)", n, budget)
+			}
+		})
+	}
+
+	t.Run("the refusal still says which of the two faults it is", func(t *testing.T) {
+		// Declining to quote the values must not cost the diagnosis.
+		semantics := predictioneval.SuppliedDrawTrace{EntropySemanticsVersion: "not-the-core's"}
+		runID := predictioneval.SuppliedDrawTrace{
+			EntropySemanticsVersion: predictioneval.OrderedRulesEntropySemanticsVersion,
+			RunID:                   "not-this-run's",
+		}
+		e1 := p4offline.ValidateDrawTrace(okCoords(0), semantics)
+		e2 := p4offline.ValidateDrawTrace(okCoords(0), runID)
+		if e1 == nil || e2 == nil || e1.Error() == e2.Error() {
+			t.Fatalf("a foreign semantics version and a foreign run identity must be distinguishable: %v / %v", e1, e2)
+		}
+	})
+}
+
+// TestValidateEntropyWordsDoesNotBindTheCount pins the documented gap between
+// the two validators, so the weaker one cannot quietly be read as the stronger.
+// ValidateEntropyWords validates the words SUPPLIED; only ValidateDrawTrace
+// binds how many there should be, through the run identity.
+func TestValidateEntropyWordsDoesNotBindTheCount(t *testing.T) {
+	coords := okCoords(0)
+	words, err := p4offline.GenerateEntropyWords(coords, 16)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, n := range []int{0, 1, 8, 15, 16} {
+		if err := p4offline.ValidateEntropyWords(coords, words[:n]); err != nil {
+			t.Fatalf("a correct prefix of %d words is accepted, by design: %v", n, err)
+		}
+	}
+	if err := p4offline.ValidateEntropyWords(coords, nil); err != nil {
+		t.Fatalf("a nil list is accepted, by design: %v", err)
+	}
+
+	t.Run("the whole-schedule validator does bind it", func(t *testing.T) {
+		// The trace comes from the package's own exported builder, so the run
+		// identity is not restated here: the production API is not widened to
+		// let a test read an internal value.
+		full, err := p4offline.BuildDrawTrace(coords, 16)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := p4offline.ValidateDrawTrace(coords, full); err != nil {
+			t.Fatalf("the whole schedule must validate: %v", err)
+		}
+		truncated := full
+		truncated.Words = full.Words[:8]
+		if err := p4offline.ValidateDrawTrace(coords, truncated); !errors.Is(err, p4offline.ErrEntropyTrace) {
+			t.Fatalf("a truncated schedule must be refused as a run-identity fault, got %v", err)
+		}
+		// And the weaker validator accepts that very same truncation, which is
+		// the whole point of the two existing side by side.
+		if err := p4offline.ValidateEntropyWords(coords, truncated.Words); err != nil {
+			t.Fatalf("the word validator accepts a correct prefix, by design: %v", err)
+		}
+	})
+}

@@ -188,6 +188,22 @@ func TestFactsetLabelsAreRederivedNotTrusted(t *testing.T) {
 			s.StealthMode = true
 			f.Settings = &s
 		}},
+		// THE TWO HALVES ARE SEPARATE CASES, and the reason is the finding
+		// that made them so. The single case below used to set BOTH fields, so
+		// it satisfied both disjuncts of `!fs.ReachedDecision ||
+		// fs.PreDecisionExit != ""` at once and could not tell `||` from
+		// `&&`. An independent lane weakened that one token and the whole
+		// package suite stayed green, while a factset asserting simultaneously
+		// that the policy ran AND that it exited before running verified
+		// clean, evaluated to WOULD_ATTEMPT and projected into P3b -- with
+		// nothing masking it. Each disjunct now has a case that violates it
+		// alone.
+		{"COMPLETE beside a decision that was not reached", func(f *p4offline.CommonFactset) {
+			f.ReachedDecision = false
+		}},
+		{"COMPLETE beside a recorded pre-decision exit", func(f *p4offline.CommonFactset) {
+			f.PreDecisionExit = "NOT_ELIGIBLE"
+		}},
 		{"a pre-decision exit relabelled COMPLETE", func(f *p4offline.CommonFactset) {
 			f.ReachedDecision = false
 			f.PreDecisionExit = "NOT_ELIGIBLE"

@@ -147,10 +147,19 @@ func (r QualityRecord) normalised() QualityRecord {
 	return r
 }
 
-// Downgrade lowers the record to q with a reason. A call that would RAISE the
-// quality changes nothing except the recorded reason, which is kept so the
-// attempt is visible; an unrecognised quality — as the target or as the
-// receiver's own — is treated as EXCLUDED.
+// Downgrade RETURNS a lowered record; it does not modify the receiver. THE
+// RESULT MUST BE ASSIGNED. `rec.Downgrade(QualityExcluded, reason)` in
+// statement position compiles, `go vet` says nothing, and the record stays
+// where it was — which for this type means it stays at the TOP of the ladder,
+// the exact inverse of the ladder's own safety property. The value semantics
+// are deliberate (normalised() detaches the slices so a record can branch),
+// and the name is kept because the seam is approved; the obligation is stated
+// here instead, and a test asserts the receiver is unchanged so the decision
+// cannot drift silently.
+//
+// A call that would RAISE the quality changes nothing except the recorded
+// reason, which is kept so the attempt is visible; an unrecognised quality —
+// as the target or as the receiver's own — is treated as EXCLUDED.
 func (r QualityRecord) Downgrade(q Quality, reason string) QualityRecord {
 	r = r.normalised()
 	if q.rank() < 0 {
@@ -164,7 +173,9 @@ func (r QualityRecord) Downgrade(q Quality, reason string) QualityRecord {
 	return r
 }
 
-// Merge combines two records: the LOWER quality wins, and every reason is kept.
+// Merge RETURNS the combination; it does not modify either receiver, and the
+// result must be assigned — see [QualityRecord.Downgrade]. The LOWER quality
+// wins, and every reason is kept.
 func (r QualityRecord) Merge(other QualityRecord) QualityRecord {
 	out := r.normalised()
 	other = other.normalised()
@@ -357,13 +368,22 @@ type DenominatorMembership struct {
 	// reasons, never echoed.
 	Derivation            string `json:"derivation,omitempty"`
 	CounterpartDerivation string `json:"counterpartDerivation,omitempty"`
-	// Primary is true exactly when the decision counts in the
-	// POLICY_CHOICE_ACCURACY denominator: the case is PRIMARY_SCORABLE and
-	// the payout evidence is a resolved WOULD_ATTEMPT.
+	// Primary is true ONLY when the decision counts in the
+	// POLICY_CHOICE_ACCURACY denominator. The two conditions named here -- the
+	// case is PRIMARY_SCORABLE and the payout evidence is a resolved
+	// WOULD_ATTEMPT -- are necessary, not sufficient:
+	// [AssessDenominatorMembership] applies five, and the two this sentence
+	// used to omit are the source-round gates. A PRIMARY_SCORABLE case whose
+	// payout is a resolved WOULD_ATTEMPT is still withheld when the registry
+	// does not re-derive, or when the round is not this case's canonical
+	// claim. denominator_test.go carries that counterexample beside the case
+	// that does count. The full set is on [AssessDenominatorMembership]; two
+	// independent review lanes read this comment as a biconditional, which is
+	// why it no longer reads as one.
 	Primary bool `json:"primary"`
-	// PlacedBet is true exactly when the decision counts in the
-	// PLACED_BET_WIN_RATE denominator: the case is PRIMARY_SCORABLE and the
-	// payout evidence is a platform-proven bet that settled WIN or LOSE.
+	// PlacedBet is true ONLY when the decision counts in the
+	// PLACED_BET_WIN_RATE denominator, under the same five conditions with the
+	// payout evidence instead a platform-proven bet that settled WIN or LOSE.
 	// Gating the placed-bet denominator on PRIMARY_SCORABLE — and so on the
 	// counterpart's determinacy — is this package's NARROWING of the
 	// approved "proven accepted WIN+LOSE" rule: a DESCRIPTIVE_ONLY case is
@@ -509,6 +529,15 @@ func AssessDenominatorMembership(ds predictioneval.SourceDataset, reg SourceRoun
 }
 
 // sameMapping reports whether two action mappings are equal field for field.
+//
+// Its per-field clauses are, individually, not discriminable from outside this
+// package, and the reason is the same one that makes them safe: a
+// PolicyDecision carries a producer-only witness that frames the whole action
+// (see frameAction), so an action edited in Class or in Legal alone fails
+// decisionRefusal one branch earlier and never reaches this comparison. What
+// this function actually guards is re-evaluation DRIFT -- the same factset
+// mapping differently on a second pass -- for which no input exists today.
+// Stated here rather than left as an unexplained mutation survivor.
 func sameMapping(a, b ActionMapping) bool {
 	return a.MapVersion == b.MapVersion && a.Policy == b.Policy && a.NativeAction == b.NativeAction &&
 		a.Class == b.Class && a.Legal == b.Legal && a.SkipReason == b.SkipReason && sameIDs(a.Illegality, b.Illegality)

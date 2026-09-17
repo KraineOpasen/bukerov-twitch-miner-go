@@ -156,16 +156,26 @@ func TestLocalReturnDoesNotProvePlatformAcceptance(t *testing.T) {
 		if ep.Boundary.NoCallCoverage.Proven || ep.Boundary.Proven {
 			t.Fatalf("the boundary cannot be proven over contradicted evidence: %+v", ep.Boundary)
 		}
-		// And nothing downstream can mint a factual placement from it. Whether
-		// the factset or the projection is the one that refuses, the required
-		// property is the same: no FactualPlacement exists for this shape.
+		// And nothing downstream can mint a factual placement from it. WHICH
+		// seam refuses is asserted rather than swallowed: the bare `return`
+		// that used to stand here made the ProjectFactualPlacement assertion
+		// below unreachable on every run -- an independent lane instrumented
+		// both branches and only the early one ever printed -- so no change to
+		// ProjectFactualPlacement could have failed this subtest, and a future
+		// change making BuildCommonFactset succeed here would have passed
+		// silently.
+		//
+		// The factset seam is the one that refuses today, because an excluded
+		// episode is not a selected opportunity. If that ever stops being
+		// true, this fails and names it rather than skipping on.
 		fs, err := p4offline.BuildCommonFactset(ds, ep.Episode)
 		if err != nil {
+			if !errors.Is(err, p4offline.ErrEpisodeNotSelected) {
+				t.Fatalf("the factset seam must refuse an excluded episode as unselected, got %v", err)
+			}
 			return
 		}
-		if fp, err := p4offline.ProjectFactualPlacement(ds, fs); err == nil {
-			t.Fatalf("a factual placement must not be derivable from an unspent start: %+v", fp)
-		}
+		t.Fatalf("an excluded episode must not yield a factset; the refusal moved and this test's own assertion has gone stale: %+v", fs)
 	})
 	t.Run("a placing decision with no call recorded", func(t *testing.T) {
 		_, fs2, fp2, p22 := factualCase(t, func(*synth, *predictioneval.SourceDecisionEnvelope) {})

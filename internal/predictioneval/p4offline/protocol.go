@@ -71,9 +71,17 @@ const (
 )
 
 // Contract identities of the artifacts this package produces. Each is a
-// domain-separation string hashed FIRST into the artifact's digest, so a
-// change to an encoding produces a visibly different digest rather than a
-// silently incompatible one.
+// domain-separation string hashed FIRST into the artifact's digest or framed
+// first into its witness, so a change to an encoding produces a visibly
+// different digest rather than a silently incompatible one.
+//
+// ONE EXCEPTION, named rather than left to be found. P3bProjectionManifestID
+// is not hashed into any artifact THIS package digests: it is stamped on the
+// native stream's CommonAdmission, and the PRODUCER hashes it into the stream
+// digest. The domain-separation property is the same; the owner of the digest
+// is not. Every identity here, that one included, is pinned by a second
+// statement of its value in protocol_test.go, which is what makes a one-sided
+// edit visible.
 const (
 	CommonFactsetDigestVersion   = "p4-common-factset/v1"
 	P2ConfigBindingVersion       = "p4-p2-config-binding/v1"

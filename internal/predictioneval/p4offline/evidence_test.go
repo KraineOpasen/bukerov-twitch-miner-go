@@ -347,7 +347,17 @@ func TestMissingEarliestCallRequiresACompleteNoCallCoverageProof(t *testing.T) {
 		s.skippedAttempt("r2", "e2", 2)
 		s.add(s.fact("source_unknown", "UNCLASSIFIED", "", "e2", 0))
 		sel := mustSelect(t, s.dataset())
+		// The count guard is not decoration: without it a regression that drops
+		// an episode, or attributes the two under other event ids, makes this
+		// loop run zero or one matching iteration and the subtest passes with
+		// nothing asserted. The sibling loops in this file carry the same
+		// guard; this one did not.
+		if len(sel.Episodes) != 2 {
+			t.Fatalf("both rounds must be selected for this claim to mean anything: %+v", sel.Episodes)
+		}
+		seen := map[string]bool{}
 		for _, ep := range sel.Episodes {
+			seen[ep.Episode.EventID] = true
 			switch ep.Episode.EventID {
 			case "e1":
 				if ep.Excluded {
@@ -358,6 +368,9 @@ func TestMissingEarliestCallRequiresACompleteNoCallCoverageProof(t *testing.T) {
 					t.Fatalf("%+v", ep)
 				}
 			}
+		}
+		if !seen["e1"] || !seen["e2"] {
+			t.Fatalf("both arms must be reached; the episodes were attributed as %v", seen)
 		}
 	})
 }
@@ -1633,5 +1646,254 @@ func TestUnspentStartDoesNotExcludeAHealthySiblingIncarnation(t *testing.T) {
 	if unpaired.Boundary.NoCallCoverage.Proven != paired.Boundary.NoCallCoverage.Proven {
 		t.Fatalf("coverage differs on an episode whose own evidence is unchanged: %+v vs %+v",
 			unpaired.Boundary.NoCallCoverage, paired.Boundary.NoCallCoverage)
+	}
+}
+
+// TestReconcileDoesNotReframeEveryClaimPerComparison pins that reconciliation
+// frames each claim's ordering key ONCE. claimKey is not an accessor: it builds
+// a fresh length-prefixed framing of the whole claim and hex-encodes it, so it
+// costs and allocates about twice the claim's own bytes. Computing it inside a
+// sort comparator re-framed every claim about 2*log2(n) times on the shape this
+// function exists to handle -- many claims on ONE public round.
+//
+// The assertion is the COLLIDING-versus-DISTINCT ratio, never a total, and
+// never wall-clock. That choice is the point of the test: reconciliation frames
+// every claim twice no matter what, because registryDigest has to frame each
+// claim to digest it, and those two mandatory passes dominate the absolute
+// number. A total-allocation threshold would therefore be measuring the digest,
+// not the comparator. Comparisons happen only WITHIN a group, so n claims on
+// one round and n claims on n distinct rounds pay the same mandatory passes and
+// differ only in the comparator's share.
+//
+// Measured, with the per-comparison framing restored as a disposable mutant and
+// then removed again: 1.73 -> 1.39 at n=8192, and 1.69 -> 1.35 at n=2048. The
+// threshold sits between, with margin on both sides.
+//
+// NOT claimed: this does not make reconciliation cheap. An independent lane
+// reported roughly 80x amplification over the claims' own bytes; that figure is
+// right and mostly is NOT this defect -- it is the two mandatory framings. What
+// this removes is the log-n factor on top of them, which was 20% of the
+// allocation at n=8192 and grows with the group.
+func TestReconcileDoesNotReframeEveryClaimPerComparison(t *testing.T) {
+	// Distinct factset digests, so a shared round is a CONFLICT rather than
+	// identical duplicates: that is the shape that forces every comparison.
+	build := func(n int, collide bool) []p4offline.SourceRoundClaim {
+		cs := make([]p4offline.SourceRoundClaim, 0, n)
+		for i := 0; i < n; i++ {
+			ev := "shared"
+			if !collide {
+				ev = "e" + strconv.Itoa(i)
+			}
+			cs = append(cs, p4offline.SourceRoundClaim{
+				Episode: p4offline.EpisodeIdentity{
+					CollectorEpoch: 1, CollectorSessionID: "session-" + strconv.Itoa(i),
+					PoolInstanceID: "pool-" + strconv.Itoa(i), RoundIncarnationID: "round-" + strconv.Itoa(i),
+					EventID: ev,
+				},
+				Attempt: predictioneval.AttemptKey{
+					CollectorEpoch: 1, CollectorSessionID: "session-" + strconv.Itoa(i),
+					PoolInstanceID: "pool-" + strconv.Itoa(i), AttemptID: uint64(i + 1),
+				},
+				FactsetDigest: fmt.Sprintf("%064x", i),
+			})
+		}
+		return cs
+	}
+	measure := func(cs []p4offline.SourceRoundClaim) uint64 {
+		runtime.GC()
+		var a, b runtime.MemStats
+		runtime.ReadMemStats(&a)
+		p4offline.ReconcileSourceRounds(cs)
+		runtime.ReadMemStats(&b)
+		return b.TotalAlloc - a.TotalAlloc
+	}
+
+	const n = 8192
+	colliding := measure(build(n, true))
+	distinct := measure(build(n, false))
+	ratio := float64(colliding) / float64(distinct)
+	t.Logf("%d claims: colliding=%d distinct=%d ratio=%.2f", n, colliding, distinct, ratio)
+	if ratio > 1.55 {
+		t.Fatalf("one shared round cost %.2fx the same claims on distinct rounds: the ordering key is being reframed per comparison", ratio)
+	}
+
+	// WHAT THE ORDER HAS TO BE, and what it does not. registryDigest frames the
+	// claims in the order they are left in, so the registry's digest -- the
+	// value VerifySourceRoundRegistry re-derives and AssessDenominatorMembership
+	// names on its verdict -- depends on it. What the contract needs is that the
+	// order be a deterministic function of the claim SET and not of the order
+	// the claims happened to arrive in. Which total order is not load-bearing:
+	// a group is CONFLICT when its claims differ, and where a canonical claim
+	// exists the claims are identical, so cs[0] is the same whichever
+	// deterministic order is chosen.
+	//
+	// TWO MUTANTS SHAPED THIS TEST, and one of them corrected me. A `len(cs) < 2`
+	// early return widened to `< 3` leaves a TWO-claim group in ARRIVAL order --
+	// plainly the non-determinism this pins, and no case reached it. The other
+	// reverses the undecorated result, and I first argued it was an equivalent
+	// mutant on the reasoning above: a deterministic permutation preserves the
+	// property, so which order is chosen cannot matter. That was wrong, and the
+	// rotated input below is what showed it. Reversing the undecorate step is
+	// NOT a permutation of the sorted result -- it maps sorted position i to
+	// input position len-1-idx[i], which depends on the arrival order through
+	// idx -- so the same claim set reconciles differently depending on how it
+	// arrived. It is killed, not argued away. Three arrival orders and three
+	// group sizes, because a single reversal is satisfiable by a symmetry.
+	for _, n := range []int{2, 3, 64} {
+		t.Run(fmt.Sprintf("%d claims on one round reconcile independently of arrival order", n), func(t *testing.T) {
+			base := build(n, true)
+			forward := p4offline.ReconcileSourceRounds(base)
+
+			reversed := make([]p4offline.SourceRoundClaim, n)
+			for i := range base {
+				reversed[i] = base[n-1-i]
+			}
+			// A third arrival order, so the check is not satisfiable by a
+			// symmetry that happens to fix the reversal.
+			rotated := append(append([]p4offline.SourceRoundClaim(nil), base[n/2:]...), base[:n/2]...)
+
+			for name, other := range map[string][]p4offline.SourceRoundClaim{
+				"reversed": reversed, "rotated": rotated,
+			} {
+				got := p4offline.ReconcileSourceRounds(other)
+				if len(forward.Entries) != 1 || len(got.Entries) != 1 {
+					t.Fatalf("one shared round is one entry: %d / %d", len(forward.Entries), len(got.Entries))
+				}
+				if forward.Entries[0].Status != p4offline.SourceRoundConflict {
+					t.Fatalf("%d different claims on one round are a CONFLICT, got %q", n, forward.Entries[0].Status)
+				}
+				if forward.Digest != got.Digest {
+					t.Fatalf("the registry digest depends on the order the claims arrived in (%s)", name)
+				}
+				for i := range forward.Entries[0].Claims {
+					if forward.Entries[0].Claims[i] != got.Entries[0].Claims[i] {
+						t.Fatalf("claim %d ordered differently from a %s input", i, name)
+					}
+				}
+			}
+		})
+	}
+}
+
+// TestP2ExclusionsAreAttributedByObservationNotOnlyByAttemptKey covers the one
+// branch of p2ExclusionsFor that no test reached. A coverage profile showed
+// count 0 on all three of its blocks, and an independent lane showed that BOTH
+// contradictory mutants of its predicate survived the whole suite: `!=` -> `==`
+// (attribute nothing) and `==` -> `!=` (attribute every unrelated exclusion).
+//
+// The branch matters because P2Exclusions is what tells an operator WHY the
+// first opportunity was unusable. Under-attribution loses the reason; the
+// package's own factset labelling reads IncompleteReasons from the same family,
+// so silence there is indistinguishable from nothing having gone wrong.
+//
+// The reachable shape is an automatic row that NAMES its attempt in the
+// counters but whose payload the producer could not decode: seam 2 records its
+// observation id against the attempt, while materialization excludes it with an
+// observation id and NO key.
+func TestP2ExclusionsAreAttributedByObservationNotOnlyByAttemptKey(t *testing.T) {
+	s := newSynth()
+	bad := s.fact(predictioneval.KindAutoDecision, predictioneval.PhaseAutoDue, "r1", "e1", 1)
+	bad.PayloadUndecodable = true
+	s.add(bad)
+	// A second round refused for a DIFFERENT reason. The two reasons must
+	// differ: with the same reason on both, appendOnce collapses an
+	// over-attributing predicate back to one entry and the over-attribution
+	// direction goes unseen -- which is exactly how one of the two
+	// contradictory mutants survived a first draft of this test.
+	other := s.fact(predictioneval.KindAutoDecision, predictioneval.PhaseAutoDue, "r2", "e2", 2)
+	other.PayloadVersion = predictioneval.SupportedPayloadVersion + 1
+	s.add(other)
+	ds := s.dataset()
+
+	sel := mustSelect(t, ds)
+	if len(sel.Episodes) != 2 {
+		t.Fatalf("both rounds must form episodes: %+v", sel.Episodes)
+	}
+	seen := map[string][]string{}
+	for _, ep := range sel.Episodes {
+		if ep.FirstOpportunityUsable {
+			t.Fatalf("an undecodable first opportunity is not usable: %+v", ep)
+		}
+		seen[ep.Episode.EventID] = ep.P2Exclusions
+	}
+	for _, tc := range []struct{ id, want string }{
+		{"e1", predictioneval.ExclusionPayloadUndecodable},
+		{"e2", predictioneval.ExclusionUnsupportedPayloadVersion},
+	} {
+		got := seen[tc.id]
+		if len(got) != 1 || got[0] != tc.want {
+			t.Fatalf("%s must carry exactly its own refusal %q, got %v", tc.id, tc.want, got)
+		}
+	}
+}
+
+// TestProveCommonCutoffPresupposesACutoff pins the documented limit of the
+// exported boundary predicate, so it cannot drift while the owner decision
+// about the seam's shape is outstanding.
+//
+// The predicate takes the cutoff as a bare int64 and cannot tell an ABSENT
+// cutoff from one at position 0, so a caller who has none and calls it anyway
+// is told BOUNDARY_PROVEN. That fails OPEN, which is why it is documented on
+// BoundaryProof rather than left to be found -- and why SelectEpisodes guards
+// the call externally and records CUTOFF_UNKNOWN itself.
+func TestProveCommonCutoffPresupposesACutoff(t *testing.T) {
+	calls := []p4offline.CallSignal{{Position: 5, ObservationID: "call-1", Kind: p4offline.CallKindAuto}}
+	coverage := p4offline.NoCallCoverageProof{Proven: true}
+
+	t.Run("a real cutoff after the call is refused", func(t *testing.T) {
+		got := p4offline.ProveCommonCutoff(9, "obs-9", calls, coverage)
+		if got.Proven || got.Reason != p4offline.BoundaryCutoffNotBeforeCall {
+			t.Fatalf("C=9 is not before F=5: %+v", got)
+		}
+	})
+	for _, tc := range []struct {
+		name   string
+		cutoff int64
+		obs    string
+	}{
+		{"a cutoff left at its zero", 0, ""},
+		{"a negative cutoff", -1, ""},
+	} {
+		t.Run(tc.name+" is reported as proven, which is the documented limit", func(t *testing.T) {
+			got := p4offline.ProveCommonCutoff(tc.cutoff, tc.obs, calls, coverage)
+			if !got.Proven || got.Reason != p4offline.BoundaryProven {
+				t.Fatalf("the documented behaviour is BOUNDARY_PROVEN; if this now refuses, the seam changed and BoundaryProof's doc must change with it: %+v", got)
+			}
+		})
+	}
+	t.Run("the honest verdict exists but the predicate never returns it", func(t *testing.T) {
+		// CUTOFF_UNKNOWN is the caller's to record. If ProveCommonCutoff ever
+		// starts returning it, this fires and the limitation is closed.
+		for _, cutoff := range []int64{-1, 0, 9} {
+			if got := p4offline.ProveCommonCutoff(cutoff, "", calls, coverage); got.Reason == p4offline.BoundaryCutoffUnknown {
+				t.Fatalf("the predicate now names CUTOFF_UNKNOWN at cutoff %d; update BoundaryProof's doc and drop this test", cutoff)
+			}
+		}
+	})
+}
+
+// TestQualityRecordMethodsDoNotModifyTheReceiver pins the value semantics the
+// two exported ladder methods document. Discarding either result compiles and
+// `go vet` is silent, and the record then stays at the TOP of the ladder --
+// the inverse of its safety property -- so the obligation to assign is stated
+// on the methods and checked here.
+func TestQualityRecordMethodsDoNotModifyTheReceiver(t *testing.T) {
+	rec := p4offline.NewQualityRecord()
+	if rec.Quality != p4offline.QualityPrimaryScorable {
+		t.Fatalf("a new record starts at the top: %+v", rec)
+	}
+	lowered := rec.Downgrade(p4offline.QualityExcluded, "BOUNDARY_NOT_PROVEN")
+	if rec.Quality != p4offline.QualityPrimaryScorable || len(rec.Reasons) != 0 {
+		t.Fatalf("Downgrade modified its receiver; the doc says it does not: %+v", rec)
+	}
+	if lowered.Quality != p4offline.QualityExcluded {
+		t.Fatalf("the RETURNED record carries the downgrade: %+v", lowered)
+	}
+	merged := rec.Merge(lowered)
+	if rec.Quality != p4offline.QualityPrimaryScorable || len(rec.Reasons) != 0 {
+		t.Fatalf("Merge modified its receiver; the doc says it does not: %+v", rec)
+	}
+	if merged.Quality != p4offline.QualityExcluded {
+		t.Fatalf("the RETURNED record carries the lower quality: %+v", merged)
 	}
 }
