@@ -438,6 +438,58 @@ func TestQualityRecordsAreClosedMonotoneAndDetached(t *testing.T) {
 		if containsString(m1.Reasons, "e") || containsString(m2.Reasons, "d") {
 			t.Fatalf("merges share a backing array: %v / %v", m1.Reasons, m2.Reasons)
 		}
+
+		// THE HISTORY HALF, which was unguarded. normalised() detaches BOTH
+		// slices and Downgrade's doc says so ("detaches the slices"), but only
+		// the Reasons half had a case: deleting the History clone left the whole
+		// suite green. History is the audit trail of which downgrade happened,
+		// so two branches silently rewriting each other's is worse than the
+		// Reasons case, not better.
+		//
+		// A branch point whose History has SPARE CAPACITY is what makes the
+		// sharing observable: without the clone both branches append into the
+		// same backing array and the second wins.
+		deep := p4offline.NewQualityRecord().
+			Downgrade(p4offline.QualityDescriptiveOnly, "h1").
+			Downgrade(p4offline.QualityExcluded, "h2")
+		h1 := deep.Downgrade(p4offline.QualityExcluded, "h3")
+		h2 := deep.Downgrade(p4offline.QualityExcluded, "h4")
+		lastReason := func(r p4offline.QualityRecord) string {
+			if len(r.History) == 0 {
+				return ""
+			}
+			return r.History[len(r.History)-1].Reason
+		}
+		// Neither branch actually LOWERS the quality again -- both are already
+		// EXCLUDED -- so History must be unchanged on both and on the parent.
+		if lastReason(h1) != "h2" || lastReason(h2) != "h2" || lastReason(deep) != "h2" {
+			t.Fatalf("a downgrade that lowers nothing must not append history: %q / %q / %q",
+				lastReason(h1), lastReason(h2), lastReason(deep))
+		}
+		if len(h1.History) != len(deep.History) || len(h2.History) != len(deep.History) {
+			t.Fatalf("history lengths diverged: %d / %d / %d", len(h1.History), len(h2.History), len(deep.History))
+		}
+		// And the observable half. SPARE CAPACITY is what makes the sharing
+		// visible, and a record built only through Downgrade never has any --
+		// every append lands on an exactly-sized clone, so both branches
+		// reallocate and the defect hides. A first version of this case missed
+		// the mutant for exactly that reason. QualityRecord is an exported type
+		// with exported fields, so the branch point is built directly.
+		hist := make([]p4offline.QualityStep, 1, 4)
+		hist[0] = p4offline.QualityStep{Quality: p4offline.QualityDescriptiveOnly, Reason: "w0"}
+		wide := p4offline.QualityRecord{
+			Quality: p4offline.QualityDescriptiveOnly,
+			Reasons: []string{"w0"},
+			History: hist,
+		}
+		w1 := wide.Downgrade(p4offline.QualityExcluded, "w1")
+		w2 := wide.Downgrade(p4offline.QualityExcluded, "w2")
+		if lastReason(w1) != "w1" || lastReason(w2) != "w2" {
+			t.Fatalf("branches share a history backing array: %q / %q", lastReason(w1), lastReason(w2))
+		}
+		if len(wide.History) != 1 || wide.History[0].Reason != "w0" {
+			t.Fatalf("the parent's history changed: %+v", wide.History)
+		}
 	})
 }
 

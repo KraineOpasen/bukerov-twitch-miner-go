@@ -2,6 +2,7 @@ package p4offline
 
 import (
 	"errors"
+	"strconv"
 
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/predictioneval"
 )
@@ -414,14 +415,23 @@ func commonFactsetDigest(fs CommonFactset) string {
 // VerifyCommonFactset recomputes the digest, then re-derives the labels from
 // the values, and refuses any mismatch.
 func VerifyCommonFactset(fs CommonFactset) error {
+	// THE FIRST GATE ON EVERY FACTSET PATH IN THIS PACKAGE, and it used to pay
+	// for its own refusal: these three fields are plain exported strings that
+	// nothing here bounds, and the comparison is the first statement of the
+	// function. See suppliedTextExtent for the rule and the measurement.
 	if fs.ContractVersion != CommonFactsetDigestVersion {
-		return errors.Join(ErrFactsetDigest, errors.New("p4offline: factset contract is "+fs.ContractVersion))
+		return errors.Join(ErrFactsetDigest, errors.New("p4offline: factset contract is "+
+			suppliedTextExtent(fs.ContractVersion)+", this package writes only "+strconv.Quote(CommonFactsetDigestVersion)))
 	}
 	if fs.Protocol != ProtocolVersion {
-		return errors.Join(ErrFactsetDigest, errors.New("p4offline: factset protocol is "+fs.Protocol))
+		return errors.Join(ErrFactsetDigest, errors.New("p4offline: factset protocol is "+
+			suppliedTextExtent(fs.Protocol)+", this package writes only "+strconv.Quote(ProtocolVersion)))
 	}
 	if want := commonFactsetDigest(fs); fs.Digest != want {
-		return errors.Join(ErrFactsetDigest, errors.New("p4offline: factset digest "+fs.Digest+" does not match its values"))
+		// `want` is this package's own 64 hex digits and is quoted; the
+		// supplied digest is not, because nothing gates its length here.
+		return errors.Join(ErrFactsetDigest, errors.New("p4offline: factset digest of "+
+			suppliedTextExtent(fs.Digest)+" does not match its values, which digest to "+strconv.Quote(want)))
 	}
 	return checkFactsetConsistency(fs)
 }

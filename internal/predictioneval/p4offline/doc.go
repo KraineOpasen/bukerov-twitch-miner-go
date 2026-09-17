@@ -263,15 +263,52 @@
 //     wrong one. The fix is a name that reads wrong at the call site, which
 //     would move a JSON key and so the artifact's framing.
 //
-// One further limit, on the tests rather than the code: several multi-clause
-// fail-closed guards are exercised only by cases that violate every clause at
-// once, so an individual clause's removal is masked by an outer barrier. Where
-// the outer barrier is a producer-only witness, no discriminating input exists
-// outside this package and the equivalence is argued at the site
-// (derivePlacement's case binding, sameMapping). Where one does exist it is
-// now pinned per clause (the unread-refusal guard in [MapP3bAction], the
-// COMPLETE factset invariant). The remaining sites named by review and not
-// yet split are in placement.go, quality.go and evidence.go.
+// # Multi-clause guards: what is pinned, what is argued, and what is measured
+//
+// Many of this package's fail-closed guards are compound -- `if A || B` or
+// `s.require(A && B, TAG)` -- and a test that violates every clause at once
+// cannot tell the real guard from a strictly weaker one. This is stated with a
+// MEASUREMENT rather than an impression, because an earlier version of this
+// paragraph named three files and was wrong about which.
+//
+// Two sweeps, each dropping exactly one top-level clause and running the whole
+// package suite, with a byte-identical restore per mutant:
+//
+//   - The 26 compound `s.require` guards in actionmap.go: 66 mutants,
+//     **66 killed, 0 survived**. That half is closed. It was 29 survivors
+//     before this round, all of them in the P2 exit arms.
+//   - Every single-line `if` condition in all thirteen production files:
+//     141 mutants, 65 killed, **63 survived**, 13 that do not compile.
+//     entropy.go and actionmap.go are clean; the survivors are concentrated in
+//     factset.go, p3b.go, placement.go and evidence.go.
+//
+// Those 63 are a measured COVERAGE limitation, not 63 defects. Independent
+// review proved non-equivalence for two of them and both are now pinned per
+// clause: the UNKNOWN-artifact winner guard in [VerifyResolutionArtifact] --
+// the package's prime directive at its narrowest point -- and the unread-
+// refusal guard in [MapP3bAction]. The COMPLETE factset invariant and the
+// stop-fields guard were split for the same reason.
+//
+// Where the masking barrier is a producer-only witness, no discriminating
+// input exists outside this package and the equivalence is ARGUED AT THE SITE
+// rather than left unexplained: derivePlacement's case binding, sameMapping,
+// and the payout attribution guard -- the last of which was checked by writing
+// the test and watching it fail on PLACEMENT_NOT_DERIVED, the barrier one step
+// earlier. The remainder are neither pinned nor individually argued, and that
+// is the honest state: the number above is the exposure.
+//
+// # Framing a float has no NaN or infinity discipline
+//
+// canonical.go frames a float by its BITS, so two values a decimal rendering
+// would round together stay distinguishable. It does not follow that two
+// INDISTINGUISHABLE values frame alike. A NaN has many bit patterns and the
+// architectures this project ships for do not agree on which one an arithmetic
+// NaN carries, so the same fact can digest differently on two targets; and a
+// factset carrying a NaN passes [VerifyCommonFactset] but cannot be encoded by
+// encoding/json at all, which the package's own storage-and-rederivation
+// argument assumes it can. Reported by review, reproduced, and NOT repaired
+// here: whether the producer can emit a NaN at all was not established, and
+// refusing one is a behavioural narrowing of an approved seam.
 //
 // Nothing here was checked against real P1/P1.5 data: no production dataset
 // is proven available, no dataset window (T0/T1) or dataset binding is

@@ -359,9 +359,12 @@ func decisionOf(policy string, fs CommonFactset, resultDigest string, action Act
 	if err := VerifyCommonFactset(fs); err != nil {
 		return PolicyDecision{}, err
 	}
+	// Neither digest is gated for length on this path -- both arrive on plain
+	// exported fields -- so both are named by extent. See suppliedTextExtent.
 	if resultDigest == "" || resultDigest != fs.Digest {
 		return PolicyDecision{}, errors.Join(ErrDecisionBinding,
-			errors.New("p4offline: result was evaluated over factset "+resultDigest+", not "+fs.Digest))
+			errors.New("p4offline: result was evaluated over a factset digest of "+suppliedTextExtent(resultDigest)+
+				", not this factset's "+suppliedTextExtent(fs.Digest)))
 	}
 	if action.Policy != policy || action.MapVersion != NativeActionMapVersion {
 		return PolicyDecision{}, errors.Join(ErrDecisionBinding, errors.New("p4offline: action mapping is not this policy's"))

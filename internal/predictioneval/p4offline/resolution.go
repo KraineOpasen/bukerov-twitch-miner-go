@@ -2,6 +2,7 @@ package p4offline
 
 import (
 	"errors"
+	"strconv"
 
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/predictioneval"
 )
@@ -352,11 +353,14 @@ func resolutionDigest(a ResolutionArtifact) string {
 // WINNER_KNOWN or REFUND artifact must be exactly what projecting its own
 // facts produces, and an UNKNOWN artifact must assert nothing.
 func VerifyResolutionArtifact(a ResolutionArtifact) error {
+	// Same rule as VerifyCommonFactset's first gate: see suppliedTextExtent.
 	if a.ContractVersion != ResolutionFactsDigestVersion {
-		return errors.Join(ErrResolutionDigest, errors.New("p4offline: artifact contract is "+a.ContractVersion))
+		return errors.Join(ErrResolutionDigest, errors.New("p4offline: artifact contract is "+
+			suppliedTextExtent(a.ContractVersion)+", this package writes only "+strconv.Quote(ResolutionFactsDigestVersion)))
 	}
 	if a.ObligationsRevision != ResolutionObligationsRevision {
-		return errors.Join(ErrResolutionDigest, errors.New("p4offline: artifact obligations revision is "+a.ObligationsRevision))
+		return errors.Join(ErrResolutionDigest, errors.New("p4offline: artifact obligations revision is "+
+			suppliedTextExtent(a.ObligationsRevision)+", this package writes only "+strconv.Quote(ResolutionObligationsRevision)))
 	}
 	if a.ResolutionFactsDigest != resolutionDigest(a) {
 		return errors.Join(ErrResolutionDigest, errors.New("p4offline: resolution facts digest does not match the artifact"))
@@ -389,15 +393,64 @@ func VerifyResolutionArtifact(a ResolutionArtifact) error {
 	return nil
 }
 
+// joinReasons renders a reason list in ONE pass.
+//
+// It used to accumulate with `out += r`, which copies the whole prefix on every
+// iteration: quadratic in a list nothing bounds. An independent security lane
+// reached it through the exported EvaluateP2Case with a factset this package's
+// own verifier accepts, and measured 1,018,297,776 bytes at 1,000 reasons
+// rising to 64,420,331,144 at 8,000 -- exactly 4x the allocation per 2x the
+// input. Reproduced here at 4,097 reasons: 1,266,167,840 bytes to refuse
+// 297,913 bytes of input.
+//
+// The size is computed first and the buffer allocated once. strings.Join would
+// say this in one line, but `strings` is not on the purity allowlist and
+// bringing it in to save four lines is not a trade this package makes; the
+// dependency fence exists to be inconvenient here.
+//
+// This removes the quadratic factor at every call site. It does NOT bound the
+// result, so a caller-controlled list would still be rendered in full -- which
+// is why the one site reached with unbounded caller content reports a count and
+// a total instead of calling this at all. See EvaluateP2Case.
+//
+// AND THAT IS WHY THIS REWRITE IS NOT SEPARATELY TESTABLE, stated rather than
+// left as an unexplained mutation survivor. Restoring the `+=` accumulation
+// leaves the suite green, because after the EvaluateP2Case repair no remaining
+// caller hands this an unbounded list: factset.go's session refusals come from
+// sessionRefusals, whose every member is a package constant or a producer
+// anomaly prefix; its exclusion reasons and resolution.go's refusals both go
+// through appendOnce over closed vocabularies; and the COMPLETE-beside check
+// passes at most six derived reasons. The quadratic is removed because a future
+// caller should not have to rediscover it, not because a current one reaches
+// it.
 func joinReasons(rs []string) string {
-	out := ""
+	if len(rs) == 0 {
+		return ""
+	}
+	n := len(rs) - 1
+	for _, r := range rs {
+		n += len(r)
+	}
+	out := make([]byte, 0, n)
 	for i, r := range rs {
 		if i > 0 {
-			out += ","
+			out = append(out, ',')
 		}
-		out += r
+		out = append(out, r...)
 	}
-	return out
+	return string(out)
+}
+
+// reasonListExtent names a reason list by its COUNT and its TOTAL BYTES,
+// without rendering it. It is the rule rulesetIdentityFault, ValidateDrawTrace
+// and bindEntropyCoordinates already follow, applied to a list instead of a
+// string: a refusal names the fault, never the input it is refusing.
+func reasonListExtent(rs []string) string {
+	n := 0
+	for _, r := range rs {
+		n += len(r)
+	}
+	return strconv.Itoa(len(rs)) + " reasons, " + strconv.Itoa(n) + " bytes"
 }
 
 // ExtractResolutionReferences names the facts of one round a resolution could

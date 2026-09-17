@@ -341,9 +341,19 @@ func BuildDrawTrace(coords EntropyCoordinates, count int) (predictioneval.Suppli
 // conclude. Any correct PREFIX validates, including an empty list and a nil
 // one: for a truncated schedule the loop simply runs fewer times and returns
 // nil, so "the 16-word schedule verified" is not a conclusion this function
-// supports. Use [ValidateDrawTrace] to validate a WHOLE schedule — its run
-// identity embeds the word count, so a truncation is refused as a run-identity
-// fault. The evaluation path goes through that one.
+// supports.
+//
+// [ValidateDrawTrace] is stronger but NOT that strong, and the difference is
+// worth stating because an earlier version of this paragraph got it wrong. Its
+// run identity is computed from the trace's OWN word count, so it refuses a
+// trace whose Words were truncated AFTER it was drawn — the RunID then names a
+// length the words no longer have. It does not establish that the schedule is
+// the length the caller wanted: a correctly drawn 8-word trace validates
+// cleanly under coordinates for which the caller needed sixteen. A caller who
+// needs that must compare len(trace.Words) against the count the traversal
+// requires. The package's own path does, and degrades honestly when it is
+// short — the core returns UNKNOWN_INPUT / ENTROPY_EXHAUSTED rather than
+// inventing a decision.
 func ValidateEntropyWords(coords EntropyCoordinates, words []predictioneval.OrderedRulesHex64) error {
 	if err := checkEntropyCoordinates(coords); err != nil {
 		return err

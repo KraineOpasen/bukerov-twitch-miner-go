@@ -60,6 +60,28 @@ func (c *canonical) digest() string {
 	return hexEncode(sum[:])
 }
 
+// suppliedTextExtent names a caller-supplied string by its LENGTH, for a
+// refusal message.
+//
+// THE RULE THIS ENFORCES, written down once because it has now been rediscovered
+// four times on this branch. A gate that refuses caller-supplied text must name
+// the FAULT and the EXTENT, never the text. Concatenating it costs the caller's
+// whole string on the path where nothing has been validated yet, and every one
+// of these gates is the FIRST statement of an exported function -- so no bound,
+// no digest and no length check has run. Measured on a 64 MiB supplied string:
+// 134,234,440 bytes allocated and a 67,108,944-byte error, to report that a
+// string differs from a 20-byte compile-time constant.
+//
+// The constant being compared against IS quoted, deliberately: it is
+// compile-time, it is short, and naming it is the whole diagnosis.
+//
+// Repaired under this rule, in the order they were found: VerifyP3bRuleset's
+// identity gate (rulesetIdentityFault), ValidateDrawTrace's two gates,
+// bindEntropyCoordinates' round gate, and the five below.
+func suppliedTextExtent(s string) string {
+	return strconv.Itoa(len(s)) + " bytes"
+}
+
 // lpFrame frames the parts in order with the u64 big-endian length prefix and
 // returns the framed bytes. It is the exact framing [EntropyAlgorithmVersion]
 // hashes, exported through [EntropyMessage] so an independent implementation

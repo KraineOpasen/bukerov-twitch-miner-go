@@ -466,17 +466,49 @@ func TestDrawTraceRefusalDoesNotMaterializeSuppliedText(t *testing.T) {
 		})
 	}
 
-	t.Run("the refusal still says which of the two faults it is", func(t *testing.T) {
-		// Declining to quote the values must not cost the diagnosis.
-		semantics := predictioneval.SuppliedDrawTrace{EntropySemanticsVersion: "not-the-core's"}
+	t.Run("each refusal still names its own fault", func(t *testing.T) {
+		// Declining to quote the values must not cost the diagnosis, and
+		// "the two strings differ" does not establish that. A first version of
+		// this subtest asserted only inequality, and an independent lane showed
+		// two mutants surviving it: emitting the SEMANTICS message from the
+		// run-identity gate (so a caller with a correct version and a wrong run
+		// is told the wrong fault), and reporting len(trace.RunID) on BOTH
+		// sides of the run-identity message (so it reads "is N bytes and is not
+		// this run's, which is N bytes"). Both passed, because the two fixture
+		// strings happen to differ in length. Content is asserted now.
+		const foreignSemantics = "not-the-core's"
+		const foreignRun = "not-this-run's"
+		semantics := predictioneval.SuppliedDrawTrace{EntropySemanticsVersion: foreignSemantics}
 		runID := predictioneval.SuppliedDrawTrace{
 			EntropySemanticsVersion: predictioneval.OrderedRulesEntropySemanticsVersion,
-			RunID:                   "not-this-run's",
+			RunID:                   foreignRun,
 		}
 		e1 := p4offline.ValidateDrawTrace(okCoords(0), semantics)
 		e2 := p4offline.ValidateDrawTrace(okCoords(0), runID)
-		if e1 == nil || e2 == nil || e1.Error() == e2.Error() {
-			t.Fatalf("a foreign semantics version and a foreign run identity must be distinguishable: %v / %v", e1, e2)
+		if !errors.Is(e1, p4offline.ErrEntropyTrace) || !errors.Is(e2, p4offline.ErrEntropyTrace) {
+			t.Fatalf("both must be trace faults: %v / %v", e1, e2)
+		}
+		// The semantics arm names itself, the supplied LENGTH, and the constant
+		// the core consumes -- which is quoted because it is a constant.
+		if !strings.Contains(e1.Error(), "declares semantics of "+strconv.Itoa(len(foreignSemantics))+" bytes") ||
+			!strings.Contains(e1.Error(), strconv.Quote(predictioneval.OrderedRulesEntropySemanticsVersion)) {
+			t.Fatalf("the semantics fault must name itself, the supplied length and the core's constant: %v", e1)
+		}
+		// The run-identity arm names itself and TWO DIFFERENT lengths: the one
+		// supplied and the one this run actually has. Equal counts would be the
+		// self-contradictory message the second mutant produced.
+		if !strings.Contains(e2.Error(), "run identity is "+strconv.Itoa(len(foreignRun))+" bytes") {
+			t.Fatalf("the run-identity fault must name itself and the supplied length: %v", e2)
+		}
+		if strings.Contains(e2.Error(), "is not this run's, which is "+strconv.Itoa(len(foreignRun))+" bytes") {
+			t.Fatalf("both lengths are the supplied one; the refusal contradicts itself: %v", e2)
+		}
+		// And neither re-exports the text it refused.
+		if strings.Contains(e1.Error(), foreignSemantics) || strings.Contains(e2.Error(), foreignRun) {
+			t.Fatalf("a refusal must not carry the text it is refusing: %v / %v", e1, e2)
+		}
+		if e1.Error() == e2.Error() {
+			t.Fatalf("the two faults must be distinguishable: %v / %v", e1, e2)
 		}
 	})
 }

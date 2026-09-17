@@ -805,3 +805,178 @@ func TestP2ActionMapRequiresACoherentExecutedPercentCap(t *testing.T) {
 		}
 	})
 }
+
+// TestP2ExitArmClausesArePinnedOneAtATime is the systematic answer to a
+// finding that this package had been half-making for two rounds.
+//
+// MapP2Action's exit arms are written as compound requirements -- `s.require(A
+// && B, "TAG")` -- and every existing case that names one of those tags
+// violates EVERY conjunct at once, because the fixtures are built by tampering
+// a whole stage. So a strictly weaker guard is indistinguishable from the real
+// one. A single-conjunct sweep over actionmap.go measured it: 66 mutants, 37
+// killed, 29 SURVIVED, 0 build failures -- and every survivor is in this half
+// of the map. Concretely, deleting `ev.Filter.Applied` from the FILTER_REJECTED
+// arm lets a native evaluation whose filter answered "skip" but never actually
+// applied map legal, as a POLICY_SKIP with an exact-zero stake, with the whole
+// suite green.
+//
+// The table below violates exactly ONE field per case, on a REAL native
+// evaluation of that action, and asserts the arm's own identifier is named.
+// Other identifiers may fire beside it -- a tampered stage state often
+// contradicts more than one relation -- and that is fine; what must not happen
+// is the clause under test going unnamed.
+func TestP2ExitArmClausesArePinnedOneAtATime(t *testing.T) {
+	const (
+		exec = predictioneval.StageStateExecuted
+		nr   = predictioneval.StageStateNotReached
+	)
+	placement := func() predictioneval.DecisionInputs { return p2Inputs() }
+	healthGated := func() predictioneval.DecisionInputs {
+		in := p2Inputs()
+		in.HealthState = predictioneval.HealthDenied
+		return in
+	}
+	reserve := func() predictioneval.DecisionInputs {
+		in := p2Inputs()
+		in.RiskReservePoints = 960
+		return in
+	}
+	belowMinimum := func() predictioneval.DecisionInputs {
+		in := p2Inputs()
+		in.Balance = 100
+		return in
+	}
+	filterRejected := func() predictioneval.DecisionInputs {
+		in := p2Inputs()
+		in.Settings.FilterCondition = &predictioneval.SourceFilterCondition{By: "odds", Where: "GT", Value: 5}
+		return in
+	}
+
+	for _, tc := range []struct {
+		name   string
+		inputs func() predictioneval.DecisionInputs
+		action string
+		tag    string
+		edit   func(*predictioneval.Evaluation)
+	}{
+		// WOULD_ATTEMPT_PLACEMENT
+		{"a placement whose choice stage never ran", placement, predictioneval.ActionWouldAttemptPlacement,
+			"CHOICE_NOT_SELECTED", func(e *predictioneval.Evaluation) { e.Choice.State = nr }},
+		{"a placement whose choice selected nothing", placement, predictioneval.ActionWouldAttemptPlacement,
+			"CHOICE_NOT_SELECTED", func(e *predictioneval.Evaluation) { e.Choice.Selected = false }},
+		{"a placement whose filter stage never ran", placement, predictioneval.ActionWouldAttemptPlacement,
+			"FILTER_CONTRADICTS_PLACEMENT", func(e *predictioneval.Evaluation) { e.Filter.State = nr }},
+		{"a placement whose filter answered skip", placement, predictioneval.ActionWouldAttemptPlacement,
+			"FILTER_CONTRADICTS_PLACEMENT", func(e *predictioneval.Evaluation) { e.Filter.Skip = true }},
+		{"a placement whose filter was applied", placement, predictioneval.ActionWouldAttemptPlacement,
+			"FILTER_CONTRADICTS_PLACEMENT", func(e *predictioneval.Evaluation) { e.Filter.Applied = true }},
+		{"a placement whose clamp never ran", placement, predictioneval.ActionWouldAttemptPlacement,
+			"NO_FINAL_STAKE", func(e *predictioneval.Evaluation) { e.Clamp.State = nr }},
+		{"a placement with no final amount", placement, predictioneval.ActionWouldAttemptPlacement,
+			"NO_FINAL_STAKE", func(e *predictioneval.Evaluation) { e.Clamp.HasFinal = false }},
+		{"a placement whose minimum never ran", placement, predictioneval.ActionWouldAttemptPlacement,
+			"MINIMUM_CONTRADICTS_PLACEMENT", func(e *predictioneval.Evaluation) { e.Minimum.State = nr }},
+		{"a placement below the minimum", placement, predictioneval.ActionWouldAttemptPlacement,
+			"MINIMUM_CONTRADICTS_PLACEMENT", func(e *predictioneval.Evaluation) { e.Minimum.Below = true }},
+
+		// HEALTH_GATED
+		{"a health exit that was not witnessed", healthGated, predictioneval.ActionHealthGated,
+			"HEALTH_NOT_DENIED", func(e *predictioneval.Evaluation) { e.Health.State = exec }},
+		{"a health exit that was not denied", healthGated, predictioneval.ActionHealthGated,
+			"HEALTH_NOT_DENIED", func(e *predictioneval.Evaluation) { e.Health.Verdict = predictioneval.HealthAllowed }},
+		{"a health exit whose stake gate ran anyway", healthGated, predictioneval.ActionHealthGated,
+			"STAGES_AFTER_HEALTH_REACHED", func(e *predictioneval.Evaluation) { e.StakeGate.State = exec }},
+		{"a health exit whose clamp ran anyway", healthGated, predictioneval.ActionHealthGated,
+			"STAGES_AFTER_HEALTH_REACHED", func(e *predictioneval.Evaluation) { e.Clamp.State = exec }},
+
+		// RESERVE_VIOLATION
+		{"a reserve exit whose gate never ran", reserve, predictioneval.ActionReserveViolation,
+			"STAKE_GATE_NOT_RESERVE_VIOLATION", func(e *predictioneval.Evaluation) { e.StakeGate.State = nr }},
+		{"a reserve exit naming another gate reason", reserve, predictioneval.ActionReserveViolation,
+			"STAKE_GATE_NOT_RESERVE_VIOLATION", func(e *predictioneval.Evaluation) { e.StakeGate.Reason = predictioneval.GateNone }},
+
+		// BELOW_MINIMUM
+		{"a minimum exit whose filter never ran", belowMinimum, predictioneval.ActionBelowMinimum,
+			"FILTER_CONTRADICTS_MINIMUM_EXIT", func(e *predictioneval.Evaluation) { e.Filter.State = nr }},
+		{"a minimum exit whose filter was applied", belowMinimum, predictioneval.ActionBelowMinimum,
+			"FILTER_CONTRADICTS_MINIMUM_EXIT", func(e *predictioneval.Evaluation) { e.Filter.Applied = true }},
+		{"a minimum exit whose clamp never ran", belowMinimum, predictioneval.ActionBelowMinimum,
+			"NO_FINAL_STAKE", func(e *predictioneval.Evaluation) { e.Clamp.State = nr }},
+		{"a minimum exit with no final amount", belowMinimum, predictioneval.ActionBelowMinimum,
+			"NO_FINAL_STAKE", func(e *predictioneval.Evaluation) { e.Clamp.HasFinal = false }},
+		{"a minimum exit that was not below", belowMinimum, predictioneval.ActionBelowMinimum,
+			"MINIMUM_NOT_BELOW", func(e *predictioneval.Evaluation) { e.Minimum.Below = false }},
+		{"a minimum exit whose minimum stage never ran", belowMinimum, predictioneval.ActionBelowMinimum,
+			"MINIMUM_NOT_BELOW", func(e *predictioneval.Evaluation) { e.Minimum.State = nr }},
+
+		// FILTER_REJECTED
+		{"a filter exit whose filter never ran", filterRejected, predictioneval.ActionFilterRejected,
+			"FILTER_NOT_APPLIED", func(e *predictioneval.Evaluation) { e.Filter.State = nr }},
+		{"a filter exit whose filter did not answer skip", filterRejected, predictioneval.ActionFilterRejected,
+			"FILTER_NOT_APPLIED", func(e *predictioneval.Evaluation) { e.Filter.Skip = false }},
+		{"a filter exit whose filter was never applied", filterRejected, predictioneval.ActionFilterRejected,
+			"FILTER_NOT_APPLIED", func(e *predictioneval.Evaluation) { e.Filter.Applied = false }},
+		{"a filter exit whose clamp never ran", filterRejected, predictioneval.ActionFilterRejected,
+			"NO_FINAL_STAKE", func(e *predictioneval.Evaluation) { e.Clamp.State = nr }},
+		{"a filter exit with no final amount", filterRejected, predictioneval.ActionFilterRejected,
+			"NO_FINAL_STAKE", func(e *predictioneval.Evaluation) { e.Clamp.HasFinal = false }},
+		{"a filter exit whose minimum never ran", filterRejected, predictioneval.ActionFilterRejected,
+			"MINIMUM_CONTRADICTS_FILTER_EXIT", func(e *predictioneval.Evaluation) { e.Minimum.State = nr }},
+		{"a filter exit that was also below the minimum", filterRejected, predictioneval.ActionFilterRejected,
+			"MINIMUM_CONTRADICTS_FILTER_EXIT", func(e *predictioneval.Evaluation) { e.Minimum.Below = true }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ev := p2Eval(tc.inputs())
+			if ev.Action != tc.action {
+				t.Fatalf("fixture must be %q, got %q", tc.action, ev.Action)
+			}
+			if m := p4offline.MapP2Action(ev); !m.Legal {
+				t.Fatalf("the untouched producer output must stay legal: %+v", m)
+			}
+			tc.edit(&ev)
+			m := p4offline.MapP2Action(ev)
+			if m.Legal || !containsString(m.Illegality, tc.tag) {
+				t.Fatalf("want %s: %+v", tc.tag, m)
+			}
+		})
+	}
+
+	// The PRE_DECISION_EXIT arm is ONE requirement over seven stages, so each
+	// stage gets its own case: an attempt that ended before Calculate cannot
+	// have run any of them, and a forgery reaching exactly one is the shape a
+	// whole-stage fixture cannot tell from a strictly weaker guard.
+	preDecision := func() predictioneval.DecisionInputs {
+		in := p2Inputs()
+		in.ReachedDecision = false
+		in.PreDecisionExit = "NOT_ELIGIBLE"
+		return in
+	}
+	for _, tc := range []struct {
+		name string
+		edit func(*predictioneval.Evaluation)
+	}{
+		{"the choice stage", func(e *predictioneval.Evaluation) { e.Choice.State = exec }},
+		{"the base stake stage", func(e *predictioneval.Evaluation) { e.BaseStake.State = exec }},
+		{"the stealth stage", func(e *predictioneval.Evaluation) { e.Stealth.State = exec }},
+		{"the filter stage", func(e *predictioneval.Evaluation) { e.Filter.State = exec }},
+		{"the health stage", func(e *predictioneval.Evaluation) { e.Health.State = exec }},
+		{"the stake gate", func(e *predictioneval.Evaluation) { e.StakeGate.State = exec }},
+		{"the clamp, after the gate", func(e *predictioneval.Evaluation) { e.Clamp.State = exec }},
+		{"the minimum, after the gate", func(e *predictioneval.Evaluation) { e.Minimum.State = exec }},
+	} {
+		t.Run("a pre-decision exit that reached "+tc.name, func(t *testing.T) {
+			ev := p2Eval(preDecision())
+			if ev.Action != predictioneval.ActionPreDecisionExit {
+				t.Fatalf("fixture must be a pre-decision exit, got %q", ev.Action)
+			}
+			if m := p4offline.MapP2Action(ev); !m.Legal {
+				t.Fatalf("the untouched producer output must stay legal: %+v", m)
+			}
+			tc.edit(&ev)
+			if m := p4offline.MapP2Action(ev); m.Legal ||
+				!containsString(m.Illegality, "STAGES_REACHED_BEFORE_DECISION") {
+				t.Fatalf("want STAGES_REACHED_BEFORE_DECISION for %s: %+v", tc.name, m)
+			}
+		})
+	}
+}

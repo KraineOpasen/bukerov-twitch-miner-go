@@ -781,6 +781,15 @@ func evaluateProjected(fs CommonFactset, proj P3bProjection, rs VerifiedP3bRules
 	// refuse it: 512 MB copied to refuse 512 MB. A slice header's length
 	// cannot be changed under a value receiver, so reading it before the copy
 	// costs the detachment property nothing.
+	//
+	// ONE CONSEQUENCE, a precedence shift rather than a behaviour change: a
+	// trace that is BOTH past the ceiling AND carries a foreign semantics
+	// version or run identity used to come back as ErrEntropyTrace, because
+	// ValidateDrawTrace's first two gates ran before ValidateEntropyWords
+	// reached the count. It now comes back as ErrEntropyCount. No input moves
+	// between admitted and refused -- the same bound is applied to the same
+	// length, one call earlier -- but a caller switching on the sentinel sees a
+	// different one for that class.
 	if err := checkEntropyCount(len(trace.Words)); err != nil {
 		return P3bCaseResult{}, err
 	}

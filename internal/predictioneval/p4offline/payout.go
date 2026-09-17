@@ -332,6 +332,17 @@ func derivePayout(policy PolicyDecision, placement PlacementEvidence, res Resolu
 		reason(string(placement.Status))
 		return out
 	}
+	// BOTH CLAUSES ARE UNPINNED AND NEITHER IS DISCRIMINABLE FROM OUTSIDE THIS
+	// PACKAGE, which is the disposition and not an excuse. A package-wide
+	// single-clause sweep found both surviving, so this was checked rather than
+	// assumed: PlacementEvidence carries a producer-only witness, so a
+	// hand-edited placement is refused as PLACEMENT_NOT_DERIVED one barrier
+	// earlier -- verified by writing that test and watching it fail on the
+	// masking barrier -- and a genuinely DERIVED placement takes its attributed
+	// outcome from this very decision, so the two cannot disagree. The guard is
+	// defence in depth against a future caller inside the package, and
+	// manufacturing a test for it would mean widening the production API to
+	// defeat the witness, which is worse than the gap.
 	if placement.AttributedOutcomeID != policy.Choice.OutcomeID || placement.AttributedCallObservationID == "" {
 		reason(PayoutReasonPlacementContradicts)
 		return out

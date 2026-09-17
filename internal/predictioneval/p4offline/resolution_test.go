@@ -117,10 +117,18 @@ func TestResolutionVerificationRederivesTheOutcome(t *testing.T) {
 	// not itself serialized, so re-running the same pure function over the same
 	// value is f(x) == f(x): it holds for ANY implementation of the serializer,
 	// including one whose whole body is `return []byte("x")`. An independent
-	// lane executed that mutant and this line did not fire; the ONE test that
-	// did fire is the independent Python golden. So the guard is stated for
-	// what it actually is -- internal consistency of the fixture, not a check
-	// on the framing -- and the framing is pinned where it really is pinned.
+	// lane executed that mutant and neither this line nor its sibling below
+	// fired. SIX tests did, and an earlier draft of this comment named the
+	// wrong one: TestResolutionArtifactDigestMatchesTheIndependentGolden (in
+	// golden_test.go, not this file), TestResolutionArtifactIsTypedImmutableAndDigested,
+	// TestResolutionVerificationRederivesTheOutcome -- the very function this
+	// comment sits in, at its VerifyResolutionArtifact assertion, not at either
+	// guard -- TestHandwrittenWinLoseRefundScoring,
+	// TestAssessCaseQualityIsTheMinimumOverEverySeam and
+	// TestDenominatorMembershipIsComposedWithTheCaseQuality. So the guard is
+	// stated for what it actually is -- internal consistency of the fixture,
+	// not a check on the framing -- and the framing is covered in several
+	// places, the independent Python golden among them.
 	forged := forgedWinnerArtifact("o2")
 	if got := p4offline.DigestReference(digestOf(p4offline.SerializeResolutionArtifact(forged))); got != forged.ResolutionFactsDigest {
 		t.Fatalf("fixture: the forged artifact must be internally consistent")
@@ -134,8 +142,9 @@ func TestResolutionVerificationRederivesTheOutcome(t *testing.T) {
 	// cannot disagree with the code. It is kept as a regression guard on the
 	// two being WIRED together -- if ProjectResolution ever stopped setting the
 	// field from the serializer, this fires -- and the framing itself is
-	// pinned by TestResolutionArtifactDigestMatchesTheIndependentGolden, which
-	// is the only assertion in this file that a rewritten serializer breaks.
+	// pinned elsewhere -- by golden_test.go's independent Python golden, and by
+	// five further assertions including the VerifyResolutionArtifact check
+	// twelve lines below this one.
 	a := p4offline.ProjectResolution(goodWinnerEvidence())
 	if p4offline.DigestReference(digestOf(p4offline.SerializeResolutionArtifact(a))) != a.ResolutionFactsDigest {
 		t.Fatal("ProjectResolution no longer digests what SerializeResolutionArtifact frames")
@@ -149,12 +158,40 @@ func TestResolutionVerificationRederivesTheOutcome(t *testing.T) {
 		t.Fatalf("got %v", err)
 	}
 	// An UNKNOWN artifact that names a winner is not an UNKNOWN artifact.
-	unknown := p4offline.ResolutionNotRecorded(p4offline.PublicRoundIdentity{EventID: "e1"}, []string{"o1", "o2"}, nil, "p")
-	unknown.WinnerOutcomeID = "o1"
-	unknown.WinnerIndex = 0
-	unknown.ResolutionFactsDigest = p4offline.DigestReference(digestOf(p4offline.SerializeResolutionArtifact(unknown)))
-	if err := p4offline.VerifyResolutionArtifact(unknown); !errors.Is(err, p4offline.ErrResolutionNotDerivable) {
-		t.Fatalf("got %v", err)
+	//
+	// ONE CLAUSE AT A TIME, and this one matters more than most: the guard is
+	// the package's prime directive at its narrowest point -- an artifact that
+	// admits it does not know the outcome must not name one. It used to be
+	// tested by a single case setting BOTH the identity and the index, so
+	// either conjunct could be deleted with the whole suite green, and an
+	// artifact naming a winner by index alone (or by identity alone) would
+	// have verified. A discriminating input exists and needs only exported
+	// symbols, which is why this is split rather than argued away.
+	unknownNaming := func(t *testing.T, edit func(*p4offline.ResolutionArtifact)) error {
+		t.Helper()
+		u := p4offline.ResolutionNotRecorded(p4offline.PublicRoundIdentity{EventID: "e1"}, []string{"o1", "o2"}, nil, "p")
+		if u.Outcome != p4offline.ResolutionUnknown {
+			t.Fatalf("fixture must be UNKNOWN, got %q", u.Outcome)
+		}
+		edit(&u)
+		u.ResolutionFactsDigest = p4offline.DigestReference(digestOf(p4offline.SerializeResolutionArtifact(u)))
+		return p4offline.VerifyResolutionArtifact(u)
+	}
+	for _, tc := range []struct {
+		name string
+		edit func(*p4offline.ResolutionArtifact)
+	}{
+		{"by identity alone", func(u *p4offline.ResolutionArtifact) { u.WinnerOutcomeID = "o1" }},
+		{"by index alone", func(u *p4offline.ResolutionArtifact) { u.WinnerIndex = 0 }},
+		{"by both", func(u *p4offline.ResolutionArtifact) { u.WinnerOutcomeID = "o1"; u.WinnerIndex = 0 }},
+	} {
+		if err := unknownNaming(t, tc.edit); !errors.Is(err, p4offline.ErrResolutionNotDerivable) {
+			t.Fatalf("an UNKNOWN artifact naming a winner %s must be refused, got %v", tc.name, err)
+		}
+	}
+	// And the honest control: an UNKNOWN artifact that names nothing verifies.
+	if err := unknownNaming(t, func(*p4offline.ResolutionArtifact) {}); err != nil {
+		t.Fatalf("an honest UNKNOWN artifact must verify: %v", err)
 	}
 	// An outcome outside the vocabulary is refused whatever its digest.
 	odd := a

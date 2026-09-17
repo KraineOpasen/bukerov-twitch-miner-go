@@ -14,6 +14,7 @@ import (
 	"reflect"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -2619,12 +2620,60 @@ func TestP3bTerminalStatusesCarryTheTraversalStateTheProducerWrote(t *testing.T)
 	t.Run("stop fields beside no stop at all", func(t *testing.T) {
 		// Counterexample 3's other half: the ghost stop on a shape that really
 		// did stop nowhere.
-		ev := native(t, noDefault, trace, predictioneval.StatusRefused)
-		ev.StoppedAtCandidate = "GHOST"
-		ev.StoppedAtPosition = -99
+		//
+		// ONE CLAUSE AT A TIME. Every case in this package naming this tag used
+		// to violate BOTH conjuncts at once, so replacing either with `true`
+		// left the whole suite green -- the sibling half of the very guard this
+		// branch split for the unread-refusal arm, and found by the same kind
+		// of sweep one round later. A build in which an evaluation declares no
+		// stop yet names a stopped-at candidate, or carries a non-zero stop
+		// position, would have mapped legal with nothing saying so.
+		for _, tc := range []struct {
+			name string
+			edit func(*predictioneval.OrderedRulesEvaluation)
+		}{
+			{"a stopped candidate alone", func(e *predictioneval.OrderedRulesEvaluation) {
+				e.StoppedAtCandidate = "GHOST"
+			}},
+			{"a stopped position alone", func(e *predictioneval.OrderedRulesEvaluation) {
+				e.StoppedAtPosition = -99
+			}},
+			{"both together", func(e *predictioneval.OrderedRulesEvaluation) {
+				e.StoppedAtCandidate = "GHOST"
+				e.StoppedAtPosition = -99
+			}},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				ev := native(t, noDefault, trace, predictioneval.StatusRefused)
+				if ev.HasStopPosition {
+					t.Fatalf("fixture must have stopped nowhere: %+v", ev)
+				}
+				tc.edit(&ev)
+				if m := p4offline.MapP3bAction(ev); m.Legal ||
+					!containsString(m.Illegality, "STOP_FIELDS_WITHOUT_STOP_POSITION") {
+					t.Fatalf("want STOP_FIELDS_WITHOUT_STOP_POSITION for %s: %+v", tc.name, m)
+				}
+			})
+		}
+	})
+
+	t.Run("an admission that claims no candidate at all", func(t *testing.T) {
+		// NO_CANDIDATE_REACHED is a disjunction beside a count, and its SECOND
+		// conjunct was unpinned: no case cleared the counter while leaving the
+		// selection and the stop in place. The producer cannot write that --
+		// CandidatesConsumed, the stop and HasStopPosition are the same three
+		// adjacent lines -- so it is a contradiction in the evidence. Other
+		// identifiers fire beside it here, which is expected; what matters is
+		// that this one is named.
+		ev := native(t, cfgWithRule("a", predictioneval.ComparatorGe, 50, 100), trace,
+			predictioneval.StatusWouldAttempt)
+		if ev.Selected == nil || !ev.HasStopPosition || ev.CandidatesConsumed < 1 {
+			t.Fatalf("fixture must admit, carrying a stop and a consumed candidate: %+v", ev)
+		}
+		ev.CandidatesConsumed = 0
 		if m := p4offline.MapP3bAction(ev); m.Legal ||
-			!containsString(m.Illegality, "STOP_FIELDS_WITHOUT_STOP_POSITION") {
-			t.Fatalf("want STOP_FIELDS_WITHOUT_STOP_POSITION: %+v", m)
+			!containsString(m.Illegality, "NO_CANDIDATE_REACHED") {
+			t.Fatalf("want NO_CANDIDATE_REACHED: %+v", m)
 		}
 	})
 
@@ -2790,19 +2839,51 @@ func TestEntropyBindingRefusalDoesNotMaterializeTheFactsetRound(t *testing.T) {
 		t.Fatalf("the refusal carries %d bytes; a refusal must name the fault, not the factset's round (budget %d)", n, budget)
 	}
 
-	t.Run("the refusal still tells the two binding faults apart", func(t *testing.T) {
+	t.Run("each binding fault still names its own side", func(t *testing.T) {
+		// BOTH FAULTS THROUGH THE SAME SEAM, and each one asserted on its own
+		// CONTENT. A first version of this subtest produced its "other" error
+		// from ValidateDrawTrace with a zero-value trace, which returns at its
+		// first gate with a SEMANTICS fault and never reaches
+		// bindEntropyCoordinates at all -- so it compared a trace fault against
+		// a binding fault, two different sentinels, and could not fail for any
+		// implementation of either message. Two independent lanes found that,
+		// and both demonstrated it the same way: collapsing the two binding
+		// messages into one identical string left the whole suite green. Which
+		// is the direction this round was pushing in.
 		_, small := selectedFactset(t, nil, nil)
+
 		wrongDigest := synthCoords(small, 0)
 		wrongDigest.CommonFactsetDigest = p4offline.DigestReference(strings.Repeat("ab", 32))
+		_, e1 := p4offline.EvaluateP3bCase(small, rs, wrongDigest)
+		if !errors.Is(e1, p4offline.ErrP3bBinding) {
+			t.Fatalf("a foreign factset digest must be refused as a binding fault: %v", e1)
+		}
+		// The digest side IS quoted, deliberately: isDigestReference holds both
+		// values to 71 bytes and naming them is the diagnosis.
+		if !strings.Contains(e1.Error(), "entropy factset digest") ||
+			!strings.Contains(e1.Error(), strings.Repeat("ab", 32)) {
+			t.Fatalf("the digest fault must name itself and the digest it was given: %v", e1)
+		}
+
 		wrongRound := synthCoords(small, 0)
 		wrongRound.PairedOpportunityID = "not-this-round"
-		e1 := p4offline.ValidateDrawTrace(wrongDigest, predictioneval.SuppliedDrawTrace{})
 		_, e2 := p4offline.EvaluateP3bCase(small, rs, wrongRound)
-		if e2 == nil || !errors.Is(e2, p4offline.ErrP3bBinding) {
-			t.Fatalf("a foreign round must still be refused as a binding fault: %v", e2)
+		if !errors.Is(e2, p4offline.ErrP3bBinding) {
+			t.Fatalf("a foreign round must be refused as a binding fault: %v", e2)
 		}
-		if e1 != nil && e1.Error() == e2.Error() {
-			t.Fatalf("the two faults must be distinguishable: %v / %v", e1, e2)
+		// The round side is NOT quoted -- the factset's round is unbounded --
+		// so what it must carry is its own name and both byte counts.
+		if !strings.Contains(e2.Error(), "paired opportunity") ||
+			!strings.Contains(e2.Error(), strconv.Itoa(len(wrongRound.PairedOpportunityID))+" bytes") ||
+			!strings.Contains(e2.Error(), strconv.Itoa(len(small.Episode.EventID))+" bytes") {
+			t.Fatalf("the round fault must name itself and both lengths: %v", e2)
+		}
+		if strings.Contains(e2.Error(), wrongRound.PairedOpportunityID) ||
+			strings.Contains(e2.Error(), small.Episode.EventID) {
+			t.Fatalf("the round fault must not re-export either identity: %v", e2)
+		}
+		if e1.Error() == e2.Error() {
+			t.Fatalf("the two binding faults must be distinguishable: %v / %v", e1, e2)
 		}
 	})
 }
@@ -2853,15 +2934,41 @@ func TestOverLongTraceIsRefusedBeforeItIsCopied(t *testing.T) {
 		// The gate must not become the reason legal input is refused. This is
 		// the false-refusal control, and it runs on the trace this very
 		// projection needs rather than on a hand-picked number.
-		//
-		// STATED rather than left to be found: admission at EXACTLY
-		// MaxOrderedRulesDrawWords is not exercised here, because drawing a
-		// ceiling-sized schedule costs 2^20 HMAC-SHA256 computations and this
-		// suite runs under -race. The ceiling itself is pinned from both sides
-		// by entropy_test.go's count table (0.. admitted, ceiling+1 refused),
-		// which is where that boundary belongs.
 		if _, err := p4offline.EvaluateP3bCase(fs, rs, coords); err != nil {
 			t.Fatalf("the projection's own trace must be admitted: %v", err)
+		}
+	})
+
+	t.Run("the gate's own boundary, not the ceiling constant's", func(t *testing.T) {
+		// THIS CALL SITE'S ARGUMENT, not checkEntropyCount itself. A lane
+		// showed the difference: entropy_test.go's count table pins the
+		// helper, and the two mutants that delete this gate or move it back
+		// after the copy are killed above -- but `len(trace.Words) + 1`
+		// survived all of them, falsely refusing a legal ceiling-sized trace
+		// with "1048577 words requested". Nothing distinguished the helper's
+		// boundary from this expression's until here.
+		//
+		// The word VALUES are irrelevant to a count gate, so zero-valued words
+		// are used and no HMAC work is done. The RunID is deliberately not the
+		// one this count would have: the assertion is on WHICH fault is
+		// reported, and the count gate runs before the trace is validated.
+		words := func(n int) predictioneval.SuppliedDrawTrace {
+			return predictioneval.SuppliedDrawTrace{
+				EntropySemanticsVersion: predictioneval.OrderedRulesEntropySemanticsVersion,
+				Words:                   make([]predictioneval.OrderedRulesHex64, n),
+			}
+		}
+		if _, err := p4offline.EvaluateP3bWithTrace(fs, rs, coords,
+			words(predictioneval.MaxOrderedRulesDrawWords+1)); !errors.Is(err, p4offline.ErrEntropyCount) {
+			t.Fatalf("one word past the ceiling must be a count fault, got %v", err)
+		}
+		// AT the ceiling the count gate must let it through. What it is then
+		// refused for is a run-identity fault, because these words were never
+		// drawn -- and that is the point: the count gate is no longer the one
+		// answering.
+		if _, err := p4offline.EvaluateP3bWithTrace(fs, rs, coords,
+			words(predictioneval.MaxOrderedRulesDrawWords)); errors.Is(err, p4offline.ErrEntropyCount) {
+			t.Fatalf("a trace AT the ceiling must pass the count gate, got %v", err)
 		}
 	})
 }
@@ -2912,6 +3019,52 @@ func TestAnUnreadRefusalStillCarriesWhatTheProducerEarned(t *testing.T) {
 	if m := p4offline.MapP3bAction(ev); !m.Legal {
 		t.Fatalf("ordinary producer output must map legal: %+v", m)
 	}
+
+	t.Run("and an established cutoff, which is the limb the matrix reversed", func(t *testing.T) {
+		// THE THIRD FIELD THE MATRIX ENTRY NAMES. The fixture above comes from
+		// ProjectP3bSingleCandidate, which supplies no interventions, so its
+		// cutoff is always Established:false -- and a lane pointed out that the
+		// one limb reversing the previous round's producer claim about DERIVED
+		// fields was the limb the control could not see. If a future producer
+		// change started clearing Cutoff on the refuseUnread path, restoring
+		// the old and wrong matrix reading, the control above would still pass.
+		//
+		// The stream is rebuilt on the producer's own projection seam from the
+		// candidate this very projection produced -- so the balance keeps its
+		// provenance -- with the declared interval widened by one and a single
+		// PROVEN_RELEVANT intervention placed in the gap.
+		cand := proj.Stream.Candidates[0]
+		scope := proj.Stream.Scope
+		scope.IntervalToPosition = cand.Position + 1
+		src := predictioneval.OrderedRulesSource{
+			Scope:      scope,
+			Candidates: []predictioneval.OrderedRulesCandidate{cand},
+			Interventions: []predictioneval.OrderedRulesIntervention{{
+				Identity: "obs-x", Position: cand.Position + 1, HasPosition: true,
+				Kind: predictioneval.InterventionAutoCallStarted, Relevance: predictioneval.RelevanceProven,
+			}},
+		}
+		stream, err := predictioneval.ProjectOrderedRulesStream(src, proj.Stream.Admission)
+		if err != nil {
+			t.Fatalf("the fixture stream must project: %v", err)
+		}
+		if !stream.Cutoff.Established {
+			t.Fatalf("the fixture must establish a cutoff: %+v", stream.Cutoff)
+		}
+		cut := predictioneval.EvaluateOrderedRules(stream, cfg, trace)
+		if cut.Status != predictioneval.StatusRefused || cut.Reason != predictioneval.ReasonSuppliedTextNotEncodable {
+			t.Fatalf("fixture must be the unencodable-text refusal, got %q/%q", cut.Status, cut.Reason)
+		}
+		if !cut.Cutoff.Established {
+			t.Fatalf("this refusal carries the cutoff it established; the matrix said it does not: %+v", cut.Cutoff)
+		}
+		if cut.StreamDigest == "" || len(cut.Qualifications) == 0 {
+			t.Fatalf("and the other two fields with it: %+v", cut)
+		}
+		if m := p4offline.MapP3bAction(cut); !m.Legal {
+			t.Fatalf("ordinary producer output must map legal: %+v", m)
+		}
+	})
 
 	t.Run("and still carries no traversal state", func(t *testing.T) {
 		// The property the REFUSED arm does depend on. Both pre-traversal

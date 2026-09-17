@@ -93,8 +93,14 @@ func EvaluateP2Case(fs CommonFactset) (P2CaseResult, error) {
 		return P2CaseResult{}, err
 	}
 	if fs.Completeness != FactsetComplete || !fs.ReachedDecision {
+		// The reasons are NAMED, not rendered. IncompleteReasons is a plain
+		// exported slice that checkFactsetConsistency bounds neither in count
+		// nor per string -- containsID asks only that the derived reasons are a
+		// SUBSET of the supplied ones, so arbitrary padding is legal by this
+		// package's own rules -- and this is the exported entry point a caller
+		// reaches it through.
 		return P2CaseResult{}, errors.Join(ErrFactsetNotEvaluable,
-			errors.New("p4offline: factset is "+string(fs.Completeness)+": "+joinReasons(fs.IncompleteReasons)))
+			errors.New("p4offline: factset is "+string(fs.Completeness)+": "+reasonListExtent(fs.IncompleteReasons)))
 	}
 	binding, err := BindP2Config(fs)
 	if err != nil {

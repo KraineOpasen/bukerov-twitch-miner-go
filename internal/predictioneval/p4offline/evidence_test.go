@@ -1739,40 +1739,88 @@ func TestReconcileDoesNotReframeEveryClaimPerComparison(t *testing.T) {
 	// idx -- so the same claim set reconciles differently depending on how it
 	// arrived. It is killed, not argued away. Three arrival orders and three
 	// group sizes, because a single reversal is satisfiable by a symmetry.
-	for _, n := range []int{2, 3, 64} {
-		t.Run(fmt.Sprintf("%d claims on one round reconcile independently of arrival order", n), func(t *testing.T) {
-			base := build(n, true)
-			forward := p4offline.ReconcileSourceRounds(base)
+	// INVALID CLAIMS ARE SORTED BY THE SAME CALL AND WERE PINNED BY NOTHING.
+	// ReconcileSourceRounds sorts the invalid list too, and registryDigest
+	// frames the INVALID entries in the order it is left in -- so their order is
+	// load-bearing for the digest VerifySourceRoundRegistry re-derives and
+	// AssessDenominatorMembership names on its verdict. A lane deleted that one
+	// call and the whole suite stayed green, then showed two blank-round claims
+	// reconciling to two DIFFERENT digests depending only on arrival order,
+	// with verification returning nil for both.
+	buildInvalid := func(n int) []p4offline.SourceRoundClaim {
+		cs := make([]p4offline.SourceRoundClaim, 0, n)
+		for i := 0; i < n; i++ {
+			c := build(1, true)[0]
+			c.Episode.EventID = "" // no round: an invalid claim
+			c.Episode.CollectorSessionID = "session-" + strconv.Itoa(i)
+			c.Attempt.AttemptID = uint64(i + 1)
+			c.FactsetDigest = fmt.Sprintf("%064x", i)
+			cs = append(cs, c)
+		}
+		return cs
+	}
 
-			reversed := make([]p4offline.SourceRoundClaim, n)
-			for i := range base {
-				reversed[i] = base[n-1-i]
+	for _, shape := range []struct {
+		name  string
+		build func(int) []p4offline.SourceRoundClaim
+		want  p4offline.SourceRoundStatus
+	}{
+		{"claims on one round", func(n int) []p4offline.SourceRoundClaim { return build(n, true) }, p4offline.SourceRoundConflict},
+		{"invalid claims", buildInvalid, p4offline.SourceRoundInvalid},
+	} {
+		for _, n := range []int{2, 3, 64} {
+			runArrivalOrderCase(t, shape.name, n, shape.build, shape.want)
+		}
+	}
+}
+
+// runArrivalOrderCase asserts that a claim set reconciles to the same entries
+// and the same digest however it arrived: forward, reversed and rotated. Three
+// orders, because a single reversal is satisfiable by a symmetry -- which is
+// exactly how a deterministic-but-arrival-dependent permutation survived the
+// first version of this test.
+func runArrivalOrderCase(t *testing.T, shape string, n int,
+	build func(int) []p4offline.SourceRoundClaim, want p4offline.SourceRoundStatus) {
+	t.Helper()
+	t.Run(fmt.Sprintf("%d %s reconcile independently of arrival order", n, shape), func(t *testing.T) {
+		base := build(n)
+		forward := p4offline.ReconcileSourceRounds(base)
+
+		reversed := make([]p4offline.SourceRoundClaim, n)
+		for i := range base {
+			reversed[i] = base[n-1-i]
+		}
+		rotated := append(append([]p4offline.SourceRoundClaim(nil), base[n/2:]...), base[:n/2]...)
+
+		wantEntries := 1
+		if want == p4offline.SourceRoundInvalid {
+			// Every invalid claim is its own entry.
+			wantEntries = n
+		}
+		for _, name := range []string{"reversed", "rotated"} {
+			other := reversed
+			if name == "rotated" {
+				other = rotated
 			}
-			// A third arrival order, so the check is not satisfiable by a
-			// symmetry that happens to fix the reversal.
-			rotated := append(append([]p4offline.SourceRoundClaim(nil), base[n/2:]...), base[:n/2]...)
-
-			for name, other := range map[string][]p4offline.SourceRoundClaim{
-				"reversed": reversed, "rotated": rotated,
-			} {
-				got := p4offline.ReconcileSourceRounds(other)
-				if len(forward.Entries) != 1 || len(got.Entries) != 1 {
-					t.Fatalf("one shared round is one entry: %d / %d", len(forward.Entries), len(got.Entries))
-				}
-				if forward.Entries[0].Status != p4offline.SourceRoundConflict {
-					t.Fatalf("%d different claims on one round are a CONFLICT, got %q", n, forward.Entries[0].Status)
-				}
-				if forward.Digest != got.Digest {
-					t.Fatalf("the registry digest depends on the order the claims arrived in (%s)", name)
-				}
-				for i := range forward.Entries[0].Claims {
-					if forward.Entries[0].Claims[i] != got.Entries[0].Claims[i] {
-						t.Fatalf("claim %d ordered differently from a %s input", i, name)
+			got := p4offline.ReconcileSourceRounds(other)
+			if len(forward.Entries) != wantEntries || len(got.Entries) != wantEntries {
+				t.Fatalf("want %d entries, got %d / %d", wantEntries, len(forward.Entries), len(got.Entries))
+			}
+			if forward.Entries[0].Status != want {
+				t.Fatalf("want status %q, got %q", want, forward.Entries[0].Status)
+			}
+			if forward.Digest != got.Digest {
+				t.Fatalf("the registry digest depends on the order the claims arrived in (%s)", name)
+			}
+			for e := range forward.Entries {
+				for i := range forward.Entries[e].Claims {
+					if forward.Entries[e].Claims[i] != got.Entries[e].Claims[i] {
+						t.Fatalf("entry %d claim %d ordered differently from a %s input", e, i, name)
 					}
 				}
 			}
-		})
-	}
+		}
+	})
 }
 
 // TestP2ExclusionsAreAttributedByObservationNotOnlyByAttemptKey covers the one
@@ -1877,6 +1925,13 @@ func TestProveCommonCutoffPresupposesACutoff(t *testing.T) {
 // `go vet` is silent, and the record then stays at the TOP of the ladder --
 // the inverse of its safety property -- so the obligation to assign is stated
 // on the methods and checked here.
+// WHAT ACTUALLY CATCHES DRIFT HERE IS THE COMPILER, not these assertions, and
+// saying so is the point. A value receiver on a fresh record with nil slices
+// cannot modify its caller's copy under ANY body, so no single-token change
+// makes the assertions below fire. What does fire is the fix doc.go names for
+// this sharp edge: rewriting Downgrade with a pointer receiver breaks the build
+// at every call site that ranges over records by value. The test is kept as the
+// statement of the contract the doc comment makes, not as its discriminator.
 func TestQualityRecordMethodsDoNotModifyTheReceiver(t *testing.T) {
 	rec := p4offline.NewQualityRecord()
 	if rec.Quality != p4offline.QualityPrimaryScorable {
