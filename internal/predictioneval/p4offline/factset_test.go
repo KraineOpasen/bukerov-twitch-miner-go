@@ -818,9 +818,17 @@ func TestFirstGatesDoNotMaterializeSuppliedText(t *testing.T) {
 			}
 		}
 		// The digest gate names the digest this package computed, which is not
-		// a compile-time constant but is its own 64 hex characters.
-		if e3 == nil || !strings.Contains(e3.Error(), "which digest to \"") {
-			t.Fatalf("the digest fault must name the digest the values produce: %v", e3)
+		// a compile-time constant but is its own 64 hex characters -- so it is
+		// asserted BY VALUE, like the five rows above, and not by its shape. An
+		// earlier draft of this row looked only for `which digest to "`, and a
+		// mutant that keeps the quotes and loses the value -- a fixed 64-zero
+		// digest reported for every mismatch there is -- survived the whole
+		// suite. That is precisely the sentence-that-reads-the-same-for-every-
+		// input failure this half of the rule exists to prevent, so shape is
+		// not enough here either. The subtest overwrites only fs.Digest, so the
+		// digest the VALUES produce is still good's own.
+		if e3 == nil || !strings.Contains(e3.Error(), strconv.Quote(good.Digest)) {
+			t.Fatalf("the digest fault must name the digest the values produce (%s): %v", good.Digest, e3)
 		}
 		if e1.Error() == e2.Error() {
 			t.Fatalf("the two faults must be distinguishable: %v / %v", e1, e2)

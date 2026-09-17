@@ -3105,6 +3105,12 @@ func refusalReasonIsInP4Vocabulary(reason string) bool {
 // Neither of the rule's earlier scopings covered it: it is not the first
 // statement of an exported function, and it is not a gate. decisionOf takes a
 // thunk now, so the derivation is built only once the gates have passed.
+//
+// BOTH callers are driven here. decisionOf has exactly two in production --
+// P2CaseResult.Decision and P3bCaseResult.Decision -- and an earlier draft of
+// this test pinned only P3b's, which left the sibling repair free to regress
+// silently. A repair that lives at three places needs a case per caller, not
+// a case per repair.
 func TestDecisionDoesNotBuildItsDerivationBeforeItsGates(t *testing.T) {
 	_, fs := selectedFactset(t, nil, nil)
 	rs := mustVerify(t, rulesetFrom(t, cfgDefaultOnly("c1", 0, 1)))
@@ -3146,6 +3152,42 @@ func TestDecisionDoesNotBuildItsDerivationBeforeItsGates(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("and the P2 caller is held to the same rule", func(t *testing.T) {
+		// THE REPAIR LIVES AT THREE PLACES AND ONLY ONE OF THEM WAS PINNED.
+		// decisionOf has exactly two production callers, and the table above
+		// drives only P3b's. An independent lane reverted P2's thunk to an
+		// eager string, left every other file at these bytes, and the whole
+		// suite passed -- at 67,121,512 bytes allocated on a 64 MiB
+		// Binding.Digest, for a call that returns a 210-byte refusal. That is
+		// the identical fifth-instance defect on the sibling caller, reachable
+		// through an exported method, with no test pressure holding the repair
+		// in place. P2CaseResult has every field exported but its witness, so
+		// Binding.Digest carries exactly the provenance the P3b rows do.
+		p2, err := p4offline.EvaluateP2Case(fs)
+		if err != nil {
+			t.Fatal(err)
+		}
+		bad := p2
+		bad.Binding.Digest = big
+		bad.FactsetDigest = strings.Repeat("ab", 32)
+
+		runtime.GC()
+		var before, after runtime.MemStats
+		runtime.ReadMemStats(&before)
+		_, derr := bad.Decision(fs)
+		runtime.ReadMemStats(&after)
+		allocated := after.TotalAlloc - before.TotalAlloc
+		t.Logf("1 MiB supplied; the refusing P2 call allocated %d bytes", allocated)
+
+		if !errors.Is(derr, p4offline.ErrDecisionBinding) {
+			t.Fatalf("want ErrDecisionBinding, got %v", derr)
+		}
+		if allocated > uint64(len(big))/2 {
+			t.Fatalf("the refusing call allocated %d bytes against a %d-byte supplied field: the derivation was built before the gates",
+				allocated, len(big))
+		}
+	})
 
 	t.Run("and a decision that passes its gates still carries its derivation", func(t *testing.T) {
 		// The thunk must not cost the derivation itself: a legitimate decision

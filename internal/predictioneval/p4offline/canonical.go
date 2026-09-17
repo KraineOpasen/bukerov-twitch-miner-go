@@ -111,8 +111,8 @@ func (c *canonical) digest() string {
 //	    bindEntropyCoordinates' round gate.
 //	9 call this helper --
 //	    3 in VerifyCommonFactset (contract, protocol, digest),
-//	    1 in VerifyCommonFactset's stealth-proof arm,
-//	    1 in checkFactsetConsistency's completeness arm,
+//	    2 in checkFactsetConsistency (the stealth-proof arm and the
+//	      completeness arm), both reached through VerifyCommonFactset,
 //	    2 in VerifyResolutionArtifact (contract, obligations),
 //	    1 in its outcome arm,
 //	    1 in decisionOf.
@@ -121,7 +121,11 @@ func (c *canonical) digest() string {
 // because it is not a gate and there is nothing to name: decisionOf takes its
 // derivation as a thunk so the caller's text is never built on the refusing
 // path. That is the fifth instance, and the reason the rule above is scoped to
-// materialization rather than to gates.
+// materialization rather than to gates. It is one seam with TWO production
+// callers -- P2CaseResult.Decision and P3bCaseResult.Decision -- and its test
+// drives both, because a repair that lives at three places and is pinned at
+// one leaves the other free to regress in silence. It did: an independent lane
+// reverted the P2 caller alone and the whole suite passed.
 //
 // TestFirstGatesDoNotMaterializeSuppliedText is the registry for the nine
 // reachable through an exported verifier. It names where the other five are
