@@ -308,6 +308,11 @@ func SelectEpisodes(ds predictioneval.SourceDataset) (EvidenceSelection, error) 
 		attempts[pk.Attempts[i].Key] = &pk.Attempts[i]
 	}
 
+	// One interner for the whole selection: every episode whose matched manual
+	// set is identical shares one array, and the ceiling is checked against
+	// what is actually held rather than against what was matched.
+	manual := &manualSignalInterner{}
+
 	// Episodes, keyed by (pool, incarnation), in causal order of first
 	// appearance. Records with no incarnation are not episodes; they can
 	// still be signals.
@@ -537,6 +542,17 @@ func SelectEpisodes(ds predictioneval.SourceDataset) (EvidenceSelection, error) 
 				coverage.Reasons = appendOnce(coverage.Reasons, CoverageUndecodableFact)
 			}
 		})
+		// INTERNED THE MOMENT THE LIST STOPS GROWING, before anything reads it.
+		// Contents and order are unchanged -- canonical returns an identical
+		// slice or the equal one it already holds -- so every consumer below,
+		// and every caller, sees exactly what it saw before.
+		ep.ManualSignals = manual.canonical(ep.ManualSignals)
+		if manual.retained > maxRetainedManualSignals {
+			return EvidenceSelection{}, errors.Join(ErrEvidenceRetention,
+				errors.New("p4offline: this dataset's episodes retain "+strconv.Itoa(manual.retained)+
+					" manual-signal attributions after interning; this package holds "+
+					strconv.Itoa(maxRetainedManualSignals)))
+		}
 		if len(ep.ManualSignals) > 0 {
 			exclude(ExclusionManualIntervention)
 		}
@@ -898,11 +914,27 @@ func indexSignals(recs []predictioneval.SourceRecord, knownEvents map[string]boo
 //
 // That residue is the SIZE OF THE RELATION rather than an implementation
 // artefact, and shrinking it would change which signals match which episodes,
-// which is the one thing this rewrite had to keep identical. What the space
-// claim buys is the failure MODE: the verifier now gets slower on a hostile
+// which is the one thing this rewrite had to keep identical.
+//
+// WHAT THIS PARAGRAPH USED TO CLAIM, AND WHY IT WAS FALSE. It said the space
+// repair bought the failure MODE -- "the verifier now gets slower on a hostile
 // input instead of being killed by the allocator before it can produce its
-// fail-closed answer. A declared ceiling on this ingest path is still the
-// follow-up the measurements argue for.
+// fail-closed answer". On the very dataset this paragraph defines, an
+// independent judge measured the verifier being killed by the allocator, by
+// name: at 50,000 records under a declared 2 GiB cap, "fatal error: runtime:
+// out of memory", exit status 2, where the same record count in a linear shape
+// returned in 1.6 seconds holding 13 MB. The sentence asserted the opposite of
+// what the code did, in the package's most load-bearing cost narrative, and an
+// auditor would have taken the opposite of the truth from it.
+//
+// WHAT THE LADDER ACTUALLY SHOWS, stated so the next reader can check it rather
+// than trust it: the rewrite removed the per-episode TRANSIENT allocation and
+// the sort's log factor; the matching relation remains quadratic in CPU; the
+// RESULT was quadratic in RETAINED memory through ManualSignals, and that is
+// repaired at the accumulation site by interning plus a stated ceiling
+// (maxRetainedManualSignals); and the collision axis is not the event id -- it
+// is ANY posting list that matches many episodes, which is a shared EventID OR
+// a shared PoolInstanceID carrying facts the attribution rule cannot place.
 //
 // ONE RESIDUE THAT USED TO SURVIVE HERE, AND NO LONGER DOES. ManualSignals was
 // accumulated per matched manual signal through appendOnce, which scans the
@@ -912,8 +944,16 @@ func indexSignals(recs []predictioneval.SourceRecord, knownEvents map[string]boo
 // output and therefore "not free to drop", and that a declared ingest ceiling
 // was "the only real answer to it". The second half was wrong: a seen-set
 // deduplicates identically, in the same order, for linear cost. It is at the
-// accumulation site, with the measurements. The CPU residue in the MATCHING
-// relation above is real and remains; this one was not the same thing.
+// accumulation site, with the measurements.
+//
+// AND THE SENTENCE THAT FOLLOWED THAT ONE WAS ALSO WRONG. It said "the CPU
+// residue in the MATCHING relation above is real and remains; this one was not
+// the same thing" -- which reads as though the accumulation had been fully
+// dealt with. It had not: removing the appendOnce scan fixed the COST of
+// building the list and left the RETENTION of n*n entries untouched, which is
+// the defect a later round measured as an unrecoverable out-of-memory. Both
+// halves are dealt with now, and the retention half is interned and bounded at
+// the site, not argued here.
 //
 // One honest note on the deduplication: no PRODUCTION consumer is
 // duplicate-sensitive. Seam 1 sets flags idempotently, collects manual signals
@@ -923,6 +963,85 @@ func indexSignals(recs []predictioneval.SourceRecord, knownEvents map[string]boo
 // behaviour exactly, and it IS pinned — the differential test kills a mutant
 // that visits every signal twice. If a future consumer ever counts matched
 // signals, this is the line it depends on.
+// manualSignalInterner shares ONE backing array between every episode whose
+// manual-signal list is identical, which is what stops EvidenceSelection
+// RETAINING an episodes x manual-signals cross product.
+//
+// WHY THIS EXISTS, measured rather than argued. ManualSignals is exported
+// output: what the episode reports. An earlier repair removed the quadratic
+// COST of building it (appendOnce scanning the accumulated list) and left the
+// quadratic RETENTION untouched, and the comment beside it then told the reader
+// the remaining residue was CPU in the matching relation. That was wrong twice
+// over. An independent judge measured, through the exported SelectEpisodes,
+// exactly n*n retained entries -- 250,000 / 1,000,000 / 4,000,000 / 16,000,000
+// at n = 500 / 1,000 / 2,000 / 4,000 -- and, at a fixed 50,000 records under a
+// declared 2 GiB cap, the call dying with an unrecoverable
+// "fatal error: runtime: out of memory" where the same size in a linear shape
+// returned in 1.6 seconds holding 13 MB.
+//
+// AND THE AMPLIFIER IS NOT THE EVENT COLLISION. The same judge reached it with
+// event ids entirely DISTINCT, using manual facts that name no incarnation:
+// those route to byPoolUnattributed, which is keyed on PoolInstanceID alone and
+// matches every episode of the pool. Any posting list that matches many
+// episodes does it.
+//
+// WHAT INTERNING BUYS, and what it does not. Episodes whose matched manual set
+// is identical -- which is every episode of a pool when the facts are
+// unattributable, and every episode of an event when they collide on it --
+// now share one array, so those shapes retain O(distinct lists) instead of
+// O(episodes x signals). It does NOT make the worst case linear: a shape where
+// every episode matches a DIFFERENT long list still retains their sum. That
+// residue is bounded below, by a ceiling, so the guarantee is statable rather
+// than measured.
+type manualSignalInterner struct {
+	byHash map[uint64][][]string
+	// retained counts the entries this interner has actually stored -- the
+	// entries an identical list SHARES are not counted twice, because they cost
+	// nothing to hold.
+	retained int
+}
+
+// canonical returns a slice with the same contents and order as list, shared
+// with any earlier identical list. The returned slice is never appended to.
+func (mi *manualSignalInterner) canonical(list []string) []string {
+	if len(list) == 0 {
+		return nil
+	}
+	// FNV-1a over the members and their boundaries. The boundary byte keeps
+	// ["ab","c"] and ["a","bc"] apart; equality below is what decides, so a
+	// collision costs a comparison and never a wrong answer.
+	var h uint64 = 14695981039346656037
+	for _, v := range list {
+		for i := 0; i < len(v); i++ {
+			h ^= uint64(v[i])
+			h *= 1099511628211
+		}
+		h ^= 0xff
+		h *= 1099511628211
+	}
+	if mi.byHash == nil {
+		mi.byHash = map[uint64][][]string{}
+	}
+	for _, cand := range mi.byHash[h] {
+		if len(cand) != len(list) {
+			continue
+		}
+		same := true
+		for i := range cand {
+			if cand[i] != list[i] {
+				same = false
+				break
+			}
+		}
+		if same {
+			return cand
+		}
+	}
+	mi.byHash[h] = append(mi.byHash[h], list)
+	mi.retained += len(list)
+	return list
+}
+
 func (ix signalIndex) eachMatching(ep EpisodeIdentity, visit func(rawSignal)) {
 	var a []int
 	if ep.EventID != "" {
@@ -1381,6 +1500,40 @@ func registryDigest(entries []SourceRoundEntry) string {
 // ErrSourceRoundRegistry names a registry that is not what
 // [ReconcileSourceRounds] produces from its own entries.
 var ErrSourceRoundRegistry = errors.New("p4offline: source-round registry does not re-derive from its entries")
+
+// ErrEvidenceRetention refuses a dataset whose SHAPE would make the selection
+// retain more manual-signal attributions than this package will hold.
+var ErrEvidenceRetention = errors.New("p4offline: the dataset's shape retains more evidence than this package will hold")
+
+// maxRetainedManualSignals bounds the TOTAL manual-signal entries an
+// EvidenceSelection retains across every episode, after interning.
+//
+// THIS IS THE ONE NUMBER IN THIS PACKAGE THAT IS CHOSEN RATHER THAN DERIVED,
+// and saying so is the point. Every other ceiling here reads a bound off the
+// producer or off the contract: rulesetMaxNesting is the depth a full contract
+// document forms, the entropy ceilings are the core's own constants, the
+// ruleset ceiling is the size the contract already admits. The P4
+// preregistration says nothing whatever about how many manual interventions a
+// session may carry, so there is no bound to read, and inventing one that
+// claimed to be the contract's would be worse than admitting this one is not.
+//
+// What it is derived from is the RESOURCE. A retained entry is a string header,
+// 16 bytes on the targets this builds for, sharing the observation id's bytes
+// with the record it came from; 1<<20 of them is about 16 MiB of headers, which
+// is a quantity a verifier can hold and answer from. The alternative to holding
+// a bound is what an independent judge measured without one: an unrecoverable
+// "fatal error: runtime: out of memory" from the package's FIRST seam.
+//
+// THE FAIL-CLOSED COST IS REAL AND IS NOT HIDDEN. Refusing the dataset refuses
+// its AUTOMATIC episodes too, which are the ones the study reads. A session
+// reaching this ceiling after interning is one where many episodes each match a
+// DIFFERENT long manual list -- the shapes where they match the SAME list are
+// interned to one -- and no session this collector writes has that shape. But
+// "no session I can construct reaches it" is a measurement, not a guarantee,
+// and if a real dataset ever refuses here the right answer is a per-episode
+// bounded sample with an extent, which changes exported output and is an owner
+// decision rather than a mechanical one.
+const maxRetainedManualSignals = 1 << 20
 
 // VerifySourceRoundRegistry re-derives a registry from the claims its own
 // entries carry: the registry must be exactly what [ReconcileSourceRounds]

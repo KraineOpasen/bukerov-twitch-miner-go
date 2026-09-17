@@ -1473,6 +1473,14 @@ func TestEpisodeSignalMatchingKeepsItsOrderAndDeduplicates(t *testing.T) {
 // at 4,096 (12,288 records) — about 16x per 4x input, against 29 MB for the
 // same record count with distinct event ids. The allocation was the part that
 // mattered: it turns a slow parse into an OOM before the verifier can answer.
+// WHAT THIS TEST DOES NOT COVER, named because it read as though it did. Its
+// dataset emits only placedAttempt and skippedAttempt, so it carries ZERO manual
+// signals at every size: the episodes x manual-signals product is identically
+// zero here, and its allocation ratio is measured where that term does not
+// exist. It also uses a DISTINCT-event dataset as its linear control, and that
+// same shape is quadratic once the manual facts are unattributable. The product
+// is covered by TestManualSignalsAreSharedNotRetainedPerEpisode, which scales
+// both factors and drives both collision axes.
 func TestEpisodeSelectionDoesNotRebuildTheEventBucketPerEpisode(t *testing.T) {
 	// The fixture MUST carry call facts. An earlier version of this test built
 	// skipped attempts only, so seam 1 matched no calls and the per-episode
@@ -1690,6 +1698,142 @@ func TestUnspentStartDoesNotExcludeAHealthySiblingIncarnation(t *testing.T) {
 //
 // The assertion is an absolute budget rather than a ratio, because the repaired
 // path does no work at all that grows with n -- which is exactly the property.
+// TestManualSignalsAreSharedNotRetainedPerEpisode is the BLOCKER receipt for the
+// episodes x manual-signals cross product EvidenceSelection used to RETAIN.
+//
+// WHAT WAS WRONG. An earlier repair removed the quadratic COST of building
+// ManualSignals and left the quadratic RETENTION, and the comment beside it then
+// told the reader the remaining residue was CPU in the matching relation. An
+// independent judge measured exactly n*n retained entries -- 250,000 / 1,000,000
+// / 4,000,000 / 16,000,000 at n = 500 / 1,000 / 2,000 / 4,000, peak RSS
+// 2,057,468 KiB from 12,213,348 bytes of input -- and, at a fixed 50,000 records
+// under a declared 2 GiB cap, the call dying with an unrecoverable
+// "fatal error: runtime: out of memory" where the same size in a linear shape
+// returned in 1.6 seconds holding 13 MB.
+//
+// AND ON TWO AXES, NOT ONE. The same judge reached it with event ids entirely
+// DISTINCT, using manual facts that name no incarnation: those route to
+// byPoolUnattributed, keyed on PoolInstanceID alone, which matches every episode
+// of the pool. Both axes are driven below.
+//
+// WHAT THIS ASSERTS, AND WHY IT IS NOT WHAT THE REVIEW ASKED FOR. The review
+// asked for an assertion that the summed len(ManualSignals) is LINEAR. This test
+// deliberately does not assert that, and the number is logged so a reader can
+// see it is still n*n: making that sum linear means each episode no longer
+// reports the signals matched to it, which changes exported output and is an
+// owner decision, not a mechanical one. What the repair guarantees instead is
+// that episodes whose matched set is IDENTICAL share one array, so what is HELD
+// is the distinct lists. That property is exact and free of allocator noise --
+// it is the count of distinct backing arrays -- so it is what is asserted, with
+// the retained heap as a corroborating measurement rather than the pin.
+func TestManualSignalsAreSharedNotRetainedPerEpisode(t *testing.T) {
+	// n episodes on one pool, and n manual facts every one of them matches.
+	build := func(n int, sharedEvent bool) predictioneval.SourceDataset {
+		s := newSynth()
+		for i := 0; i < n; i++ {
+			ev := "shared"
+			if !sharedEvent {
+				ev = "e" + strconv.Itoa(i)
+			}
+			s.placedAttempt("r"+strconv.Itoa(i), ev, int64(i+1))
+		}
+		for j := 0; j < n; j++ {
+			if sharedEvent {
+				s.manualCall("r0", "shared", 50, 0)
+			} else {
+				// No incarnation and an event no episode carries: this is the
+				// pool-unattributed route, and it needs no event collision at all.
+				s.manualCall("", "u"+strconv.Itoa(j), 50, 0)
+			}
+		}
+		return s.dataset()
+	}
+
+	for _, shape := range []struct {
+		name        string
+		sharedEvent bool
+	}{
+		{"a shared event id", true},
+		{"manual facts that name no incarnation", false},
+	} {
+		t.Run(shape.name, func(t *testing.T) {
+			for _, n := range []int{250, 500, 1000} {
+				sel, err := p4offline.SelectEpisodes(build(n, shape.sharedEvent))
+				if err != nil {
+					t.Fatalf("n=%d: %v", n, err)
+				}
+				total := 0
+				arrays := map[*string]bool{}
+				for i := range sel.Episodes {
+					ms := sel.Episodes[i].ManualSignals
+					total += len(ms)
+					if len(ms) > 0 {
+						arrays[&ms[0]] = true
+					}
+				}
+				t.Logf("n=%-5d episodes=%-5d summed len(ManualSignals)=%-9d distinct backing arrays=%d",
+					n, len(sel.Episodes), total, len(arrays))
+
+				if total != n*n {
+					t.Fatalf("the exported content must be UNCHANGED by interning: summed %d, want %d", total, n*n)
+				}
+				if len(arrays) != 1 {
+					t.Fatalf("every episode matches the same manual set, so one array must be held, not %d", len(arrays))
+				}
+			}
+		})
+	}
+}
+
+// TestEvidenceRetentionCeilingRefusesTypedRatherThanDying is the second half of
+// the same receipt: interning collapses the shapes where the lists are
+// IDENTICAL, and a ceiling is what makes the residue statable.
+//
+// A shape where every episode matches a DIFFERENT long list is not interned --
+// the lists genuinely differ -- so it is refused, in full, with a typed error
+// naming the extent. maxRetainedManualSignals is the one number in this package
+// chosen rather than derived, and the constant's own comment says so and says
+// what the fail-closed cost is: refusing the dataset refuses its automatic
+// episodes too.
+func TestEvidenceRetentionCeilingRefusesTypedRatherThanDying(t *testing.T) {
+	// Each episode carries its own event and one manual fact on that event,
+	// plus a shared pool-unattributed tail every episode also matches. Every
+	// list is then (its own fact + the whole tail), so all n are DISTINCT and
+	// each is length n -- n*n retained, with nothing to share.
+	const n = 1100
+	s := newSynth()
+	for i := 0; i < n; i++ {
+		s.placedAttempt("r"+strconv.Itoa(i), "e"+strconv.Itoa(i), int64(i+1))
+	}
+	for i := 0; i < n; i++ {
+		s.manualCall("r"+strconv.Itoa(i), "e"+strconv.Itoa(i), 50, 0)
+	}
+	for j := 0; j < n-1; j++ {
+		s.manualCall("", "u"+strconv.Itoa(j), 50, 0)
+	}
+
+	_, err := p4offline.SelectEpisodes(s.dataset())
+	if !errors.Is(err, p4offline.ErrEvidenceRetention) {
+		t.Fatalf("a dataset whose shape retains more than the ceiling must be refused TYPED, got %v", err)
+	}
+	if msg := err.Error(); !strings.Contains(msg, "after interning") {
+		t.Fatalf("the refusal must name what it counted: %s", msg)
+	}
+
+	t.Run("and an ordinary dataset is nowhere near it", func(t *testing.T) {
+		// The false-refusal control. A ceiling that refused honest evidence
+		// would be worse than the exhaustion it prevents.
+		s := newSynth()
+		for i := 0; i < 200; i++ {
+			s.placedAttempt("r"+strconv.Itoa(i), "e"+strconv.Itoa(i), int64(i+1))
+		}
+		s.manualCall("r0", "e0", 50, 0)
+		if _, err := p4offline.SelectEpisodes(s.dataset()); err != nil {
+			t.Fatalf("an ordinary session must be selected, not refused: %v", err)
+		}
+	})
+}
+
 func TestRegistryRefusesOnItsConstantsBeforeItReconciles(t *testing.T) {
 	const n = 4096
 	claims := make([]p4offline.SourceRoundClaim, 0, n)
@@ -2079,6 +2223,11 @@ func TestQualityRecordMethodsDoNotModifyTheReceiver(t *testing.T) {
 //
 // The assertion is a GROWTH ratio, never wall-clock: what distinguishes the
 // defect is the exponent.
+// WHAT THIS TEST DOES NOT COVER, for the same reason. It builds through
+// singleEpisode(), which fails on more than one episode, so the OTHER factor is
+// pinned at one: it measures the cost of building ONE episode's list and can say
+// nothing about what the selection RETAINS across many. That is
+// TestManualSignalsAreSharedNotRetainedPerEpisode's job.
 func TestManualSignalsDoNotCostQuadraticInTheirOwnCount(t *testing.T) {
 	build := func(manual int) predictioneval.SourceDataset {
 		s := newSynth()

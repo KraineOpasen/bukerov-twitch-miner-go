@@ -6,6 +6,7 @@ package p4offline_test
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -19,6 +20,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/predictioneval"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/predictioneval/p4offline"
@@ -2942,6 +2944,10 @@ func TestEntropyBindingRefusalDoesNotMaterializeTheFactsetRound(t *testing.T) {
 // so it cannot be driven in the parent.
 const deepRulesetChildEnv = "P4OFFLINE_DEEP_RULESET_CHILD"
 
+// deepRulesetGenEnv caps the re-execution at one generation, so no mutation of
+// the marker comparison can turn this test into a fork bomb.
+const deepRulesetGenEnv = "P4OFFLINE_DEEP_RULESET_GEN"
+
 // deeplyNestedRuleset builds a ruleset whose "detailed" value is n nested arrays
 // and whose declared identity is large enough that the document sits INSIDE its
 // own rulesetRawCeiling -- which is the whole point: the caller raises its own
@@ -3039,20 +3045,41 @@ func TestRulesetNestingIsBoundedBeforeItRecurses(t *testing.T) {
 	})
 
 	t.Run("and the shape that used to kill the process now refuses", func(t *testing.T) {
+		if os.Getenv(deepRulesetGenEnv) != "" {
+			t.Skip("already a child: one generation only")
+		}
 		// RUN IN A SUBPROCESS, deliberately. A fatal error cannot be recovered,
 		// so if this regressed, an in-process assertion would take the whole
 		// test binary down and report nothing useful.
 		if testing.Short() {
 			t.Skip("builds a ~9 MB document and re-executes the test binary")
 		}
-		cmd := exec.Command(os.Args[0], "-test.run=^TestRulesetNestingIsBoundedBeforeItRecurses$", "-test.v")
-		cmd.Env = append(os.Environ(), deepRulesetChildEnv+"=1")
+		// THE PARENT MUST JUDGE WHAT THE CHILD RAN, not merely that it exited.
+		// An earlier version checked only for a non-nil error and the absence
+		// of "stack overflow" -- and a child that runs NO TEST satisfies both:
+		// executed with a deliberately mistyped -test.run, the child prints
+		// "testing: warning: no tests to run", then PASS, and exits 0. The
+		// parent was green on a child that exercised nothing, which is worse
+		// than having no test here at all.
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestRulesetNestingIsBoundedBeforeItRecurses$", "-test.v")
+		// The generation counter is belt and braces: if a mutation ever broke
+		// the marker comparison above, the child would take the PARENT branch
+		// and spawn its own child. One generation is all this can ever be.
+		cmd.Env = append(os.Environ(), deepRulesetChildEnv+"=1", deepRulesetGenEnv+"=1")
 		out, err := cmd.CombinedOutput()
 		if err != nil {
 			t.Fatalf("the child died on a shape that must refuse: %v\n%s", err, out)
 		}
 		if bytes.Contains(out, []byte("stack overflow")) {
 			t.Fatalf("the child overflowed its stack:\n%s", out)
+		}
+		if bytes.Contains(out, []byte("no tests to run")) {
+			t.Fatalf("the child ran no test, so it proved nothing:\n%s", out)
+		}
+		if !bytes.Contains(out, []byte("--- PASS: TestRulesetNestingIsBoundedBeforeItRecurses")) {
+			t.Fatalf("the child must report the test it was asked to run as PASSED:\n%s", out)
 		}
 	})
 }
