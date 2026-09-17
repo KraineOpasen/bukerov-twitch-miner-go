@@ -289,8 +289,22 @@ type SourceRoundRegistry struct {
 
 // SelectEpisodes is seams 1–3 over one dataset.
 //
-// It returns an error only for a caller contract violation (records out of
-// causal order). Every evidential refusal is typed on the result.
+// IT RETURNS AN ERROR FOR TWO DIFFERENT KINDS OF THING, and a caller must be
+// able to tell them apart, because one is its own bug and the other is not:
+//
+//   - A CALLER CONTRACT VIOLATION: records out of causal order. The caller
+//     handed this function something it promised not to.
+//   - A RESOURCE REFUSAL on the dataset's SHAPE: ErrEvidenceRetention when the
+//     episodes would report more manual-signal attributions than this package
+//     emits, and ErrEvidenceMatchWork when the episodes and signals meet in
+//     more matches than it walks. The dataset is well-formed; it is the shape
+//     this package declines, and both are typed so a caller can say so.
+//
+// An earlier version of this sentence said an error came back "only for a
+// caller contract violation", and kept saying it after the resource refusals
+// were added -- so a caller reading it would have diagnosed a legitimate
+// shape refusal as its own ordering bug. Every EVIDENTIAL refusal is still
+// typed on the result rather than returned.
 func SelectEpisodes(ds predictioneval.SourceDataset) (EvidenceSelection, error) {
 	out := EvidenceSelection{ProtocolVersion: ProtocolVersion, Source: ds.Source}
 	pk, err := predictioneval.MaterializePairedKnowledge(ds)
@@ -308,10 +322,16 @@ func SelectEpisodes(ds predictioneval.SourceDataset) (EvidenceSelection, error) 
 		attempts[pk.Attempts[i].Key] = &pk.Attempts[i]
 	}
 
-	// One interner for the whole selection: every episode whose matched manual
-	// set is identical shares one array, and the ceiling is checked against
-	// what is actually held rather than against what was matched.
-	manual := &manualSignalInterner{}
+	// One pass over the producer's exclusions for the whole selection, not one
+	// per episode: see p2ExclusionIndex.
+	exclusionIndex := buildP2ExclusionIndex(pk.Excluded)
+
+	// The running total of manual-signal entries this selection will REPORT,
+	// checked against the ceiling as it grows.
+	manualEntries := 0
+
+	// And the running total of episode-signal matches walked, likewise.
+	matchVisits := 0
 
 	// Episodes, keyed by (pool, incarnation), in causal order of first
 	// appearance. Records with no incarnation are not episodes; they can
@@ -441,7 +461,7 @@ func SelectEpisodes(ds predictioneval.SourceDataset) (EvidenceSelection, error) 
 				ep.Boundary.CutoffPosition = terminal.CollectorSequence
 				ep.Boundary.CutoffObservationID = terminal.ObservationID
 			} else {
-				ep.P2Exclusions = p2ExclusionsFor(pk.Excluded, key, attemptObs[firstID])
+				ep.P2Exclusions = exclusionIndex.exclusionsFor(key, attemptObs[firstID])
 				exclude(ExclusionFirstOpportunityUnusable)
 			}
 		}
@@ -486,7 +506,9 @@ func SelectEpisodes(ds predictioneval.SourceDataset) (EvidenceSelection, error) 
 		// deduplication, fails the repeated-observation case beside the growth
 		// measurement.
 		seenManual := map[string]bool{}
+		visits := 0
 		signals.eachMatching(ep.Episode, func(sig rawSignal) {
+			visits++
 			if sig.manual && !seenManual[sig.rec.ObservationID] {
 				seenManual[sig.rec.ObservationID] = true
 				ep.ManualSignals = append(ep.ManualSignals, sig.rec.ObservationID)
@@ -542,15 +564,46 @@ func SelectEpisodes(ds predictioneval.SourceDataset) (EvidenceSelection, error) 
 				coverage.Reasons = appendOnce(coverage.Reasons, CoverageUndecodableFact)
 			}
 		})
-		// INTERNED THE MOMENT THE LIST STOPS GROWING, before anything reads it.
-		// Contents and order are unchanged -- canonical returns an identical
-		// slice or the equal one it already holds -- so every consumer below,
-		// and every caller, sees exactly what it saw before.
-		ep.ManualSignals = manual.canonical(ep.ManualSignals)
-		if manual.retained > maxRetainedManualSignals {
+		matchVisits += visits
+		if matchVisits > maxSignalMatchVisits {
+			return EvidenceSelection{}, errors.Join(ErrEvidenceMatchWork,
+				errors.New("p4offline: this dataset's episodes and signals meet in "+strconv.Itoa(matchVisits)+
+					" matches or more; this package walks at most "+strconv.Itoa(maxSignalMatchVisits)))
+		}
+		// THE CEILING COUNTS WHAT THE SELECTION REPORTS, checked as the total
+		// grows rather than after it is built, so the refusal happens before
+		// the memory is committed rather than after.
+		//
+		// AN EARLIER VERSION OF THIS REPAIR INTERNED INSTEAD, sharing one
+		// backing array between episodes whose matched set is identical, and
+		// counting only what was thereby held. It was reverted, and the three
+		// reasons are worth keeping because each one is a way a clever repair
+		// can be worse than a plain bound:
+		//
+		//   - IT ALIASED. One array with spare capacity, handed out through an
+		//     exported field, means an ordinary caller append silently clobbers
+		//     another episode's entry. Reproduced by review: two episodes at
+		//     len 3 cap 4, one append each, and the first episode's tail read
+		//     the second's value. The comment beside it claimed every caller
+		//     saw exactly what it saw before. That was false.
+		//   - IT COST MORE THAN IT SAVED, on an axis nothing bounded. Sharing
+		//     requires comparing, so it hashed every byte of every entry: 2,000
+		//     records carrying 32.8 MB of observation ids took 48.6 s, 83% of
+		//     it flat in the hash, against 6.0 s with the sharing removed.
+		//   - IT BOUNDED THE WRONG THING. Counting only what was SHARED meant
+		//     the ceiling could not see the report: 1,001 counted against a
+		//     ceiling of 1,048,576, while the emitted document carried
+		//     1,001,000 entries and 31 MB of JSON, and decoding it allocated
+		//     the per-episode arrays the sharing had avoided.
+		//
+		// Counting the entries themselves has none of those properties: each
+		// episode keeps its own slice, nothing is hashed, and the number the
+		// ceiling compares is the number the report carries.
+		manualEntries += len(ep.ManualSignals)
+		if manualEntries > maxRetainedManualSignals {
 			return EvidenceSelection{}, errors.Join(ErrEvidenceRetention,
-				errors.New("p4offline: this dataset's episodes retain "+strconv.Itoa(manual.retained)+
-					" manual-signal attributions after interning; this package holds "+
+				errors.New("p4offline: this dataset's episodes report "+strconv.Itoa(manualEntries)+
+					" manual-signal attributions or more; this package emits at most "+
 					strconv.Itoa(maxRetainedManualSignals)))
 		}
 		if len(ep.ManualSignals) > 0 {
@@ -724,25 +777,90 @@ func sessionRefusals(ds predictioneval.SourceDataset, pk predictioneval.PairedKn
 // nothing about complexity -- cannot tell the two apart. What IS pinned is the
 // answer: the attribution test drives both directions of the predicate, and the
 // growth test asserts the ATTRIBUTION is unchanged beside its ratio.
-func p2ExclusionsFor(excluded []predictioneval.Exclusion, key predictioneval.AttemptKey, obs []string) []string {
-	var out []string
-	byObservation := make(map[string]bool, len(obs))
-	for _, id := range obs {
-		if id != "" {
-			byObservation[id] = true
+// p2ExclusionIndex answers, for one episode, which producer exclusions bear on
+// it -- by the attempt's native key, or by any observation id the episode's
+// first opportunity carries.
+//
+// IT IS BUILT ONCE FOR THE WHOLE SELECTION, and that is the repair. The previous
+// version took the exclusion slice and rescanned ALL of it for every episode, so
+// SelectEpisodes was quadratic in episodes x |pk.Excluded| -- which is the
+// product on the one shape that makes both factors grow together: one
+// undecodable AUTO_DUE per round incarnation is simultaneously its own episode
+// and its own producer exclusion. Review measured 0.076 / 0.243 / 0.919 / 3.543
+// / 14.254 s at 2,000 / 4,000 / 8,000 / 16,000 / 32,000 records -- a doubling
+// ratio of 4.02x -- with a CPU profile putting 93.05% cumulative in this
+// function.
+//
+// POSITIONS, NOT REASONS, are what the index stores, because the ANSWER'S ORDER
+// is the order the exclusions appear in. The old scan walked the slice once and
+// appended as it went; this walks only the positions that match, in the same
+// order, so the list it produces is identical member for member.
+//
+// AND THAT IDENTITY IS WHY THIS REPAIR IS ARGUED HERE AND NOT PINNED BY A TEST,
+// stated rather than left as an unexplained mutation survivor. Reinstating the
+// rescan as a well-formed mutant -- with this index still built, so nothing is
+// optimised away -- leaves the whole suite green, because it computes the same
+// attribution. What it costs is CPU, and this suite asserts allocation ratios
+// and never wall-clock, so no assertion here can tell the two apart. The
+// evidence is the measurement above: 6.287 s to 3.050 s at 16,000 records, with
+// p2ExclusionsFor falling out of the profile entirely. What IS pinned is the
+// answer, for every episode rather than for one --
+// TestP2ExclusionAttributionIsCompleteForEveryEpisode.
+type p2ExclusionIndex struct {
+	byKey map[predictioneval.AttemptKey][]int
+	byObs map[string][]int
+	all   []predictioneval.Exclusion
+}
+
+func buildP2ExclusionIndex(excluded []predictioneval.Exclusion) *p2ExclusionIndex {
+	ix := &p2ExclusionIndex{
+		byKey: make(map[predictioneval.AttemptKey][]int, len(excluded)),
+		byObs: make(map[string][]int, len(excluded)),
+		all:   excluded,
+	}
+	for i, e := range excluded {
+		if e.Key != nil {
+			ix.byKey[*e.Key] = append(ix.byKey[*e.Key], i)
+		}
+		// An exclusion carrying no observation id is indexed under none: the
+		// lookup below never asks for "", because the episode's own ids are
+		// filtered, so a bucket at "" could only ever be dead weight.
+		if e.ObservationID != "" {
+			ix.byObs[e.ObservationID] = append(ix.byObs[e.ObservationID], i)
 		}
 	}
-	// The emptiness test lives in the index build above, not here: a map that
-	// never holds "" cannot match an exclusion carrying "". Keeping both was a
-	// redundant guard, and a mutation dropping this one survived because it
-	// could not change an answer.
-	for _, e := range excluded {
-		switch {
-		case e.Key != nil && *e.Key == key:
-			out = appendOnce(out, e.Reason)
-		case byObservation[e.ObservationID]:
-			out = appendOnce(out, e.Reason)
+	return ix
+}
+
+// exclusionsFor returns the reasons bearing on one episode, deduplicated, in the
+// order the exclusions themselves appear -- byte for byte what the rescan
+// produced.
+func (ix *p2ExclusionIndex) exclusionsFor(key predictioneval.AttemptKey, obs []string) []string {
+	var hits []int
+	hits = append(hits, ix.byKey[key]...)
+	seenObs := make(map[string]bool, len(obs))
+	for _, id := range obs {
+		if id == "" || seenObs[id] {
+			continue
 		}
+		seenObs[id] = true
+		hits = append(hits, ix.byObs[id]...)
+	}
+	if len(hits) == 0 {
+		return nil
+	}
+	// The same exclusion can be reached by both routes, and the episode's ids
+	// are distinct but its buckets are not, so the positions are sorted and
+	// de-duplicated before the reasons are read off in slice order.
+	sort.Ints(hits)
+	var out []string
+	prev := -1
+	for _, i := range hits {
+		if i == prev {
+			continue
+		}
+		prev = i
+		out = appendOnce(out, ix.all[i].Reason)
 	}
 	return out
 }
@@ -963,85 +1081,6 @@ func indexSignals(recs []predictioneval.SourceRecord, knownEvents map[string]boo
 // behaviour exactly, and it IS pinned — the differential test kills a mutant
 // that visits every signal twice. If a future consumer ever counts matched
 // signals, this is the line it depends on.
-// manualSignalInterner shares ONE backing array between every episode whose
-// manual-signal list is identical, which is what stops EvidenceSelection
-// RETAINING an episodes x manual-signals cross product.
-//
-// WHY THIS EXISTS, measured rather than argued. ManualSignals is exported
-// output: what the episode reports. An earlier repair removed the quadratic
-// COST of building it (appendOnce scanning the accumulated list) and left the
-// quadratic RETENTION untouched, and the comment beside it then told the reader
-// the remaining residue was CPU in the matching relation. That was wrong twice
-// over. An independent judge measured, through the exported SelectEpisodes,
-// exactly n*n retained entries -- 250,000 / 1,000,000 / 4,000,000 / 16,000,000
-// at n = 500 / 1,000 / 2,000 / 4,000 -- and, at a fixed 50,000 records under a
-// declared 2 GiB cap, the call dying with an unrecoverable
-// "fatal error: runtime: out of memory" where the same size in a linear shape
-// returned in 1.6 seconds holding 13 MB.
-//
-// AND THE AMPLIFIER IS NOT THE EVENT COLLISION. The same judge reached it with
-// event ids entirely DISTINCT, using manual facts that name no incarnation:
-// those route to byPoolUnattributed, which is keyed on PoolInstanceID alone and
-// matches every episode of the pool. Any posting list that matches many
-// episodes does it.
-//
-// WHAT INTERNING BUYS, and what it does not. Episodes whose matched manual set
-// is identical -- which is every episode of a pool when the facts are
-// unattributable, and every episode of an event when they collide on it --
-// now share one array, so those shapes retain O(distinct lists) instead of
-// O(episodes x signals). It does NOT make the worst case linear: a shape where
-// every episode matches a DIFFERENT long list still retains their sum. That
-// residue is bounded below, by a ceiling, so the guarantee is statable rather
-// than measured.
-type manualSignalInterner struct {
-	byHash map[uint64][][]string
-	// retained counts the entries this interner has actually stored -- the
-	// entries an identical list SHARES are not counted twice, because they cost
-	// nothing to hold.
-	retained int
-}
-
-// canonical returns a slice with the same contents and order as list, shared
-// with any earlier identical list. The returned slice is never appended to.
-func (mi *manualSignalInterner) canonical(list []string) []string {
-	if len(list) == 0 {
-		return nil
-	}
-	// FNV-1a over the members and their boundaries. The boundary byte keeps
-	// ["ab","c"] and ["a","bc"] apart; equality below is what decides, so a
-	// collision costs a comparison and never a wrong answer.
-	var h uint64 = 14695981039346656037
-	for _, v := range list {
-		for i := 0; i < len(v); i++ {
-			h ^= uint64(v[i])
-			h *= 1099511628211
-		}
-		h ^= 0xff
-		h *= 1099511628211
-	}
-	if mi.byHash == nil {
-		mi.byHash = map[uint64][][]string{}
-	}
-	for _, cand := range mi.byHash[h] {
-		if len(cand) != len(list) {
-			continue
-		}
-		same := true
-		for i := range cand {
-			if cand[i] != list[i] {
-				same = false
-				break
-			}
-		}
-		if same {
-			return cand
-		}
-	}
-	mi.byHash[h] = append(mi.byHash[h], list)
-	mi.retained += len(list)
-	return list
-}
-
 func (ix signalIndex) eachMatching(ep EpisodeIdentity, visit func(rawSignal)) {
 	var a []int
 	if ep.EventID != "" {
@@ -1506,7 +1545,16 @@ var ErrSourceRoundRegistry = errors.New("p4offline: source-round registry does n
 var ErrEvidenceRetention = errors.New("p4offline: the dataset's shape retains more evidence than this package will hold")
 
 // maxRetainedManualSignals bounds the TOTAL manual-signal entries an
-// EvidenceSelection retains across every episode, after interning.
+// EvidenceSelection REPORTS across every episode -- which is the same number
+// the producer holds, the same number the emitted document carries, and the
+// same number a decoder of that document will allocate.
+//
+// THAT IDENTITY IS THE POINT, and it is what an earlier version of this repair
+// got wrong. It bounded what the producer held AFTER sharing arrays between
+// episodes, which is a different and much smaller number: review measured 1,001
+// counted against this ceiling while the report carried 1,001,000 entries and
+// 31 MB of JSON. A bound the emitted form can exceed is not a bound on
+// anything a reader of that form can rely on.
 //
 // THIS IS THE ONE NUMBER IN THIS PACKAGE THAT IS CHOSEN RATHER THAN DERIVED,
 // and saying so is the point. Every other ceiling here reads a bound off the
@@ -1517,23 +1565,66 @@ var ErrEvidenceRetention = errors.New("p4offline: the dataset's shape retains mo
 // session may carry, so there is no bound to read, and inventing one that
 // claimed to be the contract's would be worse than admitting this one is not.
 //
-// What it is derived from is the RESOURCE. A retained entry is a string header,
+// What it is derived from is the RESOURCE. A reported entry is a string header,
 // 16 bytes on the targets this builds for, sharing the observation id's bytes
-// with the record it came from; 1<<20 of them is about 16 MiB of headers, which
-// is a quantity a verifier can hold and answer from. The alternative to holding
-// a bound is what an independent judge measured without one: an unrecoverable
-// "fatal error: runtime: out of memory" from the package's FIRST seam.
+// with the record it came from; 1<<20 of them is about 16 MiB of headers in the
+// selection itself. What the SERIALIZED form costs is a separate and larger
+// number that this constant does not bound -- the ids' bytes are written out in
+// full there, so a document at this ceiling can be far larger than 16 MiB, and
+// nothing in this package limits what a caller hands a decoder. The alternative
+// to holding any bound at all is what review measured without one: an
+// unrecoverable "fatal error: runtime: out of memory" from the package's FIRST
+// seam, at 50,000 records under a 2 GiB cap.
 //
-// THE FAIL-CLOSED COST IS REAL AND IS NOT HIDDEN. Refusing the dataset refuses
-// its AUTOMATIC episodes too, which are the ones the study reads. A session
-// reaching this ceiling after interning is one where many episodes each match a
-// DIFFERENT long manual list -- the shapes where they match the SAME list are
-// interned to one -- and no session this collector writes has that shape. But
-// "no session I can construct reaches it" is a measurement, not a guarantee,
-// and if a real dataset ever refuses here the right answer is a per-episode
-// bounded sample with an extent, which changes exported output and is an owner
-// decision rather than a mechanical one.
+// THE FAIL-CLOSED COST IS REAL, IS LARGER THAN THE EARLIER VERSION'S, AND IS
+// NOT HIDDEN. Refusing the dataset refuses its AUTOMATIC episodes too, which are
+// the ones the study reads. Counting reported entries rather than shared ones
+// means the degenerate shapes -- many episodes on one pool, all matching the
+// same manual facts -- now reach the ceiling where sharing would have absorbed
+// them: 1,024 episodes each reporting 1,024 manual signals is refused. That is
+// a deliberate trade. The sharing that absorbed those shapes aliased the
+// caller's slices and cost 8x CPU on a dimension nothing bounded, and a refusal
+// a caller can see and act on is worth more than a cheaper answer that can also
+// be silently corrupted by an append. If a real dataset ever refuses here the
+// right answer is a per-episode bounded sample with an extent, which changes
+// exported output and is an owner decision rather than a mechanical one.
 const maxRetainedManualSignals = 1 << 20
+
+// ErrEvidenceMatchWork refuses a dataset whose SHAPE makes the signal-matching
+// relation too large to walk.
+var ErrEvidenceMatchWork = errors.New("p4offline: the dataset's shape makes the signal-matching relation too large to walk")
+
+// maxSignalMatchVisits bounds the TOTAL episode-signal visits one selection may
+// make -- the size of the matching relation itself.
+//
+// THE PACKAGE HAS DEFERRED THIS THREE TIMES, calling a declared ingest ceiling
+// "the follow-up the measurements argue for", and it is here because a review
+// round finally measured what deferring it costs: one undecodable AUTO_DUE per
+// round incarnation makes every row its own episode AND a signal every other
+// episode matches, so the relation is |episodes| x |signals on that event|.
+// Measured through the exported SelectEpisodes at 2,000 / 4,000 / 8,000 /
+// 16,000 records: 0.128 / 0.424 / 1.621 / 6.287 s, a doubling ratio of 3.88x,
+// and 14.254 s at 32,000.
+//
+// HALF OF THAT WAS AN IMPLEMENTATION ARTEFACT AND IS REPAIRED: the exclusion
+// rescan is now indexed once (see p2ExclusionIndex), which halves the time --
+// 6.287 s becomes 3.050 s at 16,000. The other half is not an artefact. It is
+// the relation: every record of an event is matched to every episode of that
+// event, and the caller inspects each match. Profiled after the index repair,
+// signalIndex.eachMatching is 94.71% cumulative. Shrinking it would change
+// WHICH signals match which episodes, which is the one thing this seam may not
+// change, so what is left is to refuse the shape rather than to grind through it.
+//
+// THE VALUE, and what it is derived from. Like maxRetainedManualSignals this is
+// chosen rather than read off the contract, and for the same reason: the
+// preregistration says nothing about dataset shape. It is set at the point where
+// the walk stops being something a verifier can answer from -- 1<<26 visits is
+// roughly a second of matching on the machine this was measured on, and it
+// admits every shape whose episodes sit on distinct events, which is what the
+// producer writes: one incarnation per round means visits are linear in records
+// there, and a 16,000-record honest dataset makes on the order of 16,000 visits,
+// four thousand times under this bound.
+const maxSignalMatchVisits = 1 << 26
 
 // VerifySourceRoundRegistry re-derives a registry from the claims its own
 // entries carry: the registry must be exactly what [ReconcileSourceRounds]

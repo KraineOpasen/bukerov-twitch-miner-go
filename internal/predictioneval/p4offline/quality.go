@@ -213,7 +213,15 @@ func (r QualityRecord) Merge(other QualityRecord) QualityRecord {
 
 // Quality reasons. Closed vocabulary.
 const (
-	QualityReasonEpisodeExcluded              = "EPISODE_EXCLUDED"
+	QualityReasonEpisodeExcluded = "EPISODE_EXCLUDED"
+	// QualityReasonSelectionUnavailable is recorded when the episode's
+	// selection could not be RUN at all -- the dataset was refused on its
+	// shape, or handed over out of causal order -- as distinct from an episode
+	// the selection ran and excluded. Both are EXCLUDED and neither is
+	// recoverable here; what differs is what an auditor can conclude. An
+	// earlier version collapsed the two into EPISODE_EXCLUDED, so a refusal of
+	// the whole dataset was indistinguishable from evidence about this episode.
+	QualityReasonSelectionUnavailable         = "SELECTION_UNAVAILABLE"
 	QualityReasonFactsetDigestMismatch        = "FACTSET_DIGEST_MISMATCH"
 	QualityReasonFactsetBindingMismatch       = "FACTSET_BINDING_MISMATCH"
 	QualityReasonFactsetPrefix                = "FACTSET_"
@@ -264,7 +272,15 @@ func AssessCaseQuality(ds predictioneval.SourceDataset, fs CommonFactset, p2, p3
 		episode = episode.Merge(ep.Quality)
 	}
 	if err != nil {
-		episode = episode.Downgrade(QualityExcluded, QualityReasonEpisodeExcluded)
+		// A selection that could not RUN says nothing about this episode, and
+		// recording it as though it did is a claim about evidence that was never
+		// read. Both verdicts are EXCLUDED and fail-closed; only the reason
+		// differs, which is exactly what an auditor reads.
+		reason := QualityReasonEpisodeExcluded
+		if errors.Is(err, ErrEvidenceRetention) || errors.Is(err, ErrEvidenceMatchWork) {
+			reason = QualityReasonSelectionUnavailable
+		}
+		episode = episode.Downgrade(QualityExcluded, reason)
 	}
 
 	factset := NewQualityRecord()

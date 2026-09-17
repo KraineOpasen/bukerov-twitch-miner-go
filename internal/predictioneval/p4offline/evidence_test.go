@@ -1698,35 +1698,33 @@ func TestUnspentStartDoesNotExcludeAHealthySiblingIncarnation(t *testing.T) {
 //
 // The assertion is an absolute budget rather than a ratio, because the repaired
 // path does no work at all that grows with n -- which is exactly the property.
-// TestManualSignalsAreSharedNotRetainedPerEpisode is the BLOCKER receipt for the
-// episodes x manual-signals cross product EvidenceSelection used to RETAIN.
+// TestManualSignalReportIsBoundedAndEpisodesDoNotAlias is the receipt for the
+// episodes x manual-signals cross product, and for the repair that replaced the
+// first attempt at fixing it.
 //
-// WHAT WAS WRONG. An earlier repair removed the quadratic COST of building
-// ManualSignals and left the quadratic RETENTION, and the comment beside it then
-// told the reader the remaining residue was CPU in the matching relation. An
-// independent judge measured exactly n*n retained entries -- 250,000 / 1,000,000
-// / 4,000,000 / 16,000,000 at n = 500 / 1,000 / 2,000 / 4,000, peak RSS
-// 2,057,468 KiB from 12,213,348 bytes of input -- and, at a fixed 50,000 records
-// under a declared 2 GiB cap, the call dying with an unrecoverable
+// WHAT WAS WRONG. EvidenceSelection reported, and held, an episodes x
+// manual-signals cross product -- exactly n*n. Review measured 250,000 /
+// 1,000,000 / 4,000,000 / 16,000,000 entries at n = 500 / 1,000 / 2,000 / 4,000,
+// peak RSS 2,057,468 KiB from 12,213,348 bytes of input, and at a fixed 50,000
+// records under a declared 2 GiB cap the call dying with an unrecoverable
 // "fatal error: runtime: out of memory" where the same size in a linear shape
-// returned in 1.6 seconds holding 13 MB.
+// returned in 1.6 s holding 13 MB. On TWO axes: a shared EventID, and manual
+// facts naming no incarnation, which route to a bucket keyed on PoolInstanceID
+// alone and match every episode of the pool.
 //
-// AND ON TWO AXES, NOT ONE. The same judge reached it with event ids entirely
-// DISTINCT, using manual facts that name no incarnation: those route to
-// byPoolUnattributed, keyed on PoolInstanceID alone, which matches every episode
-// of the pool. Both axes are driven below.
+// THE FIRST REPAIR WAS WORSE THAN THE BOUND, and this test exists in its current
+// shape because of what review found in it. It shared one backing array between
+// episodes whose matched set was identical. That aliased the caller's slices --
+// two episodes at len 3 cap 4, one ordinary append each, and the first
+// episode's tail read the second's value -- it hashed every byte of every entry
+// to decide what could be shared, costing 8x CPU on a dimension nothing
+// bounded, and it counted only what was shared, so the ceiling could not see a
+// report carrying 1,001,000 entries and 31 MB of JSON.
 //
-// WHAT THIS ASSERTS, AND WHY IT IS NOT WHAT THE REVIEW ASKED FOR. The review
-// asked for an assertion that the summed len(ManualSignals) is LINEAR. This test
-// deliberately does not assert that, and the number is logged so a reader can
-// see it is still n*n: making that sum linear means each episode no longer
-// reports the signals matched to it, which changes exported output and is an
-// owner decision, not a mechanical one. What the repair guarantees instead is
-// that episodes whose matched set is IDENTICAL share one array, so what is HELD
-// is the distinct lists. That property is exact and free of allocator noise --
-// it is the count of distinct backing arrays -- so it is what is asserted, with
-// the retained heap as a corroborating measurement rather than the pin.
-func TestManualSignalsAreSharedNotRetainedPerEpisode(t *testing.T) {
+// SO THE BOUND IS ON WHAT IS REPORTED, and the two properties below are what
+// that buys: a shape that would exceed it is refused before the memory is
+// committed, and every episode owns its own slice.
+func TestManualSignalReportIsBoundedAndEpisodesDoNotAlias(t *testing.T) {
 	// n episodes on one pool, and n manual facts every one of them matches.
 	build := func(n int, sharedEvent bool) predictioneval.SourceDataset {
 		s := newSynth()
@@ -1741,8 +1739,8 @@ func TestManualSignalsAreSharedNotRetainedPerEpisode(t *testing.T) {
 			if sharedEvent {
 				s.manualCall("r0", "shared", 50, 0)
 			} else {
-				// No incarnation and an event no episode carries: this is the
-				// pool-unattributed route, and it needs no event collision at all.
+				// No incarnation and an event no episode carries: the
+				// pool-unattributed route, which needs no event collision.
 				s.manualCall("", "u"+strconv.Itoa(j), 50, 0)
 			}
 		}
@@ -1757,70 +1755,68 @@ func TestManualSignalsAreSharedNotRetainedPerEpisode(t *testing.T) {
 		{"manual facts that name no incarnation", false},
 	} {
 		t.Run(shape.name, func(t *testing.T) {
-			for _, n := range []int{250, 500, 1000} {
-				sel, err := p4offline.SelectEpisodes(build(n, shape.sharedEvent))
-				if err != nil {
-					t.Fatalf("n=%d: %v", n, err)
-				}
-				total := 0
-				arrays := map[*string]bool{}
-				for i := range sel.Episodes {
-					ms := sel.Episodes[i].ManualSignals
-					total += len(ms)
-					if len(ms) > 0 {
-						arrays[&ms[0]] = true
-					}
-				}
-				t.Logf("n=%-5d episodes=%-5d summed len(ManualSignals)=%-9d distinct backing arrays=%d",
-					n, len(sel.Episodes), total, len(arrays))
-
-				if total != n*n {
-					t.Fatalf("the exported content must be UNCHANGED by interning: summed %d, want %d", total, n*n)
-				}
-				if len(arrays) != 1 {
-					t.Fatalf("every episode matches the same manual set, so one array must be held, not %d", len(arrays))
-				}
+			// Under the ceiling: selected, and the content is what it always was.
+			const under = 300
+			sel, err := p4offline.SelectEpisodes(build(under, shape.sharedEvent))
+			if err != nil {
+				t.Fatalf("n=%d is under the ceiling and must be selected: %v", under, err)
 			}
+			total := 0
+			for i := range sel.Episodes {
+				total += len(sel.Episodes[i].ManualSignals)
+			}
+			if total != under*under {
+				t.Fatalf("every episode reports every manual signal matched to it: summed %d, want %d",
+					total, under*under)
+			}
+
+			t.Run("and no episode's slice aliases another's", func(t *testing.T) {
+				// THE REGRESSION CHECK. The reverted repair handed one array
+				// with spare capacity to every episode, so an ordinary caller
+				// append clobbered a sibling. Two appends, one per episode, must
+				// not be able to see each other.
+				if len(sel.Episodes) < 2 {
+					t.Fatalf("need two episodes to test aliasing, got %d", len(sel.Episodes))
+				}
+				a := sel.Episodes[0].ManualSignals
+				b := sel.Episodes[1].ManualSignals
+				if len(a) == 0 || len(b) == 0 {
+					t.Fatal("both episodes must report manual signals")
+				}
+				beforeB := b[0]
+				a[0] = "MUTATED-BY-CALLER"
+				if b[0] != beforeB {
+					t.Fatal("writing one episode's manual signals changed another's")
+				}
+				// BOTH tails are checked, not one. An earlier draft appended to
+				// both and inspected only the first -- which the linter caught as
+				// an ineffectual assignment, and it was right about more than
+				// style: with the shared array, it is the SECOND append that
+				// overwrites the first, so inspecting only one of them could
+				// miss the very collision this case exists for.
+				a = append(a, "ANNOTATION-A")
+				b = append(b, "ANNOTATION-B")
+				if a[len(a)-1] != "ANNOTATION-A" || b[len(b)-1] != "ANNOTATION-B" {
+					t.Fatalf("appends into two episodes' lists collided: %q and %q",
+						a[len(a)-1], b[len(b)-1])
+				}
+			})
+
+			t.Run("and a shape that would report past the ceiling is refused typed", func(t *testing.T) {
+				// 1,100 episodes x 1,100 signals is 1,210,000 reported entries
+				// against a ceiling of 1,048,576.
+				_, err := p4offline.SelectEpisodes(build(1100, shape.sharedEvent))
+				if !errors.Is(err, p4offline.ErrEvidenceRetention) {
+					t.Fatalf("want ErrEvidenceRetention, got %v", err)
+				}
+				if msg := err.Error(); !strings.Contains(msg, "manual-signal attributions") {
+					t.Fatalf("the refusal must name what it counted: %s", msg)
+				}
+			})
 		})
 	}
-}
 
-// TestEvidenceRetentionCeilingRefusesTypedRatherThanDying is the second half of
-// the same receipt: interning collapses the shapes where the lists are
-// IDENTICAL, and a ceiling is what makes the residue statable.
-//
-// A shape where every episode matches a DIFFERENT long list is not interned --
-// the lists genuinely differ -- so it is refused, in full, with a typed error
-// naming the extent. maxRetainedManualSignals is the one number in this package
-// chosen rather than derived, and the constant's own comment says so and says
-// what the fail-closed cost is: refusing the dataset refuses its automatic
-// episodes too.
-func TestEvidenceRetentionCeilingRefusesTypedRatherThanDying(t *testing.T) {
-	// Each episode carries its own event and one manual fact on that event,
-	// plus a shared pool-unattributed tail every episode also matches. Every
-	// list is then (its own fact + the whole tail), so all n are DISTINCT and
-	// each is length n -- n*n retained, with nothing to share.
-	const n = 1100
-	s := newSynth()
-	for i := 0; i < n; i++ {
-		s.placedAttempt("r"+strconv.Itoa(i), "e"+strconv.Itoa(i), int64(i+1))
-	}
-	for i := 0; i < n; i++ {
-		s.manualCall("r"+strconv.Itoa(i), "e"+strconv.Itoa(i), 50, 0)
-	}
-	for j := 0; j < n-1; j++ {
-		s.manualCall("", "u"+strconv.Itoa(j), 50, 0)
-	}
-
-	_, err := p4offline.SelectEpisodes(s.dataset())
-	if !errors.Is(err, p4offline.ErrEvidenceRetention) {
-		t.Fatalf("a dataset whose shape retains more than the ceiling must be refused TYPED, got %v", err)
-	}
-	if msg := err.Error(); !strings.Contains(msg, "after interning") {
-		t.Fatalf("the refusal must name what it counted: %s", msg)
-	}
-
-	t.Run("and an ordinary dataset is nowhere near it", func(t *testing.T) {
+	t.Run("and an ordinary session is nowhere near the ceiling", func(t *testing.T) {
 		// The false-refusal control. A ceiling that refused honest evidence
 		// would be worse than the exhaustion it prevents.
 		s := newSynth()
@@ -1830,6 +1826,101 @@ func TestEvidenceRetentionCeilingRefusesTypedRatherThanDying(t *testing.T) {
 		s.manualCall("r0", "e0", 50, 0)
 		if _, err := p4offline.SelectEpisodes(s.dataset()); err != nil {
 			t.Fatalf("an ordinary session must be selected, not refused: %v", err)
+		}
+	})
+}
+
+// TestSelectionRefusalIsDistinctFromEpisodeExclusion covers the downstream half
+// of the two resource refusals, which nothing drove before: review found
+// ErrEvidenceRetention occurred at exactly ONE line in every test in the
+// package, so no test carried it past the seam that produced it.
+//
+// AssessCaseQuality collapsed every error class from lookupEpisode into
+// EPISODE_EXCLUDED, so a refusal of the WHOLE DATASET on its shape was recorded
+// as evidence about this episode -- a claim about evidence that was never read.
+func TestSelectionRefusalIsDistinctFromEpisodeExclusion(t *testing.T) {
+	// A dataset refused on its shape: same construction as the relation ceiling.
+	s := newSynth()
+	for i := 0; i < 16000; i++ {
+		r := s.fact(predictioneval.KindAutoDecision, predictioneval.PhaseAutoDue,
+			"r"+strconv.Itoa(i), "e1", 1)
+		r.PayloadUndecodable = true
+		s.add(r)
+	}
+	refused := s.dataset()
+	if _, err := p4offline.SelectEpisodes(refused); !errors.Is(err, p4offline.ErrEvidenceMatchWork) {
+		t.Fatalf("the fixture must be refused on its shape, or this proves nothing: %v", err)
+	}
+
+	_, fs := selectedFactset(t, nil, nil)
+	q := p4offline.AssessCaseQuality(refused, fs, p4offline.PolicyDecision{}, p4offline.PolicyDecision{},
+		p4offline.ResolutionNotRecorded(p4offline.PublicRoundIdentity{EventID: "e1"}, []string{"o1", "o2"}, nil, "p"))
+	if q.Quality != p4offline.QualityExcluded {
+		t.Fatalf("a selection that could not run must still be fail-closed: %+v", q)
+	}
+	if !containsString(q.Reasons, p4offline.QualityReasonSelectionUnavailable) {
+		t.Fatalf("the reason must say the selection could not RUN: %v", q.Reasons)
+	}
+	if containsString(q.Reasons, p4offline.QualityReasonEpisodeExcluded) {
+		t.Fatalf("a dataset refused on its shape says nothing about this episode: %v", q.Reasons)
+	}
+}
+
+// TestSignalMatchingRelationIsBounded pins the ceiling on the matching relation
+// itself -- the residue this package deferred three times, calling a declared
+// ingest ceiling "the follow-up the measurements argue for".
+//
+// WHY IT IS HERE NOW. One undecodable AUTO_DUE per round incarnation makes every
+// row its own episode AND a signal every other episode on that event matches, so
+// the relation is |episodes| x |signals|. Measured through the exported
+// SelectEpisodes: 0.128 / 0.424 / 1.621 / 6.287 s at 2,000 / 4,000 / 8,000 /
+// 16,000 records, 3.88x per doubling, and review measured 14.254 s at 32,000.
+// Indexing the exclusion rescan halves it and cannot remove it: the remainder is
+// the relation, 94.71% cumulative in signalIndex.eachMatching on a profile of
+// the repaired bytes, and shrinking it would change which signals match which
+// episodes.
+//
+// SO THE SHAPE IS REFUSED RATHER THAN GROUND THROUGH, and the two cases below
+// are the two halves of that claim: the hostile shape is refused, typed, in
+// bounded time, and an honest dataset of the SAME RECORD COUNT is selected.
+func TestSignalMatchingRelationIsBounded(t *testing.T) {
+	build := func(k int, oneEvent bool) predictioneval.SourceDataset {
+		s := newSynth()
+		for i := 0; i < k; i++ {
+			ev := "e" + strconv.Itoa(i)
+			if oneEvent {
+				ev = "e1"
+			}
+			r := s.fact(predictioneval.KindAutoDecision, predictioneval.PhaseAutoDue,
+				"r"+strconv.Itoa(i), ev, 1)
+			r.PayloadUndecodable = true
+			s.add(r)
+		}
+		return s.dataset()
+	}
+
+	const k = 16000
+	t.Run("a shape whose relation is quadratic is refused", func(t *testing.T) {
+		_, err := p4offline.SelectEpisodes(build(k, true))
+		if !errors.Is(err, p4offline.ErrEvidenceMatchWork) {
+			t.Fatalf("want ErrEvidenceMatchWork, got %v", err)
+		}
+		if msg := err.Error(); !strings.Contains(msg, "matches or more") {
+			t.Fatalf("the refusal must name what it counted: %s", msg)
+		}
+	})
+
+	t.Run("and the same record count on distinct events is selected", func(t *testing.T) {
+		// THE FALSE-REFUSAL CONTROL, and it is the same SIZE as the refused
+		// shape: what is refused is the SHAPE, not the dataset's size. This is
+		// what the producer writes -- one incarnation per round, each on its own
+		// event -- so its relation is linear in records.
+		sel, err := p4offline.SelectEpisodes(build(k, false))
+		if err != nil {
+			t.Fatalf("an honest dataset of %d records must be selected, not refused: %v", k, err)
+		}
+		if len(sel.Episodes) != k {
+			t.Fatalf("want %d episodes, got %d", k, len(sel.Episodes))
 		}
 	})
 }
@@ -2337,31 +2428,57 @@ func TestSessionRefusalsAreNamedByKindNotOncePerRecord(t *testing.T) {
 	}
 }
 
-// TestP2ExclusionAttributionIsNotQuadraticInTheDataset is the receipt for the
-// THIRD superlinear accumulation found on this seam, and the reason the
-// package's account of that seam had to be corrected twice.
+// TestP2ExclusionAttributionIsCompleteForEveryEpisode is the receipt for the THIRD
+// superlinear accumulation found on this seam, and it is renamed because the
+// name it used to carry asserted something it could not see.
 //
-// p2ExclusionsFor walked the whole observation slice for EVERY exclusion whose
-// key did not match -- with the emptiness test inside the inner loop, so an
-// exclusion carrying no observation id walked it doing nothing, and a match did
-// not break. Both operands grow with the caller's dataset, so the cost was
-// O(|excluded| x |obs|) per excluded episode: quadratic in one dataset, through
-// the exported SelectEpisodes.
+// WHAT IT USED TO CLAIM. It was called ...IsNotQuadraticInTheDataset, and an
+// auditor reads that name as proof. Review measured its own fixture: every row
+// was built on the same RoundIncarnationID, so it yielded exactly ONE episode at
+// k = 2,000 / 4,000 / 8,000 / 16,000 / 32,000. The episode factor was pinned at
+// one by construction, and the exact pre-repair nested rescan, reinstated as a
+// well-formed mutation whose reachedness its own subtest confirmed, left it and
+// the whole package suite green. It asserted the negation of a fact that was
+// true.
 //
-// WHAT THIS TEST CAN AND CANNOT SEE, stated because the difference matters.
-// The ratio below is ALLOCATION, and the nested scan allocated nothing extra --
-// its cost was CPU. So this test does not discriminate the repair; the argument
-// for that is at the site. What it does hold is the shape of the seam around
-// it, and the subtest holds the ANSWER: the index must attribute exactly what
-// the nested scan attributed.
-func TestP2ExclusionAttributionIsNotQuadraticInTheDataset(t *testing.T) {
+// WHAT THE SEAM REALLY COSTS, measured on both trees through the exported
+// SelectEpisodes with one undecodable AUTO_DUE PER round incarnation, so every
+// row is its own episode AND its own producer exclusion:
+//
+//	records     rescan     indexed
+//	  2,000     0.128 s    0.069 s
+//	  4,000     0.424 s    0.216 s
+//	  8,000     1.621 s    0.799 s
+//	 16,000     6.287 s    refused
+//
+// The index halves it and does not make it linear, because it was never the only
+// quadratic on that shape: profiled after the repair, signalIndex.eachMatching
+// is 94.71% cumulative, and that is the matching RELATION rather than an
+// implementation artefact. What bounds the rest is maxSignalMatchVisits, which
+// is why 16,000 refuses -- see TestSignalMatchingRelationIsBounded.
+//
+// SO THIS TEST ASSERTS THE ANSWER, WHICH IS ALL IT CAN, AND IS NAMED FOR THAT.
+// It was briefly renamed ...IsIndexedNotRescanned, which is the same defect the
+// old name had -- a name claiming a property the body does not check. Executed:
+// the pre-repair rescan, reinstated as a well-formed mutant with the index kept
+// alive so nothing is optimised away, leaves this test and the whole suite
+// green, because the rescan computes the SAME attribution. The cost repair is
+// argued at its site with the measurements, in the convention this package uses
+// for every CPU-only change; what is PINNED here is that every episode gets its
+// own correct answer, which the old fixture could not check because it only ever
+// produced one episode.
+func TestP2ExclusionAttributionIsCompleteForEveryEpisode(t *testing.T) {
 	// K automatic rows naming one attempt that never gets a terminal envelope,
 	// so the first opportunity is unusable and the attribution runs; each row is
 	// also producer-excluded, so both operands grow together.
 	build := func(k int) predictioneval.SourceDataset {
 		s := newSynth()
 		for i := 0; i < k; i++ {
-			r := s.fact(predictioneval.KindAutoDecision, predictioneval.PhaseAutoDue, "r1", "e1", 1)
+			// ONE EPISODE PER ROW, which is the whole correction: on the old
+			// fixture every row shared "r1", so there was one episode at
+			// every size and the product this seam is about never formed.
+			r := s.fact(predictioneval.KindAutoDecision, predictioneval.PhaseAutoDue,
+				"r"+strconv.Itoa(i), "e1", 1)
 			r.PayloadUndecodable = true
 			s.add(r)
 		}
@@ -2386,16 +2503,25 @@ func TestP2ExclusionAttributionIsNotQuadraticInTheDataset(t *testing.T) {
 		t.Fatalf("allocation grew %.1fx over a 2x input: the attribution is rescanning per exclusion", ratio)
 	}
 
-	t.Run("and the attribution is unchanged", func(t *testing.T) {
-		// The index must not change WHICH reasons are attributed: the seen-set
-		// answers the same question the nested scan did.
-		sel, err := p4offline.SelectEpisodes(build(4))
+	t.Run("and the attribution is unchanged, for every episode", func(t *testing.T) {
+		// The index must not change WHICH reasons are attributed, and it must
+		// not change them for ANY episode -- which is what the old subtest could
+		// not check, because it asserted through singleEpisode() and the old
+		// fixture only ever produced one. Each row here is its own episode and
+		// its own producer exclusion, so each must carry exactly its own.
+		const n = 8
+		sel, err := p4offline.SelectEpisodes(build(n))
 		if err != nil {
 			t.Fatal(err)
 		}
-		ep := singleEpisode(t, sel)
-		if len(ep.P2Exclusions) != 1 || ep.P2Exclusions[0] != predictioneval.ExclusionPayloadUndecodable {
-			t.Fatalf("the episode must carry exactly its own refusal, got %v", ep.P2Exclusions)
+		if len(sel.Episodes) != n {
+			t.Fatalf("the fixture must produce one episode per row: got %d, want %d", len(sel.Episodes), n)
+		}
+		for i := range sel.Episodes {
+			got := sel.Episodes[i].P2Exclusions
+			if len(got) != 1 || got[0] != predictioneval.ExclusionPayloadUndecodable {
+				t.Fatalf("episode %d must carry exactly its own refusal, got %v", i, got)
+			}
 		}
 	})
 }

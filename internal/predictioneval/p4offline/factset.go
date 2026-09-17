@@ -168,7 +168,10 @@ type P2ConfigBinding struct {
 // episode's selection. found reports whether the episode exists in an
 // admitted session at all; err is non-nil whenever the episode is not a
 // selected opportunity (absent, session refused, excluded, unusable or
-// unproven), and is a caller-contract error for an unordered dataset.
+// unproven). The error is a caller-contract error for an unordered dataset, and
+// a typed RESOURCE refusal -- ErrEvidenceRetention or ErrEvidenceMatchWork --
+// when SelectEpisodes declines the dataset's shape; see its documentation. The
+// two are not the same thing and a caller must not read one as the other.
 func lookupEpisode(ds predictioneval.SourceDataset, episode EpisodeIdentity) (EpisodeSelection, bool, error) {
 	sel, err := SelectEpisodes(ds)
 	if err != nil {
