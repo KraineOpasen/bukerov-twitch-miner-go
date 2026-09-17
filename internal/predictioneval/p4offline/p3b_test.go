@@ -2987,9 +2987,21 @@ func TestRulesetNestingIsBoundedBeforeItRecurses(t *testing.T) {
 	if os.Getenv(deepRulesetChildEnv) == "1" {
 		// THE CHILD. Depth 4,000,000 -- past the 3,800,000 at which the
 		// unbounded walk died, and well past the 3,000,000 it survived.
+		//
+		// IT ASSERTS THE DEPTH GATE BY NAME, not merely the sentinel, and the
+		// reason is that a subprocess test which silently exercises nothing is
+		// worse than no test at all. ErrRulesetRawDecode is shared by every
+		// decode-class refusal, so a change that made this document refuse for
+		// some OTHER reason would leave the child exiting 0 and the parent
+		// green -- without the recursion ever being driven. Requiring the
+		// depth gate's own wording is what makes the child's pass mean that it
+		// reached the recursive arm and was stopped there.
 		_, err := p4offline.VerifyP3bRuleset(deeplyNestedRuleset(4_000_000))
 		if !errors.Is(err, p4offline.ErrRulesetRawDecode) {
 			t.Fatalf("the child must get a TYPED refusal, got %v", err)
+		}
+		if msg := err.Error(); !strings.Contains(msg, "nests past") {
+			t.Fatalf("the child must be stopped by the DEPTH gate, not by some other decode fault: %q", msg)
 		}
 		return
 	}
