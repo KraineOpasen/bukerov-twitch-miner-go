@@ -406,7 +406,7 @@ func TestQualityRecordsAreClosedMonotoneAndDetached(t *testing.T) {
 		// THE PROPERTY THE REPAIR HAD TO PRESERVE. Merge used appendOnce in a
 		// loop, which scans the accumulated list on every call -- O(n*m) in two
 		// slices the caller owns, measured through this exported method at
-		// ~4.6x per 2x input (3.7 ms at 2,000 distinct reasons, 223 ms at
+		// ~3.9x per 2x input (3.7 ms at 2,000 distinct reasons, 223 ms at
 		// 16,000). It is the fourth superlinear accumulation found on this
 		// branch. The seen-set that replaced it is CPU-only, so reverting it
 		// survives any allocation-ratio assertion and this suite makes none

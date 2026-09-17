@@ -374,29 +374,48 @@ func ValidateEntropyWords(coords EntropyCoordinates, words []predictioneval.Orde
 // ValidateDrawTrace checks a whole P3b trace: its declared semantics, its run
 // identity and every word.
 func ValidateDrawTrace(coords EntropyCoordinates, trace predictioneval.SuppliedDrawTrace) error {
+	if err := checkDrawTraceIdentity(coords, trace.EntropySemanticsVersion, trace.RunID, len(trace.Words)); err != nil {
+		return err
+	}
+	return ValidateEntropyWords(coords, trace.Words)
+}
+
+// checkDrawTraceIdentity is ValidateDrawTrace's O(1) half, split out so a
+// caller holding an unvalidated word slice can run it BEFORE paying to copy
+// that slice. It reads the words only through their LENGTH.
+//
+// THIS SPLIT IS THE CLASS AGAIN, one gate further than the last time. The
+// comment in evaluateProjected records moving the word COUNT past its
+// detachment copy and then stops; these two identity gates are equally O(1) in
+// the words and were equally stranded behind it, so a trace with a foreign
+// semantics version paid a full copy of its words to be refused on a string
+// comparison: 1,067,056 / 2,115,744 / 4,212,784 / 8,407,200 bytes at 2^17..2^20
+// words through the exported EvaluateP3bWithTrace, against 232 bytes FLAT for
+// the identical refusal through the exported ValidateDrawTrace.
+//
+// NEITHER of the two trace fields is bounded anywhere on this path, and that is
+// why neither is quoted. checkEntropyCoordinates below bounds the three
+// COORDINATE identities and ValidateEntropyWords bounds the word slice; the
+// trace's own semantics version and run identity are plain caller-supplied
+// strings that nothing reaches. Quoting them cost 1.67 GB of allocation and a
+// 268 MB error on a 64 MiB input -- to report that two version strings differ.
+// The rule is the one rulesetIdentityFault records and the native producer
+// wrote down before either of us: a refusal names the fault and the LENGTHS,
+// never the text it is refusing. The constant the core consumes IS quoted,
+// because it is a compile-time constant and naming it is the whole diagnosis.
+func checkDrawTraceIdentity(coords EntropyCoordinates, semantics, runID string, words int) error {
 	if err := checkEntropyCoordinates(coords); err != nil {
 		return err
 	}
-	// NEITHER of these two fields is bounded anywhere on this path, and that is
-	// why neither is quoted. checkEntropyCoordinates above bounds the three
-	// COORDINATE identities and ValidateEntropyWords below bounds the word
-	// slice; the trace's own semantics version and run identity are plain
-	// caller-supplied strings that nothing reaches. Quoting them cost 1.67 GB
-	// of allocation and a 268 MB error on a 64 MiB input -- to report that two
-	// version strings differ. The rule is the one rulesetIdentityFault records
-	// and the native producer wrote down before either of us: a refusal names
-	// the fault and the LENGTHS, never the text it is refusing. The constant
-	// the core consumes IS quoted, because it is a compile-time constant and
-	// naming it is the whole diagnosis.
-	if trace.EntropySemanticsVersion != predictioneval.OrderedRulesEntropySemanticsVersion {
+	if semantics != predictioneval.OrderedRulesEntropySemanticsVersion {
 		return errors.Join(ErrEntropyTrace,
-			errors.New("p4offline: trace declares semantics of "+strconv.Itoa(len(trace.EntropySemanticsVersion))+
+			errors.New("p4offline: trace declares semantics of "+strconv.Itoa(len(semantics))+
 				" bytes, the core consumes only "+strconv.Quote(predictioneval.OrderedRulesEntropySemanticsVersion)))
 	}
-	if want := entropyRunID(coords, len(trace.Words)); trace.RunID != want {
+	if want := entropyRunID(coords, words); runID != want {
 		return errors.Join(ErrEntropyTrace,
-			errors.New("p4offline: trace run identity is "+strconv.Itoa(len(trace.RunID))+
+			errors.New("p4offline: trace run identity is "+strconv.Itoa(len(runID))+
 				" bytes and is not this run's, which is "+strconv.Itoa(len(want))+" bytes"))
 	}
-	return ValidateEntropyWords(coords, trace.Words)
+	return nil
 }

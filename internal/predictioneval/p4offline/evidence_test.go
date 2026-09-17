@@ -1675,6 +1675,77 @@ func TestUnspentStartDoesNotExcludeAHealthySiblingIncarnation(t *testing.T) {
 // right and mostly is NOT this defect -- it is the two mandatory framings. What
 // this removes is the log-n factor on top of them, which was 20% of the
 // allocation at n=8192 and grows with the group.
+// TestRegistryRefusesOnItsConstantsBeforeItReconciles pins the SEVENTH-instance
+// sibling in VerifySourceRoundRegistry: the two O(1) clauses of its condition
+// run before the work, not after it.
+//
+// The whole flattening, ReconcileSourceRounds, the per-claim framing and
+// registryDigest used to run as STATEMENTS above a condition whose first two
+// clauses are constant comparisons -- and every clause of that condition
+// returns the same sentinel, so nothing about precedence was at stake. An
+// independent judge measured a one-byte-wrong Version at 8,865,720 / 19,038,200
+// / 37,564,760 / 76,808,072 bytes and 8.9 / 28.9 / 55.8 / 105.1 ms for n =
+// 2,000 / 4,000 / 8,000 / 16,000 claims: 59% of the cost of a VALID
+// verification, to refuse on a string comparison.
+//
+// The assertion is an absolute budget rather than a ratio, because the repaired
+// path does no work at all that grows with n -- which is exactly the property.
+func TestRegistryRefusesOnItsConstantsBeforeItReconciles(t *testing.T) {
+	const n = 4096
+	claims := make([]p4offline.SourceRoundClaim, 0, n)
+	for i := 0; i < n; i++ {
+		claims = append(claims, p4offline.SourceRoundClaim{
+			Episode: p4offline.EpisodeIdentity{
+				CollectorEpoch: 1, CollectorSessionID: "session-" + strconv.Itoa(i),
+				PoolInstanceID: "pool-" + strconv.Itoa(i), RoundIncarnationID: "round-" + strconv.Itoa(i),
+				EventID: "e" + strconv.Itoa(i),
+			},
+			Attempt: predictioneval.AttemptKey{
+				CollectorEpoch: 1, CollectorSessionID: "session-" + strconv.Itoa(i),
+				PoolInstanceID: "pool-" + strconv.Itoa(i), AttemptID: uint64(i + 1),
+			},
+			FactsetDigest: fmt.Sprintf("%064x", i),
+		})
+	}
+	valid := p4offline.ReconcileSourceRounds(claims)
+	if err := p4offline.VerifySourceRoundRegistry(valid); err != nil {
+		t.Fatalf("the fixture must verify, or the refusals below prove nothing: %v", err)
+	}
+
+	measure := func(reg p4offline.SourceRoundRegistry) uint64 {
+		runtime.GC()
+		var a, b runtime.MemStats
+		runtime.ReadMemStats(&a)
+		if err := p4offline.VerifySourceRoundRegistry(reg); err == nil {
+			t.Fatal("this registry must be refused")
+		}
+		runtime.ReadMemStats(&b)
+		return b.TotalAlloc - a.TotalAlloc
+	}
+
+	// Well above anything the two comparisons legitimately need, and orders
+	// below the reconciliation the defect paid for at this n.
+	const budget = 64 * 1024
+	for _, tc := range []struct {
+		name string
+		edit func(*p4offline.SourceRoundRegistry)
+	}{
+		{"a foreign registry version", func(r *p4offline.SourceRoundRegistry) { r.Version += "x" }},
+		{"an absent digest", func(r *p4offline.SourceRoundRegistry) { r.Digest = "" }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			bad := valid
+			tc.edit(&bad)
+			allocated := measure(bad)
+			t.Logf("%d claims; the refusing call allocated %d bytes", n, allocated)
+			if allocated > budget {
+				t.Fatalf("refusing on a constant allocated %d bytes over %d claims: the registry was reconciled before it was judged",
+					allocated, n)
+			}
+		})
+	}
+}
+
 func TestReconcileDoesNotReframeEveryClaimPerComparison(t *testing.T) {
 	// Distinct factset digests, so a shared round is a CONFLICT rather than
 	// identical duplicates: that is the shape that forces every comparison.

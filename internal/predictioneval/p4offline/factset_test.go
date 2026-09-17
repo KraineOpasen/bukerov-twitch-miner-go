@@ -583,7 +583,7 @@ func TestIncompleteFactsetRefusalIsBoundedInItsOwnInput(t *testing.T) {
 }
 
 // TestFirstGatesDoNotMaterializeSuppliedText is the class test, and it exists
-// because this defect has now been found on this branch SIX times: at
+// because this defect has now been found on this branch SEVEN times: at
 // VerifyP3bRuleset's identity gate; then at ValidateDrawTrace's two gates and
 // bindEntropyCoordinates' round gate; then at six more, including
 // VerifyCommonFactset, the first gate on every factset path; then at three MORE
@@ -594,9 +594,11 @@ func TestIncompleteFactsetRefusalIsBoundedInItsOwnInput(t *testing.T) {
 // at a site that is not a gate at all, the derivation argument Decision builds
 // before decisionOf's first statement runs.
 //
-// So this is a table over every gate that compares a caller-supplied string
-// that no earlier gate has length-bounded, wherever it sits. A new gate of that
-// shape belongs here on the day it is written.
+// So this is a table over the gates of that shape that are reachable as a plain
+// first-gate comparison through an exported verifier, and a new gate of that
+// shape belongs here on the day it is written. It is a REGISTRY, not a proof of
+// enumeration -- see the paragraph below, which exists because this sentence
+// used to claim more than any test can.
 //
 // EACH ROW ASSERTS THE RENDERED EXTENT, not merely that the error is small. A
 // first version asserted only the sentinel, a 1024-byte budget and the absence
@@ -612,11 +614,22 @@ func TestIncompleteFactsetRefusalIsBoundedInItsOwnInput(t *testing.T) {
 //	ValidateDrawTrace's two gates     TestDrawTraceRefusalDoesNotMaterializeSuppliedText
 //	bindEntropyCoordinates' round     TestEntropyBindingRefusalDoesNotMaterializeTheFactsetRound
 //	Decision's derivation thunk       TestDecisionDoesNotBuildItsDerivationBeforeItsGates
+//	walkRulesetObject's key gate      TestRulesetKeyRefusalsDoNotMaterializeTheSuppliedKey
 //	  (BOTH callers -- P2CaseResult.Decision and P3bCaseResult.Decision -- and
 //	  the mint check below them, which is the sixth instance)
 //
-// With the nine rows below that is fourteen sites. canonical.go carries the
-// same inventory beside the rule. The Decision row used to name one test while
+// With the nine rows below that is FIFTEEN sites. canonical.go carries the same
+// inventory beside the rule, and both counts are now read off the source by a
+// scan rather than written from memory.
+//
+// WHAT THIS TABLE IS NOT. It is the registry for the sites reachable as a plain
+// first-gate comparison through an exported verifier; it is NOT a proof that
+// the class is enumerated. An earlier version of this comment said it covered
+// every such gate "wherever it sits" and called its inventory whole. That claim
+// was FALSE while walkRulesetObject's key gate sat outside it, and an auditor
+// reading it as an enumeration would have been misled about what is proven. The
+// class has been found seven times; the honest statement is that every site
+// KNOWN to it is listed here or named above, not that no eighth exists. The Decision row used to name one test while
 // that test drove ONE of its two callers; a lane reverted the other and the
 // whole suite passed, so the row promised more than it held. It names what it
 // covers now.

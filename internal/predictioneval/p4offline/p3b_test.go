@@ -2898,6 +2898,104 @@ func TestEntropyBindingRefusalDoesNotMaterializeTheFactsetRound(t *testing.T) {
 //
 // The assertion is an allocation RATIO against the supplied array, never a
 // wall-clock threshold: a time bound on shared CI proves nothing and flakes.
+// TestRulesetKeyRefusalsDoNotMaterializeTheSuppliedKey is the SEVENTH instance
+// of the refusal-cost class, and it is here because an earlier sweep cleared
+// these two sites BY NAME.
+//
+// The clearance said walkRulesetObject's key quotes are bounded, because
+// VerifyP3bRuleset applies rulesetRawCeiling before checkRulesetKeys ever runs.
+// That is true and it is not a bound: the ceiling is
+// rulesetStructuralAllowance + 6*len(ConfigID), which the CALLER raises by
+// declaring a large ConfigID -- to roughly 769 MiB. An independent judge
+// measured a 16 MiB key at 159,406,880 bytes allocated and a 16,777,374-byte
+// error, returned to say the key is misspelled.
+//
+// WHAT THIS ASSERTS, and what it deliberately does not. The assertion is the
+// ERROR's size, not the call's allocation. encoding/json must materialize the
+// key token to compare it at all, so a large key costs a large decode however
+// the refusal is worded; what the repair removes is re-exporting that key into
+// the error, which is the part with no bound and no purpose. Judged: 9.50x ->
+// 5.00x allocation, 1,048,734 -> 175 bytes of error.
+func TestRulesetKeyRefusalsDoNotMaterializeTheSuppliedKey(t *testing.T) {
+	const budget = 1024
+	big := strings.Repeat("k", 1<<20)
+	wantExtent := strconv.Itoa(len(big)) + " bytes"
+
+	// The caller raises its own ceiling by declaring the same large identity,
+	// which is exactly how the site is reached with a large key at all.
+	rulesetCarrying := func(body string) p4offline.P3bRuleset {
+		raw := []byte(body)
+		sum := sha256.Sum256(raw)
+		return p4offline.P3bRuleset{
+			RulesetID: big,
+			RawBytes:  raw,
+			RawSHA256: hex.EncodeToString(sum[:]),
+			Config:    predictioneval.OrderedRulesConfig{ConfigID: big},
+		}
+	}
+
+	for _, tc := range []struct {
+		name string
+		body string
+		want string
+	}{
+		{"a key the contract does not spell", `{"` + big + `":1}`, "is not spelled as the contract spells it"},
+		// The duplicate-key arm is NOT in this table, and the reason is a
+		// correction to the report this test came from. That arm was named as
+		// the same defect, with a 4 MiB measurement beside it. It is not
+		// reachable with a large key at all: seen[key] can only be true for a
+		// key that already passed the contract-spelling check, because the walk
+		// returns on the first occurrence of anything else. Executed here --
+		// `{"<1 MiB key>":1,"<same>":2}` comes back as "is not spelled",
+		// never "appears twice" -- so that arm can only ever render one of the
+		// contract's own compile-time spellings, and it keeps its quote.
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := p4offline.VerifyP3bRuleset(rulesetCarrying(tc.body))
+			if err == nil {
+				t.Fatal("this ruleset must be refused")
+			}
+			msg := err.Error()
+			t.Logf("error is %d bytes: %s", len(msg), msg)
+			if len(msg) > budget {
+				t.Fatalf("the refusal is %d bytes against a %d-byte supplied key: the key was re-exported into it",
+					len(msg), len(big))
+			}
+			if strings.Contains(msg, big) {
+				t.Fatal("the refusal must not carry the supplied key")
+			}
+			if !strings.Contains(msg, wantExtent) {
+				t.Fatalf("the refusal must name the key by EXTENT: %s", msg)
+			}
+			if !strings.Contains(msg, tc.want) {
+				t.Fatalf("the refusal must still name the fault (%s): %s", tc.want, msg)
+			}
+		})
+	}
+
+	t.Run("a duplicated large key is refused for its spelling, not as a duplicate", func(t *testing.T) {
+		// The executed basis for the paragraph above, kept as a test rather
+		// than left as an assertion in a comment.
+		_, err := p4offline.VerifyP3bRuleset(rulesetCarrying(`{"` + big + `":1,"` + big + `":2}`))
+		if err == nil {
+			t.Fatal("this ruleset must be refused")
+		}
+		if msg := err.Error(); !strings.Contains(msg, "is not spelled as the contract spells it") ||
+			strings.Contains(msg, "appears twice") {
+			t.Fatalf("the first occurrence must decide it: %s", msg)
+		}
+	})
+
+	t.Run("and a legitimate ruleset is still verified", func(t *testing.T) {
+		// Bounding a refusal must not become the reason honest input is
+		// refused; this is the false-refusal control the last four rounds of
+		// this class each needed.
+		if _, err := p4offline.VerifyP3bRuleset(rulesetFrom(t, cfgDefaultOnly("c1", 0, 1))); err != nil {
+			t.Fatalf("a legitimate ruleset must still verify: %v", err)
+		}
+	})
+}
+
 func TestOverLongTraceIsRefusedBeforeItIsCopied(t *testing.T) {
 	_, fs := selectedFactset(t, nil, nil)
 	rs := mustVerify(t, rulesetFrom(t, cfgDefaultOnly("c1", 0, 1)))
@@ -2929,6 +3027,44 @@ func TestOverLongTraceIsRefusedBeforeItIsCopied(t *testing.T) {
 		t.Fatalf("the refusing call allocated %d bytes against a %d-byte supplied array: the array was copied before it was judged",
 			allocated, suppliedBytes)
 	}
+
+	t.Run("and an identity fault is judged before the copy too", func(t *testing.T) {
+		// THE SAME GATE ORDER, one step further, and the reason this subtest
+		// exists is that the repair above stopped at the COUNT. ValidateDrawTrace's
+		// two identity gates are equally O(1) in the words -- they read the two
+		// identity strings and the LENGTH -- and were equally stranded behind the
+		// detachment copy, so a trace with a foreign semantics version paid a full
+		// duplication of its array to be refused on a string comparison. Measured
+		// by an independent judge through this exported function: 1,067,056 /
+		// 2,115,744 / 4,212,784 / 8,407,200 bytes at 2^17..2^20 words, against 232
+		// bytes FLAT for the identical refusal through the exported
+		// ValidateDrawTrace.
+		//
+		// The array is at the ceiling, not past it, so the count gate PASSES and
+		// this really does exercise the gate below it.
+		const legal = predictioneval.MaxOrderedRulesDrawWords
+		const suppliedBytes = legal * 8
+		bad := predictioneval.SuppliedDrawTrace{
+			EntropySemanticsVersion: predictioneval.OrderedRulesEntropySemanticsVersion + "-not-the-core's",
+			Words:                   make([]predictioneval.OrderedRulesHex64, legal),
+		}
+
+		runtime.GC()
+		var before, after runtime.MemStats
+		runtime.ReadMemStats(&before)
+		_, err := p4offline.EvaluateP3bWithTrace(fs, rs, coords, bad)
+		runtime.ReadMemStats(&after)
+		allocated := after.TotalAlloc - before.TotalAlloc
+		t.Logf("supplied %d words (%d bytes); the refusing call allocated %d bytes", legal, suppliedBytes, allocated)
+
+		if !errors.Is(err, p4offline.ErrEntropyTrace) {
+			t.Fatalf("a foreign semantics version must be a trace fault, got %v", err)
+		}
+		if allocated > suppliedBytes/2 {
+			t.Fatalf("the refusing call allocated %d bytes against a %d-byte supplied array: the array was copied before the identity was judged",
+				allocated, suppliedBytes)
+		}
+	})
 
 	t.Run("a trace the package itself draws is still admitted", func(t *testing.T) {
 		// The gate must not become the reason legal input is refused. This is

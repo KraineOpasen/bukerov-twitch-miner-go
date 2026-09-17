@@ -184,8 +184,12 @@ func (r QualityRecord) Merge(other QualityRecord) QualityRecord {
 	}
 	// appendOnce SCANS THE ACCUMULATED LIST ON EVERY CALL, so this loop is
 	// O(n*m) in two slices the caller owns -- Reasons is exported and
-	// caller-settable. Measured through this exported method at ~4.6x per 2x
-	// input: 3.7 ms at 2,000 distinct reasons, 223 ms at 16,000. It is the
+	// caller-settable. Measured through this exported method at ~3.9x per 2x
+	// input: 3.7 ms at 2,000 distinct reasons, 223 ms at 16,000 -- 60x over
+	// three doublings, which an independent revert of this loop reproduced at
+	// 3.94x per doubling. (An earlier version of this line said 4.6x, which its
+	// own two anchors contradict; the shape and the repair were never in
+	// question, only my arithmetic.) It is the
 	// fourth superlinear accumulation found on this branch and the same shape
 	// as the manual-signal one repaired in evidence.go, so it gets the same
 	// repair rather than a note: one set built once. No production path

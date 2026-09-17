@@ -64,11 +64,12 @@ func (c *canonical) digest() string {
 // refusal message.
 //
 // THE RULE THIS ENFORCES, written down once because it has now been rediscovered
-// SIX times on this branch -- and stated on the third scoping, in the only terms
-// that have survived review. The headline said FOUR and "the fourth attempt"
-// for two rounds after its own body said five and said the scope had been wrong
-// twice; a reader meets this sentence first, so it was the one sentence in the
-// package a claim sweep could least afford to skip, and it skipped it twice.
+// SEVEN times on this branch -- and stated on the third scoping, in the only
+// terms that have survived review. The headline said FOUR and "the fourth
+// attempt" for two rounds after its own body said five and said the scope had
+// been wrong twice; a reader meets this sentence first, so it was the one
+// sentence in the package a claim sweep could least afford to skip, and it
+// skipped it twice.
 //
 // THE RULE: no expression may MATERIALIZE caller-supplied text on a path that
 // has not already bounded that text. Where the text must be spoken about, name
@@ -107,6 +108,24 @@ func (c *canonical) digest() string {
 // Measured: 75,527,248 bytes on a 16 MiB ruleset id, 4.50x the input, for a
 // refusal that costs O(1).
 //
+// THE SEVENTH WAS CLEARED BY NAME BY A SWEEP, which is a failure mode worth
+// recording separately from a scope being too narrow. walkRulesetObject's
+// unknown-key gate re-exported the caller's JSON key; a sweep declared it
+// bounded because VerifyP3bRuleset applies rulesetRawCeiling before the walk.
+// True, and not a bound: that ceiling is rulesetStructuralAllowance +
+// 6*len(ConfigID), which the CALLER raises by declaring a large ConfigID, to
+// roughly 769 MiB. A bound the input chooses is not a bound. Measured through
+// the exported verifier: 159,406,880 bytes and a 16,777,374-byte error on a
+// 16 MiB key, to say the key is misspelled.
+//
+// TWO SIBLINGS OF THE SAME ROUND ARE THE COST SHAPE WITHOUT THE TEXT, and they
+// are repaired under the sharpened question rather than this helper, because
+// there is no text to name: VerifySourceRoundRegistry reconciled a whole
+// registry above a condition whose first two clauses are constant comparisons
+// (76,808,072 bytes and 105 ms at 16,000 claims, to refuse on a string
+// comparison), and evaluateProjected copied a caller's whole word array above
+// two O(1) identity gates (8,407,200 bytes at 2^20 words, against 232 flat).
+//
 // Measured on a 64 MiB supplied string: 134,234,440 bytes allocated and a
 // 67,108,944-byte error, to report that a string differs from a 20-byte
 // compile-time constant. On the three that the position-based wording missed:
@@ -116,23 +135,31 @@ func (c *canonical) digest() string {
 // A constant this package OWNS is quoted, deliberately: it is compile-time and
 // short, and naming it is the whole diagnosis. So is a digest this package has
 // just computed, which is its own 64 hex characters whatever the caller sent.
+// And so is a caller's string that an EARLIER gate has already restricted to
+// one of this package's own spellings: walkRulesetObject's duplicate-key arm
+// keeps its quote, because a key reaches it only after passing the
+// contract-spelling check one line below, and a review that read the two arms
+// as the same defect was wrong about which one the caller controls.
 //
 // THE INVENTORY, counted once so the next reader does not have to re-derive it.
-// THIRTEEN sites are repaired under this rule:
+// The counts below are read off the source by a scan, not written from memory,
+// because four consecutive rounds each found one of them wrong. FOURTEEN sites
+// are repaired under this rule:
 //
 //	4 predate this helper and have their own tests --
 //	    VerifyP3bRuleset's identity gate (rulesetIdentityFault),
 //	    ValidateDrawTrace's two gates,
 //	    bindEntropyCoordinates' round gate.
-//	9 call this helper --
+//	10 call this helper --
 //	    3 in VerifyCommonFactset (contract, protocol, digest),
 //	    2 in checkFactsetConsistency (the stealth-proof arm and the
 //	      completeness arm), both reached through VerifyCommonFactset,
 //	    2 in VerifyResolutionArtifact (contract, obligations),
 //	    1 in its outcome arm,
-//	    1 in decisionOf.
+//	    1 in decisionOf,
+//	    1 in walkRulesetObject's unknown-key gate.
 //
-// A fourteenth site is repaired under the same rule WITHOUT this helper,
+// A fifteenth site is repaired under the same rule WITHOUT this helper,
 // because it is not a gate and there is nothing to name: decisionOf takes its
 // derivation as a thunk, so the caller's text is not built before the gates
 // ABOVE that thunk. That is the fifth instance, and the reason the rule above
@@ -156,8 +183,10 @@ func (c *canonical) digest() string {
 // and P2's Binding.Digest, none of which any gate bounds either.
 //
 // TestFirstGatesDoNotMaterializeSuppliedText is the registry for the nine
-// reachable through an exported verifier. It names where the other five are
-// pinned rather than duplicating them.
+// reachable through an exported verifier as a plain first-gate comparison. It
+// names where the other six are pinned rather than duplicating them -- the
+// tenth helper site, walkRulesetObject's, needs a raw document and a raised
+// ceiling to reach, so it has its own test.
 func suppliedTextExtent(s string) string {
 	return strconv.Itoa(len(s)) + " bytes"
 }

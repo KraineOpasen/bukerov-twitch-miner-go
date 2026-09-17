@@ -503,12 +503,34 @@ func walkRulesetObject(dec *json.Decoder, path string) error {
 		if !ok {
 			return errors.New("p4offline: object key at " + pathName(path) + " is not a string")
 		}
+		// THE SEVENTH INSTANCE OF THE CLASS, and the one an earlier sweep
+		// cleared by name. The clearance said these two are bounded because
+		// VerifyP3bRuleset applies rulesetRawCeiling before checkRulesetKeys.
+		// That ceiling is rulesetStructuralAllowance + 6*len(ConfigID) -- a
+		// bound the CALLER raises by declaring a large ConfigID, to roughly
+		// 769 MiB -- so it is not a bound in the sense the rule uses the word.
+		// Measured through the exported VerifyP3bRuleset on a 16 MiB key:
+		// 159,406,880 bytes allocated, 9.50x the input, returning a
+		// 16,777,374-byte error to say a key is misspelled. The path and the
+		// contract's own spellings are named, because both are this package's
+		// and naming them is the whole diagnosis; the caller's key is not.
+		// THE DUPLICATE ARM KEEPS ITS QUOTE, and that is not an oversight.
+		// seen[key] can only be true for a key that already passed
+		// containsID(allowed, key) below -- the walk RETURNS on the first
+		// occurrence of anything else -- so the only key this arm can ever
+		// render is one of the contract's own compile-time spellings. Naming it
+		// is the whole diagnosis, which is the converse half of the rule on
+		// suppliedTextExtent. An independent judge reported this arm as the
+		// same defect and quoted a 4 MiB measurement for it; that is not
+		// reproducible through the exported API, because a 4 MiB key is refused
+		// one line below on its FIRST occurrence and never reaches a second.
 		if seen[key] {
 			return errors.New("p4offline: key " + strconv.Quote(key) + " appears twice at " + pathName(path))
 		}
 		seen[key] = true
 		if !containsID(allowed, key) {
-			return errors.New("p4offline: key " + strconv.Quote(key) + " at " + pathName(path) + " is not spelled as the contract spells it")
+			return errors.New("p4offline: a key of " + suppliedTextExtent(key) + " at " + pathName(path) +
+				" is not spelled as the contract spells it, which allows " + joinReasons(allowed))
 		}
 		child := key
 		if path != "" {
@@ -793,8 +815,18 @@ func evaluateProjected(fs CommonFactset, proj P3bProjection, rs VerifiedP3bRules
 	if err := checkEntropyCount(len(trace.Words)); err != nil {
 		return P3bCaseResult{}, err
 	}
+	// AND THE SAME AGAIN, one gate further. ValidateDrawTrace's two identity
+	// gates are O(1) in the words and were stranded behind this copy, so a
+	// trace with a foreign semantics version paid a full duplication of its
+	// words to be refused on a string comparison. They read only the two
+	// identity strings and the LENGTH, all of which survive the value copy of
+	// the parameter, so the detachment property is untouched and the order in
+	// which faults are reported is unchanged.
+	if err := checkDrawTraceIdentity(coords, trace.EntropySemanticsVersion, trace.RunID, len(trace.Words)); err != nil {
+		return P3bCaseResult{}, err
+	}
 	trace.Words = append([]predictioneval.OrderedRulesHex64(nil), trace.Words...)
-	if err := ValidateDrawTrace(coords, trace); err != nil {
+	if err := ValidateEntropyWords(coords, trace.Words); err != nil {
 		return P3bCaseResult{}, err
 	}
 	ev := predictioneval.EvaluateOrderedRules(proj.Stream, rs.Config, trace)
