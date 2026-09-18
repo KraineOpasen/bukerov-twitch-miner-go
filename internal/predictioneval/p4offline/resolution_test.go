@@ -489,6 +489,10 @@ func TestProjectResolutionNeverMintsAnArtifactItsOwnVerifierRefuses(t *testing.T
 		{"an evidence reference observation id",
 			func(e *p4offline.ResolutionEvidence) { e.EvidenceReferences[0].ObservationID = invalid },
 			func(a p4offline.ResolutionArtifact) string { return a.EvidenceReferences[0].ObservationID }},
+		{"winner outcome id", func(e *p4offline.ResolutionEvidence) { e.WinnerOutcomeID = invalid },
+			func(a p4offline.ResolutionArtifact) string { return a.WinnerOutcomeID }},
+		{"proof revision", func(e *p4offline.ResolutionEvidence) { e.ProofRevision = invalid },
+			func(a p4offline.ResolutionArtifact) string { return a.ProofRevision }},
 		// Availability is here although an unrepresentable value ALSO falls
 		// outside the closed vocabulary and is refused on that ground. The two
 		// refusals are not interchangeable: the vocabulary one would leave the
@@ -536,6 +540,39 @@ func TestProjectResolutionNeverMintsAnArtifactItsOwnVerifierRefuses(t *testing.T
 	if a.Outcome != p4offline.ResolutionWinnerKnown || len(a.Refusals) != 0 {
 		t.Fatalf("valid evidence = %v with refusals %v, want WINNER_KNOWN and none", a.Outcome, a.Refusals)
 	}
+
+	// ResolutionNotRecorded is the file's OTHER exported producer. It builds no
+	// artifact of its own -- it delegates to ProjectResolution and so inherits
+	// the gate -- and that delegation is exactly what wants pinning: a later
+	// refactor that constructed the artifact inline here would reopen the hole
+	// silently, with every test above still green.
+	t.Run("ResolutionNotRecorded inherits the gate", func(t *testing.T) {
+		a := p4offline.ResolutionNotRecorded(
+			p4offline.PublicRoundIdentity{EventID: "e", ChannelID: invalid},
+			[]string{"o1", invalid},
+			[]p4offline.EvidenceReference{{ObservationID: invalid, Kind: "k"}},
+			"pr")
+		if a.Outcome != p4offline.ResolutionUnknown {
+			t.Fatalf("outcome = %v, want UNKNOWN", a.Outcome)
+		}
+		if !containsString(a.Refusals, p4offline.ResolutionRefusalTextNotExpressible) {
+			t.Fatalf("refusals = %v, want %s", a.Refusals, p4offline.ResolutionRefusalTextNotExpressible)
+		}
+		if a.Round.ChannelID == invalid || a.OrderedOutcomeIDs[1] == invalid ||
+			a.EvidenceReferences[0].ObservationID == invalid {
+			t.Fatalf("the projection RETAINED the unrepresentable bytes: %+v", a)
+		}
+		if err := p4offline.VerifyResolutionArtifact(a); err != nil {
+			t.Fatalf("the package minted an artifact its own verifier refuses: %v", err)
+		}
+		var back p4offline.ResolutionArtifact
+		if err := json.Unmarshal(mustMarshal(t, a), &back); err != nil {
+			t.Fatal(err)
+		}
+		if err := p4offline.VerifyResolutionArtifact(back); err != nil {
+			t.Fatalf("the artifact did not survive its own JSON round trip: %v", err)
+		}
+	})
 
 	// AND THE CALLER'S EVIDENCE IS NOT TOUCHED. ProjectResolution takes its
 	// argument by value, which protects the scalars and protects nothing else:

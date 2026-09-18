@@ -3102,6 +3102,117 @@ func TestASuppliedRegistryCarryingTextItCannotExpressIsRefused(t *testing.T) {
 	}
 }
 
+// TestTheRefusalNamesWhichEntryAndWhichClaim closes a hole the writer left and
+// no review reported, and it is the same hole a lane demonstrated one round
+// earlier in the factset's sibling gate.
+//
+// checkRegistryTextExpressible builds its message from strconv.Itoa(i) and
+// strconv.Itoa(j) -- the entry index and the claim index. Every other test of
+// that gate uses a registry with ONE entry holding ONE claim, so both indices
+// are 0 whatever the code computes, and replacing either with the constant 0
+// would leave the whole suite green. An index nothing pins is an index that can
+// point anywhere.
+//
+// The fixture is a registry with TWO entries, one of them a CONFLICT holding
+// two claims, which also reaches three cases nothing else here covers: an entry
+// past index 0, a claim past index 0, and an entry whose Canonical is nil.
+func TestTheRefusalNamesWhichEntryAndWhichClaim(t *testing.T) {
+	const invalid = "\xff\xfe\x80"
+	base := p4offline.SourceRoundClaim{
+		Episode:       p4offline.EpisodeIdentity{CollectorEpoch: 1, CollectorSessionID: "s-a", PoolInstanceID: "p", RoundIncarnationID: "r", EventID: "e1"},
+		Attempt:       predictioneval.AttemptKey{CollectorEpoch: 1, CollectorSessionID: "s-a", PoolInstanceID: "p", AttemptID: 1},
+		FactsetDigest: "d1",
+	}
+	// Two DIFFERENT claims on e1 -- a CONFLICT, so entry 0 holds two claims and
+	// no canonical one -- and a third on e2, which is UNIQUE and does have one.
+	other := base
+	other.Episode.CollectorSessionID, other.Attempt.CollectorSessionID, other.FactsetDigest = "s-b", "s-b", "d9"
+	third := base
+	third.Episode.EventID, third.Episode.RoundIncarnationID = "e2", "r2"
+	mint := func() p4offline.SourceRoundRegistry {
+		return p4offline.ReconcileSourceRounds([]p4offline.SourceRoundClaim{base, other, third})
+	}
+	reg := mint()
+	if len(reg.Entries) != 2 ||
+		reg.Entries[0].EventID != "e1" || reg.Entries[0].Status != p4offline.SourceRoundConflict ||
+		len(reg.Entries[0].Claims) != 2 || reg.Entries[0].Canonical != nil ||
+		reg.Entries[1].EventID != "e2" || reg.Entries[1].Status != p4offline.SourceRoundUnique ||
+		reg.Entries[1].Canonical == nil {
+		t.Fatalf("the fixture must be a two-claim CONFLICT followed by a UNIQUE: %+v", reg.Entries)
+	}
+	if err := p4offline.VerifySourceRoundRegistry(reg); err != nil {
+		t.Fatalf("the unpoked control must verify: %v", err)
+	}
+	// The claims inside an entry are sorted by key, so which of the two e1
+	// claims sits at index 1 is not something this test gets to assume. It is
+	// read off the minted registry -- the registry is the oracle for its own
+	// ordering, and the CLAIM under test is which INDEX the message reports.
+	for _, tc := range []struct {
+		name string
+		poke func(*p4offline.SourceRoundRegistry)
+		want string
+	}{
+		{"the second claim of the first entry", func(r *p4offline.SourceRoundRegistry) {
+			r.Entries[0].Claims[1].FactsetDigest = invalid
+		}, "entry 0 claim 1 factset digest"},
+		{"the first claim of the second entry", func(r *p4offline.SourceRoundRegistry) {
+			r.Entries[1].Claims[0].Episode.PoolInstanceID = invalid
+		}, "entry 1 claim 0 episode pool instance id"},
+		{"the second entry's canonical claim", func(r *p4offline.SourceRoundRegistry) {
+			r.Entries[1].Canonical.Attempt.CollectorSessionID = invalid
+		}, "entry 1 canonical claim attempt collector session id"},
+		{"the second entry's event id", func(r *p4offline.SourceRoundRegistry) {
+			r.Entries[1].EventID = invalid
+		}, "entry 1 event id"},
+		{"the second entry's status", func(r *p4offline.SourceRoundRegistry) {
+			r.Entries[1].Status = p4offline.SourceRoundStatus(invalid)
+		}, "entry 1 status"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			poked := mint()
+			tc.poke(&poked)
+			err := p4offline.VerifySourceRoundRegistry(poked)
+			if !errors.Is(err, p4offline.ErrSourceRoundRegistry) {
+				t.Fatalf("invalid UTF-8 at %s was CERTIFIED (err %v)", tc.name, err)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("the refusal must name WHICH entry and WHICH claim:\n got %v\nwant a mention of %q", err, tc.want)
+			}
+		})
+	}
+
+	// And the PRODUCER side of the same shape: an uncarriable claim among
+	// claims that CONFLICT must not change what the conflict is, and the
+	// registry must still survive its own round trip.
+	t.Run("an uncarriable claim beside a conflict", func(t *testing.T) {
+		bad := base
+		bad.Attempt.PoolInstanceID = invalid
+		reg := p4offline.ReconcileSourceRounds([]p4offline.SourceRoundClaim{base, other, third, bad})
+		if at, ok := registryCarriesOnlyExpressibleText(reg); !ok {
+			t.Fatalf("the minted registry still carries text it cannot express, at %s", at)
+		}
+		if err := p4offline.VerifySourceRoundRegistry(reg); err != nil {
+			t.Fatalf("the registry this package minted does not verify: %v", err)
+		}
+		if len(reg.Entries) != 3 {
+			t.Fatalf("four claims, two rounds and one uncarriable claim make three entries: %+v", reg.Entries)
+		}
+		if reg.Entries[0].Status != p4offline.SourceRoundConflict || len(reg.Entries[0].Claims) != 2 {
+			t.Fatalf("the uncarriable claim must not join or dissolve the conflict: %+v", reg.Entries[0])
+		}
+		if reg.Entries[2].Status != p4offline.SourceRoundInvalid || reg.Entries[2].EventID != "" {
+			t.Fatalf("%+v", reg.Entries[2])
+		}
+		var back p4offline.SourceRoundRegistry
+		if err := json.Unmarshal(mustMarshal(t, reg), &back); err != nil {
+			t.Fatal(err)
+		}
+		if err := p4offline.VerifySourceRoundRegistry(back); err != nil {
+			t.Fatalf("the registry failed its own re-derivation after a JSON round trip: %v", err)
+		}
+	})
+}
+
 // TestADerivedClaimIsNeverRoutedInvalidForItsText is the no-false-refusal
 // control for the routing, and it is the half a narrowing owes.
 //
