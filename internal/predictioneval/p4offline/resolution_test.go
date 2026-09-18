@@ -10,6 +10,7 @@ package p4offline_test
 
 import (
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -382,4 +383,73 @@ func TestJoinReasonsHandlesTheEmptyAndSingletonLists(t *testing.T) {
 			t.Fatalf("a single member carries no separator: %q", e.Error())
 		}
 	})
+}
+
+// TestEveryReachableResolutionStringRefusesInvalidUTF8 is the factset test's
+// sibling, and it exists because the factset repair was made first and this
+// artifact was left out.
+//
+// The same defect lived here: a caller-supplied ResolutionArtifact carrying
+// invalid UTF-8 in a framed string was CERTIFIED, marshalled without error,
+// and failed its OWN digest after a JSON round trip — the signal this package
+// reserves for tampering. coverage_test.go round-trips this artifact in the
+// same test that round-trips a factset, so the path is supported rather than
+// hypothetical.
+//
+// Reproduced before the repair at four positions; a poked Round.EventID was
+// already caught by the re-projection, so the hole was four wide and not five.
+// The gate now sits ahead of both the digest and the re-projection, so every
+// position reports the encoding fault.
+func TestEveryReachableResolutionStringRefusesInvalidUTF8(t *testing.T) {
+	const invalid = "\xff\xfe\x80"
+	const validWide = "ok-\u00e9-\uFFFD"
+	const utf8Fault = "is not valid UTF-8"
+
+	sealed := func(a p4offline.ResolutionArtifact) p4offline.ResolutionArtifact {
+		a.ResolutionFactsDigest = p4offline.DigestReference(digestOf(p4offline.SerializeResolutionArtifact(a)))
+		return a
+	}
+	sites := func() (*p4offline.ResolutionArtifact, []floatSite) {
+		a := winnerArtifact("o1")
+		var out []floatSite
+		reachableStrings(reflect.ValueOf(&a).Elem(), "ResolutionArtifact", &out)
+		return &a, out
+	}
+	_, found := sites()
+	if len(found) < 8 {
+		t.Fatalf("reached only %d string positions; the walk is not covering the artifact", len(found))
+	}
+	for i, site := range found {
+		switch site.path {
+		case "ResolutionArtifact.ResolutionFactsDigest":
+			continue // the seal itself, not a framed value
+		}
+		t.Run(site.path, func(t *testing.T) {
+			a, s := sites()
+			s[i].at.SetString(invalid)
+			err := p4offline.VerifyResolutionArtifact(sealed(*a))
+			if err == nil {
+				t.Fatalf("invalid UTF-8 at %s was CERTIFIED", site.path)
+			}
+			// The two identifiers held to exact constants are refused by the
+			// gates above this one; everything else must be refused BY THE
+			// ENCODING, and naming the difference is what keeps the assertion
+			// from passing on any error whatsoever.
+			if site.path == "ResolutionArtifact.ContractVersion" ||
+				site.path == "ResolutionArtifact.ObligationsRevision" {
+				return
+			}
+			if !strings.Contains(err.Error(), utf8Fault) {
+				t.Fatalf("invalid UTF-8 at %s = %v, want a %q refusal", site.path, err, utf8Fault)
+			}
+			// The control: valid multi-byte text, U+FFFD included, is never
+			// refused for its encoding.
+			a2, s2 := sites()
+			s2[i].at.SetString(validWide)
+			if err := p4offline.VerifyResolutionArtifact(sealed(*a2)); err != nil &&
+				strings.Contains(err.Error(), utf8Fault) {
+				t.Fatalf("valid UTF-8 at %s was refused for its encoding: %v", site.path, err)
+			}
+		})
+	}
 }

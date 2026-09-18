@@ -3,6 +3,7 @@ package p4offline
 import (
 	"errors"
 	"strconv"
+	"unicode/utf8"
 
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/predictioneval"
 )
@@ -345,6 +346,71 @@ func SerializeResolutionArtifact(a ResolutionArtifact) []byte {
 	return c.bytes()
 }
 
+// checkResolutionStringsExpressible refuses an artifact holding a string its
+// own encoding cannot carry unchanged. It covers every string
+// [SerializeResolutionArtifact] frames, constant-size positions first and the
+// two caller-sized slices last, for the reason checkFactsetValuesExpressible
+// states: a supplier pairing one bad constant-size value with a huge slice
+// would otherwise turn a constant-time refusal into work over the whole slice.
+//
+// It does NOT check ObligationsRevision, which the gate above holds to an exact
+// constant, and it says nothing about whether a string is the one the platform
+// reported. Every valid UTF-8 string is accepted exactly as before, including
+// one that already contains U+FFFD.
+func checkResolutionStringsExpressible(a ResolutionArtifact) error {
+	lossy := func(what string) error {
+		return errors.Join(ErrResolutionDigest, errors.New("p4offline: "+what+
+			" is not valid UTF-8, so this artifact's own encoding cannot carry it unchanged"))
+	}
+	for _, f := range [...]struct {
+		what string
+		v    string
+	}{
+		{"round event id", a.Round.EventID},
+		{"round channel id", a.Round.ChannelID},
+		{"outcome", string(a.Outcome)},
+		{"winner outcome id", a.WinnerOutcomeID},
+		{"proof basis", a.ProofBasis},
+		{"availability", string(a.Availability)},
+		{"projector revision", a.ProjectorRevision},
+		{"proof revision", a.ProofRevision},
+	} {
+		if !utf8.ValidString(f.v) {
+			return lossy(f.what)
+		}
+	}
+	for i, id := range a.OrderedOutcomeIDs {
+		if !utf8.ValidString(id) {
+			return lossy("ordered outcome id " + strconv.Itoa(i))
+		}
+	}
+	for i, r := range a.EvidenceReferences {
+		at := func(what string) error {
+			return lossy("evidence reference " + strconv.Itoa(i) + " " + what)
+		}
+		switch {
+		case !utf8.ValidString(r.ObservationID):
+			return at("observation id")
+		case !utf8.ValidString(r.CollectorSessionID):
+			return at("collector session id")
+		case !utf8.ValidString(r.Kind):
+			return at("kind")
+		case !utf8.ValidString(r.Phase):
+			return at("phase")
+		case !utf8.ValidString(r.RoundState):
+			return at("round state")
+		case !utf8.ValidString(r.EventID):
+			return at("event id")
+		}
+	}
+	for i, r := range a.Refusals {
+		if !utf8.ValidString(r) {
+			return lossy("refusal " + strconv.Itoa(i))
+		}
+	}
+	return nil
+}
+
 func resolutionDigest(a ResolutionArtifact) string {
 	return DigestReference(sha256Hex(SerializeResolutionArtifact(a)))
 }
@@ -361,6 +427,27 @@ func VerifyResolutionArtifact(a ResolutionArtifact) error {
 	if a.ObligationsRevision != ResolutionObligationsRevision {
 		return errors.Join(ErrResolutionDigest, errors.New("p4offline: artifact obligations revision is "+
 			suppliedTextExtent(a.ObligationsRevision)+", this package writes only "+strconv.Quote(ResolutionObligationsRevision)))
+	}
+	// AHEAD OF THE DIGEST, and for the reason checkFactsetValuesExpressible
+	// gives at the other artifact: a string encoding/json cannot carry
+	// UNCHANGED must not be hashed into a certificate. encoding/json marshals
+	// invalid UTF-8 WITHOUT error by substituting U+FFFD, so the stored
+	// artifact is a different value from the certified one and fails its own
+	// digest when it is read back -- which is the signal this package reserves
+	// for tampering. coverage_test.go round-trips this artifact through JSON in
+	// the same test that round-trips a factset, so that is a supported path.
+	//
+	// This seam was found by a review lane AFTER the same repair had been made
+	// to the factset and this file's WHAT REMAINS note had been shortened to
+	// say the class was closed. It was closed for one artifact of the four this
+	// package verifies. Reproduced here before repair: a poked ChannelID, a
+	// consistently-poked winner id, a non-winner ordered id and an evidence
+	// reference's ObservationID each CERTIFIED, marshalled without error, and
+	// failed their own digest after a round trip. A poked Round.EventID did
+	// not, because the re-projection below re-derives the round identity and
+	// catches it first -- so the hole was four positions wide, not five.
+	if err := checkResolutionStringsExpressible(a); err != nil {
+		return err
 	}
 	if a.ResolutionFactsDigest != resolutionDigest(a) {
 		return errors.Join(ErrResolutionDigest, errors.New("p4offline: resolution facts digest does not match the artifact"))

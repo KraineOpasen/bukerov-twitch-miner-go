@@ -1264,8 +1264,12 @@ func TestTheValueGateAddsNoPerOutcomeAllocation(t *testing.T) {
 	}
 }
 
-// reachableStrings is reachableFloats for strings, with the same scope and the
-// same blind spots — see that function's comment, which applies verbatim.
+// reachableStrings is reachableFloats for strings, with the same blind spots —
+// no reflect.Map, no reflect.Interface, a `json:"-"` field would be collected.
+// One thing does NOT carry over: reachableFloats' note that the walk is exact
+// on this fixture. For strings it is not, because IncompleteReasons is nil
+// here and an empty slice contributes no position. The test below covers that
+// one by hand rather than pretending the walk reaches it.
 func reachableStrings(v reflect.Value, path string, out *[]floatSite) {
 	switch v.Kind() {
 	case reflect.String:
@@ -1330,9 +1334,44 @@ func TestEveryReachableFactsetStringRefusesInvalidUTF8(t *testing.T) {
 		reachableStrings(reflect.ValueOf(&fs).Elem(), "CommonFactset", &out)
 		return &fs, out
 	}
+	// The count is exact, like the float sibling's, and for the same reason: a
+	// slack bound would let half the positions disappear without tripping. It
+	// is a property of the FIXTURE — 15 scalar positions, two outcome ids, the
+	// four settings strings, Digest, and the two contract identifiers — not of
+	// the type. IncompleteReasons is nil on this fixture and so is NOT among
+	// them; that is why the hand-written subtest below exists.
 	_, found := sites()
-	if len(found) < 12 {
-		t.Fatalf("reached only %d string positions; the walk is not covering the factset", len(found))
+	if want := 22; len(found) != want {
+		var paths []string
+		for _, f := range found {
+			paths = append(paths, f.path)
+		}
+		t.Fatalf("reached %d string positions, want %d: %s", len(found), want, strings.Join(paths, ", "))
+	}
+	// The refusal must NAME the position it refused. Without this, swapping two
+	// labels in the validator's table — or replacing every label with one
+	// constant — leaves the whole package suite green, which a review lane
+	// demonstrated by doing it.
+	names := map[string]string{
+		"CommonFactset.ProjectorRevision":                  "projector revision",
+		"CommonFactset.Episode.CollectorSessionID":         "episode collector session id",
+		"CommonFactset.Episode.PoolInstanceID":             "episode pool instance id",
+		"CommonFactset.Episode.RoundIncarnationID":         "episode round incarnation id",
+		"CommonFactset.Episode.EventID":                    "episode event id",
+		"CommonFactset.Attempt.CollectorSessionID":         "attempt collector session id",
+		"CommonFactset.Attempt.PoolInstanceID":             "attempt pool instance id",
+		"CommonFactset.TerminalObservationID":              "terminal observation id",
+		"CommonFactset.Completeness":                       "completeness",
+		"CommonFactset.PreDecisionExit":                    "pre-decision exit",
+		"CommonFactset.StealthProof":                       "stealth proof",
+		"CommonFactset.HealthState":                        "health state",
+		"CommonFactset.HealthReason":                       "health reason",
+		"CommonFactset.Settings.*.Strategy":                "settings strategy",
+		"CommonFactset.Settings.*.DelayMode":               "settings delay mode",
+		"CommonFactset.Settings.*.FilterCondition.*.By":    "settings filter condition subject",
+		"CommonFactset.Settings.*.FilterCondition.*.Where": "settings filter condition comparator",
+		"CommonFactset.Outcomes[0].ID":                     "outcome 0 id",
+		"CommonFactset.Outcomes[1].ID":                     "outcome 1 id",
 	}
 	for i, site := range found {
 		if site.path == "CommonFactset.Digest" {
@@ -1363,6 +1402,13 @@ func TestEveryReachableFactsetStringRefusesInvalidUTF8(t *testing.T) {
 			}
 			if !errors.Is(err, p4offline.ErrFactsetInconsistent) {
 				t.Fatalf("invalid UTF-8 at %s did not carry ErrFactsetInconsistent: %v", site.path, err)
+			}
+			want, ok := names[site.path]
+			if !ok {
+				t.Fatalf("no expected name recorded for %s; add one", site.path)
+			}
+			if !strings.Contains(err.Error(), want+" is not valid UTF-8") {
+				t.Fatalf("refusal at %s does not name it: want %q in %v", site.path, want, err)
 			}
 			// The control: a valid multi-byte string, U+FFFD included, is
 			// never refused FOR ITS ENCODING. It may still be refused by a

@@ -376,21 +376,41 @@
 //     stable by design. Outcomes, which carries no omitempty, does not behave
 //     this way.
 //
-// A SECOND CLASS WAS HERE FOR ONE ROUND AND IS NOW REPAIRED, which is worth
-// recording as a process fact rather than quietly deleting. Invalid UTF-8 in a
-// hashed string verified, marshalled WITHOUT error, came back as U+FFFD and
-// then failed its own digest -- silently, and presenting as the one signal
-// this package reserves for tampering. A local lane found it because this
-// section's first draft claimed the float repair had settled the whole class;
-// it was recorded as out of scope on the reasoning that the reported class was
-// a value that cannot be ENCODED while this one encodes LOSSILY. An external
-// lane then ranked it P1 and named the two things that settle it: this
-// package's own coverage_test.go round-trips a factset through JSON, so the
-// round trip is a supported path rather than a hypothetical one, and
-// checkEntropyCoordinates in this same package ALREADY requires valid UTF-8 of
-// three identities -- the precedent was three functions away. Both are right,
-// and checkFactsetValuesExpressible now checks every string the framing
-// hashes. Being out of scope is a judgement, and this one was wrong.
+// A SECOND CLASS WAS HERE FOR ONE ROUND AND IS NOW REPAIRED, and the way it
+// was repaired is worth recording rather than quietly deleting, because the
+// first repair was of the INSTANCE and not the class.
+//
+// Invalid UTF-8 in a hashed string verified, marshalled WITHOUT error, came
+// back as U+FFFD and then failed its own digest -- silently, and presenting as
+// the one signal this package reserves for tampering. A local lane found it
+// because this section's first draft claimed the float repair had settled the
+// whole class; it was then recorded as out of scope on the reasoning that the
+// reported class was a value that cannot be ENCODED while this one encodes
+// LOSSILY. An external lane ranked it P1 and named the two things that settle
+// it: this package's own coverage_test.go round-trips a factset through JSON,
+// so the round trip is a supported path rather than a hypothetical one, and
+// checkEntropyCoordinates in this same package ALREADY required valid UTF-8 of
+// three identities -- the precedent was three functions away. Being out of
+// scope is a judgement, and that one was wrong.
+//
+// THE GATE WAS THEN ADDED TO THE FACTSET ONLY, and this paragraph was shortened
+// to say the class was closed. It was closed for ONE of the four artifacts this
+// package verifies, and a review lane caught the shortened sentence. The state
+// now, established by execution across all four:
+//
+//	CommonFactset        checkFactsetValuesExpressible      -- gate added
+//	ResolutionArtifact   checkResolutionStringsExpressible  -- gate added, one
+//	                     commit later, after the same defect was reproduced at
+//	                     four of its framed positions
+//	SourceRoundRegistry  closed by CONSTRUCTION: it re-derives from its own
+//	                     entries, so a mangled entry fails re-derivation
+//	P3bRuleset           closed by CONSTRUCTION: the typed config is compared
+//	                     against the one decoded from the raw bytes, and the
+//	                     decode substitutes U+FFFD, so the two differ
+//
+// Two needed a gate; two never had the hole. That is the class, checked rather
+// than assumed -- and the shortened sentence that claimed it was closed is the
+// reason this one is this long.
 //
 // Nothing here was checked against real P1/P1.5 data: no production dataset
 // is proven available, no dataset window (T0/T1) or dataset binding is

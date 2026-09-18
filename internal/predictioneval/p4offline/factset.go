@@ -87,9 +87,11 @@ var (
 	ErrFactsetDigest = errors.New("p4offline: common factset digest does not verify")
 	// ErrFactsetInconsistent is a factset whose labels — completeness, the
 	// stealth proof, the incompleteness reasons — are not what its own
-	// values derive, or which holds a value its own encoding cannot express
-	// (see checkFactsetValuesExpressible). Both are the same fault at
-	// different depths: the artifact does not support what carrying it claims.
+	// values derive, or which holds a value its own encoding cannot express --
+	// a non-finite float -- or cannot carry UNCHANGED -- an invalid-UTF-8
+	// string, which encodes without error and comes back altered (see
+	// checkFactsetValuesExpressible). All three are the same fault at different
+	// depths: the artifact does not support what carrying it claims.
 	ErrFactsetInconsistent = errors.New("p4offline: common factset labels are not derived from its values")
 	// ErrFactsetNotDerived is a factset that verifies on its own but is not
 	// the one the dataset derives for its episode.
@@ -268,6 +270,19 @@ type causeText struct{ err error }
 
 func (c causeText) Error() string { return c.err.Error() }
 
+// Unwrap withholds the cause's sentinels ONLY when the cause is the
+// expressibility fault, which is the one that classifies the wrong artifact.
+// Every other cause -- ErrEpisodeNotSelected from buildFactset's boundary
+// check, say -- keeps reaching errors.Is through this seam, the way
+// lookupEpisode's doc says selection errors must. A blanket suppressor here
+// would have withdrawn those too; a review lane pointed that out.
+func (c causeText) Unwrap() error {
+	if errors.Is(c.err, ErrFactsetInconsistent) {
+		return nil
+	}
+	return c.err
+}
+
 // BuildCommonFactset re-derives the episode's selection from the dataset and
 // projects the selected opportunity's inputs into a digested, outcome-free
 // factset. It takes the DATASET, not a selection: a selection is an exported
@@ -276,8 +291,18 @@ func (c causeText) Error() string { return c.err.Error() }
 // It can return ErrFactsetInconsistent, which the build path could not return
 // before the value gate existed. The consequence is larger than the value and
 // is named here rather than left to be met: an episode whose inputs hold a
-// non-finite float yields NO factset rather than an INCOMPLETE one, so the
-// CASE leaves the cohort with the value. That is fail-closed and deliberate —
+// non-finite float, OR a hashed string its encoding cannot carry unchanged,
+// yields NO factset rather than an INCOMPLETE one, so the CASE leaves the
+// cohort with the value.
+//
+// The string half was added a commit after the float half, and it widens this
+// materially: a truncated multi-byte character is an ordinary transport or
+// storage artifact, while a NaN is not, and outcome ids, observation ids and
+// the free-text health reason all come from upstream. Fail-closed is still the
+// deliberate choice — INCOMPLETE-with-a-reason was available, and a label
+// derived from a value the artifact cannot carry is a label about nothing —
+// but the reachability question this raises is NOT answered here, and nothing
+// in this package has been checked against real P1/P1.5 data. That is fail-closed and deliberate —
 // a label derived from a value the artifact cannot carry would be a label
 // about nothing — but it is a case lost, not merely a field refused.
 func BuildCommonFactset(ds predictioneval.SourceDataset, episode EpisodeIdentity) (CommonFactset, error) {
@@ -495,11 +520,15 @@ func VerifyCommonFactset(fs CommonFactset) error {
 	// validator, so a factset cannot be refused by one and accepted by the
 	// other.
 	//
-	// ONE CONSEQUENCE, a precedence shift rather than a behaviour change,
-	// stated the way p3b.go states its own: a factset that is BOTH non-finite
-	// AND carries a wrong digest used to come back as ErrFactsetDigest and now
-	// comes back as ErrFactsetInconsistent. A caller switching on the sentinel
-	// sees a different one for that class.
+	// CONSEQUENCES, precedence shifts rather than behaviour changes, stated the
+	// way p3b.go states its own. A factset that is BOTH unexpressible -- by a
+	// non-finite float or by an invalid-UTF-8 string, the string half carries
+	// the identical shift -- AND carries a wrong digest used to come back as
+	// ErrFactsetDigest and now comes back as ErrFactsetInconsistent. Two
+	// further shifts are message-only, same sentinel: a closed-vocabulary
+	// position now reports the encoding fault rather than the vocabulary one,
+	// and a factset bad in both a string and a float now names whichever the
+	// order below reaches first rather than always the float.
 	if err := checkFactsetValuesExpressible(fs); err != nil {
 		return err
 	}
