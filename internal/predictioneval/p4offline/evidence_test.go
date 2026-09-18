@@ -1403,10 +1403,10 @@ func TestEpisodeSignalMatchingKeepsItsOrderAndDeduplicates(t *testing.T) {
 		// This asserts only that a healthy placed attempt stays selectable. It
 		// does NOT detect a dedup failure, and it used to claim it did: the
 		// at-most-one-start rule lives in classifySignals, which runs once per
-		// record while the index is built, so how many times eachMatching
-		// visits a signal afterwards cannot re-trigger it. The deduplication is
-		// pinned differentially in evidence_internal_test.go instead, which is
-		// where it can actually be observed.
+		// record while the index is built, so how many times a matched signal
+		// is read afterwards cannot re-trigger it. The deduplication is pinned
+		// differentially in evidence_internal_test.go instead, which is where
+		// it can actually be observed.
 		s := newSynth()
 		s.placedAttempt("r1", "e1", 1)
 		ep := singleEpisode(t, mustSelect(t, s.dataset()))
@@ -1640,8 +1640,9 @@ func TestUnspentStartDoesNotExcludeAHealthySiblingIncarnation(t *testing.T) {
 		}
 		return s.dataset()
 	}
-	paired := byIncarnation(t, mustSelect(t, build(true)), "r2")
-	unpaired := byIncarnation(t, mustSelect(t, build(false)), "r2")
+	pairedSel, unpairedSel := mustSelect(t, build(true)), mustSelect(t, build(false))
+	paired := byIncarnation(t, pairedSel, "r2")
+	unpaired := byIncarnation(t, unpairedSel, "r2")
 
 	// The ONLY difference between the two datasets is whether r1's start was
 	// spent. r2's own evidence is identical and complete in both.
@@ -1655,6 +1656,23 @@ func TestUnspentStartDoesNotExcludeAHealthySiblingIncarnation(t *testing.T) {
 	if unpaired.Boundary.NoCallCoverage.Proven != paired.Boundary.NoCallCoverage.Proven {
 		t.Fatalf("coverage differs on an episode whose own evidence is unchanged: %+v vs %+v",
 			unpaired.Boundary.NoCallCoverage, paired.Boundary.NoCallCoverage)
+	}
+
+	// THE POSITIVE HALF, AND WITHOUT IT THIS TEST IS SATISFIED BY LOSING THE
+	// MARK ALTOGETHER. A scope that matches nothing excuses the sibling and the
+	// RECORDER alike, and the assertions above cannot tell the two apart: a
+	// mutant keying the scope on the public round instead of the incarnation
+	// survived them. So the incarnation that recorded the unspent start is
+	// checked here, on the same two datasets.
+	recorder := byIncarnation(t, unpairedSel, "r1")
+	if recorder.Boundary.NoCallCoverage.Proven ||
+		!containsString(recorder.Boundary.NoCallCoverage.Reasons, p4offline.CoverageUnclassifiedFact) {
+		t.Fatalf("the incarnation that RECORDED the unspent start must carry the mark: %+v",
+			recorder.Boundary.NoCallCoverage)
+	}
+	if spent := byIncarnation(t, pairedSel, "r1"); !spent.Boundary.NoCallCoverage.Proven {
+		t.Fatalf("the same incarnation with its start SPENT carries no contradiction: %+v",
+			spent.Boundary.NoCallCoverage)
 	}
 }
 
@@ -1830,8 +1848,98 @@ func TestManualSignalReportIsBoundedAndEpisodesDoNotAlias(t *testing.T) {
 	})
 }
 
+// TestManualSignalBudgetBoundaryIsTheLiteralValue pins the BUDGET ITSELF --
+// 1<<20 reported entries across one selection -- at the three points that
+// matter, through the public seam and with the number written out rather than
+// read from the package. A test that imported the constant would agree with any
+// value the constant took.
+//
+// The budget is an operational OUTPUT-ENTRY budget, and nothing more: not a
+// rule about which datasets are valid, not a statistical exclusion, not a bound
+// on process memory or on the serialized document. What it says is how many
+// manual-signal attributions ONE selection will emit.
+func TestManualSignalBudgetBoundaryIsTheLiteralValue(t *testing.T) {
+	const budget = 1 << 20 // 1,048,576
+
+	// episodes x facts reported entries: every episode on the pool matches
+	// every manual fact that names no incarnation.
+	build := func(episodes, facts int) predictioneval.SourceDataset {
+		s := newSynth()
+		for i := 0; i < episodes; i++ {
+			s.placedAttempt("r"+strconv.Itoa(i), "e"+strconv.Itoa(i), int64(i+1))
+		}
+		for j := 0; j < facts; j++ {
+			s.manualCall("", "u"+strconv.Itoa(j), 50, 0)
+		}
+		return s.dataset()
+	}
+
+	reported := func(t *testing.T, sel p4offline.EvidenceSelection) int {
+		t.Helper()
+		n := 0
+		for i := range sel.Episodes {
+			n += len(sel.Episodes[i].ManualSignals)
+		}
+		return n
+	}
+
+	t.Run("below the budget", func(t *testing.T) {
+		sel, err := p4offline.SelectEpisodes(build(1024, 1023))
+		if err != nil {
+			t.Fatalf("1,047,552 entries is under the budget: %v", err)
+		}
+		if got := reported(t, sel); got != budget-1024 {
+			t.Fatalf("reported %d entries, want %d", got, budget-1024)
+		}
+	})
+
+	t.Run("at exactly the budget", func(t *testing.T) {
+		// THE BOUNDARY. At the limit, otherwise-valid processing is supported:
+		// the last admissible entry is emitted and the selection succeeds.
+		sel, err := p4offline.SelectEpisodes(build(1024, 1024))
+		if err != nil {
+			t.Fatalf("exactly %d entries must still be selected: %v", budget, err)
+		}
+		if got := reported(t, sel); got != budget {
+			t.Fatalf("reported %d entries, want exactly %d", got, budget)
+		}
+	})
+
+	t.Run("one entry past the budget", func(t *testing.T) {
+		sel, err := p4offline.SelectEpisodes(build(1024, 1025))
+		if !errors.Is(err, p4offline.ErrEvidenceRetention) {
+			t.Fatalf("want ErrEvidenceRetention, got %v", err)
+		}
+		if msg := err.Error(); !strings.Contains(msg, "manual-signal attributions") ||
+			!strings.Contains(msg, strconv.Itoa(budget)) {
+			t.Fatalf("the refusal must name what it counted and the budget: %s", msg)
+		}
+		// ALL OR NOTHING. A partial cohort returned as a complete one is the
+		// failure this refusal exists to prevent, so the zero selection comes
+		// back -- not the episodes that fitted.
+		if sel.SessionAdmitted || len(sel.Episodes) != 0 || sel.ProtocolVersion != "" {
+			t.Fatalf("an aborted selection must return nothing at all: %+v", sel.Source)
+		}
+	})
+}
+
+// collidingManualDataset builds k episodes on ONE event id and k manual facts
+// that name no incarnation, so every episode matches every manual fact and the
+// selection reports k*k manual-signal entries. It is the shape the output
+// budget is about.
+func collidingManualDataset(k int) predictioneval.SourceDataset {
+	s := newSynth()
+	for i := 0; i < k; i++ {
+		s.placedAttempt("r"+strconv.Itoa(i), "shared", int64(i+1))
+	}
+	for j := 0; j < k; j++ {
+		s.manualCall("", "u"+strconv.Itoa(j), 50, 0)
+	}
+	return s.dataset()
+}
+
 // TestSelectionRefusalIsDistinctFromEpisodeExclusion covers the downstream half
-// of the two resource refusals, which nothing drove before: review found
+// of the resource refusal, which nothing drove before: review found
 // ErrEvidenceRetention occurred at exactly ONE line in every test in the
 // package, so no test carried it past the seam that produced it.
 //
@@ -1839,16 +1947,10 @@ func TestManualSignalReportIsBoundedAndEpisodesDoNotAlias(t *testing.T) {
 // EPISODE_EXCLUDED, so a refusal of the WHOLE DATASET on its shape was recorded
 // as evidence about this episode -- a claim about evidence that was never read.
 func TestSelectionRefusalIsDistinctFromEpisodeExclusion(t *testing.T) {
-	// A dataset refused on its shape: same construction as the relation ceiling.
-	s := newSynth()
-	for i := 0; i < 16000; i++ {
-		r := s.fact(predictioneval.KindAutoDecision, predictioneval.PhaseAutoDue,
-			"r"+strconv.Itoa(i), "e1", 1)
-		r.PayloadUndecodable = true
-		s.add(r)
-	}
-	refused := s.dataset()
-	if _, err := p4offline.SelectEpisodes(refused); !errors.Is(err, p4offline.ErrEvidenceMatchWork) {
+	// A dataset refused on its shape: 1,100 x 1,100 reported entries against a
+	// budget of 1,048,576.
+	refused := collidingManualDataset(1100)
+	if _, err := p4offline.SelectEpisodes(refused); !errors.Is(err, p4offline.ErrEvidenceRetention) {
 		t.Fatalf("the fixture must be refused on its shape, or this proves nothing: %v", err)
 	}
 
@@ -1864,26 +1966,99 @@ func TestSelectionRefusalIsDistinctFromEpisodeExclusion(t *testing.T) {
 	if containsString(q.Reasons, p4offline.QualityReasonEpisodeExcluded) {
 		t.Fatalf("a dataset refused on its shape says nothing about this episode: %v", q.Reasons)
 	}
+
+	// THE MACHINE-READABLE HALF. Both outcomes are EXCLUDED and fail-closed, so
+	// the Quality cannot tell an operational abort from an ordinary exclusion,
+	// and a consumer reading prose reasons is a consumer that will one day
+	// count one as the other.
+	if q.ProcessingComplete {
+		t.Fatal("a selection that could not run must not report complete processing")
+	}
+
+	// AN ABORT SURVIVES A MERGE IN EITHER ARGUMENT POSITION, and both are
+	// asserted because only one of them is reachable through this package.
+	// AssessCaseQuality always merges with the incomplete record as the
+	// RECEIVER, so a Merge that simply discarded the other side's completeness
+	// left the whole suite green -- found by an independent lane. Merge is
+	// exported, and the caller this round is written for is exactly one that
+	// folds many records together in whatever order it likes.
+	if p4offline.NewQualityRecord().Merge(q).ProcessingComplete {
+		t.Fatal("merging a complete record WITH an incomplete one must not erase the abort")
+	}
+	if q.Merge(p4offline.NewQualityRecord()).ProcessingComplete {
+		t.Fatal("merging an incomplete record with a complete one must not erase the abort")
+	}
+	if !p4offline.NewQualityRecord().Merge(p4offline.NewQualityRecord()).ProcessingComplete {
+		t.Fatal("two complete records merge to a complete one")
+	}
+
+	t.Run("and a dataset the selection could not READ reports the same way", func(t *testing.T) {
+		// THE SECOND WAY A SELECTION CAN FAIL TO RUN, and the one an earlier
+		// version of this field missed: the caller hands the records over out of
+		// causal order, SelectEpisodes refuses on its contract, and nothing
+		// whatever is established about any episode. An independent lane found
+		// the record asserting COMPLETE processing there -- the exact fail-open
+		// the field exists to close -- so the predicate now enumerates the
+		// COMPLETE case and treats every other error as incomplete.
+		s := newSynth()
+		s.placedAttempt("r1", "e1", 1)
+		ds := s.dataset()
+		if len(ds.Records) < 2 {
+			t.Fatalf("need two records to disorder, got %d", len(ds.Records))
+		}
+		ds.Records[0], ds.Records[1] = ds.Records[1], ds.Records[0]
+		if _, err := p4offline.SelectEpisodes(ds); err == nil ||
+			errors.Is(err, p4offline.ErrEvidenceRetention) {
+			t.Fatalf("the fixture must be refused on the ORDERING contract: %v", err)
+		}
+		q := p4offline.AssessCaseQuality(ds, fs, p4offline.PolicyDecision{}, p4offline.PolicyDecision{},
+			p4offline.ResolutionNotRecorded(p4offline.PublicRoundIdentity{EventID: "e1"}, []string{"o1", "o2"}, nil, "p"))
+		if q.ProcessingComplete {
+			t.Fatal("a dataset that was never read must not report complete processing")
+		}
+		if !containsString(q.Reasons, p4offline.QualityReasonSelectionUnavailable) ||
+			containsString(q.Reasons, p4offline.QualityReasonEpisodeExcluded) {
+			t.Fatalf("the reason must say the selection could not RUN: %v", q.Reasons)
+		}
+	})
+
+	t.Run("and an ordinarily excluded episode still reports COMPLETE processing", func(t *testing.T) {
+		// THE DISCRIMINATING CONTROL, and without it the assertion above would
+		// pass on a field that is simply always false. Here the selection RAN:
+		// it read the whole dataset and established that this episode is not
+		// in it. Same Quality, same fail-closed verdict, opposite processing
+		// status -- which is the entire reason the second axis exists.
+		other := newSynth()
+		other.placedAttempt("r9", "e9", 9)
+		q := p4offline.AssessCaseQuality(other.dataset(), fs, p4offline.PolicyDecision{}, p4offline.PolicyDecision{},
+			p4offline.ResolutionNotRecorded(p4offline.PublicRoundIdentity{EventID: "e1"}, []string{"o1", "o2"}, nil, "p"))
+		if q.Quality != p4offline.QualityExcluded {
+			t.Fatalf("the control must be excluded, or it discriminates nothing: %+v", q)
+		}
+		if !containsString(q.Reasons, p4offline.QualityReasonEpisodeExcluded) {
+			t.Fatalf("the control must be an ORDINARY exclusion: %v", q.Reasons)
+		}
+		if !q.ProcessingComplete {
+			t.Fatalf("an ordinary exclusion is evidence that WAS produced: %+v", q)
+		}
+	})
 }
 
-// TestSignalMatchingRelationIsBounded pins the ceiling on the matching relation
-// itself -- the residue this package deferred three times, calling a declared
-// ingest ceiling "the follow-up the measurements argue for".
+// TestQuadraticMatchingShapeIsProcessedRatherThanRefused is the positive half
+// of removing the visit ceiling this package briefly carried.
 //
-// WHY IT IS HERE NOW. One undecodable AUTO_DUE per round incarnation makes every
-// row its own episode AND a signal every other episode on that event matches, so
-// the relation is |episodes| x |signals|. Measured through the exported
-// SelectEpisodes: 0.128 / 0.424 / 1.621 / 6.287 s at 2,000 / 4,000 / 8,000 /
-// 16,000 records, 3.88x per doubling, and review measured 14.254 s at 32,000.
-// Indexing the exclusion rescan halves it and cannot remove it: the remainder is
-// the relation, 94.71% cumulative in signalIndex.eachMatching on a profile of
-// the repaired bytes, and shrinking it would change which signals match which
-// episodes.
+// THE SHAPE. One undecodable AUTO_DUE per round incarnation makes every row its
+// own episode AND a signal every other episode on that event matches, so the
+// matching relation is |episodes| x |signals|: 256,000,000 pairs at k = 16,000.
+// The ceiling refused the dataset rather than walk them.
 //
-// SO THE SHAPE IS REFUSED RATHER THAN GROUND THROUGH, and the two cases below
-// are the two halves of that claim: the hostile shape is refused, typed, in
-// bounded time, and an honest dataset of the SAME RECORD COUNT is selected.
-func TestSignalMatchingRelationIsBounded(t *testing.T) {
+// IT IS NOT WALKED NOW. What each of those pairs established was
+// episode-INDEPENDENT -- an undecodable fact breaks the coverage argument for
+// every episode that matches it -- so it is established once per posting list
+// and read per episode. The dataset is processed, and the answer is the same
+// answer the walk gave: every episode excluded, with the undecodable-fact
+// coverage reason.
+func TestQuadraticMatchingShapeIsProcessedRatherThanRefused(t *testing.T) {
 	build := func(k int, oneEvent bool) predictioneval.SourceDataset {
 		s := newSynth()
 		for i := 0; i < k; i++ {
@@ -1900,24 +2075,40 @@ func TestSignalMatchingRelationIsBounded(t *testing.T) {
 	}
 
 	const k = 16000
-	t.Run("a shape whose relation is quadratic is refused", func(t *testing.T) {
-		_, err := p4offline.SelectEpisodes(build(k, true))
-		if !errors.Is(err, p4offline.ErrEvidenceMatchWork) {
-			t.Fatalf("want ErrEvidenceMatchWork, got %v", err)
+	t.Run("the quadratic shape is selected", func(t *testing.T) {
+		sel, err := p4offline.SelectEpisodes(build(k, true))
+		if err != nil {
+			t.Fatalf("the shape must be processed, not refused: %v", err)
 		}
-		if msg := err.Error(); !strings.Contains(msg, "matches or more") {
-			t.Fatalf("the refusal must name what it counted: %s", msg)
+		if len(sel.Episodes) != k {
+			t.Fatalf("want %d episodes, got %d", k, len(sel.Episodes))
+		}
+		// And the verdict is the one the walk produced: the episodes share a
+		// public round, so all but the earliest are superseded as well, but
+		// every one of them carries the coverage reason the matched
+		// undecodable facts establish.
+		for i := range sel.Episodes {
+			ep := &sel.Episodes[i]
+			if !ep.Excluded {
+				t.Fatalf("episode %d matched %d undecodable facts and must be excluded", i, k)
+			}
+			if ep.Boundary.NoCallCoverage.Proven {
+				t.Fatalf("episode %d: coverage cannot be proven beside an undecodable fact", i)
+			}
+			if len(ep.Boundary.NoCallCoverage.Reasons) != 1 ||
+				ep.Boundary.NoCallCoverage.Reasons[0] != p4offline.CoverageUndecodableFact {
+				t.Fatalf("episode %d: want exactly the undecodable reason, got %v",
+					i, ep.Boundary.NoCallCoverage.Reasons)
+			}
 		}
 	})
 
-	t.Run("and the same record count on distinct events is selected", func(t *testing.T) {
-		// THE FALSE-REFUSAL CONTROL, and it is the same SIZE as the refused
-		// shape: what is refused is the SHAPE, not the dataset's size. This is
-		// what the producer writes -- one incarnation per round, each on its own
-		// event -- so its relation is linear in records.
+	t.Run("and the same record count on distinct events is selected too", func(t *testing.T) {
+		// The linear counterpart, kept: what the producer actually writes is
+		// one incarnation per round, each on its own event.
 		sel, err := p4offline.SelectEpisodes(build(k, false))
 		if err != nil {
-			t.Fatalf("an honest dataset of %d records must be selected, not refused: %v", k, err)
+			t.Fatalf("an honest dataset of %d records must be selected: %v", k, err)
 		}
 		if len(sel.Episodes) != k {
 			t.Fatalf("want %d episodes, got %d", k, len(sel.Episodes))
@@ -2441,21 +2632,36 @@ func TestSessionRefusalsAreNamedByKindNotOncePerRecord(t *testing.T) {
 // the whole package suite green. It asserted the negation of a fact that was
 // true.
 //
-// WHAT THE SEAM REALLY COSTS, measured on both trees through the exported
-// SelectEpisodes with one undecodable AUTO_DUE PER round incarnation, so every
-// row is its own episode AND its own producer exclusion:
+// WHAT THE SEAM REALLY COSTS, measured through the exported SelectEpisodes with
+// one undecodable AUTO_DUE PER round incarnation, so every row is its own
+// episode AND its own producer exclusion. FOUR code states, not three: rescan
+// and indexed are earlier rounds' figures, "indexed" refusing at 16,000 because
+// the visit ceiling was still in force then; walk and aggregates were measured
+// against each other on one machine in one sitting and are the pair to read:
 //
-//	records     rescan     indexed
-//	  2,000     0.128 s    0.069 s
-//	  4,000     0.424 s    0.216 s
-//	  8,000     1.621 s    0.799 s
-//	 16,000     6.287 s    refused
+//	records     rescan     indexed    walk      aggregates
+//	  2,000     0.128 s    0.069 s    0.077 s   0.011 s
+//	  4,000     0.424 s    0.216 s    0.229 s   0.027 s
+//	  8,000     1.621 s    0.799 s    0.883 s   0.057 s
+//	 16,000     6.287 s    refused    3.481 s   0.074 s
+//	 32,000    14.254 s    refused   13.939 s   0.217 s
 //
-// The index halves it and does not make it linear, because it was never the only
-// quadratic on that shape: profiled after the repair, signalIndex.eachMatching
-// is 94.71% cumulative, and that is the matching RELATION rather than an
-// implementation artefact. What bounds the rest is maxSignalMatchVisits, which
-// is why 16,000 refuses -- see TestSignalMatchingRelationIsBounded.
+// The index halved it and did not make it linear, because it was never the only
+// quadratic on that shape: the matching RELATION is itself quadratic here, and
+// walking it was 94.71% cumulative on a profile. The package briefly REFUSED
+// the shape for that reason. It no longer does: what each of those matches
+// established was episode-INDEPENDENT, so it is established once per posting
+// list and read per episode. The walk's own ratios over the four doublings are
+// 2.97, 3.86, 3.94 and 4.00 -- quadratic once the fixed cost stops dominating;
+// the aggregates' are 2.45, 2.11, 1.30 and 2.93, which is noise around linear
+// rather than a clean ladder, and is reported as such. At 32,000 the two differ
+// by 64x. See TestQuadraticMatchingShapeIsProcessedRatherThanRefused.
+//
+// WHAT THAT IS NOT. It is one shape, and it is the shape with no
+// episode-dependent work at all. On the shape whose work IS the output -- k
+// episodes each REPORTING k manual entries -- the two trees measure the same,
+// 0.155 s against 0.167 s at 1,048,576 entries, because nothing there was
+// repeated. That work is bounded by the output budget, not removed by this.
 //
 // SO THIS TEST ASSERTS THE ANSWER, WHICH IS ALL IT CAN, AND IS NAMED FOR THAT.
 // It was briefly renamed ...IsIndexedNotRescanned, which is the same defect the

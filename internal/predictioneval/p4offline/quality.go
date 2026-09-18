@@ -122,15 +122,64 @@ type QualityRecord struct {
 	Quality Quality       `json:"quality"`
 	Reasons []string      `json:"reasons,omitempty"`
 	History []QualityStep `json:"history,omitempty"`
+	// ProcessingComplete reports that the evidence this verdict rests on was
+	// actually PRODUCED. It is a separate axis from Quality, and it is the one
+	// field on this record that is not about the episode at all.
+	//
+	// AN EXHAUSTED IMPLEMENTATION BUDGET IS NOT A COHORT EXCLUSION. When
+	// SelectEpisodes aborts on a dataset's shape, it establishes that
+	// processing did not complete -- not that the source episode is invalid.
+	// Both outcomes are EXCLUDED and fail-closed, so Quality alone cannot tell
+	// them apart, and a consumer that reads only Quality would count an
+	// operational abort as an ordinary exclusion and publish a denominator as
+	// though the dataset had been read.
+	//
+	// THE SENSE IS DELIBERATE: the zero value is FALSE, so a record that was
+	// never populated -- a zero value, a decoded document from an older
+	// producer, a struct built by a caller -- reads as NOT complete. Unknown
+	// processing status must never silently assert completion.
+	ProcessingComplete bool `json:"processingComplete"`
+}
+
+// selectionRan reports whether an error from [lookupEpisode] came from a
+// selection that ACTUALLY RAN over the dataset and reached a verdict about this
+// episode, as opposed to one that never produced a selection at all.
+//
+// THE PREDICATE IS THE WAY ROUND IT IS ON PURPOSE. Only [ErrEpisodeNotSelected]
+// is an outcome of a completed selection -- the session was refused, or the
+// episode is absent, excluded, unusable or unproven -- and lookupEpisode raises
+// it at exactly the three sites that run AFTER SelectEpisodes returned no
+// error.
+// Every other error reaches that seam verbatim from SelectEpisodes itself: the
+// caller-contract violation for records out of causal order, and the resource
+// refusal. NEITHER PRODUCES A SELECTION, so neither establishes anything about
+// this episode. (Only the first of them is literally unread: the causal-order
+// check runs before anything else. The resource refusal abandons the episode
+// loop part-way and returns the ZERO selection, which is the same thing from
+// here -- no verdict, not a partial one.)
+//
+// An earlier version enumerated the ABORT sentinels instead and matched only
+// ErrEvidenceRetention, which left the causal-order error asserting completion
+// -- the exact fail-open this field exists to close, found by an independent
+// review lane. Enumerating the complete case rather than the incomplete one
+// fails safe on an error kind nobody has thought of yet, which is the only
+// direction worth being wrong in here.
+func selectionRan(err error) bool {
+	return err == nil || errors.Is(err, ErrEpisodeNotSelected)
 }
 
 // QualityReasonOutsideVocabulary marks a record whose own quality was not in
 // the vocabulary when it was touched — a zero value or a decoded document.
 const QualityReasonOutsideVocabulary = "QUALITY_OUTSIDE_VOCABULARY"
 
-// NewQualityRecord starts a record at the top of the ladder.
+// NewQualityRecord starts a record at the top of the ladder, and is the ONLY
+// thing in this package that asserts ProcessingComplete. A record a caller
+// composes by hand carries the zero value and is therefore incomplete, so it
+// lowers every record it is merged with. That direction is deliberate — see
+// [QualityRecord.ProcessingComplete] — and a caller that did read its evidence
+// starts here rather than from a struct literal.
 func NewQualityRecord() QualityRecord {
-	return QualityRecord{Quality: QualityPrimaryScorable}
+	return QualityRecord{Quality: QualityPrimaryScorable, ProcessingComplete: true}
 }
 
 // normalised returns a DETACHED copy of the record — its own reason and
@@ -179,6 +228,12 @@ func (r QualityRecord) Downgrade(q Quality, reason string) QualityRecord {
 func (r QualityRecord) Merge(other QualityRecord) QualityRecord {
 	out := r.normalised()
 	other = other.normalised()
+	// AN OPERATIONAL ABORT SURVIVES EVERY MERGE. Quality takes the lower of the
+	// two; completeness takes the AND, so merging an incomplete record with a
+	// complete one yields incomplete. The asymmetry is the point: a later
+	// successful read of some OTHER evidence cannot make a dataset that was
+	// never read look as though it had been.
+	out.ProcessingComplete = out.ProcessingComplete && other.ProcessingComplete
 	if other.Quality.rank() < out.Quality.rank() {
 		out.Quality = other.Quality
 	}
@@ -265,6 +320,20 @@ func determinate(c ActionClass) bool {
 // never counted wrong. This function therefore judges the CASE: whether its
 // evidence, its boundary, both decisions and the resolution are what the
 // primary metric may read at all.
+//
+// THE RETURNED RECORD CARRIES TWO INDEPENDENT AXES. Quality is about the
+// episode; [QualityRecord.ProcessingComplete] is about whether the evidence
+// behind that verdict was produced at all. When the evidence seam aborts on a
+// dataset's shape ([ErrEvidenceRetention]) the verdict is EXCLUDED and
+// ProcessingComplete is false -- the same Quality an ordinarily excluded
+// episode gets, which is why the second axis exists.
+//
+// A CALLER THAT AGGREGATES MUST FAIL STOP ON AN INCOMPLETE RECORD. This
+// function is per case and never sees the set, so it cannot enforce it: a
+// future evaluation that assesses many datasets and then counts, averages or
+// publishes over them must stop and report the incomplete dataset, not drop it
+// and present the remainder's numbers as the run's. Skipping it silently
+// produces a completed-looking metric over a cohort nobody chose.
 func AssessCaseQuality(ds predictioneval.SourceDataset, fs CommonFactset, p2, p3b PolicyDecision, res ResolutionArtifact) QualityRecord {
 	episode := NewQualityRecord()
 	ep, found, err := lookupEpisode(ds, fs.Episode)
@@ -277,8 +346,15 @@ func AssessCaseQuality(ds predictioneval.SourceDataset, fs CommonFactset, p2, p3
 		// read. Both verdicts are EXCLUDED and fail-closed; only the reason
 		// differs, which is exactly what an auditor reads.
 		reason := QualityReasonEpisodeExcluded
-		if errors.Is(err, ErrEvidenceRetention) || errors.Is(err, ErrEvidenceMatchWork) {
+		if !selectionRan(err) {
+			// NOT A COHORT EXCLUSION. The selection never produced a verdict --
+			// the budget was exhausted, or the caller handed the records over
+			// out of causal order -- so nothing was established about this
+			// episode. The reason says so in prose and ProcessingComplete says
+			// so to a machine, because prose alone cannot stop a consumer
+			// counting it.
 			reason = QualityReasonSelectionUnavailable
+			episode.ProcessingComplete = false
 		}
 		episode = episode.Downgrade(QualityExcluded, reason)
 	}
@@ -395,6 +471,33 @@ type DenominatorMembership struct {
 	Policy string `json:"policy"`
 	// Quality is the case's quality, re-derived from the dataset.
 	Quality Quality `json:"quality"`
+	// ProcessingComplete carries [QualityRecord.ProcessingComplete] through to
+	// the denominator verdict, with the same fail-safe sense: FALSE means the
+	// evidence this verdict rests on was never produced.
+	//
+	// A verdict with ProcessingComplete false is NOT a non-member. It is not a
+	// member either. It is a verdict about a dataset that was not read, and the
+	// two membership flags below are false because of THAT, not because the
+	// case was judged and found wanting.
+	//
+	// THE REASONS DO NOT SAY SO CLEANLY, and the gap is worth naming rather
+	// than leaving for a reader to hit. Such a verdict carries
+	// SELECTION_UNAVAILABLE from the quality record, and then whatever the gate
+	// it stops at appends: CASE_NOT_PRIMARY_SCORABLE when it reaches the
+	// quality gate, PAYOUT_NOT_DERIVED or a binding reason when it stops
+	// earlier. Every one of those is a membership reason recorded about a
+	// dataset that was never read, and which of them appears depends on the
+	// other arguments rather than on the dataset. The reasons are a closed
+	// vocabulary shared with cases that WERE judged, so they cannot carry this
+	// distinction; this field is what a consumer reads for it, and this is
+	// exactly why prose was not enough. An evaluation that sums
+	// Primary or PlacedBet over a set of verdicts MUST FAIL STOP when any one
+	// of them is incomplete: a denominator built from the remainder is a
+	// denominator over a cohort no one chose, published as though it were the
+	// whole. This package cannot enforce that -- it issues one verdict at a
+	// time and never sees the set -- so the obligation is stated here and the
+	// flag is what a caller checks; see the note on [AssessCaseQuality].
+	ProcessingComplete bool `json:"processingComplete"`
 	// Derivation and CounterpartDerivation name the decision this verdict is
 	// about and the other policy's decision it was judged beside — the
 	// PAIRING, recorded so an audit can check that the counterpart is the
@@ -493,7 +596,7 @@ const (
 func AssessDenominatorMembership(ds predictioneval.SourceDataset, reg SourceRoundRegistry, fs CommonFactset, p2, p3b PolicyDecision,
 	res ResolutionArtifact, pe PayoutEvidence) DenominatorMembership {
 	q := AssessCaseQuality(ds, fs, p2, p3b, res)
-	out := DenominatorMembership{Quality: q.Quality, Reasons: cloneStrings(q.Reasons)}
+	out := DenominatorMembership{Quality: q.Quality, ProcessingComplete: q.ProcessingComplete, Reasons: cloneStrings(q.Reasons)}
 	reason := func(r string) { out.Reasons = appendOnce(out.Reasons, r) }
 	if !pe.derived() {
 		reason(MembershipReasonPayoutNotDerived)

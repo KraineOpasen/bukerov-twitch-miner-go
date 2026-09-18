@@ -744,3 +744,90 @@ func TestDenominatorVerdictNamesTheRegistryItWasIssuedUnder(t *testing.T) {
 		}
 	})
 }
+
+// TestDenominatorVerdictSeparatesAnAbortFromAnExclusion carries the processing
+// axis to the seam a future evaluation actually sums over.
+//
+// WHY IT MATTERS HERE RATHER THAN ONLY AT THE QUALITY. A denominator verdict
+// with Primary false reads, to anything that counts, as "this case is not a
+// member". When the selection ABORTED, that is not what happened: no case was
+// judged at all. The two are indistinguishable on Quality -- both EXCLUDED,
+// both fail-closed -- so the verdict carries ProcessingComplete, and a caller
+// that sums Primary over a set of verdicts must fail stop rather than publish
+// the remainder.
+func TestDenominatorVerdictSeparatesAnAbortFromAnExclusion(t *testing.T) {
+	ds, fs, fp, p2 := factualCase(t, coherentCall)
+	p2dec := decisionOf(t, p2, fs)
+	rs := mustVerify(t, rulesetFrom(t, cfgWithRule("one", predictioneval.ComparatorGe, 50, 100)))
+	p3b, err := p4offline.EvaluateP3bCase(fs, rs, synthCoords(fs, 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	p3bdec := decisionOf(t, p3b, fs)
+	res := winnerArtifact("o1")
+	proven := p4offline.DerivePlacement(p2dec, fp, validProof(fp))
+	pe := p4offline.DerivePayout(p2dec, proven, res, linkedRecord(proven, p4offline.KnownInt64(120), p4offline.UnknownInt64("n/a")))
+	reg := registryOf(ds, fs)
+
+	t.Run("a counted member reports complete processing", func(t *testing.T) {
+		m := p4offline.AssessDenominatorMembership(ds, reg, fs, p2dec, p3bdec, res, pe)
+		if !m.Primary || !m.ProcessingComplete {
+			t.Fatalf("a case that was read and counted: %+v", m)
+		}
+		if !wireBool(t, m, "processingComplete") {
+			t.Fatalf("the processing axis must be on the wire: %+v", m)
+		}
+	})
+
+	t.Run("an ORDINARY non-member still reports complete processing", func(t *testing.T) {
+		// THE DISCRIMINATING CONTROL. The dataset was read; it simply does not
+		// carry this episode. Not a member, and nothing is wrong with the run.
+		other := newSynth()
+		other.placedAttempt("r9", "e9", 9)
+		m := p4offline.AssessDenominatorMembership(other.dataset(), reg, fs, p2dec, p3bdec, res, pe)
+		if m.Primary || m.PlacedBet {
+			t.Fatalf("the episode is not in that dataset: %+v", m)
+		}
+		if !m.ProcessingComplete {
+			t.Fatalf("an ordinary exclusion is evidence that WAS produced: %+v", m)
+		}
+		if !containsString(m.Reasons, p4offline.QualityReasonEpisodeExcluded) {
+			t.Fatalf("want an ordinary exclusion reason: %v", m.Reasons)
+		}
+	})
+
+	t.Run("an aborted selection reports INCOMPLETE processing and no membership", func(t *testing.T) {
+		refused := collidingManualDataset(1100)
+		if _, err := p4offline.SelectEpisodes(refused); !errors.Is(err, p4offline.ErrEvidenceRetention) {
+			t.Fatalf("the fixture must abort, or this proves nothing: %v", err)
+		}
+		m := p4offline.AssessDenominatorMembership(refused, reg, fs, p2dec, p3bdec, res, pe)
+		if m.ProcessingComplete {
+			t.Fatalf("nothing was read, so nothing may claim completion: %+v", m)
+		}
+		if m.Primary || m.PlacedBet {
+			t.Fatalf("an aborted selection is no member of anything: %+v", m)
+		}
+		if m.Quality != p4offline.QualityExcluded {
+			t.Fatalf("the verdict must still be fail-closed: %+v", m)
+		}
+		if !containsString(m.Reasons, p4offline.QualityReasonSelectionUnavailable) {
+			t.Fatalf("the reason must say the selection could not RUN: %v", m.Reasons)
+		}
+		if containsString(m.Reasons, p4offline.QualityReasonEpisodeExcluded) {
+			t.Fatalf("a dataset that was never read says nothing about this episode: %v", m.Reasons)
+		}
+		// AND THE REASON SET IS PINNED AS IT ACTUALLY IS. The verdict returns at
+		// the quality gate, so it also carries CASE_NOT_PRIMARY_SCORABLE — a
+		// membership reason recorded about a dataset nobody read. That is a
+		// limit of a closed vocabulary shared with cases that WERE judged, it is
+		// documented at the field, and it is asserted here so the documentation
+		// and the artifact cannot drift apart.
+		if !containsString(m.Reasons, p4offline.MembershipReasonCaseNotPrimary) {
+			t.Fatalf("the emitted reason set is what a consumer sees: %v", m.Reasons)
+		}
+		if wireBool(t, m, "processingComplete") {
+			t.Fatalf("a consumer reading the wire must see the abort: %+v", m)
+		}
+	})
+}

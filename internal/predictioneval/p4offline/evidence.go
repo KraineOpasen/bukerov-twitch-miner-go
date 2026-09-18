@@ -293,16 +293,21 @@ type SourceRoundRegistry struct {
 // able to tell them apart, because one is its own bug and the other is not:
 //
 //   - A CALLER CONTRACT VIOLATION: records out of causal order. The caller
-//     handed this function something it promised not to.
-//   - A RESOURCE REFUSAL on the dataset's SHAPE: ErrEvidenceRetention when the
+//     handed this function something it promised not to. No selection is
+//     produced, so nothing is established about any episode -- which is the
+//     same downstream consequence as the refusal below, however different the
+//     fault is (see [QualityRecord.ProcessingComplete]).
+//   - A RESOURCE REFUSAL on the dataset's SHAPE: ErrEvidenceRetention, when the
 //     episodes would report more manual-signal attributions than this package
-//     emits, and ErrEvidenceMatchWork when the episodes and signals meet in
-//     more matches than it walks. The dataset is well-formed; it is the shape
-//     this package declines, and both are typed so a caller can say so.
+//     emits. The dataset is well-formed; it is the shape this package declines,
+//     and the refusal is typed so a caller can say so. It is ALL OR NOTHING --
+//     the zero selection comes back, never a partial cohort -- and it says that
+//     PROCESSING DID NOT COMPLETE, not that any episode was excluded. See
+//     [AssessCaseQuality] for the distinction a consumer must keep.
 //
 // An earlier version of this sentence said an error came back "only for a
-// caller contract violation", and kept saying it after the resource refusals
-// were added -- so a caller reading it would have diagnosed a legitimate
+// caller contract violation", and kept saying it after the resource refusal
+// was added -- so a caller reading it would have diagnosed a legitimate
 // shape refusal as its own ordering bug. Every EVIDENTIAL refusal is still
 // typed on the result rather than returned.
 func SelectEpisodes(ds predictioneval.SourceDataset) (EvidenceSelection, error) {
@@ -327,11 +332,9 @@ func SelectEpisodes(ds predictioneval.SourceDataset) (EvidenceSelection, error) 
 	exclusionIndex := buildP2ExclusionIndex(pk.Excluded)
 
 	// The running total of manual-signal entries this selection will REPORT,
-	// checked against the ceiling as it grows.
+	// checked BEFORE each entry is added rather than after the episode's list
+	// is built. It is the only resource budget this seam holds.
 	manualEntries := 0
-
-	// And the running total of episode-signal matches walked, likewise.
-	matchVisits := 0
 
 	// Episodes, keyed by (pool, incarnation), in causal order of first
 	// appearance. Records with no incarnation are not episodes; they can
@@ -388,8 +391,20 @@ func SelectEpisodes(ds predictioneval.SourceDataset) (EvidenceSelection, error) 
 			// and Downgrade appends to History only on an actual rank drop, so
 			// the second call with the same reason changes nothing. It is not a
 			// no-op in COST: Downgrade normalises, which clones the reasons and
-			// the history every time. On a colliding-event dataset this fires
-			// once per matched foreign call, so the clone is per-signal.
+			// the history every time.
+			//
+			// THAT COST IS GONE AND THIS GUARD NO LONGER FIRES. It was added
+			// when a colliding-event dataset called exclude once per matched
+			// foreign call; the matched signals are no longer visited, so what
+			// remains is SEVEN call sites raising SIX distinct reasons --
+			// FIRST_OPPORTUNITY_UNUSABLE from two mutually exclusive switch
+			// arms, the rest once each -- and no episode can reach two of them
+			// with the same reason. Two independent lanes measured it: one
+			// instrumented both trees over the whole suite (5,588,220 guard hits
+			// before, 0 after), the other replaced this return with a panic and
+			// ran the suite green. It is kept as defence in depth against a
+			// future caller that raises one reason twice, and is documented as
+			// unreachable rather than left to look like live cost management.
 			before := len(ep.ExclusionReasons)
 			ep.ExclusionReasons = appendOnce(ep.ExclusionReasons, reason)
 			if ep.Excluded && len(ep.ExclusionReasons) == before {
@@ -467,144 +482,137 @@ func SelectEpisodes(ds predictioneval.SourceDataset) (EvidenceSelection, error) 
 		}
 
 		// ---- Seam 1: interventions and calls matched to the episode. ------
-		// Only the EARLIEST matched call is ever read — ProveCommonCutoff takes
-		// it and so does the unusable-cutoff branch below, both through
-		// earliestCall, which is a minimum and not a count. Accumulating every
-		// matched call was therefore never required output work, and on a
-		// colliding-event dataset it is exactly the per-episode O(matched)
-		// growth the merge removed one layer down: the slice IS the bucket
-		// again. The running minimum uses earliestCall's own comparison so the
-		// answer is identical.
-		var earliest CallSignal
-		var haveCall bool
-		coverage := NoCallCoverageProof{Proven: true}
-		// The manual signals are deduplicated through a SEEN-SET, not through
-		// appendOnce, and the difference is the whole cost. appendOnce scans the
-		// accumulated list on every call, and an ObservationID is distinct per
-		// record in any well-formed dataset, so the scan never dedups anything
-		// and is pure O(M^2) in the manual facts matched to one episode.
-		// Measured on the fixtures' own manual-call shape, through the exported
-		// SelectEpisodes: 8,000 -> 131 ms, 16,000 -> 331 ms, 32,000 -> 1.56 s,
-		// 64,000 -> 7.31 s, i.e. ~4.7x per 2x input. With the set: 8.3 ms,
-		// 15.5 ms, 34.5 ms, 77.2 ms -- linear, and 95x faster at M = 64,000,
-		// with the list's contents and ORDER identical at every M.
+		// THE MATCHED SIGNALS ARE NOT VISITED. What they establish is read from
+		// the per-posting-list aggregates (see listAggregate): the earliest
+		// matched call, the coverage reasons and the ORDER they were appended in,
+		// whether some matched call is an intervention, and the lists of manual
+		// entries this episode reports.
 		//
-		// This corrects a disposition as well as a cost. The comment on
-		// eachMatching used to say the declared ingest ceiling was "the only
-		// real answer" to this residue. It was not: the set is, it changes no
-		// output, and an independent lane demonstrated that before this was
-		// written.
+		// WHAT DISAPPEARED AND WHAT DID NOT. What disappeared is REPEATED work: a
+		// posting list matched to k episodes was walked k times to re-derive the
+		// same episode-independent answers, which on a dataset whose episodes
+		// share one EventID is the whole quadratic -- the shape this replaced
+		// walked 9,000,000 matches and took an episode-dependent branch on none of
+		// them. That measurement is a reproducer, not a claim about every shape.
+		// What remains is work the OUTPUT requires -- the manual entries this
+		// episode reports, which maxRetainedManualSignals bounds -- and the one
+		// check that is genuinely about the episode, whether a matched automatic
+		// call names one of this episode's own attempts, compressed to the
+		// DISTINCT attempt identities and settled by the first failure.
 		//
-		// THE COST HALF IS NOT SEPARATELY TESTABLE HERE, and that is stated
-		// rather than left as a mutation survivor. Reverting to appendOnce
-		// produces the SAME list, in the same order: what it costs is CPU, in
-		// the scan, and nothing in it allocates more. This suite asserts
-		// allocation ratios and never wall-clock -- a time threshold on shared
-		// CI is flaky and proves nothing about complexity -- so no assertion
-		// here can tell the two apart. What IS pinned is the property the
-		// scan was there for: reverting to a bare append, which drops the
-		// deduplication, fails the repeated-observation case beside the growth
-		// measurement.
-		seenManual := map[string]bool{}
-		visits := 0
-		signals.eachMatching(ep.Episode, func(sig rawSignal) {
-			visits++
-			if sig.manual && !seenManual[sig.rec.ObservationID] {
-				seenManual[sig.rec.ObservationID] = true
-				ep.ManualSignals = append(ep.ManualSignals, sig.rec.ObservationID)
-			}
-			if sig.call {
-				c := CallSignal{
-					Position: sig.rec.CollectorSequence, ObservationID: sig.rec.ObservationID, Kind: sig.callKind,
-				}
-				if !haveCall || c.Position < earliest.Position ||
-					(c.Position == earliest.Position && c.ObservationID < earliest.ObservationID) {
-					earliest, haveCall = c, true
-				}
-				// A call the episode's OWN automatic attempts did not make is
-				// an intervention: manual when marked, otherwise of unknown
-				// origin — and unknown is not automatic. An automatic attempt
-				// id names one of the episode's own attempts only on the
-				// episode's own pool, session and epoch: the counter restarts
-				// per pool, so another pool's attempt 1 on the same public
-				// round is another attempt.
-				if sig.callKind == CallKindAuto {
-					if id := sig.attemptID; !attemptIDs[id] || !sameAttemptScope(sig.rec, ep.Episode) {
-						exclude(ExclusionUnattributedIntervention)
-					}
-				} else if !sig.manual {
-					exclude(ExclusionUnattributedIntervention)
-				}
-			}
-			if sig.orphanReturn {
-				coverage.Proven = false
-				coverage.Reasons = appendOnce(coverage.Reasons, CoverageOrphanCallReturned)
-			}
-			if sig.unclassified {
-				coverage.Proven = false
-				coverage.Reasons = appendOnce(coverage.Reasons, CoverageUnclassifiedFact)
-			}
-			// The D16 contradiction belongs to the incarnation that recorded
-			// the start, and to that one only. Signals are matched by EventID
-			// among other keys, so without this scope an unspent start reaches
-			// every episode of the public round — and it does NOT merely add a
-			// reason to them. Attempt ids are scoped to the pool rather than to
-			// the incarnation, so a sibling can own the id the start carries,
-			// never collect UNATTRIBUTED_INTERVENTION, and be excluded by this
-			// mark alone. An independent lane demonstrated exactly that flip on
-			// an episode whose own evidence was complete.
-			if sig.unspentStart &&
-				sig.rec.PoolInstanceID == ep.Episode.PoolInstanceID &&
-				sig.rec.RoundIncarnationID == ep.Episode.RoundIncarnationID {
-				coverage.Proven = false
-				coverage.Reasons = appendOnce(coverage.Reasons, CoverageUnclassifiedFact)
-			}
-			if sig.undecodable {
-				coverage.Proven = false
-				coverage.Reasons = appendOnce(coverage.Reasons, CoverageUndecodableFact)
-			}
-		})
-		matchVisits += visits
-		if matchVisits > maxSignalMatchVisits {
-			return EvidenceSelection{}, errors.Join(ErrEvidenceMatchWork,
-				errors.New("p4offline: this dataset's episodes and signals meet in "+strconv.Itoa(matchVisits)+
-					" matches or more; this package walks at most "+strconv.Itoa(maxSignalMatchVisits)))
+		// THAT SENTENCE WAS FALSE IN ITS FIRST FORM and the correction is worth
+		// keeping. A repeated observation id is deduplicated and never consumes
+		// budget, so a dataset repeating one id made every episode walk its
+		// whole matched manual set to report a single entry: 4,000,000 merge
+		// visits for 2,000 reported entries, measured by an independent lane on
+		// a shape the removed visit ceiling used to refuse. The deduplication is
+		// now applied once per posting list as well (see listAggregate.manual),
+		// which changes no output and makes the emission proportional to the
+		// report again.
+		//
+		// NOTHING ABOUT WHICH SIGNALS MATCH, THEIR ORDER OR THEIR DEDUPLICATION
+		// CHANGES, and that is not left to this sentence: evidence_internal_test.go
+		// computes the same summary by WALKING the matches with the merge the
+		// aggregates replaced, and compares the two field by field -- call
+		// minimum, coverage reasons in order, intervention verdict and the manual
+		// entry sequence -- over randomized colliding-event, shared-pool and
+		// pool-unattributed shapes.
+		sum := signals.episodeSignals(ep.Episode, attemptIDs)
+		coverage := sum.coverage
+		if sum.intervention {
+			// A call the episode's OWN automatic attempts did not make: manual when
+			// marked, otherwise of unknown origin -- and unknown is not automatic.
+			exclude(ExclusionUnattributedIntervention)
 		}
-		// THE CEILING COUNTS WHAT THE SELECTION REPORTS, checked as the total
-		// grows rather than after it is built, so the refusal happens before
-		// the memory is committed rather than after.
+		// Only the EARLIEST matched call is ever read -- ProveCommonCutoff takes
+		// it and so does the unusable-cutoff branch below. It was never a count,
+		// which is why a minimum over three per-list minima answers it exactly.
+		var earliest CallSignal
+		haveCall := sum.call >= 0
+		if haveCall {
+			sig := signals.signals[sum.call]
+			earliest = CallSignal{
+				Position: sig.rec.CollectorSequence, ObservationID: sig.rec.ObservationID, Kind: sig.callKind,
+			}
+		}
+		// THE OUTPUT BUDGET IS CHECKED BEFORE THE ENTRY IS ADDED, not after the
+		// episode's list is built. The difference is the whole point of a budget:
+		// a single episode whose matched manual set is larger than the budget
+		// would otherwise have to MATERIALIZE that set before anything could
+		// refuse it, which is the allocation the budget exists to prevent. The
+		// entries are therefore produced one at a time, through the three ordered
+		// lists, and the refusal happens on the entry that would exceed the
+		// budget rather than on the total afterwards. At the exact budget the
+		// selection still succeeds.
 		//
-		// AN EARLIER VERSION OF THIS REPAIR INTERNED INSTEAD, sharing one
-		// backing array between episodes whose matched set is identical, and
-		// counting only what was thereby held. It was reverted, and the three
-		// reasons are worth keeping because each one is a way a clever repair
-		// can be worse than a plain bound:
+		// IT IS ALL OR NOTHING. The refusal returns the zero selection: a partial
+		// cohort must never be returned as a complete one, and the caller that
+		// reads the error learns that processing did not complete rather than
+		// that some episode was excluded (see AssessCaseQuality).
+		//
+		// DUPLICATES DO NOT CONSUME BUDGET. The deduplication is a SEEN-SET, not
+		// appendOnce, and the difference is the whole cost: appendOnce scans the
+		// accumulated list on every call, and an ObservationID is distinct per
+		// record in any well-formed dataset, so the scan never dedups anything and
+		// is pure O(M^2) in the manual facts matched to one episode. Measured on
+		// the fixtures' own manual-call shape, through the exported SelectEpisodes:
+		// 8,000 -> 131 ms, 16,000 -> 331 ms, 32,000 -> 1.56 s, 64,000 -> 7.31 s,
+		// i.e. ~4.7x per 2x input. With the set: 8.3 ms, 15.5 ms, 34.5 ms, 77.2 ms
+		// -- linear, and 95x faster at M = 64,000, with the list's contents and
+		// ORDER identical at every M.
+		//
+		// AN EARLIER VERSION OF THIS REPAIR INTERNED INSTEAD, sharing one backing
+		// array between episodes whose matched set is identical, and counting only
+		// what was thereby held. It was reverted, and the three reasons are worth
+		// keeping because each one is a way a clever repair can be worse than a
+		// plain bound:
 		//
 		//   - IT ALIASED. One array with spare capacity, handed out through an
 		//     exported field, means an ordinary caller append silently clobbers
-		//     another episode's entry. Reproduced by review: two episodes at
-		//     len 3 cap 4, one append each, and the first episode's tail read
-		//     the second's value. The comment beside it claimed every caller
-		//     saw exactly what it saw before. That was false.
+		//     another episode's entry. Reproduced by review: two episodes at len 3
+		//     cap 4, one append each, and the first episode's tail read the
+		//     second's value. The comment beside it claimed every caller saw
+		//     exactly what it saw before. That was false.
 		//   - IT COST MORE THAN IT SAVED, on an axis nothing bounded. Sharing
 		//     requires comparing, so it hashed every byte of every entry: 2,000
-		//     records carrying 32.8 MB of observation ids took 48.6 s, 83% of
-		//     it flat in the hash, against 6.0 s with the sharing removed.
-		//   - IT BOUNDED THE WRONG THING. Counting only what was SHARED meant
-		//     the ceiling could not see the report: 1,001 counted against a
-		//     ceiling of 1,048,576, while the emitted document carried
-		//     1,001,000 entries and 31 MB of JSON, and decoding it allocated
-		//     the per-episode arrays the sharing had avoided.
+		//     records carrying 32.8 MB of observation ids took 48.6 s, 83% of it
+		//     flat in the hash, against 6.0 s with the sharing removed.
+		//   - IT BOUNDED THE WRONG THING. Counting only what was SHARED meant the
+		//     ceiling could not see the report: 1,001 counted against a ceiling of
+		//     1,048,576, while the emitted document carried 1,001,000 entries and
+		//     31 MB of JSON, and decoding it allocated the per-episode arrays the
+		//     sharing had avoided.
 		//
 		// Counting the entries themselves has none of those properties: each
 		// episode keeps its own slice, nothing is hashed, and the number the
-		// ceiling compares is the number the report carries.
-		manualEntries += len(ep.ManualSignals)
-		if manualEntries > maxRetainedManualSignals {
+		// budget compares is the number the report carries.
+		//
+		// THE COST HALF OF THE SEEN-SET IS NOT SEPARATELY TESTABLE HERE, and that
+		// is stated rather than left as a mutation survivor. Reverting to
+		// appendOnce produces the SAME list, in the same order: what it costs is
+		// CPU, in the scan, and nothing in it allocates more. This suite asserts
+		// allocation ratios and never wall-clock -- a time threshold on shared CI
+		// is flaky and proves nothing about complexity -- so no assertion here can
+		// tell the two apart. What IS pinned is the property the scan was there
+		// for: reverting to a bare append, which drops the deduplication, fails
+		// the repeated-observation case beside the growth measurement.
+		var overBudget bool
+		ep.ManualSignals, manualEntries, overBudget =
+			signals.emitManualSignals(sum, ep.ManualSignals, manualEntries, maxRetainedManualSignals)
+		if overBudget {
+			// THE MESSAGE NAMES THE BUDGET AND NOT THE OVERRUN, and that is a
+			// real diagnostic loss: the previous check ran after the total was
+			// known, so it could say "1,049,600 or more" and an operator could
+			// tell one entry over from a thousand times over. Aborting before
+			// the entry that would exceed the budget means the total is never
+			// computed, which is the point. Naming the offending EPISODE would
+			// recover the diagnosis and is deliberately not done: the identity
+			// is caller-supplied text, and this package does not materialize
+			// caller text on a refusal path that has not bounded it.
 			return EvidenceSelection{}, errors.Join(ErrEvidenceRetention,
-				errors.New("p4offline: this dataset's episodes report "+strconv.Itoa(manualEntries)+
-					" manual-signal attributions or more; this package emits at most "+
-					strconv.Itoa(maxRetainedManualSignals)))
+				errors.New("p4offline: this dataset's episodes report more than "+
+					strconv.Itoa(maxRetainedManualSignals)+
+					" manual-signal attributions; this package emits at most that many"))
 		}
 		if len(ep.ManualSignals) > 0 {
 			exclude(ExclusionManualIntervention)
@@ -960,11 +968,335 @@ type rawSignal struct {
 // incarnation, or an unattributable fact on the same pool — the last
 // conservatively, because a fact that names no incarnation and no round any
 // episode of the session carries cannot be proven NOT to concern this one.
+//
+// EVERY POSTING LIST IS STRICTLY ASCENDING AND CARRIES EACH INDEX ONCE,
+// because each is built by appending indices in increasing order. Two things
+// rest on that: a three-way merge over them yields exactly the ascending
+// unique sequence a copy-sort-dedup produced, and consuming every list that
+// holds the current minimum is what drops the indices two lists share.
+// evidence_internal_test.go asserts the property rather than assuming it.
+//
+// ---- WHAT THIS SEAM HAS COST, IN THREE ROUNDS ----
+//
+// The honest version of this narrative matters more than usual here, because
+// two earlier versions of it asserted things that were not true, and an
+// auditor would have taken the opposite of the truth from one of them.
+//
+// ROUND ONE: it copied the three posting lists into one slice, sorted it and
+// built a []rawSignal — PER EPISODE. On a dataset whose episodes share one
+// EventID that slice IS the whole event bucket, so N episodes copied and
+// sorted an O(N)-sized bucket N times: quadratic in work and in transient
+// allocation. The allocation was the part that mattered, because it turns a
+// slow parse into an OOM before the verifier can produce a fail-closed answer.
+// Replacing it with a streaming three-way merge removed the per-episode
+// allocation and the sort's log factor. Absolute figures are
+// environment-dependent — two measurements of the same 12,288-record shape
+// differed by about 2.5x, 2.3 GB and 6.7 GB — so what is pinned is the SHAPE:
+// about 16x per 4x input became about 4x, and the regression test asserts
+// ratios rather than byte counts for exactly that reason.
+//
+// THE SENTENCE THAT ROUND ADDED WAS FALSE. It said the repair bought the
+// failure MODE — "the verifier now gets slower on a hostile input instead of
+// being killed by the allocator before it can produce its fail-closed answer".
+// On the very dataset that paragraph defined, an independent judge measured
+// the verifier being killed by the allocator, by name: at 50,000 records under
+// a declared 2 GiB cap, "fatal error: runtime: out of memory", exit status 2,
+// where the same record count in a linear shape returned in 1.6 seconds
+// holding 13 MB. It asserted the opposite of what the code did.
+//
+// ROUND TWO: the RETAINED memory, which the merge did not touch. ManualSignals
+// was an episodes x manual-signals cross product, accumulated through
+// appendOnce — a scan that deduplicated nothing, because observation ids are
+// distinct per record. A comment here concluded that the list is exported
+// output and therefore "not free to drop", and that a declared ingest ceiling
+// was "the only real answer to it". The second half was wrong: a seen-set
+// deduplicates identically, in the same order, for linear cost. A following
+// sentence then said "the CPU residue in the MATCHING relation above is real
+// and remains; this one was not the same thing", which reads as though the
+// accumulation had been dealt with. It had not: removing the scan fixed the
+// COST of building the list and left the RETENTION of n*n entries untouched,
+// which is the defect the next round measured as the unrecoverable
+// out-of-memory above. Both halves are dealt with now — the cost at the
+// accumulation site, the retention by an output budget with the number it
+// bounds being the number the report carries.
+//
+// ROUND THREE: the matching RELATION, which is what is left. Every record of
+// an event is matched to every episode of that event, so the relation is
+// |episodes| x |signals on that event| whatever walks it. A previous round
+// concluded that shrinking it "would change which signals match which
+// episodes, which is the one thing this seam may not change", and REFUSED the
+// shape. That conclusion confused the relation with the WORK: what each pair
+// established was, with two exceptions, episode-INDEPENDENT, so it can be
+// established once per posting list and read per episode without any pair
+// being visited. That is listAggregate, the refusal is gone, and the two
+// exceptions are named there rather than absorbed.
+//
+// ONE HONEST NOTE ON THE DEDUPLICATION, kept from round one: no PRODUCTION
+// consumer is duplicate-sensitive. Seam 1 sets flags idempotently, collects
+// coverage reasons through appendOnce, and takes the earliest call as a
+// running minimum rather than a count. The deduplication is kept because each
+// rewrite had to preserve the previous behaviour exactly. It is pinned by
+// TestManualMergeVisitsASharedIndexOnce -- named precisely, because an earlier
+// version of this sentence pointed at the differential test, whose oracle
+// compares the EMITTED observation ids after their own deduplication and
+// therefore cannot see a duplicated index at all. An independent lane
+// demonstrated that with a mutant that visits a shared index once per list and
+// leaves the whole suite green.
 type signalIndex struct {
 	signals            []rawSignal
 	byEvent            map[string][]int
 	byPoolRound        map[poolRound][]int
 	byPoolUnattributed map[string][]int
+	// Summaries of the posting lists, built on first use. See listAggregate.
+	// There is no pool-round map: SelectEpisodes runs its episode loop once per
+	// DISTINCT (pool, incarnation), so that accessor is called at most once per
+	// key and a cache for it could only retain, never hit.
+	aggByEvent            map[string]*listAggregate
+	aggByPoolUnattributed map[string]*listAggregate
+}
+
+// listAggregate is the EPISODE-INDEPENDENT summary of one posting list.
+//
+// WHY IT EXISTS. A posting list is matched to every episode that shares its
+// key, and most of what the matching establishes does not depend on WHICH
+// episode is asking: whether some matched fact was undecodable, which matched
+// call is earliest, which matched facts are manual. Re-deriving those by
+// walking the list once per episode is the same answer computed |episodes|
+// times, and on a dataset whose episodes share one EventID that is the whole
+// quadratic: the reproducer this replaced walked 9,000,000 matches and took
+// an episode-dependent branch on none of them.
+//
+// WHAT IT DOES NOT COVER, and this is the honest half. Two of the checks are
+// genuinely about the episode -- whether a matched automatic call belongs to
+// THIS episode's own attempts, and whether an unspent call start was recorded
+// by THIS incarnation -- so they cannot be pre-answered. What the aggregate
+// does for them is compress: the distinct attempt identities of the matched
+// automatic calls rather than one entry per record, and the first index per
+// (pool, incarnation) for the unspent starts rather than a scan. The manual
+// list is output, so producing it stays proportional to what is reported, and
+// it is what maxRetainedManualSignals bounds.
+//
+// POSITIONS ARE KEPT, NOT JUST ANSWERS. Every field that feeds an ORDERED
+// output records the signal index that produced it, because the coverage
+// reasons are appended in the order a walk would have met them and that order
+// is output. Combining three aggregates therefore reproduces the sequence
+// rather than approximating it.
+type listAggregate struct {
+	// The first signal index in this list carrying each property, or -1.
+	orphanReturn int
+	unclassified int
+	undecodable  int
+	// unattributedCall is the first call that is an intervention for EVERY
+	// episode it matches: not automatic and not marked manual, so no episode's
+	// own attempts can own it.
+	unattributedCall int
+	// call is the index of this list's earliest call by (position,
+	// observation id), ties broken by the index itself -- the same minimum,
+	// and the same tie-break, a single ascending walk would have kept.
+	call int
+	// manual holds the indices of this list's manual signals, ascending, with
+	// the FIRST index of each observation id only.
+	//
+	// THE DEDUPLICATION IS OUTPUT-PRESERVING and it is what keeps the emission
+	// proportional to what is reported. An episode emits the first occurrence
+	// of each observation id in the MERGED order of its three lists. If index i
+	// is dropped here, some j < i in this same list carries the same id; j is in
+	// the merged order too, so the first occurrence of that id is at or before
+	// j and was never i. Nothing the episode reports can change.
+	//
+	// What changes is the WORK. Without it, a dataset that repeats one
+	// observation id makes every episode walk the whole matched manual set to
+	// report one entry: an independent lane measured 4,000,000 merge visits for
+	// 2,000 reported entries, and 16.3 s on a 64,000-record shape. With it each
+	// list carries an id at most once, so an episode visits an id at most three
+	// times and the emission is bounded by what maxRetainedManualSignals bounds.
+	// The per-EPISODE seen-set stays where the entries are emitted, because the
+	// same id can still reach an episode from two different lists.
+	manual []int
+	// autoCalls holds the DISTINCT attempt identities of this list's automatic
+	// calls, in first-seen order. An episode tests the identity, not the
+	// record, so k records naming one attempt are one test.
+	autoCalls []attemptStartKey
+	// unspentStarts maps the (pool, incarnation) that RECORDED an unspent call
+	// start to the first index that did. Only the episode's own incarnation
+	// reads its entry; the map is nil when the list has no unspent start.
+	unspentStarts map[poolRound]int
+}
+
+// eventAggregate, poolRoundAggregate and poolUnattributedAggregate return one
+// posting list's summary, building it ON FIRST USE and keeping it for the rest
+// of the selection.
+//
+// SUMMARISING EVERY LIST UP FRONT WAS THE FIRST VERSION AND IT WAS WORSE. It is
+// linear in the records either way, but a dataset can carry many posting lists
+// that no episode ever looks up -- facts on a pool no episode is on, or on
+// events no episode carries -- and the eager pass paid for all of them and held
+// every summary live for the whole call. An independent lane measured it on
+// exactly that shape: 2.15x peak live heap at 200,000 records (123 MB against
+// 57 MB) and 2.6x wall time, against 1.07x on the shape the producer actually
+// writes. Peak allocation is the axis this package's own cost narrative treats
+// as the one that turns a slow parse into an OOM, so paying it for work nobody
+// asked for was the wrong trade.
+//
+// Built on demand, an unqueried list costs nothing and is never held: on that
+// shape this builds the TWO summaries the one episode looks up and measures at
+// PARITY with the tree it replaced -- 50.36 MB against 50.36 MB peak live heap
+// at 200,001 records, where the eager draft was 136.34 MB.
+//
+// PARITY, NOT AN IMPROVEMENT, and the distinction is the point. An earlier
+// version of this paragraph said "below the tree it replaced"; it was measuring
+// cumulative allocation on a differently shaped fixture, and a lane that
+// measured PEAK live heap with the collector off, five runs, found parity and
+// no shape on which this allocates less than the tree it replaced. There is no
+// mechanism by which it could: it does everything that tree did, plus the
+// summaries.
+//
+// AND ON THE SHAPE THE PRODUCER ACTUALLY WRITES -- one incarnation per round,
+// each on its own event -- every posting list IS queried, so laziness buys
+// nothing and the summaries cost a flat constant: 90.43 MB against 78.70 MB at
+// 20,000 records and 219.73 MB against 192.77 MB at 50,000, about 1.15x, linear
+// in the queried lists. That is the price of not walking the relation, it is a
+// constant factor rather than the superlinear growth this package's cost
+// narrative is about, and it is stated here rather than implied away.
+//
+// The maps are the index's own, so a value receiver still writes through them;
+// the summary of a list is a pure function of that list, so when it is built
+// changes nothing it says.
+func (ix signalIndex) eventAggregate(k string) *listAggregate {
+	if a, ok := ix.aggByEvent[k]; ok {
+		return a
+	}
+	list, ok := ix.byEvent[k]
+	if !ok {
+		return nil
+	}
+	a := ix.aggregate(list)
+	ix.aggByEvent[k] = a
+	return a
+}
+
+// poolRoundAggregate is NOT cached, and that is measured rather than assumed.
+// SelectEpisodes groups the records into DISTINCT (pool, incarnation) keys and
+// runs its loop once per key, so this accessor sees each key once: an
+// independent lane instrumented it over 4,000 randomized datasets and counted
+// 0 hits against 17,883 misses, beside 9,816 hits for the event map. A cache
+// here would hold one summary per episode for the whole call and never be read
+// -- 3.14 MB at 20,000 records and 6.29 MB at 50,000, with byte-identical
+// output -- which is retention with no possible payoff on the axis this package
+// treats as the important one.
+func (ix signalIndex) poolRoundAggregate(k poolRound) *listAggregate {
+	list, ok := ix.byPoolRound[k]
+	if !ok {
+		return nil
+	}
+	return ix.aggregate(list)
+}
+
+func (ix signalIndex) poolUnattributedAggregate(k string) *listAggregate {
+	if a, ok := ix.aggByPoolUnattributed[k]; ok {
+		return a
+	}
+	list, ok := ix.byPoolUnattributed[k]
+	if !ok {
+		return nil
+	}
+	a := ix.aggregate(list)
+	ix.aggByPoolUnattributed[k] = a
+	return a
+}
+
+// newListAggregate returns an aggregate with every position absent.
+func newListAggregate() *listAggregate {
+	return &listAggregate{orphanReturn: -1, unclassified: -1, undecodable: -1, unattributedCall: -1, call: -1}
+}
+
+// callLess reports whether signal a is the earlier call of the two, under the
+// walk's own comparison: position, then observation id, then -- for two calls
+// a walk could not tell apart on either -- the index it met first.
+//
+// THE SECOND AND THIRD ARMS ARE NOT REACHABLE THROUGH THE PUBLIC SEAM, and
+// saying so saves a future reader looking for a reproduction that cannot
+// exist: a duplicate (epoch, collector position) is a producer anomaly that
+// sessionRefusals turns into a session refusal, so every admitted dataset has
+// unique positions. They are here because this comparison must reproduce the
+// walk's EXACTLY, and they are pinned from inside the package.
+func (ix signalIndex) callLess(a, b int) bool {
+	x, y := ix.signals[a].rec, ix.signals[b].rec
+	switch {
+	case x.CollectorSequence != y.CollectorSequence:
+		return x.CollectorSequence < y.CollectorSequence
+	case x.ObservationID != y.ObservationID:
+		return x.ObservationID < y.ObservationID
+	default:
+		return a < b
+	}
+}
+
+// aggregate summarises one posting list. Each list is summarised at most ONCE
+// per selection, so the total cost is bounded by the total length of the three
+// indexes -- linear in the records, not in episodes times records.
+//
+// WHAT IT COSTS, since this package's subject is resource limits: the aggregate
+// itself, plus two TRANSIENT maps while the list is walked -- one keyed on the
+// distinct attempt identities, one on the distinct manual observation ids. An
+// independent lane measured the second at +13.3 MB of transient allocation on a
+// 200,000-distinct-id shape (25.1 MB -> 38.5 MB), with RETAINED memory unchanged
+// at 12.5 MB and lower on a duplicate-heavy one. It is linear, it is released
+// with the walk, and it buys an emission proportional to the report rather than
+// to the matched set.
+func (ix signalIndex) aggregate(list []int) *listAggregate {
+	agg := newListAggregate()
+	var seenAuto map[attemptStartKey]bool
+	var seenManual map[string]bool
+	for _, n := range list {
+		sig := &ix.signals[n]
+		if sig.manual {
+			if seenManual == nil {
+				seenManual = map[string]bool{}
+			}
+			if !seenManual[sig.rec.ObservationID] {
+				seenManual[sig.rec.ObservationID] = true
+				agg.manual = append(agg.manual, n)
+			}
+		}
+		if sig.call {
+			if agg.call < 0 || ix.callLess(n, agg.call) {
+				agg.call = n
+			}
+			switch {
+			case sig.callKind == CallKindAuto:
+				k := attemptStartKey{sig.rec.CollectorEpoch, sig.rec.CollectorSessionID, sig.rec.PoolInstanceID, sig.attemptID}
+				if seenAuto == nil {
+					seenAuto = map[attemptStartKey]bool{}
+				}
+				if !seenAuto[k] {
+					seenAuto[k] = true
+					agg.autoCalls = append(agg.autoCalls, k)
+				}
+			case !sig.manual && agg.unattributedCall < 0:
+				agg.unattributedCall = n
+			}
+		}
+		if sig.orphanReturn && agg.orphanReturn < 0 {
+			agg.orphanReturn = n
+		}
+		if sig.unclassified && agg.unclassified < 0 {
+			agg.unclassified = n
+		}
+		if sig.unspentStart {
+			k := poolRound{sig.rec.PoolInstanceID, sig.rec.RoundIncarnationID}
+			if agg.unspentStarts == nil {
+				agg.unspentStarts = map[poolRound]int{}
+			}
+			if _, ok := agg.unspentStarts[k]; !ok {
+				agg.unspentStarts[k] = n
+			}
+		}
+		if sig.undecodable && agg.undecodable < 0 {
+			agg.undecodable = n
+		}
+	}
+	return agg
 }
 
 // indexSignals reads every fact once and records what it signals.
@@ -973,10 +1305,12 @@ type signalIndex struct {
 // incarnation is unattributable.
 func indexSignals(recs []predictioneval.SourceRecord, knownEvents map[string]bool) signalIndex {
 	ix := signalIndex{
-		signals:            classifySignals(recs),
-		byEvent:            map[string][]int{},
-		byPoolRound:        map[poolRound][]int{},
-		byPoolUnattributed: map[string][]int{},
+		signals:               classifySignals(recs),
+		byEvent:               map[string][]int{},
+		byPoolRound:           map[poolRound][]int{},
+		byPoolUnattributed:    map[string][]int{},
+		aggByEvent:            map[string]*listAggregate{},
+		aggByPoolUnattributed: map[string]*listAggregate{},
 	}
 	for i := range ix.signals {
 		r := ix.signals[i].rec
@@ -994,107 +1328,233 @@ func indexSignals(recs []predictioneval.SourceRecord, knownEvents map[string]boo
 	return ix
 }
 
-// eachMatching visits the signals matched to one episode, in index order and
-// without duplicates, WITHOUT materializing them.
+// episodeSignals is everything ONE episode's matched signals establish, built
+// from the per-list aggregates instead of by walking the matches.
 //
-// It used to copy the three posting lists into one slice, sort it, and build a
-// []rawSignal — per episode. On a dataset whose episodes share one EventID
-// that slice IS the whole event bucket, so N episodes copied and sorted an
-// O(N)-sized bucket N times: quadratic in both work and transient allocation,
-// The allocation was the part that mattered, because it turns a slow parse
-// into an OOM before the verifier can produce a fail-closed answer.
+// The three posting lists are kept rather than merged, because the manual
+// entries are OUTPUT and the output is budgeted: merging them into one slice
+// here would materialize an over-budget list before anything could refuse it.
+// eachManualIndex walks them instead, and stops when the caller says stop.
+type episodeSignals struct {
+	// call is the index of the earliest matched call, or -1.
+	call int
+	// intervention is true when some matched call is one this episode's own
+	// automatic attempts did not make.
+	intervention bool
+	// coverage is the no-call coverage proof, with its reasons in the order a
+	// walk over the matched signals would have appended them.
+	coverage NoCallCoverageProof
+	// manual holds the episode's three lists of manual signal indices, each
+	// ascending; a nil entry is an absent list. They are the aggregates' own
+	// slices and are never written through.
+	manual [3][]int
+}
+
+// coverageMark is one coverage reason together with the position that produced
+// it: the signal's index, and the rank of the check within a single visit.
+// Sorting the marks by (index, rank) reproduces the order a walk appended them
+// in, and that order is output.
+type coverageMark struct {
+	index  int
+	rank   int
+	reason string
+}
+
+// Ranks of the coverage checks within one visit, in source order.
+const (
+	coverageRankOrphanReturn = iota
+	coverageRankUnclassified
+	coverageRankUnspentStart
+	coverageRankUndecodable
+)
+
+// episodeSignals answers, for one episode, everything the matched signals
+// establish -- without visiting the matches.
 //
-// Absolute figures are environment-dependent — two independent measurements of
-// the same 12,288-record shape here differed by about 2.5x (2.3 GB and 6.7 GB)
-// — so what is pinned is the SHAPE: the old code grew about 16x per 4x input,
-// this one grows about 4x, and the regression test asserts ratios rather than
-// byte counts for exactly that reason.
-//
-// Nothing about WHICH signals match, their order, or their deduplication
-// changes here. Each posting list is built by appending indices in increasing
-// order, so all three are already sorted ascending and carry each index at
-// most once; a three-way merge therefore yields exactly the ascending unique
-// sequence the sort produced, and consuming every list that holds the current
-// minimum is what drops the duplicates the old dedup dropped. The equivalence
-// is not left to that argument: evidence_internal_test.go keeps a verbatim copy
-// of the replaced implementation and compares the two element by element over
-// randomized colliding and non-colliding datasets, and asserts the
-// strictly-ascending property that argument rests on. This sentence previously
-// described a comparison that did not exist; an independent lane caught it.
-//
-// WHAT THIS DOES AND DOES NOT REMOVE, because that distinction is the honest
-// content of the repair. It removes the per-episode ALLOCATION and the sort's
-// log factor. It does NOT make the work linear in the input: byEvent is keyed
-// on EventID alone, so the matching RELATION is itself quadratic on a
-// colliding-event dataset — every record of an event is matched to every
-// episode of that event, and the caller inspects each match. Measured
-// independently, the visit count grows exactly 4x per 2x input on that shape.
-//
-// That residue is the SIZE OF THE RELATION rather than an implementation
-// artefact, and shrinking it would change which signals match which episodes,
-// which is the one thing this rewrite had to keep identical.
-//
-// WHAT THIS PARAGRAPH USED TO CLAIM, AND WHY IT WAS FALSE. It said the space
-// repair bought the failure MODE -- "the verifier now gets slower on a hostile
-// input instead of being killed by the allocator before it can produce its
-// fail-closed answer". On the very dataset this paragraph defines, an
-// independent judge measured the verifier being killed by the allocator, by
-// name: at 50,000 records under a declared 2 GiB cap, "fatal error: runtime:
-// out of memory", exit status 2, where the same record count in a linear shape
-// returned in 1.6 seconds holding 13 MB. The sentence asserted the opposite of
-// what the code did, in the package's most load-bearing cost narrative, and an
-// auditor would have taken the opposite of the truth from it.
-//
-// WHAT THE LADDER ACTUALLY SHOWS, stated so the next reader can check it rather
-// than trust it: the rewrite removed the per-episode TRANSIENT allocation and
-// the sort's log factor; the matching relation remains quadratic in CPU; the
-// RESULT was quadratic in RETAINED memory through ManualSignals, and that is
-// repaired at the accumulation site by interning plus a stated ceiling
-// (maxRetainedManualSignals); and the collision axis is not the event id -- it
-// is ANY posting list that matches many episodes, which is a shared EventID OR
-// a shared PoolInstanceID carrying facts the attribution rule cannot place.
-//
-// ONE RESIDUE THAT USED TO SURVIVE HERE, AND NO LONGER DOES. ManualSignals was
-// accumulated per matched manual signal through appendOnce, which scans the
-// whole accumulated list every time; observation ids are distinct per record,
-// so the scan deduplicated nothing and cost O(M^2) in the manual facts matched
-// to one episode. This comment used to conclude that the list is exported
-// output and therefore "not free to drop", and that a declared ingest ceiling
-// was "the only real answer to it". The second half was wrong: a seen-set
-// deduplicates identically, in the same order, for linear cost. It is at the
-// accumulation site, with the measurements.
-//
-// AND THE SENTENCE THAT FOLLOWED THAT ONE WAS ALSO WRONG. It said "the CPU
-// residue in the MATCHING relation above is real and remains; this one was not
-// the same thing" -- which reads as though the accumulation had been fully
-// dealt with. It had not: removing the appendOnce scan fixed the COST of
-// building the list and left the RETENTION of n*n entries untouched, which is
-// the defect a later round measured as an unrecoverable out-of-memory. Both
-// halves are dealt with now, and the retention half is interned and bounded at
-// the site, not argued here.
-//
-// One honest note on the deduplication: no PRODUCTION consumer is
-// duplicate-sensitive. Seam 1 sets flags idempotently, collects manual signals
-// and coverage reasons through appendOnce, and tracks the earliest call as a
-// running minimum rather than a count. So a duplicate visit would change no
-// verdict today; the dedup is kept because this rewrite had to preserve the old
-// behaviour exactly, and it IS pinned — the differential test kills a mutant
-// that visits every signal twice. If a future consumer ever counts matched
-// signals, this is the line it depends on.
-func (ix signalIndex) eachMatching(ep EpisodeIdentity, visit func(rawSignal)) {
-	var a []int
-	if ep.EventID != "" {
-		a = ix.byEvent[ep.EventID]
+// attemptIDs is the set of automatic attempt ids the episode's OWN records
+// name; it is what makes the intervention check episode-dependent.
+func (ix signalIndex) episodeSignals(ep EpisodeIdentity, attemptIDs map[int64]bool) episodeSignals {
+	out := episodeSignals{call: -1}
+	var aggs [3]*listAggregate
+	n := 0
+	add := func(a *listAggregate) {
+		if a != nil {
+			aggs[n] = a
+			n++
+		}
 	}
-	b := ix.byPoolRound[poolRound{ep.PoolInstanceID, ep.RoundIncarnationID}]
-	c := ix.byPoolUnattributed[ep.PoolInstanceID]
+	if ep.EventID != "" {
+		add(ix.eventAggregate(ep.EventID))
+	}
+	add(ix.poolRoundAggregate(poolRound{ep.PoolInstanceID, ep.RoundIncarnationID}))
+	add(ix.poolUnattributedAggregate(ep.PoolInstanceID))
+
+	// first[rank] is the earliest signal index that produced the coverage mark
+	// of that rank, across all three lists; keep takes the minimum.
+	scope := poolRound{ep.PoolInstanceID, ep.RoundIncarnationID}
+	first := [4]int{-1, -1, -1, -1}
+	keep := func(rank, idx int) {
+		if idx >= 0 && (first[rank] < 0 || idx < first[rank]) {
+			first[rank] = idx
+		}
+	}
+	// ONE PASS OVER THE THREE SUMMARIES, not over the matches. The earliest
+	// matched call is the minimum of the three lists' minima under the walk's
+	// own comparison: a minimum over a union is the minimum of the minima
+	// whether or not the lists overlap, which is why the duplicate indices the
+	// merge drops cannot change it. The same is true of every first-index and
+	// every boolean here.
+	for i := 0; i < n; i++ {
+		agg := aggs[i]
+		out.manual[i] = agg.manual
+		if agg.call >= 0 && (out.call < 0 || ix.callLess(agg.call, out.call)) {
+			out.call = agg.call
+		}
+		if agg.unattributedCall >= 0 {
+			out.intervention = true
+		}
+		keep(coverageRankOrphanReturn, agg.orphanReturn)
+		keep(coverageRankUnclassified, agg.unclassified)
+		keep(coverageRankUndecodable, agg.undecodable)
+		// D16 IS SCOPED, and the scope is the episode's own incarnation: an
+		// unspent start recorded by a SIBLING incarnation of the same public
+		// round reaches this list and must not mark this episode. Reading one
+		// entry of the map answers that for the whole list.
+		if idx, ok := agg.unspentStarts[scope]; ok {
+			keep(coverageRankUnspentStart, idx)
+		}
+	}
+
+	// THE ONE CHECK THAT STAYS PER EPISODE, over DISTINCT attempt identities
+	// rather than per record. A matched automatic call is an intervention
+	// unless it names one of this episode's own attempts, in this episode's
+	// own scope -- the counter restarts per pool, so another pool's attempt 1
+	// is another attempt. The first failing identity settles it: exclude()
+	// appends once, so visiting the rest could only repeat an answer.
+	for i := 0; i < n && !out.intervention; i++ {
+		for _, k := range aggs[i].autoCalls {
+			if !k.sameAttemptScope(ep) || !attemptIDs[k.attempt] {
+				out.intervention = true
+				break
+			}
+		}
+	}
+
+	// The coverage reasons, in the order the walk would have produced them.
+	// UNCLASSIFIED_FACT_ON_ROUND has two producers and takes the earlier.
+	marks := make([]coverageMark, 0, 3)
+	if first[coverageRankOrphanReturn] >= 0 {
+		marks = append(marks, coverageMark{first[coverageRankOrphanReturn], coverageRankOrphanReturn, CoverageOrphanCallReturned})
+	}
+	switch u, v := first[coverageRankUnclassified], first[coverageRankUnspentStart]; {
+	case u >= 0 && (v < 0 || u <= v):
+		marks = append(marks, coverageMark{u, coverageRankUnclassified, CoverageUnclassifiedFact})
+	case v >= 0:
+		marks = append(marks, coverageMark{v, coverageRankUnspentStart, CoverageUnclassifiedFact})
+	}
+	if first[coverageRankUndecodable] >= 0 {
+		marks = append(marks, coverageMark{first[coverageRankUndecodable], coverageRankUndecodable, CoverageUndecodableFact})
+	}
+	// The index decides; the rank decides a TIE, which is two marks produced by
+	// ONE signal. That second clause is DEFENCE IN DEPTH and is deliberately
+	// not separately tested, because no signal can carry two marks today:
+	// classifySignals sets undecodable and unclassified in mutually exclusive
+	// arms of one switch, an orphan return is a decodable CALL_RETURNED so it
+	// is neither, and an unspent start is marked on the FIRST start of a slot,
+	// which took the CALL_STARTED arm and is therefore neither. An independent
+	// lane corroborated it by enumerating the classifier's whole input space --
+	// every (kind x phase x manual x payload version x attempt id x undecodable)
+	// combination in one- and two-record datasets, 12,703,320 signals -- and
+	// found none carrying two. It is kept because a future classifier that did
+	// produce two would otherwise silently reorder an exported list, and it
+	// costs nothing.
+	sort.Slice(marks, func(a, b int) bool {
+		if marks[a].index != marks[b].index {
+			return marks[a].index < marks[b].index
+		}
+		return marks[a].rank < marks[b].rank
+	})
+	out.coverage = NoCallCoverageProof{Proven: len(marks) == 0}
+	for _, m := range marks {
+		out.coverage.Reasons = append(out.coverage.Reasons, m.reason)
+	}
+	return out
+}
+
+// emitManualSignals appends the episode's manual entries to dst, deduplicated
+// by observation id, and STOPS at the entry that would carry total past
+// budget. It returns the extended slice, the new running total, and whether it
+// stopped short.
+//
+// NOTHING BEYOND THE BUDGET IS EVER APPENDED, and the merge that produces the
+// entries is ABANDONED at that point rather than run to the end. That is the
+// property, and it is the one a check after the fact cannot have: an episode
+// whose matched manual set is larger than the whole budget is refused without
+// THE EPISODE'S LIST ever existing. The aggregate's own index list is a
+// different thing and IS built -- once per posting list, linear in the
+// records, before any episode is considered -- and it is not what the budget
+// is about. At exactly the budget it appends the last entry and
+// reports no overrun, so otherwise-valid processing at the limit still
+// succeeds.
+//
+// DUPLICATES DO NOT CONSUME BUDGET. The budget counts what is REPORTED, and a
+// repeated observation id is reported once, so the deduplication is applied
+// before the check and not after it.
+//
+// ONE PROPERTY HERE IS COST-ONLY AND IS NOT SEPARATELY TESTABLE, stated rather
+// than left as an unexplained mutation survivor: the `return false` that stops
+// the merge. Returning true instead produces the SAME list and the same
+// allocation -- every later entry meets the same full budget and is refused
+// before anything is written -- so no assertion over the output can tell the
+// two apart, and this suite asserts allocation ratios and never wall-clock. It
+// is here because walking a matched set larger than the budget after the answer
+// is settled is work with no output. What IS pinned is the part that matters:
+// nothing past the budget is appended, and the over-budget list is never
+// materialized (TestOversizedEpisodeIsRefusedWithoutMaterializingItsList
+// measures it). The stopping MECHANISM is pinned one layer down, on
+// eachManualIndex.
+func (ix signalIndex) emitManualSignals(sum episodeSignals, dst []string, total, budget int) ([]string, int, bool) {
+	var seen map[string]bool
+	over := false
+	sum.eachManualIndex(func(n int) bool {
+		obs := ix.signals[n].rec.ObservationID
+		if seen == nil {
+			seen = map[string]bool{}
+		}
+		if seen[obs] {
+			return true
+		}
+		if total == budget {
+			over = true
+			return false
+		}
+		seen[obs] = true
+		dst = append(dst, obs)
+		total++
+		return true
+	})
+	return dst, total, over
+}
+
+// eachManualIndex visits the episode's matched manual signals in ascending
+// index order, without duplicates and WITHOUT materializing them, and stops as
+// soon as visit returns false.
+//
+// It is the same three-way merge the whole-list walk used, run over the manual
+// SUBLISTS. Each sublist is a subsequence of an ascending posting list, so it
+// is itself ascending and carries each index at most once, and merging three
+// such lists while consuming every list that holds the current minimum yields
+// exactly the manual subsequence of the merged order the walk produced.
+//
+// Two tests hold the two halves of that, and they are named apart because an
+// earlier version of this paragraph cited only the first:
+// TestAggregateSummaryMatchesTheWalkItReplaced compares the entries this
+// EMITS against the retained walk, and TestManualMergeVisitsASharedIndexOnce
+// pins the index-level deduplication the sentence above rests on, which the
+// first cannot see.
+func (e episodeSignals) eachManualIndex(visit func(int) bool) {
+	a, b, c := e.manual[0], e.manual[1], e.manual[2]
 	for i, j, k := 0, 0, 0; i < len(a) || j < len(b) || k < len(c); {
-		// The minimum of the live heads, tracked with a FOUND flag rather than
-		// a sentinel value. A sentinel would be a value a posting list could in
-		// principle hold, and if it ever did, no head would compare below it,
-		// no pointer would advance and this loop would not terminate. Indices
-		// come from ranging over the signals so that cannot happen today; the
-		// flag costs nothing and removes the "today" from that sentence.
 		n, found := 0, false
 		if i < len(a) && (!found || a[i] < n) {
 			n, found = a[i], true
@@ -1109,8 +1569,7 @@ func (ix signalIndex) eachMatching(ep EpisodeIdentity, visit func(rawSignal)) {
 			return
 		}
 		// Every list holding the minimum advances past it, so an index carried
-		// by two lists is visited once and the next minimum is strictly
-		// greater.
+		// by two lists is visited once and the next minimum is strictly greater.
 		if i < len(a) && a[i] == n {
 			i++
 		}
@@ -1120,7 +1579,9 @@ func (ix signalIndex) eachMatching(ep EpisodeIdentity, visit func(rawSignal)) {
 		if k < len(c) && c[k] == n {
 			k++
 		}
-		visit(ix.signals[n])
+		if !visit(n) {
+			return
+		}
 	}
 }
 
@@ -1386,12 +1847,13 @@ func classifySignals(recs []predictioneval.SourceRecord) []rawSignal {
 	return out
 }
 
-// sameAttemptScope reports whether a fact was recorded on the episode's own
-// pool, in its own collector session and epoch — the scope within which an
-// automatic attempt id identifies one attempt.
-func sameAttemptScope(r *predictioneval.SourceRecord, ep EpisodeIdentity) bool {
-	return r.CollectorEpoch == ep.CollectorEpoch && r.CollectorSessionID == ep.CollectorSessionID &&
-		r.PoolInstanceID == ep.PoolInstanceID
+// sameAttemptScope reports whether an attempt identity names an attempt of the
+// episode's own pool, collector session and epoch — the scope within which an
+// automatic attempt id identifies one attempt. The numeric id alone does not:
+// the counter restarts in every pool, so another pool's attempt 1 on the same
+// public round is another attempt.
+func (k attemptStartKey) sameAttemptScope(ep EpisodeIdentity) bool {
+	return k.epoch == ep.CollectorEpoch && k.session == ep.CollectorSessionID && k.pool == ep.PoolInstanceID
 }
 
 func earliestCall(calls []CallSignal) (CallSignal, bool) {
@@ -1589,42 +2051,6 @@ var ErrEvidenceRetention = errors.New("p4offline: the dataset's shape retains mo
 // right answer is a per-episode bounded sample with an extent, which changes
 // exported output and is an owner decision rather than a mechanical one.
 const maxRetainedManualSignals = 1 << 20
-
-// ErrEvidenceMatchWork refuses a dataset whose SHAPE makes the signal-matching
-// relation too large to walk.
-var ErrEvidenceMatchWork = errors.New("p4offline: the dataset's shape makes the signal-matching relation too large to walk")
-
-// maxSignalMatchVisits bounds the TOTAL episode-signal visits one selection may
-// make -- the size of the matching relation itself.
-//
-// THE PACKAGE HAS DEFERRED THIS THREE TIMES, calling a declared ingest ceiling
-// "the follow-up the measurements argue for", and it is here because a review
-// round finally measured what deferring it costs: one undecodable AUTO_DUE per
-// round incarnation makes every row its own episode AND a signal every other
-// episode matches, so the relation is |episodes| x |signals on that event|.
-// Measured through the exported SelectEpisodes at 2,000 / 4,000 / 8,000 /
-// 16,000 records: 0.128 / 0.424 / 1.621 / 6.287 s, a doubling ratio of 3.88x,
-// and 14.254 s at 32,000.
-//
-// HALF OF THAT WAS AN IMPLEMENTATION ARTEFACT AND IS REPAIRED: the exclusion
-// rescan is now indexed once (see p2ExclusionIndex), which halves the time --
-// 6.287 s becomes 3.050 s at 16,000. The other half is not an artefact. It is
-// the relation: every record of an event is matched to every episode of that
-// event, and the caller inspects each match. Profiled after the index repair,
-// signalIndex.eachMatching is 94.71% cumulative. Shrinking it would change
-// WHICH signals match which episodes, which is the one thing this seam may not
-// change, so what is left is to refuse the shape rather than to grind through it.
-//
-// THE VALUE, and what it is derived from. Like maxRetainedManualSignals this is
-// chosen rather than read off the contract, and for the same reason: the
-// preregistration says nothing about dataset shape. It is set at the point where
-// the walk stops being something a verifier can answer from -- 1<<26 visits is
-// roughly a second of matching on the machine this was measured on, and it
-// admits every shape whose episodes sit on distinct events, which is what the
-// producer writes: one incarnation per round means visits are linear in records
-// there, and a 16,000-record honest dataset makes on the order of 16,000 visits,
-// four thousand times under this bound.
-const maxSignalMatchVisits = 1 << 26
 
 // VerifySourceRoundRegistry re-derives a registry from the claims its own
 // entries carry: the registry must be exactly what [ReconcileSourceRounds]

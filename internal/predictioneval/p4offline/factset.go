@@ -169,9 +169,17 @@ type P2ConfigBinding struct {
 // admitted session at all; err is non-nil whenever the episode is not a
 // selected opportunity (absent, session refused, excluded, unusable or
 // unproven). The error is a caller-contract error for an unordered dataset, and
-// a typed RESOURCE refusal -- ErrEvidenceRetention or ErrEvidenceMatchWork --
-// when SelectEpisodes declines the dataset's shape; see its documentation. The
-// two are not the same thing and a caller must not read one as the other.
+// a typed RESOURCE refusal -- ErrEvidenceRetention -- when SelectEpisodes
+// declines the dataset's shape; see its documentation. The two differ in whose
+// fault they are and a caller must not read one as the other, but they agree on
+// the thing that matters downstream: NEITHER PRODUCES A SELECTION, so neither
+// establishes anything about this episode -- the causal-order check refuses
+// before anything is read, and the resource refusal abandons the loop part-way
+// and returns the zero selection rather than a partial one. Only ErrEpisodeNotSelected
+// is the verdict of a selection that DID run, and that is the distinction
+// selectionRan turns into [QualityRecord.ProcessingComplete]. Errors from
+// SelectEpisodes are returned VERBATIM so errors.Is reaches their sentinels
+// through this seam.
 func lookupEpisode(ds predictioneval.SourceDataset, episode EpisodeIdentity) (EpisodeSelection, bool, error) {
 	sel, err := SelectEpisodes(ds)
 	if err != nil {

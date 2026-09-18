@@ -13,7 +13,9 @@ package p4offline
 
 import (
 	"math/rand"
+	"runtime"
 	"sort"
+	"strconv"
 	"testing"
 
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/predictioneval"
@@ -37,6 +39,55 @@ func (ix signalIndex) matchingBeforeTheMerge(ep EpisodeIdentity) []rawSignal {
 		out = append(out, ix.signals[k])
 	}
 	return out
+}
+
+// eachMatching is the streaming three-way merge that visits the signals
+// matched to one episode, in index order and without duplicates. It was this
+// package's production path until the per-posting-list aggregates replaced it,
+// and it is kept HERE, verbatim, as the oracle the aggregates are compared
+// against — the same role matchingBeforeTheMerge plays for it. Like that one,
+// it must NOT be tidied.
+func (ix signalIndex) eachMatching(ep EpisodeIdentity, visit func(rawSignal)) {
+	var a []int
+	if ep.EventID != "" {
+		a = ix.byEvent[ep.EventID]
+	}
+	b := ix.byPoolRound[poolRound{ep.PoolInstanceID, ep.RoundIncarnationID}]
+	c := ix.byPoolUnattributed[ep.PoolInstanceID]
+	for i, j, k := 0, 0, 0; i < len(a) || j < len(b) || k < len(c); {
+		// The minimum of the live heads, tracked with a FOUND flag rather than
+		// a sentinel value. A sentinel would be a value a posting list could in
+		// principle hold, and if it ever did, no head would compare below it,
+		// no pointer would advance and this loop would not terminate. Indices
+		// come from ranging over the signals so that cannot happen today; the
+		// flag costs nothing and removes the "today" from that sentence.
+		n, found := 0, false
+		if i < len(a) && (!found || a[i] < n) {
+			n, found = a[i], true
+		}
+		if j < len(b) && (!found || b[j] < n) {
+			n, found = b[j], true
+		}
+		if k < len(c) && (!found || c[k] < n) {
+			n, found = c[k], true
+		}
+		if !found {
+			return
+		}
+		// Every list holding the minimum advances past it, so an index carried
+		// by two lists is visited once and the next minimum is strictly
+		// greater.
+		if i < len(a) && a[i] == n {
+			i++
+		}
+		if j < len(b) && b[j] == n {
+			j++
+		}
+		if k < len(c) && c[k] == n {
+			k++
+		}
+		visit(ix.signals[n])
+	}
 }
 
 func TestStreamingMergeMatchesTheImplementationItReplaced(t *testing.T) {
@@ -134,4 +185,812 @@ func valuesPR(m map[poolRound][]int) [][]int {
 		out = append(out, v)
 	}
 	return out
+}
+
+// ---------------------------------------------------------------------------
+// The aggregate path, differentially.
+//
+// episodeSignals answers, from the per-posting-list aggregates, what the visit
+// body used to answer by walking every match. The two must agree on everything
+// the selection emits: WHICH manual entries, in which ORDER, after which
+// deduplication; WHICH call is the earliest, including the tie-breaks; whether
+// the episode collected an unattributed intervention; and the coverage
+// reasons IN THE ORDER a walk appended them.
+//
+// The order is not a detail. The reasons are an exported list built by
+// appendOnce during an ascending walk, so a reordering is an output change
+// that no equality-of-sets assertion would catch. That is why the oracle below
+// is the walk itself, copied verbatim, rather than a re-derivation.
+// ---------------------------------------------------------------------------
+
+// episodeOutcome is the four things one episode's matched signals establish,
+// in the form the selection emits them.
+type episodeOutcome struct {
+	manual       []string
+	call         CallSignal
+	haveCall     bool
+	intervention bool
+	coverage     NoCallCoverageProof
+}
+
+// outcomeByWalk is the visit body episodeSignals replaced, copied verbatim
+// from 5551a23 and changed only to record its results instead of writing them
+// into an EpisodeSelection. It is the oracle, so its comparisons and their
+// ORDER must NOT be tidied.
+func (ix signalIndex) outcomeByWalk(ep EpisodeIdentity, attemptIDs map[int64]bool) episodeOutcome {
+	out := episodeOutcome{coverage: NoCallCoverageProof{Proven: true}}
+	seenManual := map[string]bool{}
+	var earliest CallSignal
+	haveCall := false
+	ix.eachMatching(ep, func(sig rawSignal) {
+		if sig.manual && !seenManual[sig.rec.ObservationID] {
+			seenManual[sig.rec.ObservationID] = true
+			out.manual = append(out.manual, sig.rec.ObservationID)
+		}
+		if sig.call {
+			c := CallSignal{
+				Position: sig.rec.CollectorSequence, ObservationID: sig.rec.ObservationID, Kind: sig.callKind,
+			}
+			if !haveCall || c.Position < earliest.Position ||
+				(c.Position == earliest.Position && c.ObservationID < earliest.ObservationID) {
+				earliest, haveCall = c, true
+			}
+			if sig.callKind == CallKindAuto {
+				if id := sig.attemptID; !attemptIDs[id] || !sameAttemptScopeRec(sig.rec, ep) {
+					out.intervention = true
+				}
+			} else if !sig.manual {
+				out.intervention = true
+			}
+		}
+		if sig.orphanReturn {
+			out.coverage.Proven = false
+			out.coverage.Reasons = appendOnce(out.coverage.Reasons, CoverageOrphanCallReturned)
+		}
+		if sig.unclassified {
+			out.coverage.Proven = false
+			out.coverage.Reasons = appendOnce(out.coverage.Reasons, CoverageUnclassifiedFact)
+		}
+		if sig.unspentStart &&
+			sig.rec.PoolInstanceID == ep.PoolInstanceID &&
+			sig.rec.RoundIncarnationID == ep.RoundIncarnationID {
+			out.coverage.Proven = false
+			out.coverage.Reasons = appendOnce(out.coverage.Reasons, CoverageUnclassifiedFact)
+		}
+		if sig.undecodable {
+			out.coverage.Proven = false
+			out.coverage.Reasons = appendOnce(out.coverage.Reasons, CoverageUndecodableFact)
+		}
+	})
+	out.call, out.haveCall = earliest, haveCall
+	return out
+}
+
+// sameAttemptScopeRec is the RECORD-shaped scope predicate the walk used,
+// before the aggregates reduced the matched automatic calls to their distinct
+// attempt identities. It belongs to the oracle and must not be tidied either.
+func sameAttemptScopeRec(r *predictioneval.SourceRecord, ep EpisodeIdentity) bool {
+	return r.CollectorEpoch == ep.CollectorEpoch && r.CollectorSessionID == ep.CollectorSessionID &&
+		r.PoolInstanceID == ep.PoolInstanceID
+}
+
+// outcomeByAggregate is what the selection now does: read the summary, then
+// emit the manual entries through the same deduplication the caller applies.
+func (ix signalIndex) outcomeByAggregate(ep EpisodeIdentity, attemptIDs map[int64]bool) episodeOutcome {
+	sum := ix.episodeSignals(ep, attemptIDs)
+	out := episodeOutcome{intervention: sum.intervention, coverage: sum.coverage}
+	seen := map[string]bool{}
+	sum.eachManualIndex(func(n int) bool {
+		obs := ix.signals[n].rec.ObservationID
+		if !seen[obs] {
+			seen[obs] = true
+			out.manual = append(out.manual, obs)
+		}
+		return true
+	})
+	if sum.call >= 0 {
+		sig := ix.signals[sum.call]
+		out.call = CallSignal{
+			Position: sig.rec.CollectorSequence, ObservationID: sig.rec.ObservationID, Kind: sig.callKind,
+		}
+		out.haveCall = true
+	}
+	return out
+}
+
+// randomSignalDataset builds one adversarial record set. The vocabularies are
+// deliberately tiny so collisions are the common case rather than the rare one:
+// repeated observation ids drive the deduplication and the call tie-break,
+// repeated collector sequences drive the minimum's second and third
+// comparisons, and one shared event id drives the shape the aggregates exist
+// for.
+func randomSignalDataset(rng *rand.Rand, collide bool) ([]predictioneval.SourceRecord, map[string]bool) {
+	pools := []string{"", "p0", "p1"}
+	rounds := []string{"", "r0", "r1"}
+	events := []string{"", "e0", "e1"}
+	kinds := []string{
+		predictioneval.KindPlacement, predictioneval.KindAutoDecision,
+		predictioneval.KindUserTerminal, kindManualControl, "channel_event", "source_unknown",
+	}
+	phases := []string{
+		predictioneval.PhaseCallStarted, predictioneval.PhaseCallReturned,
+		predictioneval.PhaseAutoDue, predictioneval.PhaseAutoDecided,
+		predictioneval.PhaseAutoSkipped, "ROUND_CREATED",
+	}
+	yes, no := true, false
+	n := 1 + rng.Intn(30)
+	recs := make([]predictioneval.SourceRecord, 0, n)
+	known := map[string]bool{}
+	for i := 0; i < n; i++ {
+		ev := events[rng.Intn(len(events))]
+		if collide {
+			ev = "e0"
+		}
+		r := predictioneval.SourceRecord{
+			CollectorEpoch:     int64(1 + rng.Intn(2)),
+			CollectorSessionID: []string{"s0", "s1"}[rng.Intn(2)],
+			PoolInstanceID:     pools[rng.Intn(len(pools))],
+			RoundIncarnationID: rounds[rng.Intn(len(rounds))],
+			EventID:            ev,
+			// Sequences and ids repeat on purpose.
+			CollectorSequence:  int64(rng.Intn(5)),
+			ObservationID:      "o" + strconv.Itoa(rng.Intn(6)),
+			Kind:               kinds[rng.Intn(len(kinds))],
+			PayloadUndecodable: rng.Intn(6) == 0,
+		}
+		r.Payload.Phase = phases[rng.Intn(len(phases))]
+		r.PayloadVersion = predictioneval.SupportedPayloadVersion
+		if rng.Intn(8) == 0 {
+			r.PayloadVersion = predictioneval.SupportedPayloadVersion + 1
+		}
+		switch rng.Intn(3) {
+		case 0:
+			r.Payload.Manual = &yes
+		case 1:
+			r.Payload.Manual = &no
+		}
+		if id := int64(rng.Intn(4)); id > 0 {
+			r.Payload.Counters = map[string]int64{predictioneval.CounterAutoAttemptID: id}
+		}
+		recs = append(recs, r)
+		if rng.Intn(2) == 0 {
+			known[ev] = true
+		}
+	}
+	return recs, known
+}
+
+func TestAggregateSummaryMatchesTheWalkItReplaced(t *testing.T) {
+	rng := rand.New(rand.NewSource(20260918))
+	pools := []string{"", "p0", "p1"}
+	rounds := []string{"", "r0", "r1"}
+	events := []string{"", "e0", "e1"}
+	// Every subset of the attempt ids the generator emits, so the one
+	// episode-dependent branch is driven both ways on the same dataset.
+	attemptSets := []map[int64]bool{
+		{},
+		{1: true},
+		{2: true},
+		{1: true, 2: true, 3: true},
+	}
+	sawManual, sawCall, sawIntervention, sawCoverage := false, false, false, false
+	for ds := 0; ds < 600; ds++ {
+		recs, known := randomSignalDataset(rng, ds%2 == 0)
+		ix := indexSignals(recs, known)
+		for _, p := range pools {
+			for _, r := range rounds {
+				for _, e := range events {
+					for _, epoch := range []int64{1, 2} {
+						for _, sess := range []string{"s0", "s1"} {
+							for _, ids := range attemptSets {
+								ep := EpisodeIdentity{
+									CollectorEpoch: epoch, CollectorSessionID: sess,
+									PoolInstanceID: p, RoundIncarnationID: r, EventID: e,
+								}
+								want := ix.outcomeByWalk(ep, ids)
+								got := ix.outcomeByAggregate(ep, ids)
+								if !sameOutcome(want, got) {
+									t.Fatalf("dataset %d %+v ids=%v:\n walk      %+v\n aggregate %+v",
+										ds, ep, ids, want, got)
+								}
+								sawManual = sawManual || len(want.manual) > 0
+								sawCall = sawCall || want.haveCall
+								sawIntervention = sawIntervention || want.intervention
+								sawCoverage = sawCoverage || len(want.coverage.Reasons) > 1
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+	// A differential test that drove none of the branches proves nothing, and
+	// the generator is random: assert it reached them.
+	if !sawManual || !sawCall || !sawIntervention || !sawCoverage {
+		t.Fatalf("the generator did not reach every branch: manual=%v call=%v intervention=%v multi-reason coverage=%v",
+			sawManual, sawCall, sawIntervention, sawCoverage)
+	}
+}
+
+func sameOutcome(a, b episodeOutcome) bool {
+	if a.haveCall != b.haveCall || a.call != b.call || a.intervention != b.intervention {
+		return false
+	}
+	if a.coverage.Proven != b.coverage.Proven || len(a.coverage.Reasons) != len(b.coverage.Reasons) {
+		return false
+	}
+	for i := range a.coverage.Reasons {
+		if a.coverage.Reasons[i] != b.coverage.Reasons[i] {
+			return false
+		}
+	}
+	if len(a.manual) != len(b.manual) {
+		return false
+	}
+	for i := range a.manual {
+		if a.manual[i] != b.manual[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// TestAggregatePathDoesNotRepeatEpisodeIndependentWork is the WORK half of the
+// same change, and it is counted rather than timed: a wall-clock threshold on
+// shared CI is flaky and proves nothing about complexity.
+//
+// The two numbers are the matches a walk would visit, and the items the
+// aggregate path actually inspects per episode. On the shape that motivated the
+// removed visit ceiling -- one undecodable AUTO_DUE per incarnation, all on one
+// event id -- every episode matches every record, so the walk is |episodes| x
+// |records| and NONE of those visits reaches an episode-dependent branch. The
+// aggregate path inspects nothing there.
+//
+// The second shape is the honest counterpart: manual facts ARE reported, so the
+// work that remains is the output, one inspection per reported entry. That is
+// what the output budget bounds, and it is stated here rather than claimed
+// away.
+//
+// WHAT THE COUNTER IS, precisely, because "inspects 0" reads as "does nothing":
+// it counts the items whose number is proportional to POSTING-LIST LENGTH --
+// merge visits and distinct attempt identities. The fixed per-episode work
+// inside episodeSignals (three map lookups, the scope lookup, the four keeps,
+// a sort over at most three marks) is not counted and is not meant to be; it
+// does not grow with the matched set, which is the property under test. The
+// identity count is also a conservative UPPER bound: production settles on the
+// first failing identity and this sums them all.
+func TestAggregatePathDoesNotRepeatEpisodeIndependentWork(t *testing.T) {
+	// visits counts what a walk would have done; inspected counts what the
+	// aggregate path does.
+	measure := func(recs []predictioneval.SourceRecord, eps []EpisodeIdentity, ids map[int64]bool) (visits, inspected int) {
+		known := map[string]bool{}
+		for i := range recs {
+			if recs[i].EventID != "" {
+				known[recs[i].EventID] = true
+			}
+		}
+		ix := indexSignals(recs, known)
+		for _, ep := range eps {
+			ix.eachMatching(ep, func(rawSignal) { visits++ })
+			sum := ix.episodeSignals(ep, ids)
+			sum.eachManualIndex(func(int) bool { inspected++; return true })
+			for _, l := range sum.manual {
+				_ = l
+			}
+			inspected += ix.autoCallIdentitiesFor(ep)
+		}
+		return visits, inspected
+	}
+
+	undecodable := func(k int) ([]predictioneval.SourceRecord, []EpisodeIdentity) {
+		recs := make([]predictioneval.SourceRecord, 0, k)
+		eps := make([]EpisodeIdentity, 0, k)
+		for i := 0; i < k; i++ {
+			r := predictioneval.SourceRecord{
+				PoolInstanceID: "p0", RoundIncarnationID: "r" + strconv.Itoa(i), EventID: "e1",
+				CollectorSequence: int64(i), ObservationID: "o" + strconv.Itoa(i),
+				Kind: predictioneval.KindAutoDecision, PayloadUndecodable: true,
+				PayloadVersion: predictioneval.SupportedPayloadVersion,
+			}
+			r.Payload.Phase = predictioneval.PhaseAutoDue
+			recs = append(recs, r)
+			eps = append(eps, EpisodeIdentity{PoolInstanceID: "p0", RoundIncarnationID: "r" + strconv.Itoa(i), EventID: "e1"})
+		}
+		return recs, eps
+	}
+
+	for _, k := range []int{200, 400} {
+		recs, eps := undecodable(k)
+		visits, inspected := measure(recs, eps, map[int64]bool{})
+		if visits != k*k {
+			t.Fatalf("k=%d: a walk visits every episode-record pair: got %d, want %d", k, visits, k*k)
+		}
+		if inspected != 0 {
+			t.Fatalf("k=%d: no episode-dependent item exists on this shape, yet %d were inspected", k, inspected)
+		}
+	}
+
+	// The output-dependent counterpart: k episodes each reporting k manual
+	// entries. The walk still visits k*k; the aggregate path inspects exactly
+	// the k*k entries it REPORTS, and not one more.
+	manual := func(k int) ([]predictioneval.SourceRecord, []EpisodeIdentity) {
+		recs := make([]predictioneval.SourceRecord, 0, 2*k)
+		eps := make([]EpisodeIdentity, 0, k)
+		yes := true
+		for i := 0; i < k; i++ {
+			r := predictioneval.SourceRecord{
+				PoolInstanceID: "p0", RoundIncarnationID: "r" + strconv.Itoa(i), EventID: "e1",
+				CollectorSequence: int64(i), ObservationID: "a" + strconv.Itoa(i),
+				Kind: predictioneval.KindAutoDecision, PayloadVersion: predictioneval.SupportedPayloadVersion,
+			}
+			r.Payload.Phase = predictioneval.PhaseAutoDue
+			recs = append(recs, r)
+			eps = append(eps, EpisodeIdentity{PoolInstanceID: "p0", RoundIncarnationID: "r" + strconv.Itoa(i), EventID: "e1"})
+		}
+		for i := 0; i < k; i++ {
+			m := predictioneval.SourceRecord{
+				PoolInstanceID: "p0", EventID: "e1",
+				CollectorSequence: int64(k + i), ObservationID: "m" + strconv.Itoa(i),
+				Kind: kindManualControl, PayloadVersion: predictioneval.SupportedPayloadVersion,
+			}
+			m.Payload.Phase = predictioneval.PhaseCallStarted
+			m.Payload.Manual = &yes
+			recs = append(recs, m)
+		}
+		return recs, eps
+	}
+	for _, k := range []int{200, 400} {
+		recs, eps := manual(k)
+		visits, inspected := measure(recs, eps, map[int64]bool{})
+		if visits != k*2*k {
+			t.Fatalf("k=%d: walk visits %d, want %d", k, visits, k*2*k)
+		}
+		if inspected != k*k {
+			t.Fatalf("k=%d: the work that remains must be the output: inspected %d, reported %d", k, inspected, k*k)
+		}
+	}
+}
+
+// autoCallIdentitiesFor counts the DISTINCT automatic attempt identities the
+// episode's aggregates make it test — the one episode-dependent inspection the
+// aggregates compress rather than remove.
+func (ix signalIndex) autoCallIdentitiesFor(ep EpisodeIdentity) int {
+	n := 0
+	if ep.EventID != "" {
+		if a := ix.eventAggregate(ep.EventID); a != nil {
+			n += len(a.autoCalls)
+		}
+	}
+	if a := ix.poolRoundAggregate(poolRound{ep.PoolInstanceID, ep.RoundIncarnationID}); a != nil {
+		n += len(a.autoCalls)
+	}
+	if a := ix.poolUnattributedAggregate(ep.PoolInstanceID); a != nil {
+		n += len(a.autoCalls)
+	}
+	return n
+}
+
+// ---------------------------------------------------------------------------
+// The output budget's CHECK POINT.
+//
+// The external suite pins the literal budget (below it, exactly at it, past
+// it) through SelectEpisodes. What it cannot pin there is WHEN the check
+// happens, because demonstrating that through the public seam would need a
+// single episode matching more than 1,048,576 manual facts -- a million source
+// records, which is the very allocation the budget exists to avoid making in
+// CI as much as in production. The budget is a parameter of emitManualSignals
+// for exactly that reason, so the timing can be demonstrated at any size.
+// ---------------------------------------------------------------------------
+
+// manualFactsOnOnePool builds n manual facts that name no incarnation, so they
+// are matched to every episode on the pool, plus the index over them.
+func manualFactsOnOnePool(n int, dupes bool) (signalIndex, episodeSignals) {
+	yes := true
+	recs := make([]predictioneval.SourceRecord, 0, n)
+	for i := 0; i < n; i++ {
+		id := "m" + strconv.Itoa(i)
+		if dupes {
+			id = "m" + strconv.Itoa(i/2)
+		}
+		r := predictioneval.SourceRecord{
+			PoolInstanceID: "p0", CollectorSequence: int64(i), ObservationID: id,
+			Kind: kindManualControl, PayloadVersion: predictioneval.SupportedPayloadVersion,
+		}
+		r.Payload.Phase = predictioneval.PhaseCallStarted
+		r.Payload.Manual = &yes
+		recs = append(recs, r)
+	}
+	ix := indexSignals(recs, map[string]bool{})
+	ep := EpisodeIdentity{PoolInstanceID: "p0", RoundIncarnationID: "r0"}
+	return ix, ix.episodeSignals(ep, map[int64]bool{})
+}
+
+func TestManualBudgetStopsBeforeTheEntryThatWouldExceedIt(t *testing.T) {
+	t.Run("under the budget every entry is reported", func(t *testing.T) {
+		ix, sum := manualFactsOnOnePool(10, false)
+		got, total, over := ix.emitManualSignals(sum, nil, 0, 16)
+		if over || total != 10 || len(got) != 10 {
+			t.Fatalf("want 10 entries and no overrun, got %d/%d over=%v", len(got), total, over)
+		}
+	})
+
+	t.Run("at exactly the budget processing still succeeds", func(t *testing.T) {
+		// THE BOUNDARY, and the sense of the comparison is the whole test: a
+		// check written one off would refuse the last admissible entry.
+		ix, sum := manualFactsOnOnePool(16, false)
+		got, total, over := ix.emitManualSignals(sum, nil, 0, 16)
+		if over {
+			t.Fatal("at the exact budget, otherwise-valid processing must be supported")
+		}
+		if total != 16 || len(got) != 16 {
+			t.Fatalf("want the 16th entry reported, got %d/%d", len(got), total)
+		}
+	})
+
+	t.Run("one past the budget stops on that entry", func(t *testing.T) {
+		ix, sum := manualFactsOnOnePool(17, false)
+		got, total, over := ix.emitManualSignals(sum, nil, 0, 16)
+		if !over {
+			t.Fatal("the 17th entry must not be reported against a budget of 16")
+		}
+		if total != 16 || len(got) != 16 {
+			t.Fatalf("nothing past the budget may be appended: %d/%d", len(got), total)
+		}
+	})
+
+	t.Run("duplicates do not consume budget", func(t *testing.T) {
+		// 32 facts carrying 16 distinct observation ids. The budget counts
+		// what is REPORTED, so this is exactly at the budget, not twice it.
+		ix, sum := manualFactsOnOnePool(32, true)
+		got, total, over := ix.emitManualSignals(sum, nil, 0, 16)
+		if over {
+			t.Fatalf("a repeated observation id is reported once and must not be charged twice: %d", total)
+		}
+		if len(got) != 16 {
+			t.Fatalf("want 16 distinct entries, got %d", len(got))
+		}
+	})
+
+	t.Run("the running total carries across episodes", func(t *testing.T) {
+		// The accumulation half: a second episode's entries are charged to the
+		// same budget, and the refusal can fall in the middle of one.
+		ix, sum := manualFactsOnOnePool(10, false)
+		got, total, over := ix.emitManualSignals(sum, nil, 12, 16)
+		if !over {
+			t.Fatal("12 + 10 exceeds 16 and must be refused")
+		}
+		if total != 16 || len(got) != 4 {
+			t.Fatalf("want 4 more entries to exactly fill the budget, got %d/%d", len(got), total)
+		}
+	})
+}
+
+// TestOversizedEpisodeIsRefusedWithoutMaterializingItsList is the correction
+// this round was given by name: "a single large episode must not materialize
+// its entire over-budget list before discovering that it exceeds the budget".
+//
+// The old check added len(ep.ManualSignals) to the running total AFTER the
+// episode's list was built, so the list had to exist first. Here ONE episode
+// matches 200,000 manual facts against a budget of 16, and what the emission
+// allocates is measured: if the list were built first it would cost at least
+// 200,000 string headers, 3.2 MB.
+func TestOversizedEpisodeIsRefusedWithoutMaterializingItsList(t *testing.T) {
+	const facts, budget = 200000, 16
+	ix, sum := manualFactsOnOnePool(facts, false)
+
+	var before, after runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&before)
+	got, total, over := ix.emitManualSignals(sum, nil, 0, budget)
+	runtime.ReadMemStats(&after)
+
+	if !over || total != budget || len(got) != budget {
+		t.Fatalf("want a refusal at exactly the budget, got %d/%d over=%v", len(got), total, over)
+	}
+	grew := after.TotalAlloc - before.TotalAlloc
+	// The whole list would be 200,000 * 16 bytes of headers alone. A generous
+	// ceiling well under that says the list was never built: what this must
+	// allocate is a handful of entries and one small map.
+	const ceiling = 64 << 10
+	if grew > ceiling {
+		t.Fatalf("refusing an over-budget episode allocated %d bytes; the budgeted entries need far less, "+
+			"so the over-budget list was materialized", grew)
+	}
+}
+
+// TestManualMergeStopsWhenTheCallerSaysStop pins the mechanism the budget uses
+// to refuse without materializing: the merge must ABANDON the walk at the first
+// false, not run it out and discard the rest.
+//
+// It is here rather than at emitManualSignals because that is where it is
+// observable: the caller counts what it was handed, and a merge that ignored
+// the answer would hand it the whole list.
+func TestManualMergeStopsWhenTheCallerSaysStop(t *testing.T) {
+	_, sum := manualFactsOnOnePool(500, false)
+	seen := 0
+	sum.eachManualIndex(func(int) bool {
+		seen++
+		return seen < 4
+	})
+	if seen != 4 {
+		t.Fatalf("the merge must stop on the visit that returned false: it made %d visits of a possible 500", seen)
+	}
+	// And the control: when nothing says stop, every matched manual signal is
+	// visited exactly once.
+	all := 0
+	sum.eachManualIndex(func(int) bool { all++; return true })
+	if all != 500 {
+		t.Fatalf("an unstopped merge visits every matched manual signal once: %d", all)
+	}
+}
+
+// TestRepeatedObservationIdsDoNotMakeTheEmissionQuadratic pins the correction an
+// independent lane forced: the work that remains after the aggregates must be
+// proportional to what is REPORTED, and a duplicate is not reported.
+//
+// A duplicate observation id is deduplicated and never consumes budget, so it
+// cannot stop the merge either. Before the per-posting-list deduplication, a
+// dataset repeating one id therefore made every episode walk the whole matched
+// manual set to report a single entry -- the lane measured 4,000,000 merge
+// visits for 2,000 reported entries, on a shape the removed visit ceiling used
+// to refuse. This asserts the shape of that work, counted rather than timed.
+func TestRepeatedObservationIdsDoNotMakeTheEmissionQuadratic(t *testing.T) {
+	// k episodes on one event id, and k manual facts every one of them matches.
+	build := func(k int, oneID bool) signalIndex {
+		yes := true
+		recs := make([]predictioneval.SourceRecord, 0, 2*k)
+		for i := 0; i < k; i++ {
+			r := predictioneval.SourceRecord{
+				PoolInstanceID: "p0", RoundIncarnationID: "r" + strconv.Itoa(i), EventID: "e1",
+				CollectorSequence: int64(i), ObservationID: "a" + strconv.Itoa(i),
+				Kind: predictioneval.KindAutoDecision, PayloadVersion: predictioneval.SupportedPayloadVersion,
+			}
+			r.Payload.Phase = predictioneval.PhaseAutoDue
+			recs = append(recs, r)
+		}
+		for j := 0; j < k; j++ {
+			id := "m" + strconv.Itoa(j)
+			if oneID {
+				id = "m0"
+			}
+			m := predictioneval.SourceRecord{
+				PoolInstanceID: "p0", EventID: "e1",
+				CollectorSequence: int64(k + j), ObservationID: id,
+				Kind: kindManualControl, PayloadVersion: predictioneval.SupportedPayloadVersion,
+			}
+			m.Payload.Phase = predictioneval.PhaseCallStarted
+			m.Payload.Manual = &yes
+			recs = append(recs, m)
+		}
+		return indexSignals(recs, map[string]bool{"e1": true})
+	}
+	count := func(ix signalIndex, k int) (visits, reported int) {
+		for i := 0; i < k; i++ {
+			ep := EpisodeIdentity{PoolInstanceID: "p0", RoundIncarnationID: "r" + strconv.Itoa(i), EventID: "e1"}
+			sum := ix.episodeSignals(ep, map[int64]bool{})
+			seen := map[string]bool{}
+			sum.eachManualIndex(func(n int) bool {
+				visits++
+				if obs := ix.signals[n].rec.ObservationID; !seen[obs] {
+					seen[obs] = true
+					reported++
+				}
+				return true
+			})
+		}
+		return visits, reported
+	}
+
+	for _, k := range []int{200, 400} {
+		visits, reported := count(build(k, true), k)
+		if reported != k {
+			t.Fatalf("k=%d: every episode reports the one distinct id once: %d", k, reported)
+		}
+		// The whole point: k, not k*k.
+		if visits != k {
+			t.Fatalf("k=%d: %d merge visits to report %d entries -- the emission is walking the "+
+				"matched set instead of the report", k, visits, reported)
+		}
+	}
+	// The control: with DISTINCT ids every visit is a reported entry, so the
+	// work is the output and the output budget is what bounds it.
+	for _, k := range []int{200, 400} {
+		visits, reported := count(build(k, false), k)
+		if reported != k*k || visits != reported {
+			t.Fatalf("k=%d: want %d reported and the same number of visits, got %d/%d",
+				k, k*k, reported, visits)
+		}
+	}
+}
+
+// TestManualMergeVisitsASharedIndexOnce pins the property the merge's own
+// comment rests on, on a fixture that can actually observe it.
+//
+// A record carrying BOTH a known event id AND an incarnation sits in byEvent
+// and byPoolRound at once, so an episode matching both lists meets its index
+// twice unless the merge consumes every list that holds the current minimum.
+// The other fixtures here put every record in exactly ONE list, where "visited
+// once" and "visited once per list" are the same number -- an independent lane
+// showed a mutant that duplicates a shared index leaving the whole suite green.
+func TestManualMergeVisitsASharedIndexOnce(t *testing.T) {
+	const n = 5
+	yes := true
+	recs := make([]predictioneval.SourceRecord, 0, n)
+	for i := 0; i < n; i++ {
+		r := predictioneval.SourceRecord{
+			PoolInstanceID: "p0", RoundIncarnationID: "r0", EventID: "e1",
+			CollectorSequence: int64(i), ObservationID: "m" + strconv.Itoa(i),
+			Kind: kindManualControl, PayloadVersion: predictioneval.SupportedPayloadVersion,
+		}
+		r.Payload.Phase = predictioneval.PhaseCallStarted
+		r.Payload.Manual = &yes
+		recs = append(recs, r)
+	}
+	ix := indexSignals(recs, map[string]bool{"e1": true})
+	ep := EpisodeIdentity{PoolInstanceID: "p0", RoundIncarnationID: "r0", EventID: "e1"}
+
+	// The fixture must really share indices, or it proves nothing.
+	shared := 0
+	byRound := map[int]bool{}
+	for _, i := range ix.byPoolRound[poolRound{"p0", "r0"}] {
+		byRound[i] = true
+	}
+	for _, i := range ix.byEvent["e1"] {
+		if byRound[i] {
+			shared++
+		}
+	}
+	if shared != n {
+		t.Fatalf("the fixture must put every index in two posting lists: %d of %d", shared, n)
+	}
+
+	var got []int
+	ix.episodeSignals(ep, map[int64]bool{}).eachManualIndex(func(i int) bool {
+		got = append(got, i)
+		return true
+	})
+	if len(got) != n {
+		t.Fatalf("an index carried by two lists must be visited once: %v", got)
+	}
+	for i := 1; i < len(got); i++ {
+		if got[i] <= got[i-1] {
+			t.Fatalf("the merged order must be strictly ascending: %v", got)
+		}
+	}
+}
+
+// TestOneObservationIdFromTwoListsIsReportedOnce covers the case the
+// per-posting-list deduplication does NOT cover, and the reason the per-episode
+// seen-set is still there.
+//
+// Deduplicating each list removes a repeat WITHIN a list. The same observation
+// id can still reach one episode from two DIFFERENT lists, at two different
+// indices, and then only the emission's own set can tell that it is one entry.
+// The fixture below is built for exactly that: one manual fact carries the
+// episode's event and no incarnation, the other carries the episode's
+// incarnation and no event, and they share an observation id. Without this
+// case, disabling the emission's set changes nothing observable — an earlier
+// version of this suite had only within-list repeats, and the mutant survived.
+func TestOneObservationIdFromTwoListsIsReportedOnce(t *testing.T) {
+	yes := true
+	manual := func(seq int64, round, event, obs string) predictioneval.SourceRecord {
+		r := predictioneval.SourceRecord{
+			PoolInstanceID: "p0", RoundIncarnationID: round, EventID: event,
+			CollectorSequence: seq, ObservationID: obs,
+			Kind: kindManualControl, PayloadVersion: predictioneval.SupportedPayloadVersion,
+		}
+		r.Payload.Phase = predictioneval.PhaseCallStarted
+		r.Payload.Manual = &yes
+		return r
+	}
+	recs := []predictioneval.SourceRecord{
+		manual(1, "", "e1", "dup"),  // byEvent only
+		manual(2, "r0", "", "dup"),  // byPoolRound only
+		manual(3, "r0", "", "solo"), // byPoolRound only
+	}
+	ix := indexSignals(recs, map[string]bool{"e1": true})
+	ep := EpisodeIdentity{PoolInstanceID: "p0", RoundIncarnationID: "r0", EventID: "e1"}
+	sum := ix.episodeSignals(ep, map[int64]bool{})
+
+	// The fixture must really deliver the id from two lists, or it proves nothing.
+	seen, lists := map[string]int{}, 0
+	for _, l := range sum.manual {
+		if len(l) == 0 {
+			continue
+		}
+		lists++
+		for _, n := range l {
+			seen[ix.signals[n].rec.ObservationID]++
+		}
+	}
+	if lists != 2 || seen["dup"] != 2 {
+		t.Fatalf("the fixture must carry one id in two lists: %d lists, %v", lists, seen)
+	}
+
+	got, total, over := ix.emitManualSignals(sum, nil, 0, 16)
+	if over {
+		t.Fatalf("nothing here is near the budget: %d", total)
+	}
+	if len(got) != 2 || got[0] != "dup" || got[1] != "solo" {
+		t.Fatalf("the shared id is reported ONCE, in merged order: %v", got)
+	}
+	if total != 2 {
+		t.Fatalf("and it is charged once: %d", total)
+	}
+
+	// AND THE SKIP MUST HAPPEN BEFORE THE BUDGET IS CONSULTED, which is only
+	// observable at the boundary: with room for exactly one entry, the second
+	// arrival of the same id must be skipped and the selection must SUCCEED.
+	// Checking the budget first would abort on it -- a dataset refused for
+	// reporting an entry it does not report.
+	// Just the two shared-id entries: byEvent holds "dup" alone, byPoolRound
+	// holds "dup" then "solo", so the second list is cut to its first entry.
+	only := episodeSignals{call: -1, manual: [3][]int{sum.manual[0], sum.manual[1][:1], nil}}
+	if len(only.manual[0]) != 1 || len(only.manual[1]) != 1 ||
+		ix.signals[only.manual[0][0]].rec.ObservationID != "dup" ||
+		ix.signals[only.manual[1][0]].rec.ObservationID != "dup" {
+		t.Fatalf("this case needs exactly the two shared-id entries: %v", only.manual)
+	}
+	got, total, over = ix.emitManualSignals(only, nil, 0, 1)
+	if over || total != 1 || len(got) != 1 || got[0] != "dup" {
+		t.Fatalf("a duplicate at the exact budget is skipped, not refused: %v total=%d over=%v",
+			got, total, over)
+	}
+}
+
+// TestUnspentStartKeepsTheFIRSTIndexOnItsScope pins the rule the coverage-reason
+// ORDER rests on, which the differential oracle cannot reach.
+//
+// An aggregate records the first index per (pool, incarnation) that carried an
+// unspent start, because UNCLASSIFIED_FACT_ON_ROUND is appended at the position
+// a walk would have met it and that position orders it against the other
+// reasons. Keeping the LAST index instead flips an exported list -- and the
+// randomized generator never builds the shape that shows it: two unspent
+// automatic starts on one incarnation with another mark-producing fact strictly
+// between them. An independent lane found that gap; this is the shape.
+func TestUnspentStartKeepsTheFIRSTIndexOnItsScope(t *testing.T) {
+	start := func(seq int64, attempt int64) predictioneval.SourceRecord {
+		r := predictioneval.SourceRecord{
+			PoolInstanceID: "p0", RoundIncarnationID: "r0", EventID: "e0",
+			CollectorSequence: seq, ObservationID: "s" + strconv.FormatInt(attempt, 10),
+			Kind: predictioneval.KindPlacement, PayloadVersion: predictioneval.SupportedPayloadVersion,
+		}
+		r.Payload.Phase = predictioneval.PhaseCallStarted
+		r.Payload.Counters = map[string]int64{predictioneval.CounterAutoAttemptID: attempt}
+		return r
+	}
+	bad := predictioneval.SourceRecord{
+		PoolInstanceID: "p0", RoundIncarnationID: "r0", EventID: "e0",
+		CollectorSequence: 2, ObservationID: "u1",
+		Kind: "channel_event", PayloadUndecodable: true,
+		PayloadVersion: predictioneval.SupportedPayloadVersion,
+	}
+	// start(1) ... undecodable(2) ... start(3): the unspent-start mark belongs
+	// to index 0 and must be appended BEFORE the undecodable one at index 1.
+	ix := indexSignals([]predictioneval.SourceRecord{start(1, 1), bad, start(3, 2)},
+		map[string]bool{"e0": true})
+	ep := EpisodeIdentity{PoolInstanceID: "p0", RoundIncarnationID: "r0", EventID: "e0"}
+
+	agg := ix.poolRoundAggregate(poolRound{"p0", "r0"})
+	if agg == nil {
+		t.Fatal("the fixture must build a pool-round list")
+	}
+	if got, ok := agg.unspentStarts[poolRound{"p0", "r0"}]; !ok || got != 0 {
+		t.Fatalf("the FIRST unspent start on the scope is index 0, got %d (present=%v)", got, ok)
+	}
+
+	sum := ix.episodeSignals(ep, map[int64]bool{})
+	want := []string{CoverageUnclassifiedFact, CoverageUndecodableFact}
+	if sum.coverage.Proven || len(sum.coverage.Reasons) != len(want) {
+		t.Fatalf("want %v, got %+v", want, sum.coverage)
+	}
+	for i := range want {
+		if sum.coverage.Reasons[i] != want[i] {
+			t.Fatalf("the reason order is output: want %v, got %v", want, sum.coverage.Reasons)
+		}
+	}
+	// And the oracle agrees, on this shape the generator does not build.
+	if !sameOutcome(ix.outcomeByWalk(ep, map[int64]bool{}), ix.outcomeByAggregate(ep, map[int64]bool{})) {
+		t.Fatal("the aggregate path and the walk disagree on this shape")
+	}
 }
