@@ -3661,3 +3661,129 @@ func TestDecisionDoesNotBuildItsDerivationBeforeItsGates(t *testing.T) {
 		}
 	})
 }
+
+// TestNoP3bRulesetCarryingTextItCannotExpressIsVerified is the fourth artifact
+// of the encoding class, and it exists because the other three taught the same
+// lesson three times: a row in doc.go's table that says "closed by
+// CONSTRUCTION" is an argument until something runs it.
+//
+// This one IS closed, and the table can now say so with receipts instead of
+// reasoning. Every string a P3bRuleset holds is covered, by three different
+// gates -- which is itself the reason the row is trustworthy: no single
+// mechanism is carrying it.
+//
+//   - ConfigID and a rule's Comparator, the only strings the CONFIG holds, are
+//     compared against the config decoded from the raw bytes. Any JSON decode
+//     substitutes U+FFFD, so an invalid byte on either side makes the two
+//     differ. Both placements are covered: in the typed config alone, and in
+//     the typed config AND the raw bytes together with the hash re-derived,
+//     which is the shape a supplier who controls both would send.
+//   - RulesetID is held equal to Config.ConfigID.
+//   - RawSHA256 and NativeConfigDigest are held to 64 lower-case hex digits.
+//
+// RawBytes needs no clause: it is []byte, which JSON carries as base64 and
+// returns byte for byte.
+//
+// Also recorded, because it is a stronger closure one layer down and this
+// package does not own it: the native core REFUSES to digest a config whose
+// text it cannot encode (REFUSED/SUPPLIED_TEXT_NOT_ENCODABLE), so a supplier
+// cannot obtain an honest NativeConfigDigest for one in the first place. The
+// gates above are what this package can state on its own.
+func TestNoP3bRulesetCarryingTextItCannotExpressIsVerified(t *testing.T) {
+	const invalid = "\xff\xfe\x80"
+	base := predictioneval.OrderedRulesConfig{ConfigID: "cfg", HasDefault: true,
+		Default: predictioneval.OrderedRulesDefault{RawMinPercent: 0, RawMaxPercent: 100,
+			Points: predictioneval.OrderedRulesPoints{MaxValue: 10, RawPercent: 5}}}
+	good := rulesetFrom(t, base)
+	if _, err := p4offline.VerifyP3bRuleset(good); err != nil {
+		t.Fatalf("the control must verify: %v", err)
+	}
+	var back p4offline.P3bRuleset
+	if err := json.Unmarshal(mustMarshal(t, good), &back); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p4offline.VerifyP3bRuleset(back); err != nil {
+		t.Fatalf("the control must survive its own round trip: %v", err)
+	}
+
+	rehash := func(r p4offline.P3bRuleset) p4offline.P3bRuleset {
+		sum := sha256.Sum256(r.RawBytes)
+		r.RawSHA256 = hex.EncodeToString(sum[:])
+		return r
+	}
+	withComparator := func(cmp predictioneval.OrderedRuleComparator) predictioneval.OrderedRulesConfig {
+		c := base
+		c.Detailed = []predictioneval.OrderedRule{{Comparator: cmp, RawThresholdPercent: 1,
+			RawAttemptRatePercent: 1, Points: predictioneval.OrderedRulesPoints{MaxValue: 1, RawPercent: 1}}}
+		return c
+	}
+	for _, tc := range []struct {
+		name  string
+		build func() p4offline.P3bRuleset
+		want  error
+	}{
+		{"config id, in the typed config only", func() p4offline.P3bRuleset {
+			r := good
+			r.Config.ConfigID = "cfg" + invalid
+			r.RulesetID = r.Config.ConfigID
+			return r
+		}, p4offline.ErrRulesetConfigMismatch},
+		{"config id, in the typed config and the raw bytes", func() p4offline.P3bRuleset {
+			r := good
+			r.Config.ConfigID = "cfg" + invalid
+			r.RulesetID = r.Config.ConfigID
+			r.RawBytes = mustMarshal(t, r.Config)
+			return rehash(r)
+		}, p4offline.ErrRulesetConfigMismatch},
+		{"a detailed rule's comparator", func() p4offline.P3bRuleset {
+			r := good
+			r.Config = withComparator(predictioneval.ComparatorGe + invalid)
+			r.RawBytes = mustMarshal(t, r.Config)
+			return rehash(r)
+		}, p4offline.ErrRulesetConfigMismatch},
+		{"ruleset id", func() p4offline.P3bRuleset {
+			r := good
+			r.RulesetID = "cfg" + invalid
+			return r
+		}, p4offline.ErrRulesetIdentity},
+		{"raw sha256", func() p4offline.P3bRuleset {
+			r := good
+			r.RawSHA256 = "ab" + invalid
+			return r
+		}, p4offline.ErrRulesetRawHash},
+		{"native config digest", func() p4offline.P3bRuleset {
+			r := good
+			r.NativeConfigDigest = "ab" + invalid
+			return r
+		}, p4offline.ErrRulesetNativeDigest},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := p4offline.VerifyP3bRuleset(tc.build()); !errors.Is(err, tc.want) {
+				t.Fatalf("invalid UTF-8 at %s: got %v, want %v", tc.name, err, tc.want)
+			}
+		})
+	}
+	// The control per position: the same shapes with a VALID wide string, which
+	// must verify. Without it this would pass on a gate that refused every
+	// ruleset.
+	const validWide = "ok-\u00e9-\uFFFD"
+	for _, tc := range []struct {
+		name  string
+		build func() p4offline.P3bRuleset
+	}{
+		{"config id", func() p4offline.P3bRuleset {
+			c := base
+			c.ConfigID = "cfg" + validWide
+			return rulesetFrom(t, c)
+		}},
+		{"a detailed rule's comparator", func() p4offline.P3bRuleset {
+			return rulesetFrom(t, withComparator(predictioneval.ComparatorGe))
+		}},
+	} {
+		t.Run("valid wide text at "+tc.name, func(t *testing.T) {
+			if _, err := p4offline.VerifyP3bRuleset(tc.build()); err != nil {
+				t.Fatalf("a valid multi-byte string must verify: %v", err)
+			}
+		})
+	}
+}

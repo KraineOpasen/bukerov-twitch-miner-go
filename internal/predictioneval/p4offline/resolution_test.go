@@ -9,6 +9,7 @@ package p4offline_test
 // same stake alone, or a terminal WON/LOST.
 
 import (
+	"encoding/json"
 	"errors"
 	"reflect"
 	"strings"
@@ -452,4 +453,122 @@ func TestEveryReachableResolutionStringRefusesInvalidUTF8(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestProjectResolutionNeverMintsAnArtifactItsOwnVerifierRefuses closes the
+// producer half of the class the verifier gate above closes.
+//
+// Gating only VerifyResolutionArtifact left the package's own exported
+// projector able to MINT an artifact that fails its own verifier: an
+// invalid-UTF-8 Round.ChannelID yielded WINNER_KNOWN with NO refusals,
+// retaining the bad bytes. That is the same producer/verifier contradiction the
+// factset's build-path gate had already removed, and it survived one commit
+// because that repair was made at the verifier only.
+//
+// Each case asserts the three things that together mean "asserts nothing, and
+// can be stored": the projection carries the refusal, it does NOT retain the
+// unrepresentable bytes, and the artifact it returns verifies and survives a
+// JSON round trip.
+func TestProjectResolutionNeverMintsAnArtifactItsOwnVerifierRefuses(t *testing.T) {
+	const invalid = "\xff\xfe\x80"
+	for _, tc := range []struct {
+		name  string
+		place func(*p4offline.ResolutionEvidence)
+		read  func(p4offline.ResolutionArtifact) string
+	}{
+		{"round channel id", func(e *p4offline.ResolutionEvidence) { e.Round.ChannelID = invalid },
+			func(a p4offline.ResolutionArtifact) string { return a.Round.ChannelID }},
+		{"round event id", func(e *p4offline.ResolutionEvidence) { e.Round.EventID = invalid },
+			func(a p4offline.ResolutionArtifact) string { return a.Round.EventID }},
+		{"an ordered outcome id", func(e *p4offline.ResolutionEvidence) { e.OrderedOutcomeIDs[1] = invalid },
+			func(a p4offline.ResolutionArtifact) string { return a.OrderedOutcomeIDs[1] }},
+		{"proof basis", func(e *p4offline.ResolutionEvidence) { e.ProofBasis = invalid },
+			func(a p4offline.ResolutionArtifact) string { return a.ProofBasis }},
+		{"projector revision", func(e *p4offline.ResolutionEvidence) { e.ProjectorRevision = invalid },
+			func(a p4offline.ResolutionArtifact) string { return a.ProjectorRevision }},
+		{"an evidence reference observation id",
+			func(e *p4offline.ResolutionEvidence) { e.EvidenceReferences[0].ObservationID = invalid },
+			func(a p4offline.ResolutionArtifact) string { return a.EvidenceReferences[0].ObservationID }},
+		// Availability is here although an unrepresentable value ALSO falls
+		// outside the closed vocabulary and is refused on that ground. The two
+		// refusals are not interchangeable: the vocabulary one would leave the
+		// bytes in the artifact, framed by the digest, so the artifact would
+		// still fail its own round trip while looking properly refused.
+		{"availability", func(e *p4offline.ResolutionEvidence) { e.Availability = p4offline.Availability(invalid) },
+			func(a p4offline.ResolutionArtifact) string { return string(a.Availability) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ev := goodWinnerEvidence()
+			tc.place(&ev)
+			a := p4offline.ProjectResolution(ev)
+
+			if a.Outcome != p4offline.ResolutionUnknown {
+				t.Fatalf("outcome = %v, want UNKNOWN: a refused projection must assert nothing", a.Outcome)
+			}
+			if !containsString(a.Refusals, p4offline.ResolutionRefusalTextNotExpressible) {
+				t.Fatalf("refusals = %v, want %s", a.Refusals, p4offline.ResolutionRefusalTextNotExpressible)
+			}
+			if got := tc.read(a); got == invalid {
+				t.Fatalf("the projection RETAINED the unrepresentable bytes at %s", tc.name)
+			}
+			// What the drop is for: the artifact this package minted must be
+			// one it can itself verify and store.
+			if err := p4offline.VerifyResolutionArtifact(a); err != nil {
+				t.Fatalf("the package minted an artifact its own verifier refuses: %v", err)
+			}
+			raw, err := json.Marshal(a)
+			if err != nil {
+				t.Fatalf("json.Marshal: %v", err)
+			}
+			var back p4offline.ResolutionArtifact
+			if err := json.Unmarshal(raw, &back); err != nil {
+				t.Fatal(err)
+			}
+			if err := p4offline.VerifyResolutionArtifact(back); err != nil {
+				t.Fatalf("the artifact did not survive its own JSON round trip: %v", err)
+			}
+		})
+	}
+
+	// The control: valid evidence still projects a WINNER_KNOWN with no
+	// refusals, so the gate above is not refusing everything.
+	a := p4offline.ProjectResolution(goodWinnerEvidence())
+	if a.Outcome != p4offline.ResolutionWinnerKnown || len(a.Refusals) != 0 {
+		t.Fatalf("valid evidence = %v with refusals %v, want WINNER_KNOWN and none", a.Outcome, a.Refusals)
+	}
+
+	// AND THE CALLER'S EVIDENCE IS NOT TOUCHED. ProjectResolution takes its
+	// argument by value, which protects the scalars and protects nothing else:
+	// OrderedOutcomeIDs and EvidenceReferences are slices, so blanking an
+	// element in place would reach through the copy and edit the caller's own
+	// value. That is the harder half of "drop rather than carry" -- a producer
+	// that silently rewrote its input would be a worse defect than the one it
+	// was added to fix -- and it is the shape of the aliasing trap this
+	// package's reflection walkers hit one round earlier, so it is asserted
+	// rather than assumed.
+	t.Run("the caller's evidence is not rewritten", func(t *testing.T) {
+		for _, tc := range []struct {
+			name  string
+			place func(*p4offline.ResolutionEvidence)
+		}{
+			{"an ordered outcome id", func(e *p4offline.ResolutionEvidence) { e.OrderedOutcomeIDs[1] = invalid }},
+			{"an evidence reference observation id",
+				func(e *p4offline.ResolutionEvidence) { e.EvidenceReferences[0].ObservationID = invalid }},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				ev := goodWinnerEvidence()
+				tc.place(&ev)
+				before := p4offline.ResolutionEvidence{
+					OrderedOutcomeIDs:  append([]string(nil), ev.OrderedOutcomeIDs...),
+					EvidenceReferences: append([]p4offline.EvidenceReference(nil), ev.EvidenceReferences...),
+				}
+				_ = p4offline.ProjectResolution(ev)
+				if !reflect.DeepEqual(ev.OrderedOutcomeIDs, before.OrderedOutcomeIDs) ||
+					!reflect.DeepEqual(ev.EvidenceReferences, before.EvidenceReferences) {
+					t.Fatalf("ProjectResolution edited the caller's evidence through a shared slice:\n before %+v / %+v\n  after %+v / %+v",
+						before.OrderedOutcomeIDs, before.EvidenceReferences, ev.OrderedOutcomeIDs, ev.EvidenceReferences)
+				}
+			})
+		}
+	})
 }

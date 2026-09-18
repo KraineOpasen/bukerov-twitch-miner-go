@@ -4,6 +4,7 @@ import (
 	"errors"
 	"sort"
 	"strconv"
+	"unicode/utf8"
 
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/predictioneval"
 )
@@ -281,6 +282,11 @@ type SourceRoundEntry struct {
 // claims the caller supplied. An event id can carry two entries: its
 // reconciled one and an INVALID one for claims that named it without a
 // factset digest.
+//
+// INVALID also holds the claims this registry's encoding cannot carry: a claim
+// with invalid UTF-8 in any of its strings is recorded with those strings, and
+// its round name, dropped. See expressibleClaim for why the bytes are not kept
+// and why the round name goes with them.
 type SourceRoundRegistry struct {
 	Version string             `json:"version"`
 	Entries []SourceRoundEntry `json:"entries"`
@@ -1922,6 +1928,83 @@ func ClaimSourceRound(ds predictioneval.SourceDataset, fs CommonFactset) (Source
 	return SourceRoundClaim{Episode: ep.Episode, Attempt: ep.Attempt.Key, FactsetDigest: fs.Digest}, nil
 }
 
+// claimTextFault names the first string in a claim that a registry's own
+// encoding cannot carry unchanged, or "" when there is none.
+//
+// The seven are every string the claim holds. Six of them reach the digest only
+// through claimKey, which is hex and therefore always expressible -- but the
+// digest is not the exposure here: SourceRoundEntry.Claims carries the claim
+// itself, so the registry holds the bytes whether or not it hashes them.
+//
+// It names the FIELD and never the value, which is the rule the identity gates
+// in p3b.go arrived at the expensive way: re-exporting caller text on a refusal
+// path is unbounded work to say that something is wrong. A field name is a
+// constant.
+func claimTextFault(c SourceRoundClaim) string {
+	for _, f := range [...]struct{ what, v string }{
+		{"episode collector session id", c.Episode.CollectorSessionID},
+		{"episode pool instance id", c.Episode.PoolInstanceID},
+		{"episode round incarnation id", c.Episode.RoundIncarnationID},
+		{"episode event id", c.Episode.EventID},
+		{"attempt collector session id", c.Attempt.CollectorSessionID},
+		{"attempt pool instance id", c.Attempt.PoolInstanceID},
+		{"factset digest", c.FactsetDigest},
+	} {
+		if !utf8.ValidString(f.v) {
+			return f.what
+		}
+	}
+	return ""
+}
+
+// expressibleClaim drops from a claim every string this registry's own encoding
+// cannot carry unchanged -- and, whichever string was at fault, the round name
+// with them.
+//
+// DROPPING RATHER THAN REFUSING-AND-CARRYING is the rule expressibleEvidence
+// applies in resolution.go, for the same reason. Invalid UTF-8 is not a value
+// that cannot be written: it is a value that IS written and written WRONG,
+// because encoding/json substitutes U+FFFD. A registry that frames those bytes
+// marshals without error, comes back different and then fails its OWN
+// re-derivation -- presenting as the one signal this package reserves for
+// tampering. Routing the claim to INVALID while still recording its bytes would
+// leave the registry exactly as unwritable as before, so the bytes must not be
+// carried at all.
+//
+// THE ROUND NAME GOES TOO, EVEN WHEN IT WAS VALID, and that is what makes this
+// idempotent rather than merely clean. VerifySourceRoundRegistry re-reconciles
+// a registry from its own entries, so whatever this returns has to land in the
+// same INVALID bucket on the second pass; the only thing that puts a claim
+// there is an empty round name or an empty digest, and a claim whose text this
+// registry cannot carry names no round it can carry.
+//
+// WHAT IS KEPT is everything expressible: both epochs, the attempt id, and any
+// identity component that was valid. Blanking only the OFFENDING string and
+// leaving the claim reconcilable was the other candidate, and it is wrong in
+// the direction this package cares most about: two claims differing only in an
+// unrepresentable pool instance id would blank to the same value, frame alike
+// and DEDUPLICATE_IDENTICAL -- the identity aliasing EpisodeIdentity.String's
+// length prefixes exist to prevent, arrived at in the CANONICAL position. Here
+// the aliasing that remains is between two INVALID entries, which stand for no
+// round and carry no canonical claim; the claims are still counted one entry
+// each, so nothing leaves the denominator.
+func expressibleClaim(c SourceRoundClaim) SourceRoundClaim {
+	keep := func(v string) string {
+		if utf8.ValidString(v) {
+			return v
+		}
+		return ""
+	}
+	c.Episode.CollectorSessionID = keep(c.Episode.CollectorSessionID)
+	c.Episode.PoolInstanceID = keep(c.Episode.PoolInstanceID)
+	c.Episode.RoundIncarnationID = keep(c.Episode.RoundIncarnationID)
+	c.Episode.EventID = ""
+	c.Attempt.CollectorSessionID = keep(c.Attempt.CollectorSessionID)
+	c.Attempt.PoolInstanceID = keep(c.Attempt.PoolInstanceID)
+	c.FactsetDigest = keep(c.FactsetDigest)
+	return c
+}
+
 // ReconcileSourceRounds is seam 3 across datasets: one public round, one
 // canonical claim, or none.
 //
@@ -1930,16 +2013,105 @@ func ClaimSourceRound(ds predictioneval.SourceDataset, fs CommonFactset) (Source
 // session loaded twice produces. Anything else on one public round is a
 // CONFLICT, and a conflict has no canonical claim: it is fail-closed, not
 // tie-broken.
+//
+// THE REGISTRY IT RETURNS CAN ALWAYS BE WRITTEN DOWN AND READ BACK, and that
+// took a repair here rather than a gate one function later. A claim whose text
+// this encoding cannot carry is routed to INVALID with that text dropped
+// (expressibleClaim), so no registry this function mints can fail the
+// re-derivation VerifySourceRoundRegistry performs on it. It used to mint
+// exactly that: a registry that VERIFIED, marshalled without error and then
+// failed its own re-derivation, because the bytes it framed came back as
+// U+FFFD.
+//
+// checkRegistryTextExpressible refuses a registry carrying a string this
+// package's own encoding cannot carry unchanged.
+//
+// ITS NECESSITY IS A JUDGEMENT THAT WAS MADE THE OTHER WAY FIRST, so the
+// reasoning is here rather than in a review thread. The repair for this class
+// went into the PRODUCER: ReconcileSourceRounds drops what it cannot carry, and
+// since registryDigest is unexported and the reconciler is the only exported
+// source of a registry, no consistent uncarriable registry could then be
+// obtained at all -- checked per position, and every hand-edited one is refused
+// by the two gates below. On that footing a scan here looked like work above a
+// gate that already refuses without it.
+//
+// TWO INDEPENDENT EXTERNAL REVIEWS ASKED FOR IT ANYWAY, and they were right,
+// for a reason neither had to state: that argument rests on the absence of an
+// exported serializer -- a property of this package's SURFACE, which the next
+// commit can change silently -- while the sibling gates in factset.go and
+// resolution.go rest on the artifact itself. This package has now been wrong
+// twice about a class it declared shut by reasoning, so the gate that cannot
+// quietly stop holding is the one to have. It is also the cheaper half of the
+// pair: a UTF-8 scan walks the same bytes registryDigest is about to HASH.
+//
+// Both halves are kept, and neither substitutes for the other. Without the
+// producer repair this gate would make ReconcileSourceRounds mint registries
+// its own verifier refuses -- the exact producer/verifier contradiction this
+// round found at the factset and again at the resolution artifact.
+func checkRegistryTextExpressible(reg SourceRoundRegistry) error {
+	lossy := func(what string) error {
+		return errors.Join(ErrSourceRoundRegistry, errors.New("p4offline: "+what+
+			" is not valid UTF-8, so this registry's own encoding cannot carry it unchanged"))
+	}
+	for i, e := range reg.Entries {
+		at := "entry " + strconv.Itoa(i) + " "
+		switch {
+		case !utf8.ValidString(e.EventID):
+			return lossy(at + "event id")
+		case !utf8.ValidString(string(e.Status)):
+			return lossy(at + "status")
+		}
+		for j, c := range e.Claims {
+			if what := claimTextFault(c); what != "" {
+				return lossy(at + "claim " + strconv.Itoa(j) + " " + what)
+			}
+		}
+		// Canonical is framed by registryDigest as a BOOLEAN only, so a
+		// canonical claim is the one position in a registry whose bytes the
+		// digest does not cover. Re-reconciliation catches a fabricated one --
+		// but only by disagreeing, and this names it.
+		if e.Canonical != nil {
+			if what := claimTextFault(*e.Canonical); what != "" {
+				return lossy(at + "canonical claim " + what)
+			}
+		}
+	}
+	return nil
+}
+
+// VerifySourceRoundRegistry carries the matching gate, as the other two
+// verifiers do -- see checkRegistryTextExpressible, which records why that gate
+// was judged unnecessary first and why the judgement was wrong. This repair is
+// the half that gate cannot do: without it, minting would produce registries
+// the verifier refuses.
+//
+// This refuses nothing ClaimSourceRound derives: every string a derived claim
+// carries has already passed checkFactsetValuesExpressible on the factset it
+// came from, which is pinned rather than argued in
+// TestADerivedClaimIsNeverRoutedInvalidForItsText.
 func ReconcileSourceRounds(claims []SourceRoundClaim) SourceRoundRegistry {
 	out := SourceRoundRegistry{Version: SourceRoundRegistryVersion}
 	groups := map[string][]SourceRoundClaim{}
 	var invalid []SourceRoundClaim
 	for _, c := range claims {
-		if c.Episode.EventID == "" || c.FactsetDigest == "" {
+		switch {
+		// THE O(len) TEST RUNS AHEAD OF THE TWO O(1) ONES, against this
+		// package's own ordering rule, and the exception is the point: the
+		// cheap clauses do not merely refuse, they decide what is RECORDED,
+		// and what they record is the claim verbatim. Reaching them first
+		// would write the unrepresentable bytes into the registry on exactly
+		// the path meant to keep them out. Cost, measured rather than
+		// asserted, is in TestTheExpressibilityRoutingAllocatesNothing: the
+		// scan allocates nothing, and this function's total allocation count
+		// is identical with the routing present and absent at every size and
+		// identifier width measured.
+		case claimTextFault(c) != "":
+			invalid = append(invalid, expressibleClaim(c))
+		case c.Episode.EventID == "" || c.FactsetDigest == "":
 			invalid = append(invalid, c)
-			continue
+		default:
+			groups[c.Episode.EventID] = append(groups[c.Episode.EventID], c)
 		}
-		groups[c.Episode.EventID] = append(groups[c.Episode.EventID], c)
 	}
 	ids := make([]string, 0, len(groups))
 	for id := range groups {
@@ -2093,6 +2265,13 @@ func VerifySourceRoundRegistry(reg SourceRoundRegistry) error {
 	// bytes and 34.9 / 75.1 / 144.6 / 192.8 ms at n = 2,000 / 4,000 / 8,000 /
 	// 16,000 claims -- 100.0% of the cost of a VALID verification, to refuse on
 	// a 64-character comparison. Halved by asking the digest first.
+	// AHEAD OF THE DIGEST, and cheaper than it: this scans the same bytes
+	// registryDigest is about to hash, without hashing them. An uncarriable
+	// registry is refused here rather than after a full framing pass, and an
+	// honest one pays a walk it was going to pay anyway.
+	if err := checkRegistryTextExpressible(reg); err != nil {
+		return err
+	}
 	if reg.Digest != registryDigest(reg.Entries) {
 		return ErrSourceRoundRegistry
 	}

@@ -16,6 +16,7 @@ import (
 	"runtime"
 	"sort"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/predictioneval"
@@ -992,5 +993,129 @@ func TestUnspentStartKeepsTheFIRSTIndexOnItsScope(t *testing.T) {
 	// And the oracle agrees, on this shape the generator does not build.
 	if !sameOutcome(ix.outcomeByWalk(ep, map[int64]bool{}), ix.outcomeByAggregate(ep, map[int64]bool{})) {
 		t.Fatal("the aggregate path and the walk disagree on this shape")
+	}
+}
+
+// TestTheExpressibilityRoutingAllocatesNothing pins the cost the routing's own
+// comment claims, and it is internal because the two functions it measures are
+// not reachable from outside.
+//
+// ReconcileSourceRounds now runs an O(len) test on every claim AHEAD of two
+// O(1) ones -- deliberately, since the cheap clauses decide what is recorded
+// and would record the very bytes the expensive one exists to keep out. That
+// inversion is only defensible if the scan is a scan and nothing more. It is:
+// with the routing added and removed, ReconcileSourceRounds allocates the same
+// COUNT at every size and width measured -- 867 / 1,733 / 3,530 at n = 64 /
+// 128 / 256 one-byte identities, 932 / 1,863 / 3,789 at 64 bytes and 998 /
+// 1,993 / 4,047 at 4,096 -- identical on both sides. Those figures are a
+// measurement of the whole function and would not notice a small regression,
+// so what is ASSERTED here is the exact thing: zero.
+func TestTheExpressibilityRoutingAllocatesNothing(t *testing.T) {
+	wide := strings.Repeat("w", 4096)
+	good := SourceRoundClaim{
+		Episode: EpisodeIdentity{CollectorEpoch: 1, CollectorSessionID: wide, PoolInstanceID: wide,
+			RoundIncarnationID: wide, EventID: wide},
+		Attempt:       predictioneval.AttemptKey{CollectorEpoch: 1, CollectorSessionID: wide, PoolInstanceID: wide, AttemptID: 1},
+		FactsetDigest: wide,
+	}
+	bad := good
+	bad.Attempt.PoolInstanceID = "\xff\xfe\x80"
+	cleanRegistry := ReconcileSourceRounds([]SourceRoundClaim{good})
+
+	for _, tc := range []struct {
+		name string
+		run  func()
+	}{
+		{"claimTextFault on a claim it accepts", func() { _ = claimTextFault(good) }},
+		{"claimTextFault on a claim it refuses", func() { _ = claimTextFault(bad) }},
+		{"checkRegistryTextExpressible on a registry it accepts", func() { _ = checkRegistryTextExpressible(cleanRegistry) }},
+		{"expressibleClaim", func() { _ = expressibleClaim(bad) }},
+	} {
+		if got := testing.AllocsPerRun(200, tc.run); got != 0 {
+			t.Errorf("%s allocates %.0f times, want 0", tc.name, got)
+		}
+	}
+}
+
+// TestExpressibleClaimIsIdempotentAndRoutesBackToInvalid pins the property the
+// registry's whole self-re-derivation rests on, and it is the one this repair
+// could most easily have got subtly wrong.
+//
+// VerifySourceRoundRegistry flattens a registry's entries and reconciles them
+// AGAIN, so every claim ReconcileSourceRounds records has to land where it
+// landed the first time. A blanked claim therefore has to satisfy two things
+// at once: it must be expressible (or the first clause would blank it a second
+// time, which is harmless only because expressibleClaim is idempotent), and it
+// must still reach the INVALID bucket (or the second pass would reconcile it as
+// evidence and the registry would not re-derive). The second is why the round
+// name is dropped even when the round name was valid -- the one part of this
+// repair that costs information, and the part with no other way to be right.
+func TestExpressibleClaimIsIdempotentAndRoutesBackToInvalid(t *testing.T) {
+	const invalid = "\xff\xfe\x80"
+	full := SourceRoundClaim{
+		Episode: EpisodeIdentity{CollectorEpoch: 3, CollectorSessionID: "s", PoolInstanceID: "p",
+			RoundIncarnationID: "r", EventID: "e"},
+		Attempt:       predictioneval.AttemptKey{CollectorEpoch: 3, CollectorSessionID: "as", PoolInstanceID: "ap", AttemptID: 9},
+		FactsetDigest: "d",
+	}
+	set := []func(*SourceRoundClaim){
+		func(c *SourceRoundClaim) { c.Episode.CollectorSessionID = invalid },
+		func(c *SourceRoundClaim) { c.Episode.PoolInstanceID = invalid },
+		func(c *SourceRoundClaim) { c.Episode.RoundIncarnationID = invalid },
+		func(c *SourceRoundClaim) { c.Episode.EventID = invalid },
+		func(c *SourceRoundClaim) { c.Attempt.CollectorSessionID = invalid },
+		func(c *SourceRoundClaim) { c.Attempt.PoolInstanceID = invalid },
+		func(c *SourceRoundClaim) { c.FactsetDigest = invalid },
+	}
+	// Every SUBSET of the seven, so a claim broken at several positions at once
+	// is covered as well as one broken at a single position.
+	for mask := 1; mask < 1<<len(set); mask++ {
+		c := full
+		for i := range set {
+			if mask&(1<<i) != 0 {
+				set[i](&c)
+			}
+		}
+		if claimTextFault(c) == "" {
+			t.Fatalf("mask %d: a claim carrying invalid UTF-8 was called expressible", mask)
+		}
+		once := expressibleClaim(c)
+		if claimTextFault(once) != "" {
+			t.Fatalf("mask %d: expressibleClaim left text it cannot express: %+v", mask, once)
+		}
+		if once.Episode.EventID != "" {
+			t.Fatalf("mask %d: a blanked claim still names a round, so it would reconcile as evidence on the second pass: %+v", mask, once)
+		}
+		if twice := expressibleClaim(once); twice != once {
+			t.Fatalf("mask %d: expressibleClaim is not idempotent: %+v then %+v", mask, once, twice)
+		}
+		// The numbers are expressible and are kept; so is every identity
+		// component that was valid. Losing them would be a silent narrowing of
+		// what an INVALID entry records.
+		if once.Episode.CollectorEpoch != full.Episode.CollectorEpoch ||
+			once.Attempt.CollectorEpoch != full.Attempt.CollectorEpoch ||
+			once.Attempt.AttemptID != full.Attempt.AttemptID {
+			t.Fatalf("mask %d: an expressible number was dropped: %+v", mask, once)
+		}
+		for i, kept := range []struct {
+			got, want string
+		}{
+			{once.Episode.CollectorSessionID, full.Episode.CollectorSessionID},
+			{once.Episode.PoolInstanceID, full.Episode.PoolInstanceID},
+			{once.Episode.RoundIncarnationID, full.Episode.RoundIncarnationID},
+			{once.Attempt.CollectorSessionID, full.Attempt.CollectorSessionID},
+			{once.Attempt.PoolInstanceID, full.Attempt.PoolInstanceID},
+			{once.FactsetDigest, full.FactsetDigest},
+		} {
+			// Position i of this list corresponds to set entry i, skipping
+			// EventID, which is dropped unconditionally and is checked above.
+			at := i
+			if i >= 3 {
+				at = i + 1
+			}
+			if mask&(1<<at) == 0 && kept.got != kept.want {
+				t.Fatalf("mask %d: a VALID component at position %d was dropped: %q, want %q", mask, at, kept.got, kept.want)
+			}
+		}
 	}
 }

@@ -13,12 +13,15 @@ package p4offline_test
 import (
 	"encoding/binary"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
 	"runtime"
 	"strconv"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/predictioneval"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/predictioneval/p4offline"
@@ -2730,4 +2733,403 @@ func TestP2ExclusionAttributionIsCompleteForEveryEpisode(t *testing.T) {
 			}
 		}
 	})
+}
+
+// registryStringSites walks a registry by reflection and returns a POINTER to
+// it beside every string position reachable from it. The pointer is the point:
+// the sites index into the value this function holds, so returning the registry
+// by value would hide the mutation of every field not behind a pointer or a
+// slice -- which is how an earlier draft of the factset sibling passed a
+// position it had never poked.
+//
+// Its blind spots, written down rather than left to be discovered: no map and
+// no interface is descended (SourceRoundRegistry has neither), and an EMPTY
+// slice contributes nothing, so a fixture must carry the entries and claims it
+// wants covered. A nil Canonical is allocated in place so the canonical claim's
+// strings are reached, which is why the fixture below is UNIQUE.
+func registryStringSites(reg p4offline.SourceRoundRegistry) (*p4offline.SourceRoundRegistry, []floatSite) {
+	var out []floatSite
+	reachableStrings(reflect.ValueOf(&reg).Elem(), "SourceRoundRegistry", &out)
+	return &reg, out
+}
+
+// registryCarriesOnlyExpressibleText reports the first string position in a
+// registry that its own encoding cannot carry unchanged.
+//
+// IT WALKS READ-ONLY, and that is not a stylistic preference. reachableStrings
+// ALLOCATES a nil pointer in place so the value behind it can be poked, which
+// is right for a poking test and wrong for an inspecting one: SourceRoundEntry
+// is reached through a slice, so the entries are shared however the registry
+// itself is passed, and an inspection built on that walker gave every INVALID
+// entry a Canonical claim it had not been minted with -- the instrument
+// changing the value it was measuring. The sibling trap, one round earlier,
+// was a walker whose sites pointed at a COPY; both are the same mistake about
+// what reflection is holding.
+func registryCarriesOnlyExpressibleText(reg p4offline.SourceRoundRegistry) (string, bool) {
+	var walk func(v reflect.Value, path string) (string, bool)
+	walk = func(v reflect.Value, path string) (string, bool) {
+		switch v.Kind() {
+		case reflect.String:
+			return path, utf8.ValidString(v.String())
+		case reflect.Pointer:
+			if v.IsNil() {
+				return "", true
+			}
+			return walk(v.Elem(), path+".*")
+		case reflect.Slice, reflect.Array:
+			for i := 0; i < v.Len(); i++ {
+				if at, ok := walk(v.Index(i), path+"["+strconv.Itoa(i)+"]"); !ok {
+					return at, false
+				}
+			}
+		case reflect.Struct:
+			for i := 0; i < v.NumField(); i++ {
+				if v.Type().Field(i).PkgPath != "" {
+					continue
+				}
+				if at, ok := walk(v.Field(i), path+"."+v.Type().Field(i).Name); !ok {
+					return at, false
+				}
+			}
+		}
+		return "", true
+	}
+	return walk(reflect.ValueOf(reg), "SourceRoundRegistry")
+}
+
+// TestReconcileSourceRoundsNeverMintsARegistryItsOwnVerifierRefuses is the
+// PRODUCER half of the encoding class, and it is the third producer in this
+// package to need it.
+//
+// The class was closed at VerifyCommonFactset first, then -- after an external
+// lane pointed out that gating the verifier leaves the package's own exported
+// projector free to mint what that verifier refuses -- at ProjectResolution.
+// doc.go then said this registry was "closed by CONSTRUCTION", which was an
+// argument and not a measurement: running it showed ReconcileSourceRounds
+// minting a registry that VERIFIED, marshalled without error, and failed its
+// own re-derivation after the round trip. Instance, class, and then the class
+// again: the lesson is the sweep, not any one of the three repairs.
+//
+// The assertion is the whole chain a certificate is supposed to survive --
+// verify, marshal, read back, verify again -- plus the direct statement that
+// the minted registry carries no byte it cannot carry, which is the property
+// the chain is evidence FOR.
+func TestReconcileSourceRoundsNeverMintsARegistryItsOwnVerifierRefuses(t *testing.T) {
+	const invalid = "\xff\xfe\x80"
+	// A VALID multi-byte control, already containing U+FFFD, so this cannot be
+	// passing by refusing the substitution it exists to prevent.
+	const validWide = "ok-\u00e9-\uFFFD"
+
+	good := p4offline.SourceRoundClaim{
+		Episode:       p4offline.EpisodeIdentity{CollectorEpoch: 1, CollectorSessionID: "s", PoolInstanceID: "p", RoundIncarnationID: "r", EventID: "e1"},
+		Attempt:       predictioneval.AttemptKey{CollectorEpoch: 1, CollectorSessionID: "s", PoolInstanceID: "p", AttemptID: 1},
+		FactsetDigest: "d1",
+	}
+	// Every string a claim holds, named by hand rather than walked, because
+	// this list is the CONTRACT the routing is written against: a field added
+	// to SourceRoundClaim and not added here is a position this test stops
+	// covering, and the count assertion below is what makes that visible.
+	poke := map[string]func(*p4offline.SourceRoundClaim, string){
+		"Episode.CollectorSessionID": func(c *p4offline.SourceRoundClaim, v string) { c.Episode.CollectorSessionID = v },
+		"Episode.PoolInstanceID":     func(c *p4offline.SourceRoundClaim, v string) { c.Episode.PoolInstanceID = v },
+		"Episode.RoundIncarnationID": func(c *p4offline.SourceRoundClaim, v string) { c.Episode.RoundIncarnationID = v },
+		"Episode.EventID":            func(c *p4offline.SourceRoundClaim, v string) { c.Episode.EventID = v },
+		"Attempt.CollectorSessionID": func(c *p4offline.SourceRoundClaim, v string) { c.Attempt.CollectorSessionID = v },
+		"Attempt.PoolInstanceID":     func(c *p4offline.SourceRoundClaim, v string) { c.Attempt.PoolInstanceID = v },
+		"FactsetDigest":              func(c *p4offline.SourceRoundClaim, v string) { c.FactsetDigest = v },
+	}
+	if _, sites := registryStringSites(p4offline.ReconcileSourceRounds([]p4offline.SourceRoundClaim{good})); len(sites) != 18 {
+		var paths []string
+		for _, site := range sites {
+			paths = append(paths, site.path)
+		}
+		t.Fatalf("a one-claim UNIQUE registry reaches %d string positions, want 18: %s", len(sites), strings.Join(paths, ", "))
+	}
+
+	for name, set := range poke {
+		t.Run(name, func(t *testing.T) {
+			c := good
+			set(&c, invalid)
+			reg := p4offline.ReconcileSourceRounds([]p4offline.SourceRoundClaim{c})
+			if err := p4offline.VerifySourceRoundRegistry(reg); err != nil {
+				t.Fatalf("the registry this package minted does not verify: %v", err)
+			}
+			if at, ok := registryCarriesOnlyExpressibleText(reg); !ok {
+				t.Fatalf("the minted registry still carries text it cannot express, at %s", at)
+			}
+			// The claim is not dropped: it is COUNTED, as one INVALID entry
+			// standing for no round. A denominator-disciplined package does not
+			// get to make a fact it cannot carry disappear.
+			if len(reg.Entries) != 1 || reg.Entries[0].Status != p4offline.SourceRoundInvalid ||
+				reg.Entries[0].EventID != "" || len(reg.Entries[0].Claims) != 1 || reg.Entries[0].Canonical != nil {
+				t.Fatalf("want one INVALID entry naming no round and claiming nothing, got %+v", reg.Entries)
+			}
+			raw, err := json.Marshal(reg)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			var back p4offline.SourceRoundRegistry
+			if err := json.Unmarshal(raw, &back); err != nil {
+				t.Fatalf("unmarshal: %v", err)
+			}
+			if err := p4offline.VerifySourceRoundRegistry(back); err != nil {
+				t.Fatalf("a registry this package minted and certified failed its own re-derivation after a JSON round trip: %v", err)
+			}
+			if !reflect.DeepEqual(back, reg) {
+				t.Fatalf("the registry did not survive its own round trip unchanged:\n before %+v\n  after %+v", reg, back)
+			}
+		})
+	}
+
+	// THE ORDERING, which no other case here can reach. The routing runs its
+	// O(len) expressibility test AHEAD of the two O(1) ones, against this
+	// package's usual rule, because the cheap clauses RECORD the claim verbatim
+	// rather than merely refusing it. A claim that trips both -- no round name
+	// AND text that cannot be carried -- is the only shape that tells the two
+	// orders apart, and with the cheap clause first the registry keeps the
+	// bytes while still calling the claim INVALID: refused and unwritable, the
+	// worst of both.
+	t.Run("a claim that is both unnameable and uncarriable", func(t *testing.T) {
+		c := good
+		c.Episode.EventID = ""
+		c.Attempt.PoolInstanceID = invalid
+		reg := p4offline.ReconcileSourceRounds([]p4offline.SourceRoundClaim{c})
+		if at, ok := registryCarriesOnlyExpressibleText(reg); !ok {
+			t.Fatalf("the minted registry still carries text it cannot express, at %s", at)
+		}
+		if err := p4offline.VerifySourceRoundRegistry(reg); err != nil {
+			t.Fatalf("the registry this package minted does not verify: %v", err)
+		}
+		if len(reg.Entries) != 1 || reg.Entries[0].Status != p4offline.SourceRoundInvalid {
+			t.Fatalf("%+v", reg.Entries)
+		}
+	})
+
+	// The control, per position: a VALID wide string at the same position is
+	// reconciled as evidence, not routed INVALID. Without it this test would
+	// still pass if the routing refused every claim.
+	for name, set := range poke {
+		t.Run("valid wide text at "+name, func(t *testing.T) {
+			c := good
+			set(&c, validWide)
+			reg := p4offline.ReconcileSourceRounds([]p4offline.SourceRoundClaim{c})
+			if len(reg.Entries) != 1 || reg.Entries[0].Status != p4offline.SourceRoundUnique || reg.Entries[0].Canonical == nil {
+				t.Fatalf("a valid multi-byte string is evidence: %+v", reg.Entries)
+			}
+			if *reg.Entries[0].Canonical != c {
+				t.Fatalf("the canonical claim was altered: %+v, want %+v", *reg.Entries[0].Canonical, c)
+			}
+			// And the VERIFIER's gate does not refuse it either. A gate that
+			// refused a valid multi-byte identity would be refusing the very
+			// U+FFFD substitution it exists to prevent.
+			if err := p4offline.VerifySourceRoundRegistry(reg); err != nil {
+				t.Fatalf("a registry carrying valid multi-byte text was refused: %v", err)
+			}
+		})
+	}
+}
+
+// TestARegistryMixingCarriableAndUncarriableClaimsKeepsBothCounted covers the
+// shapes one claim cannot: a registry holding BOTH kinds, and two different
+// uncarriable claims that blank to the same value.
+//
+// The second is the case the repair deliberately accepts. Dropping a claim's
+// text loses what distinguished it from another claim broken the same way, so
+// two of them alias -- but they alias into INVALID, which stands for no round
+// and carries no canonical claim, and they are still recorded one entry each.
+// That is the whole reason the text is dropped rather than the claim: a
+// package that reports a denominator does not get to make a fact it cannot
+// write down disappear. Blanking only the OFFENDING string would have moved
+// the same aliasing into the CANONICAL position instead, where it would mean
+// two distinct pieces of evidence deduplicating into one.
+func TestARegistryMixingCarriableAndUncarriableClaimsKeepsBothCounted(t *testing.T) {
+	const invalid = "\xff\xfe\x80"
+	good := p4offline.SourceRoundClaim{
+		Episode:       p4offline.EpisodeIdentity{CollectorEpoch: 1, CollectorSessionID: "s", PoolInstanceID: "p", RoundIncarnationID: "r", EventID: "e1"},
+		Attempt:       predictioneval.AttemptKey{CollectorEpoch: 1, CollectorSessionID: "s", PoolInstanceID: "p", AttemptID: 1},
+		FactsetDigest: "d1",
+	}
+	settles := func(t *testing.T, reg p4offline.SourceRoundRegistry) {
+		t.Helper()
+		if err := p4offline.VerifySourceRoundRegistry(reg); err != nil {
+			t.Fatalf("the registry this package minted does not verify: %v", err)
+		}
+		if at, ok := registryCarriesOnlyExpressibleText(reg); !ok {
+			t.Fatalf("the minted registry still carries text it cannot express, at %s", at)
+		}
+		var back p4offline.SourceRoundRegistry
+		if err := json.Unmarshal(mustMarshal(t, reg), &back); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		if err := p4offline.VerifySourceRoundRegistry(back); err != nil {
+			t.Fatalf("the registry failed its own re-derivation after a JSON round trip: %v", err)
+		}
+		if !reflect.DeepEqual(back, reg) {
+			t.Fatalf("the registry did not survive its own round trip unchanged:\n before %+v\n  after %+v", reg, back)
+		}
+	}
+
+	t.Run("a carriable claim beside an uncarriable one", func(t *testing.T) {
+		bad := good
+		bad.Episode.RoundIncarnationID = invalid
+		bad.Episode.EventID = "e2"
+		reg := p4offline.ReconcileSourceRounds([]p4offline.SourceRoundClaim{good, bad})
+		settles(t, reg)
+		if len(reg.Entries) != 2 {
+			t.Fatalf("both claims must be recorded: %+v", reg.Entries)
+		}
+		if reg.Entries[0].EventID != "e1" || reg.Entries[0].Status != p4offline.SourceRoundUnique ||
+			reg.Entries[0].Canonical == nil || *reg.Entries[0].Canonical != good {
+			t.Fatalf("the carriable claim is still evidence for its own round: %+v", reg.Entries[0])
+		}
+		if reg.Entries[1].Status != p4offline.SourceRoundInvalid || reg.Entries[1].EventID != "" {
+			t.Fatalf("the uncarriable claim names no round: %+v", reg.Entries[1])
+		}
+		// The uncarriable claim named e2, and dropping its round name must not
+		// let it be read as a second claim on e1.
+		if len(reg.Entries[1].Claims) != 1 || reg.Entries[1].Claims[0].Episode.EventID != "" {
+			t.Fatalf("%+v", reg.Entries[1])
+		}
+	})
+
+	t.Run("two uncarriable claims that blank to the same value", func(t *testing.T) {
+		a, b := good, good
+		a.Episode.EventID = invalid + "a"
+		b.Episode.EventID = invalid + "b"
+		if a == b {
+			t.Fatal("the fixture must supply two DIFFERENT claims")
+		}
+		reg := p4offline.ReconcileSourceRounds([]p4offline.SourceRoundClaim{a, b})
+		settles(t, reg)
+		if len(reg.Entries) != 2 {
+			t.Fatalf("two claims, two entries, whether or not they still differ: %+v", reg.Entries)
+		}
+		for i, e := range reg.Entries {
+			if e.Status != p4offline.SourceRoundInvalid || e.Canonical != nil || len(e.Claims) != 1 {
+				t.Fatalf("entry %d: %+v", i, e)
+			}
+		}
+		if reg.Entries[0].Claims[0] != reg.Entries[1].Claims[0] {
+			t.Fatalf("the two claims are expected to alias once their text is dropped: %+v", reg.Entries)
+		}
+	})
+}
+
+// TestASuppliedRegistryCarryingTextItCannotExpressIsRefused is the VERIFIER
+// half, and its history is the reason it asserts what it does.
+//
+// The producer repair came first, and on its own it looked sufficient: with
+// ReconcileSourceRounds dropping what it cannot carry, and registryDigest
+// unexported, there was no way left to obtain a CONSISTENT uncarriable
+// registry, and a hand-edited one was already refused at every position -- this
+// test passed before checkRegistryTextExpressible existed, which is worth
+// saying plainly, because a test that passes on both sides of a change pins a
+// standing property and not that change.
+//
+// Two independent external reviews asked for the verifier gate regardless, and
+// the argument against it was the weak kind this branch keeps getting caught
+// by: it rested on this package's exported SURFACE (no serializer, so no
+// reachable digest) rather than on the artifact. So the gate went in, and what
+// this test now pins is stronger than "refused" -- it is refused, and the
+// refusal NAMES the position. Without that, one constant message would satisfy
+// every case here, which is exactly the hole a lane demonstrated in the
+// factset's sibling by replacing all of its labels with one.
+//
+// Two positions are named by nothing and say so: Version and Digest are
+// refused by the constant-comparison gates that run first, and a value held to
+// a constant cannot carry an invalid byte past them either way.
+func TestASuppliedRegistryCarryingTextItCannotExpressIsRefused(t *testing.T) {
+	const invalid = "\xff\xfe\x80"
+	mint := func() p4offline.SourceRoundRegistry {
+		return p4offline.ReconcileSourceRounds([]p4offline.SourceRoundClaim{{
+			Episode:       p4offline.EpisodeIdentity{CollectorEpoch: 1, CollectorSessionID: "s", PoolInstanceID: "p", RoundIncarnationID: "r", EventID: "e1"},
+			Attempt:       predictioneval.AttemptKey{CollectorEpoch: 1, CollectorSessionID: "s", PoolInstanceID: "p", AttemptID: 1},
+			FactsetDigest: "d1",
+		}})
+	}
+	if err := p4offline.VerifySourceRoundRegistry(mint()); err != nil {
+		t.Fatalf("the unpoked control must verify: %v", err)
+	}
+	_, found := registryStringSites(mint())
+	if want := 18; len(found) != want {
+		var paths []string
+		for _, site := range found {
+			paths = append(paths, site.path)
+		}
+		t.Fatalf("reached %d string positions, want %d: %s", len(found), want, strings.Join(paths, ", "))
+	}
+	const p = "SourceRoundRegistry.Entries[0]"
+	names := map[string]string{
+		p + ".EventID": "entry 0 event id",
+		p + ".Status":  "entry 0 status",
+		p + ".Claims[0].Episode.CollectorSessionID":   "entry 0 claim 0 episode collector session id",
+		p + ".Claims[0].Episode.PoolInstanceID":       "entry 0 claim 0 episode pool instance id",
+		p + ".Claims[0].Episode.RoundIncarnationID":   "entry 0 claim 0 episode round incarnation id",
+		p + ".Claims[0].Episode.EventID":              "entry 0 claim 0 episode event id",
+		p + ".Claims[0].Attempt.CollectorSessionID":   "entry 0 claim 0 attempt collector session id",
+		p + ".Claims[0].Attempt.PoolInstanceID":       "entry 0 claim 0 attempt pool instance id",
+		p + ".Claims[0].FactsetDigest":                "entry 0 claim 0 factset digest",
+		p + ".Canonical.*.Episode.CollectorSessionID": "entry 0 canonical claim episode collector session id",
+		p + ".Canonical.*.Episode.PoolInstanceID":     "entry 0 canonical claim episode pool instance id",
+		p + ".Canonical.*.Episode.RoundIncarnationID": "entry 0 canonical claim episode round incarnation id",
+		p + ".Canonical.*.Episode.EventID":            "entry 0 canonical claim episode event id",
+		p + ".Canonical.*.Attempt.CollectorSessionID": "entry 0 canonical claim attempt collector session id",
+		p + ".Canonical.*.Attempt.PoolInstanceID":     "entry 0 canonical claim attempt pool instance id",
+		p + ".Canonical.*.FactsetDigest":              "entry 0 canonical claim factset digest",
+	}
+	if len(names)+2 != len(found) {
+		t.Fatalf("%d positions are named and 2 are held to constants, against %d reached", len(names), len(found))
+	}
+	for i, site := range found {
+		t.Run(site.path, func(t *testing.T) {
+			reg, sites := registryStringSites(mint())
+			sites[i].at.SetString(invalid)
+			err := p4offline.VerifySourceRoundRegistry(*reg)
+			if !errors.Is(err, p4offline.ErrSourceRoundRegistry) {
+				t.Fatalf("invalid UTF-8 at %s was CERTIFIED (err %v)", site.path, err)
+			}
+			want, named := names[site.path]
+			if !named {
+				return // Version and Digest: held to constants, refused unnamed
+			}
+			if !strings.Contains(err.Error(), want) {
+				t.Fatalf("the refusal must name the position it refused:\n got %v\nwant a mention of %q", err, want)
+			}
+			if !strings.Contains(err.Error(), "is not valid UTF-8") {
+				t.Fatalf("the refusal must say WHY, not merely which: %v", err)
+			}
+		})
+	}
+}
+
+// TestADerivedClaimIsNeverRoutedInvalidForItsText is the no-false-refusal
+// control for the routing, and it is the half a narrowing owes.
+//
+// The gate refuses a claim for its ENCODING, so the question it has to answer
+// is whether the sanctioned producer can emit one. It cannot, and the reason is
+// structural rather than incidental: ClaimSourceRound derives its claim from a
+// factset, and every string it copies -- the four episode identities, the two
+// attempt identities and the digest -- has already passed
+// checkFactsetValuesExpressible on that factset. This drives the real path
+// rather than asserting that, because "an argument two readers accept is not a
+// measurement" is this branch's oldest lesson.
+func TestADerivedClaimIsNeverRoutedInvalidForItsText(t *testing.T) {
+	s := newSynth()
+	s.placedAttempt("r1", "e1", 1)
+	ds := s.dataset()
+	fs, err := p4offline.BuildCommonFactset(ds, singleEpisode(t, mustSelect(t, ds)).Episode)
+	if err != nil {
+		t.Fatal(err)
+	}
+	claim, err := p4offline.ClaimSourceRound(ds, fs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reg := p4offline.ReconcileSourceRounds([]p4offline.SourceRoundClaim{claim})
+	if len(reg.Entries) != 1 || reg.Entries[0].Status != p4offline.SourceRoundUnique {
+		t.Fatalf("a derived claim is evidence for its round, not INVALID: %+v", reg.Entries)
+	}
+	if reg.Entries[0].Canonical == nil || *reg.Entries[0].Canonical != claim {
+		t.Fatalf("the derived claim must reach the canonical position unaltered: %+v", reg.Entries[0])
+	}
 }

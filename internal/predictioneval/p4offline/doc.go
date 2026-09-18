@@ -395,22 +395,51 @@
 //
 // THE GATE WAS THEN ADDED TO THE FACTSET ONLY, and this paragraph was shortened
 // to say the class was closed. It was closed for ONE of the four artifacts this
-// package verifies, and a review lane caught the shortened sentence. The state
-// now, established by execution across all four:
+// package verifies, and a review lane caught the shortened sentence. The long
+// version was then written, with a row per artifact -- and TWO of its four rows
+// were wrong, in the same way, for the same reason: they reasoned about the
+// code instead of running it. What follows is what running it showed.
 //
-//	CommonFactset        checkFactsetValuesExpressible      -- gate added
-//	ResolutionArtifact   checkResolutionStringsExpressible  -- gate added, one
-//	                     commit later, after the same defect was reproduced at
-//	                     four of its framed positions
-//	SourceRoundRegistry  closed by CONSTRUCTION: it re-derives from its own
-//	                     entries, so a mangled entry fails re-derivation
-//	P3bRuleset           closed by CONSTRUCTION: the typed config is compared
-//	                     against the one decoded from the raw bytes, and the
-//	                     decode substitutes U+FFFD, so the two differ
+//	CommonFactset        GATE ADDED: checkFactsetValuesExpressible, on the
+//	                     build path and the verify path, ahead of the digest
+//	                     on each
+//	ResolutionArtifact   GATE ADDED on the verify path, and then -- one commit
+//	                     later, after an external lane observed that gating a
+//	                     verifier leaves this package's own exported projector
+//	                     free to mint what it refuses -- expressibleEvidence on
+//	                     ProjectResolution, which drops the text and refuses
+//	                     with TEXT_NOT_EXPRESSIBLE
+//	SourceRoundRegistry  PRODUCER REPAIRED. The row here used to read "closed
+//	                     by CONSTRUCTION: it re-derives from its own entries",
+//	                     which was true of a registry someone EDITED and said
+//	                     nothing about the one this package mints.
+//	                     ReconcileSourceRounds minted a registry that verified,
+//	                     marshalled without error and then failed its own
+//	                     re-derivation. expressibleClaim now drops the text,
+//	                     and the round name with it, into an INVALID entry, and
+//	                     checkRegistryTextExpressible gates the verifier as the
+//	                     other two are gated. The gate was judged unnecessary
+//	                     first -- registryDigest is unexported and the
+//	                     reconciler is the only exported source of a registry,
+//	                     so the producer repair alone left no consistent
+//	                     uncarriable registry obtainable -- and two independent
+//	                     external reviews asked for it anyway. They were right:
+//	                     that argument rested on this package's exported
+//	                     SURFACE, which a later commit can change in silence,
+//	                     where the other two gates rest on the artifact
+//	P3bRuleset           CLOSED, and now with receipts rather than an argument:
+//	                     all five of its string positions are refused, by three
+//	                     different gates -- the two config strings against the
+//	                     config decoded from the raw bytes, the ruleset id
+//	                     against the config id, and the two digests against
+//	                     64 lower-case hex digits. RawBytes needs no clause:
+//	                     JSON carries []byte as base64
 //
-// Two needed a gate; two never had the hole. That is the class, checked rather
-// than assumed -- and the shortened sentence that claimed it was closed is the
-// reason this one is this long.
+// One artifact was closed all along, two needed a gate and one needed its
+// PRODUCER repaired -- found by sweeping the class a third time after the
+// second sweep had declared it shut. The pattern across all four is the one
+// worth keeping: the verifier is the easy half, and the exported producer is
+// where the hole was every time it was there at all.
 //
 // Nothing here was checked against real P1/P1.5 data: no production dataset
 // is proven available, no dataset window (T0/T1) or dataset binding is

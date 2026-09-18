@@ -125,6 +125,10 @@ const (
 	ResolutionRefusalClaimOutsideVocabulary = "CLAIM_OUTSIDE_VOCABULARY"
 	ResolutionRefusalRoundIdentityMissing   = "ROUND_IDENTITY_MISSING"
 	ResolutionRefusalAvailabilityVocabulary = "AVAILABILITY_OUTSIDE_VOCABULARY"
+	// ResolutionRefusalTextNotExpressible names evidence carrying a string
+	// this artifact's own encoding cannot carry unchanged. The value is DROPPED
+	// rather than projected: see expressibleEvidence.
+	ResolutionRefusalTextNotExpressible = "TEXT_NOT_EXPRESSIBLE"
 )
 
 // Resolution verification refusals.
@@ -193,6 +197,20 @@ type ResolutionArtifact struct {
 // It is total: a withheld obligation yields an UNKNOWN artifact naming the
 // refusal, never an error and never a winner.
 func ProjectResolution(ev ResolutionEvidence) ResolutionArtifact {
+	// THE PRODUCER IS GATED, not only the verifier. VerifyResolutionArtifact
+	// refuses a SUPPLIED artifact carrying a string encoding/json cannot carry
+	// unchanged; without this, the package's own exported projector could still
+	// MINT one -- an artifact that fails its own verifier and, after a JSON
+	// round trip, presents as tampering. Reproduced before this gate existed:
+	// an invalid-UTF-8 Round.ChannelID yielded WINNER_KNOWN with NO refusals,
+	// retaining the bad bytes, and its own verifier rejected it.
+	//
+	// The offending value is DROPPED rather than carried, because refusing
+	// while still framing the bytes would leave the artifact exactly as
+	// unserializable as before. The refusal below then forces UNKNOWN through
+	// the same `len(a.Refusals) == 0` guard every other refusal uses, so this
+	// artifact asserts nothing.
+	ev, lossyText := expressibleEvidence(ev)
 	a := ResolutionArtifact{
 		ContractVersion:     ResolutionFactsDigestVersion,
 		ObligationsRevision: ResolutionObligationsRevision,
@@ -208,6 +226,9 @@ func ProjectResolution(ev ResolutionEvidence) ResolutionArtifact {
 	}
 	refuse := func(reason string) { a.Refusals = appendOnce(a.Refusals, reason) }
 
+	if lossyText {
+		refuse(ResolutionRefusalTextNotExpressible)
+	}
 	if ev.Round.EventID == "" {
 		refuse(ResolutionRefusalRoundIdentityMissing)
 	}
@@ -307,6 +328,62 @@ func ProjectResolution(ev ResolutionEvidence) ResolutionArtifact {
 	}
 	a.ResolutionFactsDigest = resolutionDigest(a)
 	return a
+}
+
+// expressibleEvidence returns ev with every string the artifact would frame
+// replaced by "" if it is not valid UTF-8, and reports whether it replaced any.
+//
+// Dropping rather than keeping is the point: encoding/json writes invalid UTF-8
+// WITHOUT error by substituting U+FFFD, so an artifact that merely REFUSED
+// while still carrying the bytes would still fail its own digest after a round
+// trip. A blanked value also makes the ordinary refusals fire on their own
+// terms — a blanked round identity is a missing round identity — so the
+// artifact that comes back is one this package can verify and store.
+//
+// It does not touch Claim: an unrepresentable claim is outside the vocabulary
+// and the switch below already refuses it there.
+//
+// THE TWO SLICES ARE COPIED BEFORE ANYTHING IS BLANKED. ProjectResolution takes
+// its evidence by value, which protects the scalars and protects nothing else:
+// a slice copied by value still points at the caller's backing array, so
+// blanking an element in place would silently rewrite the caller's own
+// evidence. A producer that edits its input to make its output storable is a
+// worse defect than the one this gate was added to fix. Pinned by the
+// "caller's evidence is not rewritten" case, which fails without these copies.
+func expressibleEvidence(ev ResolutionEvidence) (ResolutionEvidence, bool) {
+	lossy := false
+	keep := func(v *string) {
+		if !utf8.ValidString(*v) {
+			*v = ""
+			lossy = true
+		}
+	}
+	keep(&ev.Round.EventID)
+	keep(&ev.Round.ChannelID)
+	keep(&ev.WinnerOutcomeID)
+	keep(&ev.ProofBasis)
+	keep(&ev.ProjectorRevision)
+	keep(&ev.ProofRevision)
+	if !utf8.ValidString(string(ev.Availability)) {
+		ev.Availability = ""
+		lossy = true
+	}
+	ids := append([]string(nil), ev.OrderedOutcomeIDs...)
+	for i := range ids {
+		keep(&ids[i])
+	}
+	ev.OrderedOutcomeIDs = ids
+	refs := append([]EvidenceReference(nil), ev.EvidenceReferences...)
+	for i := range refs {
+		keep(&refs[i].ObservationID)
+		keep(&refs[i].CollectorSessionID)
+		keep(&refs[i].Kind)
+		keep(&refs[i].Phase)
+		keep(&refs[i].RoundState)
+		keep(&refs[i].EventID)
+	}
+	ev.EvidenceReferences = refs
+	return ev, lossy
 }
 
 // SerializeResolutionArtifact renders the artifact's facts canonically:
