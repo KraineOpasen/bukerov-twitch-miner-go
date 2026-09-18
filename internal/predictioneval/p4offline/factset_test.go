@@ -1198,15 +1198,21 @@ func TestADatasetThatDerivesNothingStillSaysSoAsNotDerived(t *testing.T) {
 				if !errors.Is(err, p4offline.ErrFactsetNotDerived) {
 					t.Fatalf("%s = %v, want ErrFactsetNotDerived", call.name, err)
 				}
-				// The cause stays readable rather than being swallowed.
-				if !errors.Is(err, p4offline.ErrFactsetInconsistent) {
+				// The cause stays READABLE...
+				if !strings.Contains(err.Error(), "the dataset derives no factset") {
 					t.Fatalf("%s dropped the cause: %v", call.name, err)
 				}
-				// And it must not claim the caller's factset is the unencodable
-				// one: that factset verified at the top of this test.
-				if strings.Contains(err.Error(), "this factset's own encoding") &&
-					!strings.Contains(err.Error(), "the dataset derives no factset") {
-					t.Fatalf("%s blames the caller's factset: %v", call.name, err)
+				if !strings.Contains(err.Error(), "cannot express") {
+					t.Fatalf("%s dropped the underlying reason: %v", call.name, err)
+				}
+				// ...and the cause's SENTINEL does not. ErrFactsetInconsistent
+				// classifies a fault in a factset's own values; the caller's
+				// factset verified at the top of this test, so a caller that
+				// quarantines on that sentinel must not be told to quarantine
+				// it. Prose cannot disambiguate a programmatic branch, which is
+				// why this assertion is about errors.Is and not about text.
+				if errors.Is(err, p4offline.ErrFactsetInconsistent) {
+					t.Fatalf("%s exposes the caller-factset sentinel for a dataset fault: %v", call.name, err)
 				}
 			}
 		})
@@ -1392,4 +1398,75 @@ func TestEveryReachableFactsetStringRefusesInvalidUTF8(t *testing.T) {
 			t.Fatalf("BuildCommonFactset = %v, want a %q refusal", err, utf8Fault)
 		}
 	})
+}
+
+// TestAConstantSizePositionIsRefusedBeforeACallerSizedSlice pins the check
+// ORDER inside the value gate, which is a resource property stated as a
+// deterministic one.
+//
+// fs.Outcomes and fs.IncompleteReasons are slices the CALLER sizes, and nothing
+// bounds them before the digest gate. If the gate scanned them before checking
+// the constant-size positions, a supplier could pair one bad settings value
+// with a huge finite outcome slice and turn a constant-time refusal into work
+// proportional to the whole slice — all of it discarded. An external review
+// lane raised exactly that.
+//
+// Asserting it by TIME would be flaky, so it is asserted by WHICH FAULT WINS:
+// a factset bad in both places must report the constant-size one, which it can
+// only do by looking there first. The controls make each fault on its own
+// reachable, so the test cannot pass because the slice fault is simply never
+// detected.
+func TestAConstantSizePositionIsRefusedBeforeACallerSizedSlice(t *testing.T) {
+	const invalid = "\xff\xfe\x80"
+	both := func(mutate func(*p4offline.CommonFactset)) p4offline.CommonFactset {
+		_, fs := selectedFactset(t, withFilter, nil)
+		outs := make([]predictioneval.OutcomeInput, 4096)
+		for i := range outs {
+			outs[i] = predictioneval.OutcomeInput{Slot: i, Present: true, ID: "o",
+				PercentageUsers: 1, Odds: 2, OddsPercentage: 3}
+		}
+		fs.Outcomes = outs
+		mutate(&fs)
+		fs.Digest = digestOf(p4offline.SerializeCommonFactset(fs))
+		return fs
+	}
+	says := func(fs p4offline.CommonFactset) string {
+		err := p4offline.VerifyCommonFactset(fs)
+		if err == nil {
+			t.Fatalf("expected a refusal")
+		}
+		return err.Error()
+	}
+
+	// The slice fault alone IS detected — otherwise the assertions below would
+	// pass for the wrong reason.
+	if got := says(both(func(fs *p4offline.CommonFactset) {
+		fs.Outcomes[4095].ID = invalid
+	})); !strings.Contains(got, "outcome 4095 id") {
+		t.Fatalf("the slice fault alone = %q, want it named", got)
+	}
+	for _, tc := range []struct {
+		name   string
+		mutate func(*p4offline.CommonFactset)
+		want   string
+	}{
+		{"settings delay beats a late outcome id", func(fs *p4offline.CommonFactset) {
+			fs.Settings.Delay = math.NaN()
+			fs.Outcomes[4095].ID = invalid
+		}, "settings delay"},
+		{"health reason beats a late outcome odds", func(fs *p4offline.CommonFactset) {
+			fs.HealthReason = invalid
+			fs.Outcomes[4095].Odds = math.Inf(1)
+		}, "health reason"},
+		{"filter value beats a late outcome id", func(fs *p4offline.CommonFactset) {
+			fs.Settings.FilterCondition.Value = math.Inf(-1)
+			fs.Outcomes[4095].ID = invalid
+		}, "settings filter condition value"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := says(both(tc.mutate)); !strings.Contains(got, tc.want) {
+				t.Fatalf("= %q, want the constant-size fault %q first", got, tc.want)
+			}
+		})
+	}
 }

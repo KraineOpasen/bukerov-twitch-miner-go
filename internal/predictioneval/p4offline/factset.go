@@ -238,10 +238,18 @@ func derivedOpportunity(ds predictioneval.SourceDataset, fs CommonFactset) (Epis
 		// would blame the wrong artifact -- and would withdraw
 		// ErrFactsetNotDerived for an input class its own doc describes
 		// exactly, so a caller switching on it would stop seeing a case it
-		// used to see. The cause is joined rather than dropped, so an auditor
-		// still reads why the dataset derives nothing.
+		// used to see.
+		//
+		// THE CAUSE IS CARRIED AS TEXT AND NOT AS A SENTINEL, which is the
+		// other half of the same point and was wrong in this line's first
+		// form. Joining `err` itself also made errors.Is(..., ErrFactsetInconsistent)
+		// true, and THAT sentinel documents a fault in a factset's OWN VALUES
+		// -- so a caller that quarantines on it would quarantine the caller's
+		// VALID artifact because a hostile DATASET failed to derive one. Prose
+		// cannot disambiguate a programmatic branch; causeText can, by carrying
+		// the message without the identity.
 		return EpisodeSelection{}, errors.Join(ErrFactsetNotDerived,
-			errors.New("p4offline: the dataset derives no factset for this episode"), err)
+			errors.New("p4offline: the dataset derives no factset for this episode"), causeText{err})
 	}
 	if rebuilt.Digest != fs.Digest {
 		return EpisodeSelection{}, errors.Join(ErrFactsetNotDerived,
@@ -249,6 +257,16 @@ func derivedOpportunity(ds predictioneval.SourceDataset, fs CommonFactset) (Epis
 	}
 	return ep, nil
 }
+
+// causeText carries an error's MESSAGE without its identity. It deliberately
+// has no Unwrap, so errors.Is and errors.As do not see through it: a diagnostic
+// cause reaches the reader while sentinels that classify a DIFFERENT artifact
+// stay out of the caller's branch. Error() is not called until the joined error
+// is rendered, so a cause whose text is expensive costs nothing on a path that
+// only tests the sentinel.
+type causeText struct{ err error }
+
+func (c causeText) Error() string { return c.err.Error() }
 
 // BuildCommonFactset re-derives the episode's selection from the dataset and
 // projects the selected opportunity's inputs into a digested, outcome-free
@@ -513,8 +531,15 @@ func VerifyCommonFactset(fs CommonFactset) error {
 //     fails its OWN digest — a lossy round trip that presents as the one
 //     signal this package reserves for tampering. That is the quieter failure
 //     of the two, and coverage_test.go round-trips a factset through JSON, so
-//     it is a supported path rather than a hypothetical one. Every string the
-//     framing hashes is checked, in the framing's own order.
+//     it is a supported path rather than a hypothetical one.
+//
+// The string set is every string the framing hashes, plus ContractVersion,
+// which it does NOT: SerializeCommonFactset writes this package's own constant
+// in that position, and the field is held to that same constant by the first
+// gate in VerifyCommonFactset. Checking it is therefore belt-and-braces rather
+// than load-bearing, and it is listed so the set is the struct's strings and
+// not a subset a reader has to reconstruct. A review probe that compared the
+// two sets found this asymmetry; it is stated rather than tidied away.
 //
 // The second half was recorded as a known limitation for one round and
 // repaired only when an external lane ranked it P1 and named the two things
@@ -560,6 +585,14 @@ func checkFactsetValuesExpressible(fs CommonFactset) error {
 		return errors.Join(ErrFactsetInconsistent, errors.New("p4offline: "+what+
 			" is not valid UTF-8, so this factset's own encoding cannot carry it unchanged"))
 	}
+	// ORDER IS LOAD-BEARING, and it was wrong in this function's first form.
+	// Everything CONSTANT-SIZE is checked first; the two caller-sized slices
+	// come last. A supplier who pairs one bad settings value with a huge finite
+	// Outcomes slice would otherwise turn a constant-time refusal into work
+	// proportional to the whole slice, every bit of it discarded -- the same
+	// WORK-half rule that governs the per-outcome label below, applied to the
+	// ORDER of the checks rather than to one expression. A factset bad in both
+	// a constant-size position and a slice now reports the constant-size one.
 	for _, f := range [...]struct {
 		what string
 		v    string
@@ -584,17 +617,14 @@ func checkFactsetValuesExpressible(fs CommonFactset) error {
 			return lossy(f.what)
 		}
 	}
-	for i, r := range fs.IncompleteReasons {
-		if !utf8.ValidString(r) {
-			return lossy("incompleteness reason " + strconv.Itoa(i))
-		}
-	}
 	if s := fs.Settings; s != nil {
 		switch {
 		case !utf8.ValidString(s.Strategy):
 			return lossy("settings strategy")
 		case !utf8.ValidString(s.DelayMode):
 			return lossy("settings delay mode")
+		case !finiteFloat(s.Delay):
+			return unexpressible("settings delay", s.Delay)
 		}
 		if fc := s.FilterCondition; fc != nil {
 			switch {
@@ -602,12 +632,14 @@ func checkFactsetValuesExpressible(fs CommonFactset) error {
 				return lossy("settings filter condition subject")
 			case !utf8.ValidString(fc.Where):
 				return lossy("settings filter condition comparator")
+			case !finiteFloat(fc.Value):
+				return unexpressible("settings filter condition value", fc.Value)
 			}
 		}
 	}
-	for i, out := range fs.Outcomes {
-		if !utf8.ValidString(out.ID) {
-			return lossy("outcome " + strconv.Itoa(i) + " id")
+	for i, r := range fs.IncompleteReasons {
+		if !utf8.ValidString(r) {
+			return lossy("incompleteness reason " + strconv.Itoa(i))
 		}
 	}
 	// The index is folded in HERE, inside the refusal, rather than into a label
@@ -623,20 +655,14 @@ func checkFactsetValuesExpressible(fs CommonFactset) error {
 	}
 	for i, o := range fs.Outcomes {
 		switch {
+		case !utf8.ValidString(o.ID):
+			return lossy("outcome " + strconv.Itoa(i) + " id")
 		case !finiteFloat(o.PercentageUsers):
 			return outcome(i, "percentage users", o.PercentageUsers)
 		case !finiteFloat(o.Odds):
 			return outcome(i, "odds", o.Odds)
 		case !finiteFloat(o.OddsPercentage):
 			return outcome(i, "odds percentage", o.OddsPercentage)
-		}
-	}
-	if s := fs.Settings; s != nil {
-		if !finiteFloat(s.Delay) {
-			return unexpressible("settings delay", s.Delay)
-		}
-		if s.FilterCondition != nil && !finiteFloat(s.FilterCondition.Value) {
-			return unexpressible("settings filter condition value", s.FilterCondition.Value)
 		}
 	}
 	return nil
