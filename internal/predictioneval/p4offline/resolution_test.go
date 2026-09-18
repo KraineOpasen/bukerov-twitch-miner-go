@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"errors"
 	"reflect"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -512,6 +513,379 @@ func TestAResolutionRefusalIsHeldToTheSameEncoding(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "refusal 0") {
 		t.Fatalf("the refusal must name WHICH refusal it refused: %v", err)
+	}
+}
+
+// TestARefusalBelowADigestDoesNotFrameItsSupplyAgain holds refusal branches
+// that sit BELOW a digest comparison.
+//
+// THE EXPOSURE IS A DOUBLING, not the class the shape gates closed. Reaching
+// any of these means the digest already verified, so one framing of the payload
+// is paid and unavoidable; what a second framing inside the refusal buys is a
+// second copy of the whole payload for a refusal that reads none of it. It is
+// smaller than a constant-size field amplified by the payload, and it is the
+// same rule.
+//
+// THE ROWS BELOW ARE WHAT IS HELD, and this comment does not claim they are the
+// whole set. Each is driven to its own named refusal, so a row that stops
+// reaching its branch fails rather than passing vacuously.
+//
+// THREE SUCH BRANCHES ARE HELD ELSEWHERE, by the `belowDigest` rows of
+// TestFirstGatesDoNotMaterializeSuppliedText: checkFactsetConsistency's
+// stealth-proof arm, its completeness default and the artifact's outcome
+// default. Those three render a caller's EXTENT, which is what lets that table
+// hold them. ELEVEN of the rows below RENDER NO EXTENT, so they cannot satisfy
+// its `names` and `wantExtent` assertions, and relaxing those to admit them
+// would weaken every row it has. Most of the eleven are constant text
+// outright. TWO ARE NOT, and they are named because the distinction is easy to
+// lose: the artifact's digest comparison quotes both digests, and its
+// re-projection arm renders the outcome and the joined refusals. Neither
+// renders an EXTENT, which is the property this paragraph turns on, and
+// "constant text" would be the wrong test for membership of this table.
+// The twelfth is the completeness default, which renders an extent like the
+// other two and is therefore held in BOTH places -- by that table for what its
+// message says, and here for what reaching it costs.
+func TestARefusalBelowADigestDoesNotFrameItsSupplyAgain(t *testing.T) {
+	big := strings.Repeat("a", 1<<20)
+	measure := func(f func() error) (uint64, error) {
+		runtime.GC()
+		var before, after runtime.MemStats
+		runtime.ReadMemStats(&before)
+		err := f()
+		runtime.ReadMemStats(&after)
+		return after.TotalAlloc - before.TotalAlloc, err
+	}
+	// A FLOOR BESIDE EVERY CEILING. Each budget below is a ceiling, and a
+	// ceiling alone passes when the payload is not framed on the measured path
+	// at all -- and so does the second framing it exists to catch. Stopping
+	// SerializeCommonFactset and SerializeResolutionArtifact from writing
+	// ProjectorRevision costs the ceilings nothing: take the floors away and
+	// every row here passes with that mutant applied. Put them back and every row
+	// that measures a framing of `big` fails. This is that guard, expressed as
+	// cost because these refusals render no extent to assert: reaching any of
+	// them costs at least the framings named, less a tenth for the allocator's
+	// rounding.
+	//
+	// THE SIBLING TABLE CANNOT SEE THAT MUTANT AT ALL, which is the reason these
+	// budgets are here and not there. Its `wantExtent` rows assert the extent
+	// rendered for StealthProof, Completeness and Outcome, and an unwritten
+	// ProjectorRevision changes none of those messages. Tests elsewhere in the
+	// package DO fail under it -- both independent goldens among them -- but no
+	// row of that table does. No count is given for that set: it is whatever the
+	// suite happens to contain, which is not a property this test holds.
+	//
+	// ONE ROW BELOW DOES NOT USE floorOf: the registry row's payload is not
+	// `big`, so its floor is the lower side of its own ratio, written there.
+	floorOf := func(t *testing.T, allocated uint64, framings int) {
+		t.Helper()
+		if want := uint64(framings) * uint64(len(big)) * 9 / 10; allocated < want {
+			t.Fatalf("the refusing call allocated %d bytes, below the %d framing(s) of a %d-byte payload it must pay to REACH this branch (floor %d): the fixture's payload is not on the measured path, so the ceiling below proves nothing",
+				allocated, framings, len(big), want)
+		}
+	}
+
+	t.Run("an UNKNOWN artifact that names a winner", func(t *testing.T) {
+		a := p4offline.ProjectResolution(p4offline.ResolutionEvidence{
+			Round: p4offline.PublicRoundIdentity{EventID: "e1"}, OrderedOutcomeIDs: []string{"o1", "o2"},
+			Claim: p4offline.ResolutionUnknown, Availability: p4offline.AvailabilityNotRecorded,
+			ProjectorRevision: big, ProofRevision: "x"})
+		if err := p4offline.VerifyResolutionArtifact(a); err != nil {
+			t.Fatalf("the unpoked control must verify: %v", err)
+		}
+		a.WinnerOutcomeID = "o1"
+		a.ResolutionFactsDigest = p4offline.DigestReference(digestOf(p4offline.SerializeResolutionArtifact(a)))
+		allocated, err := measure(func() error { return p4offline.VerifyResolutionArtifact(a) })
+		t.Logf("a %d-byte artifact; the refusing call allocated %d bytes", len(big), allocated)
+		if !errors.Is(err, p4offline.ErrResolutionNotDerivable) || !strings.Contains(err.Error(), "names a winner") {
+			t.Fatalf("this fixture must reach the winner branch, or the budget below proves nothing: %v", err)
+		}
+		// ONE FRAMING, NOT TWO. Reaching this branch means the digest already
+		// verified, so one framing of the payload is paid and unavoidable:
+		// the refusal measures 1.01x the payload. A second framing inside the
+		// branch measures 2.02x. The line sits between them at 1.5x, which is
+		// half the payload of margin on either side.
+		floorOf(t, allocated, 1)
+		if allocated > uint64(len(big))+uint64(len(big))/2 {
+			t.Fatalf("the refusal allocated %d bytes on a %d-byte payload: reaching it costs one framing, and refusing must not add another",
+				allocated, len(big))
+		}
+	})
+
+	t.Run("an artifact whose facts do not re-project", func(t *testing.T) {
+		// THE RE-PROJECTION ARM, which a review lane measured at 3.03x the
+		// payload under a second framing and which nothing held.
+		a := p4offline.ResolutionNotRecorded(p4offline.PublicRoundIdentity{EventID: "e1"}, []string{"o1", "o2"}, nil, big)
+		a.Outcome, a.WinnerOutcomeID, a.WinnerIndex = p4offline.ResolutionWinnerKnown, "o1", 0
+		a.ResolutionFactsDigest = p4offline.DigestReference(digestOf(p4offline.SerializeResolutionArtifact(a)))
+		allocated, err := measure(func() error { return p4offline.VerifyResolutionArtifact(a) })
+		t.Logf("a %d-byte artifact; the refusing call allocated %d bytes", len(big), allocated)
+		if !errors.Is(err, p4offline.ErrResolutionNotDerivable) || !strings.Contains(err.Error(), "re-projecting") {
+			t.Fatalf("this fixture must reach the re-projection arm: %v", err)
+		}
+		// TWO FRAMINGS ARE THE FLOOR HERE, not one: reaching this arm means
+		// the artifact was framed for its digest AND re-projected, and the
+		// re-projection frames it again to compare. The honest reading is
+		// 2.02x; a third framing inside the refusal measures 3.03x. The line
+		// sits between them at 2.5x.
+		floorOf(t, allocated, 2)
+		if allocated > 5*uint64(len(big))/2 {
+			t.Fatalf("the refusal allocated %d bytes on a %d-byte payload: reaching it costs two framings, and refusing must not add a third",
+				allocated, len(big))
+		}
+	})
+
+	t.Run("an artifact whose digest is well-formed and wrong", func(t *testing.T) {
+		// THE COMPARISON ITSELF is a below-digest branch too -- it has paid the
+		// derivation it compares against -- and it was the only one of the
+		// three siblings with no budget. The factset's is held by
+		// TestTheValueGateAddsNoPerOutcomeAllocation and the registry's by
+		// TestRegistryRefusesOnItsConstantsBeforeItReconciles.
+		a := p4offline.ResolutionNotRecorded(p4offline.PublicRoundIdentity{EventID: "e1"}, []string{"o1", "o2"}, nil, big)
+		a.ResolutionFactsDigest = p4offline.DigestReference(strings.Repeat("b", 64))
+		allocated, err := measure(func() error { return p4offline.VerifyResolutionArtifact(a) })
+		t.Logf("a %d-byte artifact; the refusing comparison allocated %d bytes", len(big), allocated)
+		if !errors.Is(err, p4offline.ErrResolutionDigest) || !strings.Contains(err.Error(), "does not match the artifact") {
+			t.Fatalf("this fixture must reach the digest comparison: %v", err)
+		}
+		floorOf(t, allocated, 1)
+		if allocated > uint64(len(big))+uint64(len(big))/2 {
+			t.Fatalf("the refusal allocated %d bytes on a %d-byte payload: the comparison has paid one derivation, and refusing must not pay another",
+				allocated, len(big))
+		}
+	})
+
+	t.Run("every arm of checkFactsetConsistency but the stealth-proof one", func(t *testing.T) {
+		// ONE ROW PER ARM, each asserted by the sentence it returns, because a
+		// poke that stops reaching its arm would otherwise pass this budget
+		// while measuring a different refusal entirely. The stealth-proof arm
+		// is the ninth and is not here: it renders the caller's extent, so
+		// TestFirstGatesDoNotMaterializeSuppliedText holds it as a row.
+		_, _, good := selectedCase(t, nil, nil)
+		good.ProjectorRevision = big
+		for _, tc := range []struct {
+			name string
+			poke func(*p4offline.CommonFactset)
+			says string
+		}{
+			{"COMPLETE without a reached decision", func(fs *p4offline.CommonFactset) {
+				fs.Completeness, fs.ReachedDecision, fs.IncompleteReasons = p4offline.FactsetComplete, false, nil
+			}, "COMPLETE beside a decision that was not reached"},
+			{"COMPLETE beside incompleteness reasons", func(fs *p4offline.CommonFactset) {
+				fs.Completeness, fs.ReachedDecision = p4offline.FactsetComplete, true
+				fs.IncompleteReasons = []string{predictioneval.IneligibleMissingBalance}
+			}, "COMPLETE beside incompleteness reasons"},
+			{"COMPLETE beside a value-derived reason", func(fs *p4offline.CommonFactset) {
+				fs.Completeness, fs.ReachedDecision, fs.IncompleteReasons = p4offline.FactsetComplete, true, nil
+				fs.BalancePresent = false
+			}, "COMPLETE beside "},
+			{"PRE_DECISION_EXIT beside a reached decision", func(fs *p4offline.CommonFactset) {
+				fs.Completeness, fs.ReachedDecision = p4offline.FactsetPreDecisionExit, true
+			}, "PRE_DECISION_EXIT beside a reached decision"},
+			{"INCOMPLETE without a reached decision", func(fs *p4offline.CommonFactset) {
+				fs.Completeness, fs.ReachedDecision = p4offline.FactsetIncomplete, false
+			}, "INCOMPLETE beside a decision that was not reached"},
+			{"INCOMPLETE without a reason", func(fs *p4offline.CommonFactset) {
+				fs.Completeness, fs.ReachedDecision, fs.IncompleteReasons = p4offline.FactsetIncomplete, true, nil
+			}, "INCOMPLETE without a reason"},
+			{"INCOMPLETE without its value-derived reason", func(fs *p4offline.CommonFactset) {
+				fs.Completeness, fs.ReachedDecision = p4offline.FactsetIncomplete, true
+				fs.IncompleteReasons = []string{predictioneval.IneligibleMissingSettings}
+				fs.BalancePresent = false
+			}, "INCOMPLETE without the value-derived reason "},
+			{"a completeness outside the vocabulary", func(fs *p4offline.CommonFactset) {
+				fs.Completeness = "NOT_A_COMPLETENESS_THIS_PACKAGE_WRITES"
+			}, "is outside the vocabulary"},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				fs := good
+				tc.poke(&fs)
+				fs.Digest = digestOf(p4offline.SerializeCommonFactset(fs))
+				allocated, err := measure(func() error { return p4offline.VerifyCommonFactset(fs) })
+				t.Logf("a %d-byte factset; the refusing call allocated %d bytes", len(big), allocated)
+				if !errors.Is(err, p4offline.ErrFactsetInconsistent) || !strings.Contains(err.Error(), tc.says) {
+					t.Fatalf("this poke must reach the arm that says %q: %v", tc.says, err)
+				}
+				floorOf(t, allocated, 1)
+				if allocated > uint64(len(big))+uint64(len(big))/2 {
+					t.Fatalf("the refusal allocated %d bytes on a %d-byte payload: reaching it costs one framing, and refusing must not add another",
+						allocated, len(big))
+				}
+			})
+		}
+	})
+
+	t.Run("a registry that does not re-derive from its entries", func(t *testing.T) {
+		claims := make([]p4offline.SourceRoundClaim, 200)
+		for i := range claims {
+			id := strconv.Itoa(i)
+			claims[i] = p4offline.SourceRoundClaim{
+				Episode:       p4offline.EpisodeIdentity{CollectorEpoch: 1, CollectorSessionID: "s", PoolInstanceID: "p", RoundIncarnationID: "r" + id, EventID: "e" + id},
+				Attempt:       predictioneval.AttemptKey{CollectorEpoch: 1, CollectorSessionID: "s", PoolInstanceID: "p", AttemptID: uint64(i)},
+				FactsetDigest: strings.Repeat("a", 64)}
+		}
+		reg := p4offline.ReconcileSourceRounds(claims)
+		if err := p4offline.VerifySourceRoundRegistry(reg); err != nil {
+			t.Fatalf("the unpoked control must verify: %v", err)
+		}
+		reg.Entries[0].Status = "INVALID"
+		reg = restampRegistry(reg)
+		// BOTH FIXTURES ARE BUILT HERE, never inside a measured closure: built
+		// inside, the honest reading is dominated by its own construction and the
+		// ratio measures that instead of the verification.
+		honestReg := restampRegistry(p4offline.ReconcileSourceRounds(claims))
+		allocated, err := measure(func() error { return p4offline.VerifySourceRoundRegistry(reg) })
+		honest, honestErr := measure(func() error { return p4offline.VerifySourceRoundRegistry(honestReg) })
+		t.Logf("the refusing call allocated %d bytes; an honest verification allocated %d", allocated, honest)
+		if honestErr != nil {
+			t.Fatalf("the denominator must be an honest verification: %v", honestErr)
+		}
+		if !errors.Is(err, p4offline.ErrSourceRoundRegistry) || strings.Contains(err.Error(), "\n") {
+			t.Fatalf("this fixture must reach the BARE re-reconciliation, or the budget below proves nothing: %v", err)
+		}
+		// AGAINST AN HONEST VERIFICATION, because this refusal is
+		// payload-proportional by construction -- it flattens and reconciles
+		// before it can know the answer -- so a constant will not do. The two
+		// paths do the SAME work and differ only in what they return: registryDigest
+		// runs above the re-reconciliation, so the refusal pays it too, and the
+		// refusal measures 1.00x an honest verification. A second registryDigest
+		// inside the branch measures 1.44x. The ceiling sits between them.
+		//
+		// THE FLOOR IS THE OTHER SIDE OF THE SAME RATIO, and it is what this row
+		// has instead of floorOf, whose unit is a framing of `big`: a refusal that
+		// stopped reaching the re-reconciliation -- a short-circuit that answered
+		// from a cached digest, say -- would read far BELOW an honest verification,
+		// and a ceiling alone would call that a pass.
+		//
+		// NO MUTANT IN THIS ROUND'S CAMPAIGN MOVES THAT FLOOR, and the record is
+		// here rather than in a claim that one does: both paths run the same code
+		// and differ only in what they return, so lowering the numerator means
+		// writing the short-circuit, not editing what is here. It guards the change
+		// that has not been made yet.
+		if allocated*5 > honest*6 {
+			t.Fatalf("the refusal allocated %d bytes against %d for an honest verification: reaching it pays the framing once, and refusing must not pay it twice",
+				allocated, honest)
+		}
+		if allocated*10 < honest*9 {
+			t.Fatalf("the refusal allocated %d bytes against %d for an honest verification: it is not paying a whole verification's framing, so it is not on the measured path and the ceiling above proves nothing",
+				allocated, honest)
+		}
+	})
+}
+
+// TestAMalformedResolutionDigestIsRefusedBeforeTheArtifactIsFramed is the
+// resolution half of the same rule; see the registry sibling for the finding.
+//
+// Before the repair a producer-impossible digest was paid for at the price of
+// the whole artifact: the verifier scanned every reference and serialized the
+// artifact before comparing, and a well-formed wrong digest cost exactly the
+// same. resolutionDigest emits a DigestReference, so anything else is
+// refusable in O(1). The figures are written once, at the gate itself in
+// resolution.go; what this test asserts is the RATIO, which is what survives a
+// change of fixture.
+//
+// IT IS NAMED FOR THE FRAMING, and not for the walk, because the framing is
+// what a cost instrument can prove here. The gate moved BELOW
+// checkResolutionStringsExpressible leaves this test green: that scan ALLOCATES
+// NOTHING -- 0 B/op, 0 allocs/op on this fixture, about a millisecond of CPU --
+// so no byte ratio can see the move whatever its denominator. The order against
+// the scan is pinned by behaviour instead, in
+// TestADigestsSHAPEIsJudgedAboveTheScanThatReadsTheSupply.
+func TestAMalformedResolutionDigestIsRefusedBeforeTheArtifactIsFramed(t *testing.T) {
+	refs := make([]p4offline.EvidenceReference, 20000)
+	ids := make([]string, 20000)
+	for i := range refs {
+		refs[i] = p4offline.EvidenceReference{ObservationID: "obs" + strconv.Itoa(i), Kind: "k", Phase: "p", RoundState: "RESOLVED", EventID: "e1"}
+		ids[i] = "o" + strconv.Itoa(i)
+	}
+	a := p4offline.ProjectResolution(p4offline.ResolutionEvidence{
+		Round: p4offline.PublicRoundIdentity{EventID: "e1"}, OrderedOutcomeIDs: ids,
+		Claim: p4offline.ResolutionUnknown, Availability: p4offline.AvailabilityNotRecorded,
+		EvidenceReferences: refs, ProjectorRevision: "pr", ProofRevision: "x"})
+	if err := p4offline.VerifyResolutionArtifact(a); err != nil {
+		t.Fatalf("the unpoked control must verify: %v", err)
+	}
+	malformed := a
+	malformed.ResolutionFactsDigest = "x"
+	// WELL-FORMED BUT WRONG, and the easy way to write it is wrong: because
+	// DigestReference PREPENDS the prefix, DigestReference(prefix + hex) yields
+	// a 78-character double-prefixed value the shape gate rightly refuses, and
+	// the comparison below would then be between two malformed digests and
+	// would pass for the wrong reason. The lengths are asserted so the fixture
+	// cannot drift into that shape.
+	wrong := a
+	wrong.ResolutionFactsDigest = p4offline.DigestReference(strings.Repeat("b", 64))
+	if len(wrong.ResolutionFactsDigest) != len(a.ResolutionFactsDigest) {
+		t.Fatalf("the wrong digest must have the SHAPE of a real one: %d against %d",
+			len(wrong.ResolutionFactsDigest), len(a.ResolutionFactsDigest))
+	}
+	// THE COMPARISON NAMES BOTH DIGESTS, on the shape gate's precondition, as
+	// its two siblings do -- and in the right order, because both are
+	// DigestReferences and swapping them reads perfectly while saying the
+	// opposite. Containment cannot see that; position can.
+	werr := p4offline.VerifyResolutionArtifact(wrong)
+	if !errors.Is(werr, p4offline.ErrResolutionDigest) {
+		t.Fatalf("a well-formed WRONG digest must be refused by the comparison: %v", werr)
+	}
+	if !strings.Contains(werr.Error(), strconv.Quote(wrong.ResolutionFactsDigest)) {
+		t.Fatalf("the supplied digest is gated to a reference above and must be NAMED: %v", werr)
+	}
+	if strings.Contains(werr.Error(), "71 bytes") {
+		t.Fatalf("a gated digest reported by extent reads the same for every mismatch: %v", werr)
+	}
+	if !strings.Contains(werr.Error(), strconv.Quote(a.ResolutionFactsDigest)) {
+		t.Fatalf("the refusal must also name the digest the artifact produces: %v", werr)
+	}
+	if at, intro := strings.Index(werr.Error(), strconv.Quote(wrong.ResolutionFactsDigest)),
+		strings.Index(werr.Error(), "which digests to "); intro < 0 || at > intro {
+		t.Fatalf("the SUPPLIED digest must be named before the derived one: %v", werr)
+	}
+	if !strings.HasPrefix(werr.Error(), p4offline.ErrResolutionDigest.Error()) {
+		t.Fatalf("the refusal must lead with the class it joins: %v", werr)
+	}
+	if !errors.Is(p4offline.VerifyResolutionArtifact(malformed), p4offline.ErrResolutionDigest) ||
+		!errors.Is(p4offline.VerifyResolutionArtifact(wrong), p4offline.ErrResolutionDigest) {
+		t.Fatal("both shapes of bad digest must be refused")
+	}
+	// MEASURED IN BYTES RATHER THAN IN ALLOCATION COUNT, for the MARGIN and not
+	// because the count is blind. The count discriminates in both directions:
+	// before the gate a malformed digest cost 44 allocations against an honest
+	// verification's 41, and with the gate it costs 4 against the same 41. What
+	// differs is how much room the assertion has. An honest verification grows
+	// a few large buffers rather than many small ones, so the same pair spans a
+	// factor near fifty thousand in BYTES against a factor of ten in the count
+	// -- and the hundredfold threshold below is satisfiable only in bytes: 4
+	// allocations against 41 would fail it while the gate is working. The
+	// registry sibling counts allocations because its cost is per-claim
+	// framing, which is the opposite shape.
+	// MEASURED ONCE EACH, with the instrument TestFirstGatesDoNotMaterializeSuppliedText
+	// already uses, rather than by benchmarking. testing.Benchmark runs each
+	// function for about a second of WALL time whatever the fixture costs, so
+	// the two calls it takes here cost SEVERAL SECONDS under the race detector.
+	// No figure is quoted because none would mean anything: the floor is set by
+	// that wall-clock target and the honest half swings with b.N. Shrinking the
+	// fixture would
+	// not move it either way, since the time is fixed and only the iteration
+	// count changes. A single
+	// pair of readings answers the same question: the gap being asserted is
+	// four orders of magnitude, so a few kilobytes of bookkeeping slop cannot
+	// reach it.
+	measure := func(f func()) uint64 {
+		runtime.GC()
+		var before, after runtime.MemStats
+		runtime.ReadMemStats(&before)
+		f()
+		runtime.ReadMemStats(&after)
+		return after.TotalAlloc - before.TotalAlloc
+	}
+	cheap := measure(func() { _ = p4offline.VerifyResolutionArtifact(malformed) })
+	honest := measure(func() { _ = p4offline.VerifyResolutionArtifact(a) })
+	t.Logf("a malformed digest allocated %d bytes; an honest verification allocated %d", cheap, honest)
+	if honest < 1<<20 {
+		t.Fatalf("the fixture must make an honest verification expensive, got %d bytes", honest)
+	}
+	if cheap*100 > honest {
+		t.Fatalf("a one-byte malformed digest costs %d bytes against %d for an honest verification: "+
+			"a constant-size malformed field must not buy work proportional to the payload", cheap, honest)
 	}
 }
 

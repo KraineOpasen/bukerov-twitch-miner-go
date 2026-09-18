@@ -512,15 +512,20 @@ type DenominatorMembership struct {
 	// Primary is true ONLY when the decision counts in the
 	// POLICY_CHOICE_ACCURACY denominator. The two conditions named here -- the
 	// case is PRIMARY_SCORABLE and the payout evidence is a resolved
-	// WOULD_ATTEMPT -- are necessary, not sufficient:
-	// [AssessDenominatorMembership] applies five, and the two this sentence
-	// used to omit are the source-round gates. A PRIMARY_SCORABLE case whose
-	// payout is a resolved WOULD_ATTEMPT is still withheld when the registry
-	// does not re-derive, or when the round is not this case's canonical
-	// claim. denominator_test.go carries that counterexample beside the case
-	// that does count. The full set is on [AssessDenominatorMembership]; two
-	// independent review lanes read this comment as a biconditional, which is
-	// why it no longer reads as one.
+	// WOULD_ATTEMPT -- are necessary, NOT sufficient.
+	//
+	// NO COUNT IS GIVEN HERE. A count is the wrong instrument for this: the
+	// gates move with the code and a number in a comment does not. What a
+	// reader can check instead is the membership vocabulary declared below:
+	// every way
+	// [AssessDenominatorMembership] can withhold this flag names one of those
+	// constants, so the vocabulary IS the list, and it is a closed const block
+	// rather than a number in prose. A PRIMARY_SCORABLE case whose payout is a
+	// resolved WOULD_ATTEMPT is still withheld when the registry does not
+	// re-derive, or when the round is not this case's canonical claim;
+	// denominator_test.go carries that counterexample beside the case that
+	// does count. Two independent review lanes read this comment as a
+	// biconditional, which is why it does not read as one.
 	Primary bool `json:"primary"`
 	// PlacedBet is true ONLY when the decision counts in the
 	// PLACED_BET_WIN_RATE denominator, under the same five conditions with the
@@ -653,6 +658,26 @@ func AssessDenominatorMembership(ds predictioneval.SourceDataset, reg SourceRoun
 	// the round's canonical claim: the one reason names both (a case that
 	// reached this gate is PRIMARY_SCORABLE, so its claim derives; the error
 	// arm is defence in depth).
+	//
+	// THIS VERIFICATION IS PER-VERDICT, AND THAT IS QUADRATIC OVER A RUN.
+	// Reported by a security review lane, reproduced here, and NOT repaired --
+	// see doc.go's WHAT REMAINS for why. A run that judges N cases against an
+	// N-claim registry re-verifies the whole registry N times, and a
+	// verification hashes every claim, flattens the entries and reconciles them
+	// again. Doubling N multiplies the run's total by about 3.8. THE ABSOLUTES
+	// ARE NOT REPEATED HERE: doc.go's WHAT REMAINS owns them, because a figure
+	// maintained by hand in two places is a figure that will disagree with
+	// itself.
+	//
+	// The fix is the one the lane named: verify once per run and carry an
+	// immutable verified handle, exactly as VerifiedP3bRuleset does. That
+	// changes THIS function's signature, and this function is where seam 12
+	// composes with seams 3 and 10 -- an approved seam, not an implementation
+	// detail. There is also no non-test caller today: the shape needs a runner,
+	// which this package deliberately does not contain. So the change belongs
+	// to whoever builds that runner, with the seam re-approved, rather than to
+	// a bounded repair round guessing at an API for a consumer that does not
+	// exist yet.
 	if err := VerifySourceRoundRegistry(reg); err != nil {
 		reason(MembershipReasonRegistryNotDerived)
 		return out

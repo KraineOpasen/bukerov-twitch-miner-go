@@ -552,9 +552,14 @@ func resolutionDigest(a ResolutionArtifact) string {
 	return DigestReference(sha256Hex(SerializeResolutionArtifact(a)))
 }
 
-// VerifyResolutionArtifact checks the digest AND the derivation: a
-// WINNER_KNOWN or REFUND artifact must be exactly what projecting its own
-// facts produces, and an UNKNOWN artifact must assert nothing.
+// VerifyResolutionArtifact refuses a foreign contract or obligations revision,
+// then a digest that is not this package's shape, then a value the artifact's
+// own encoding cannot express, then recomputes the digest -- and then it checks
+// the DERIVATION: a WINNER_KNOWN or REFUND artifact must be exactly what
+// projecting its own facts produces, and an UNKNOWN artifact must assert
+// nothing. The value gate is ahead of the digest COMPARISON and below the
+// digest's SHAPE gate; both placements carry a precedence shift, and each is
+// recorded at the gate that carries it.
 func VerifyResolutionArtifact(a ResolutionArtifact) error {
 	// Same rule as VerifyCommonFactset's first gate: see suppliedTextExtent.
 	if a.ContractVersion != ResolutionFactsDigestVersion {
@@ -565,8 +570,11 @@ func VerifyResolutionArtifact(a ResolutionArtifact) error {
 		return errors.Join(ErrResolutionDigest, errors.New("p4offline: artifact obligations revision is "+
 			suppliedTextExtent(a.ObligationsRevision)+", this package writes only "+strconv.Quote(ResolutionObligationsRevision)))
 	}
-	// AHEAD OF THE DIGEST, and for the reason checkFactsetValuesExpressible
-	// gives at the other artifact: a string encoding/json cannot carry
+	// AHEAD OF THE DIGEST COMPARISON -- and BELOW the digest's SHAPE gate,
+	// which sits between this paragraph and the scan it documents. The heading
+	// names the COMPARISON for that reason: only one of the two is below this
+	// scan. For the reason checkFactsetValuesExpressible gives at the other
+	// artifact: a string encoding/json cannot carry
 	// UNCHANGED must not be hashed into a certificate. encoding/json marshals
 	// invalid UTF-8 WITHOUT error by substituting U+FFFD, so the stored
 	// artifact is a different value from the certified one and fails its own
@@ -583,11 +591,66 @@ func VerifyResolutionArtifact(a ResolutionArtifact) error {
 	// failed their own digest after a round trip. A poked Round.EventID did
 	// not, because the re-projection below re-derives the round identity and
 	// catches it first -- so the hole was four positions wide, not five.
+	//
+	// THE DIGEST'S SHAPE IS CHECKED BEFORE THE ARTIFACT IS FRAMED. A
+	// producer-impossible digest -- "x" -- used to reach the scan BELOW and the
+	// full serialization below before the mismatch was found: AT THIS COMMIT'S
+	// PARENT 0b3cd2f, 44 allocations and about 10.59 MB on a 20,000-reference
+	// artifact, against 44 and the same 10.59 MB for a WELL-FORMED wrong
+	// digest -- a constant-size malformed field amplified by the payload's
+	// size. With this gate the same call is 4 allocations and 200 bytes. The
+	// well-formed wrong digest reads 49 allocations here rather than 44,
+	// because the comparison below now quotes both digests; it is the one
+	// figure in this paragraph that moved, and it moved in the direction the
+	// gate does not govern. The megabyte is given to four significant
+	// figures because the byte-exact total is a property of the toolchain that
+	// measured it, not of the amplification this sentence is about. The 200 is
+	// this gate's own errors.Join. THE RATIO IS THE CLAIM: four allocations
+	// against forty-odd. Neither the count nor the byte total is quoted as a
+	// constant -- independent lanes reading the gated path get 4 every time and
+	// the ungated path in the mid-forties, varying by a count or two between
+	// runs and between estimators. No triple is written here, because three
+	// readings from one host are a sample and a sample quoted as a constant is
+	// something a later lane on another host has to spend its time refuting.
+	// resolutionDigest emits a DigestReference, so anything else is refusable
+	// in O(1). This is the same rule the two gates above the factset's digest
+	// already follow, applied where a review lane found it missing.
+	// THE REFUSAL NAMES THE FAULT AND THE EXTENT. This package holds a digest
+	// to its shape in SIX places -- this one, the factset's, the registry's,
+	// p3b.go's two (the declared native digest and the declared raw hash) and
+	// checkEntropyCoordinates' reference gate -- and after this change every
+	// one of the six names what it refused rather than returning the bare
+	// sentinel: factset.go emits "factset digest of N bytes is not this
+	// package's 64 lower-case hex digits", p3b.go "declared native digest is
+	// not 64 lower-case hex digits", entropy.go "common factset digest is not
+	// \"sha256:\" followed by 64 lower-case hex digits".
+	// suppliedTextExtent's rule holds here as there: the FIELD and the EXTENT,
+	// never the caller's text.
+	//
+	// What naming it buys is that a caller can tell a refusal from the SHAPE
+	// gate from one by the comparison below it. The gate's POSITION is a
+	// separate property and is pinned by behaviour, in
+	// TestADigestsSHAPEIsJudgedAboveTheScanThatReadsTheSupply, not by this
+	// message and not by cost.
+	if !isDigestReference(a.ResolutionFactsDigest) {
+		return errors.Join(ErrResolutionDigest, errors.New("p4offline: resolution facts digest of "+
+			suppliedTextExtent(a.ResolutionFactsDigest)+" is not this package's "+
+			strconv.Quote(DigestReferencePrefix)+" prefix and 64 lower-case hex digits"))
+	}
 	if err := checkResolutionStringsExpressible(a); err != nil {
 		return err
 	}
-	if a.ResolutionFactsDigest != resolutionDigest(a) {
-		return errors.Join(ErrResolutionDigest, errors.New("p4offline: resolution facts digest does not match the artifact"))
+	if want := resolutionDigest(a); a.ResolutionFactsDigest != want {
+		// BOTH DIGESTS ARE NAMED, on the same precondition as the two sibling
+		// comparisons: the shape gate above has already proved this value a
+		// DigestReference, so quoting it cannot render a caller's payload, and
+		// reporting it by extent could only ever render the constant "71
+		// bytes". Naming both is what lets a caller tell "you sent the wrong
+		// digest" from "your artifact is not what you digested"; naming
+		// neither, which this refusal used to do, says only that they differ.
+		return errors.Join(ErrResolutionDigest, errors.New("p4offline: resolution facts digest "+
+			strconv.Quote(a.ResolutionFactsDigest)+" does not match the artifact, which digests to "+
+			strconv.Quote(want)))
 	}
 	switch a.Outcome {
 	case ResolutionWinnerKnown, ResolutionRefund:

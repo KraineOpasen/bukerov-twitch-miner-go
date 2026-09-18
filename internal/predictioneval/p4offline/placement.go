@@ -391,6 +391,14 @@ func decisionOf(policy string, fs CommonFactset, resultDigest string, action Act
 	// mismatch there is. It is named, exactly as derivedOpportunity already
 	// names it under the identical precondition. resultDigest is the ungated
 	// one: a plain exported field on the supplied result.
+	//
+	// THE EMPTY CHECK IS DEAD AND STAYS, recorded rather than left to be
+	// rediscovered: fs.Digest is 64 hex characters by the precondition above,
+	// so an empty resultDigest already fails the comparison beside it and
+	// deleting the clause passes the whole suite. It is kept because it states
+	// the intent at the site -- an absent digest binds nothing -- and it would
+	// start carrying weight the moment this gate is reached on a path where
+	// fs.Digest is not already proved non-empty.
 	if resultDigest == "" || resultDigest != fs.Digest {
 		return PolicyDecision{}, errors.Join(ErrDecisionBinding,
 			errors.New("p4offline: result was evaluated over a factset digest of "+suppliedTextExtent(resultDigest)+

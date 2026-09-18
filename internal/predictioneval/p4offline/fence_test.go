@@ -49,8 +49,10 @@ import (
 	"go/build"
 	"go/parser"
 	"go/token"
+	"go/types"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strconv"
 	"strings"
@@ -483,4 +485,251 @@ func transitiveClosure(t *testing.T, roots []string) map[string]bool {
 		walk(r)
 	}
 	return seen
+}
+
+// suppliedTextExtentCensus is how many production call sites of
+// suppliedTextExtent sit in each function.
+//
+// It lives here, executable, because a count maintained in prose drifts from
+// the source it describes -- and prose ABOUT that drift drifts just as fast, so
+// none is written here. This is Rule E's lesson applied to a census: a
+// convention presented as a machine check should be a machine check.
+//
+// TestTheCensusWalkSeesWhatItClaimsTo holds the walk itself to synthetic
+// sources, because this package's own files cannot: every real call site is a
+// plain direct call in an ordinary func in a file no build tag excludes.
+var suppliedTextExtentCensus = map[string]int{
+	"evidence.go/VerifySourceRoundRegistry":  2, // the Version clause and the digest-shape gate
+	"factset.go/VerifyCommonFactset":         3, // contract, protocol, the digest's shape
+	"factset.go/checkFactsetConsistency":     2, // the stealth-proof arm and the completeness arm
+	"p3b.go/decodeFault":                     1, // a decoder fault that quoted the document
+	"p3b.go/walkRulesetObject":               1, // the unknown-key gate
+	"placement.go/decisionOf":                1, // the result's own factset digest
+	"resolution.go/VerifyResolutionArtifact": 4, // contract, obligations, the digest's shape, the outcome arm
+}
+
+// firstGateTableRows is how many rows TestFirstGatesDoNotMaterializeSuppliedText
+// carries. The test asserts its own length against this, so the two inventories
+// that quote it cannot drift from it in silence.
+const firstGateTableRows = 12
+
+// censusOfDir walks the production files of one directory and returns how many
+// times each function mentions suppliedTextExtent, plus how many files it read.
+//
+// It is a function rather than the body of the test below because the test
+// below is where almost all of it is exercised: this package's call sites are
+// every one of them plain direct calls inside ordinary funcs in files no build
+// tag excludes, so the mechanisms that give the walk its coverage -- the
+// build-excluded key, the test-file exclusion, the identifier match, the
+// receiver in the key, the package-level bucket, the selector skip and the
+// walk of its qualifier, the field skip and the walk of its type, the
+// declaration skip and the walk of its body -- are invisible to a scan of this
+// package's own files. All but TWO. The declaration skip is exercised by
+// canonical.go's own suppliedTextExtent declaration, and reverting it makes the
+// real census gain a row for the helper itself. The identifier match is
+// exercised by every site there is, so DELETING it empties the census and the
+// real scan fails -- though NARROWING it to a bare CallExpr does not, because
+// every real site is already a bare direct call. Two mutants of one mechanism,
+// and only one of them is visible from here: which is the whole reason the
+// synthetic fixture exists. Remove the test below and the other nine survive.
+// A machine check whose own mechanisms nothing asserts is a convention again,
+// which is the thing this census exists to stop being.
+func censusOfDir(t *testing.T, dir string) (map[string]int, int) {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("read %s: %v", dir, err)
+	}
+	fset := token.NewFileSet()
+	got, files := map[string]int{}, 0
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		// A FILE THE BUILD EXCLUDES IS NOT A PRODUCTION CALL SITE OF THIS
+		// BUILD, because parser.ParseFile applies no build constraints and a
+		// `//go:build never` probe would otherwise count. It is not nothing
+		// either: build.Default carries neither the tags the test binary was
+		// built with nor the GOOS this project cross-compiles for, so DROPPING
+		// an excluded file lets a real call site vanish from a census whose
+		// claim is that none can. Excluded files are walked under their own
+		// key instead. A probe must still be declared, and a site behind a tag
+		// or a GOOS suffix appears as a row nobody wrote rather than as
+		// silence.
+		ok, err := build.Default.MatchFile(dir, name)
+		if err != nil {
+			t.Fatalf("match %s: %v", name, err)
+		}
+		prefix := name
+		if ok {
+			files++
+		} else {
+			prefix = name + " [build-excluded]"
+		}
+		f, err := parser.ParseFile(fset, filepath.Join(dir, name), nil, parser.SkipObjectResolution)
+		if err != nil {
+			t.Fatalf("parse %s: %v", name, err)
+		}
+		// EVERY REFERENCE COUNTS, not every CallExpr, and the whole file is
+		// walked rather than its FuncDecls -- a call in a package-level `var`,
+		// a call through a function value and `(suppliedTextExtent)(x)` are all
+		// invisible to the narrow form, and all three mention the name.
+		// `where` is read by the walker below on every increment, so it is
+		// declared beside it and reassigned per declaration rather than
+		// rebuilding the closure for each one.
+		var where string
+		var count func(ast.Node) bool
+		count = func(n ast.Node) bool {
+			switch x := n.(type) {
+			case *ast.SelectorExpr:
+				// A SELECTED name is a different symbol -- a field or a method
+				// called suppliedTextExtent is not this helper. The qualifier
+				// is still walked, so a call nested inside one is not lost
+				// with it.
+				ast.Inspect(x.X, count)
+				return false
+			case *ast.Field:
+				// The NAMES of a struct field, a parameter or a receiver are
+				// DECLARATIONS, not references. Only the type can mention the
+				// helper. The synthetic fixture in
+				// TestTheCensusWalkSeesWhatItClaimsTo found this the moment it
+				// was written: a `suppliedTextExtent string` field counted as
+				// a call site.
+				ast.Inspect(x.Type, count)
+				return false
+			case *ast.Ident:
+				if x.Name == "suppliedTextExtent" {
+					got[where]++
+				}
+			}
+			return true
+		}
+		for _, d := range f.Decls {
+			fd, isFunc := d.(*ast.FuncDecl)
+			where = prefix + "/<package-level>"
+			if isFunc {
+				// THE RECEIVER IS PART OF THE KEY, or a method and a function
+				// of the same name in one file merge into one row and the
+				// breakdown stops being a breakdown.
+				where = prefix + "/" + fd.Name.Name
+				if fd.Recv != nil && len(fd.Recv.List) > 0 {
+					where = prefix + "/(" + types.ExprString(fd.Recv.List[0].Type) + ")." + fd.Name.Name
+				}
+				if fd.Name.Name == "suppliedTextExtent" {
+					// A DECLARATION OF THAT NAME is not a reference to the
+					// helper -- neither the helper's own, nor a METHOD's,
+					// which is a different symbol by the same rule the
+					// selector skip below states. The BODY is neither a
+					// declaration nor a selected name, so it is walked like
+					// any other: a reference inside it is a call site, and the
+					// fixture in TestTheCensusWalkSeesWhatItClaimsTo carries
+					// one, because a mechanism nothing exercises is a
+					// mechanism that can be deleted with the suite green.
+					if fd.Body != nil {
+						ast.Inspect(fd.Body, count)
+					}
+					continue
+				}
+			}
+			ast.Inspect(d, count)
+		}
+	}
+	return got, files
+}
+
+// TestTheCensusWalkSeesWhatItClaimsTo holds censusOfDir's coverage mechanisms
+// to synthetic sources, because this package's own files cannot: every real
+// call site is a plain direct call in an ordinary func in a file no build tag
+// excludes, so WITHOUT THIS TEST all but two of them could be reverted with
+// the whole suite green. THE PRECONDITION IS LOAD-BEARING: with this test
+// present, reverting any of the eleven fails, which is the entire reason it is
+// here. The two a real scan does see are named at censusOfDir: the
+// declaration skip, and the identifier match, whose DELETION empties the
+// census even though NARROWING it to a bare CallExpr does not. Each mechanism
+// appears below as a row it produces or as a row it keeps OUT, and the fixture
+// is one directory so a single expected map pins them all at once.
+func TestTheCensusWalkSeesWhatItClaimsTo(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name, body string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o600); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+	}
+	// Excluded by a build tag: keyed apart, and not counted as a production file.
+	write("excluded.go", "//go:build ignore\n\npackage p\n\nvar x = suppliedTextExtent(\"a\")\n")
+	// A _test.go file is not production and is skipped before the tag check.
+	write("skipped_test.go", "package p\n\nvar y = suppliedTextExtent(\"a\")\n")
+	write("a.go", `package p
+
+var pkgLevel = suppliedTextExtent("a")
+var alias = suppliedTextExtent
+
+type T struct{ suppliedTextExtent string }
+
+func (t T) selected() string { return t.suppliedTextExtent }
+func qualified() string      { return wrap(suppliedTextExtent("f")).s }
+func inFieldType(p [suppliedTextExtent]int) {}
+func (t T) suppliedTextExtent() string { return suppliedTextExtent("e") }
+func (t T) n() string        { return suppliedTextExtent("b") }
+func n() string              { return suppliedTextExtent("c") }
+func parenthesised() string  { return (suppliedTextExtent)("d") }
+func suppliedTextExtent(s string) string { return suppliedTextExtent(s) }
+`)
+	got, files := censusOfDir(t, dir)
+	want := map[string]int{
+		"a.go/<package-level>": 2, // the var initializer AND the function value
+		"a.go/(T).n":           1, // the receiver keeps this apart from a.go/n
+		"a.go/n":               1,
+		"a.go/parenthesised":   1, // not a bare-identifier callee
+		// THE TWO SKIPS DO NOT SWALLOW WHAT THEY STEP OVER. A selector's
+		// QUALIFIER and a field's TYPE are still walked, so a reference nested
+		// in either is a call site like any other. Without these rows both
+		// recursions can be deleted with the whole suite green, and a census
+		// that UNDERCOUNTS is the one failure it exists to rule out.
+		"a.go/qualified":   1,
+		"a.go/inFieldType": 1,
+		// Walked, but under a key of its own, so a build-excluded site can
+		// neither pass for a production one nor disappear.
+		"excluded.go [build-excluded]/<package-level>": 1,
+		// A DECLARATION of that name is not a reference, but its BODY is
+		// walked like any other, so what each of these rows counts is the ONE
+		// call inside the body and never the name above it. Without them the
+		// fixture never exercises that walk and the line doing it can be
+		// deleted with the whole suite green -- and the method row is what
+		// tells a name skipped BECAUSE IT IS A DECLARATION from one skipped
+		// only because it had no receiver.
+		"a.go/suppliedTextExtent":     1,
+		"a.go/(T).suppliedTextExtent": 1,
+	}
+	// a.go/(T).selected is absent: a FIELD of that name is a different symbol.
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("the walk does not see what it claims to.\n got: %v\nwant: %v", got, want)
+	}
+	if files != 1 {
+		t.Errorf("counted %d production files; the build-excluded and _test.go ones must not be among them", files)
+	}
+}
+
+// TestTheSuppliedTextExtentCensusMatchesAScan holds the census above to an AST
+// walk of this package's own production files.
+//
+// It asserts the BREAKDOWN, not just the total, because a right total can hide
+// two offsetting errors in the breakdown.
+func TestTheSuppliedTextExtentCensusMatchesAScan(t *testing.T) {
+	got, files := censusOfDir(t, ".")
+	if files == 0 {
+		t.Fatal("no production files were parsed; this census would pass vacuously")
+	}
+	if !reflect.DeepEqual(got, suppliedTextExtentCensus) {
+		t.Errorf("the census does not match the source.\n got: %v\nwant: %v", got, suppliedTextExtentCensus)
+	}
+	// THE TOTAL IS LOGGED, NOT ASSERTED: a literal would be another
+	// hand-maintained copy of a number the DeepEqual above already pins.
+	total := 0
+	for _, n := range suppliedTextExtentCensus {
+		total += n
+	}
+	t.Logf("%d production call sites of suppliedTextExtent, scanned across %d production files", total, files)
 }

@@ -585,7 +585,7 @@ func TestIncompleteFactsetRefusalIsBoundedInItsOwnInput(t *testing.T) {
 }
 
 // TestFirstGatesDoNotMaterializeSuppliedText is the class test, and it exists
-// because this defect has now been found in EIGHT successive review rounds: at
+// because this defect has been found again in round after round of review: at
 // VerifyP3bRuleset's identity gate; then at ValidateDrawTrace's two gates and
 // bindEntropyCoordinates' round gate; then at six more, including
 // VerifyCommonFactset, the first gate on every factset path; then at three MORE
@@ -596,21 +596,22 @@ func TestIncompleteFactsetRefusalIsBoundedInItsOwnInput(t *testing.T) {
 // at a site that is not a gate at all, the derivation argument Decision builds
 // before decisionOf's first statement runs.
 //
-// So this is a table over the gates of that shape that are reachable as a plain
-// first-gate comparison through an exported verifier, and a new gate of that
-// shape belongs here on the day it is written. It is a REGISTRY, not a proof of
-// enumeration -- see the paragraph below, which exists because this sentence
-// used to claim more than any test can.
+// So this is a table over the gates of that shape that are reachable through an
+// exported verifier -- most as a plain first-gate comparison, three from below
+// a digest gate -- and a new gate of that shape belongs here on the day it is
+// written. It is a REGISTRY, not a proof of
+// enumeration; the paragraph below says what that distinction costs a reader
+// who mistakes one for the other.
 //
-// EACH ROW ASSERTS THE RENDERED EXTENT, not merely that the error is small. A
-// first version asserted only the sentinel, a 1024-byte budget and the absence
-// of the input -- and a gate reporting the WRONG extent (this package's own
-// constant instead of the caller's string) satisfied all three. Three of five
-// rows survived a field swap. The extent is the property the repair exists for,
-// so it is the property that is checked.
+// EACH ROW ASSERTS THE RENDERED EXTENT, not merely that the error is small. The
+// sentinel, a 1024-byte budget and the absence of the input are all satisfied
+// by a gate that reports the WRONG extent -- this package's own constant
+// instead of the caller's string -- so those three together pin nothing the
+// repair is for. The extent is that property, so the extent is what is checked.
 //
-// SIX SITES OF THE CLASS ARE PINNED ELSEWHERE, in the five rows below -- one
-// row covers two gates -- and they are named here rather than duplicated:
+// THE SITES OF THE CLASS THIS TABLE DOES NOT CARRY are pinned elsewhere, and
+// are NAMED here rather than counted, because a count kept by hand in prose is
+// exactly what fence_test.go's census now derives from the source instead:
 //
 //	VerifyP3bRuleset's identity gate  TestRulesetIdentityRefusalDoesNotMaterializeSuppliedText
 //	ValidateDrawTrace's two gates     TestDrawTraceRefusalDoesNotMaterializeSuppliedText
@@ -619,45 +620,50 @@ func TestIncompleteFactsetRefusalIsBoundedInItsOwnInput(t *testing.T) {
 //	  (BOTH callers -- P2CaseResult.Decision and P3bCaseResult.Decision -- and
 //	  the mint check below them)
 //	walkRulesetObject's key gate      TestRulesetKeyRefusalsDoNotMaterializeTheSuppliedKey
+//	decodeFault's extent report       TestADecoderFaultIsReportedByItsExtent
 //
-// With the nine rows below that is FIFTEEN sites: 9 + 6. Every number in this
-// paragraph is from a scan of the source -- 9 table rows, 10 production call
-// sites of suppliedTextExtent, of which one (walkRulesetObject's) needs a raw
-// document and a raised ceiling to reach and so is pinned elsewhere. canonical.go
-// carries the same inventory beside the rule.
+// THAT LIST IS NOT A PROOF OF COMPLETENESS. What can show a site neither
+// inventory names is the census in fence_test.go, which is derived from the
+// source rather than maintained here. NO TOTAL IS WRITTEN HERE: the
+// two counts that can be derived from the source are derived --
+// firstGateTableRows, which the table below asserts its own length against, and
+// suppliedTextExtentCensus, which TestTheSuppliedTextExtentCensusMatchesAScan
+// holds against an AST walk. fence_test.go carries them both; canonical.go
+// carries the rule that put them there.
 //
-// THE PREVIOUS VERSION OF THIS PARAGRAPH GOT TWO OF THOSE NUMBERS WRONG, in the
-// same edit that claimed they were read off the source by a scan. It said FIVE
-// sites where the rows name six, because a row was added without rescanning;
-// and the new row was inserted ABOVE the indented continuation belonging to the
-// Decision row, so the parenthetical about two callers and a mint check read as
-// if it described walkRulesetObject, which has one caller and no mint check.
-// Claiming a scan is not performing one.
+// WHAT THIS TABLE IS NOT. It is the registry for the sites reachable through an
+// exported verifier, most as a plain first-gate comparison and three from below
+// a digest gate. It is NOT a proof that the
+// class is enumerated, and no test can be one: walkRulesetObject's key gate is
+// a site of this class that no exported verifier reaches as a plain first-gate
+// comparison, so it is named above and carried elsewhere rather than held here.
+// An auditor who read this table as an enumeration would be misled about what
+// is proven. fence_test.go carries the counts that can be derived from the
+// source; canonical.go carries the rule and names the sites it does not. The
+// honest statement is that every site KNOWN to this branch is listed here or
+// named above -- not that no further one exists.
 //
-// WHAT THIS TABLE IS NOT. It is the registry for the sites reachable as a plain
-// first-gate comparison through an exported verifier. It is NOT a proof that the
-// class is enumerated, and no test can be one. An earlier version said it
-// covered every such gate "wherever it sits" and called its inventory whole;
-// that was false while walkRulesetObject's key gate sat outside it, and an
-// auditor reading it as an enumeration would have been misled about what is
-// proven. The class has now been found in EIGHT successive review rounds;
-// canonical.go carries the site counts, because it is where the rule lives and
-// one place should own them. The honest statement is that every site KNOWN to
-// this branch is listed here or named above -- not that no further one exists.
-//
-// The Decision row used to name one test while that test drove ONE of its two
-// callers; a lane reverted the other and the whole suite passed, so the row
-// promised more than it held. It names what it covers now.
+// A ROW NAMES ONLY WHAT ITS TEST DRIVES. Where a site has two callers and the
+// named test drives one, the row promises more than it holds and the other
+// caller can be reverted with the whole suite green -- so the Decision row
+// names both of its own.
 func TestFirstGatesDoNotMaterializeSuppliedText(t *testing.T) {
 	const budget = 1024
 	big := strings.Repeat("a", 1<<20)
 	wantExtent := strconv.Itoa(len(big)) + " bytes"
+	// A PAYLOAD FOR THE FRAMING TO READ, AND NOT THE SAME LENGTH AS `big`.
+	// Two rows below need a second field set so the framing has something to
+	// cost; if that field were `big` too, `wantExtent` would be satisfied by
+	// EITHER field and the assertion would stop pinning "the extent of the
+	// field under test" -- a gate reporting the padding's extent instead of
+	// its own would pass. One byte of difference restores that.
+	padding := strings.Repeat("a", 1<<20+1)
 	_, _, good := selectedCase(t, nil, nil)
 	unknownArtifact := func() p4offline.ResolutionArtifact {
 		return p4offline.ResolutionNotRecorded(p4offline.PublicRoundIdentity{EventID: "e1"}, []string{"o1", "o2"}, nil, "p")
 	}
 
-	for _, tc := range []struct {
+	cases := []struct {
 		name        string
 		call        func() error
 		sentinel    error
@@ -666,6 +672,19 @@ func TestFirstGatesDoNotMaterializeSuppliedText(t *testing.T) {
 	}{
 		{"a factset contract version", func() error {
 			fs := good
+			// THE PAYLOAD GOES WHERE THE FRAMING READS IT, and the poked field
+			// is not such a place: SerializeCommonFactset writes the package's
+			// own CommonFactsetDigestVersion, never the supplied one, so a
+			// megabyte at ContractVersion leaves the framing tiny and this
+			// row's budget unapproached. It is the same structural fact
+			// TestAMalformedFactsetDigestIsRefusedBeforeTheFactsetIsFramed
+			// records one gate lower about fs.Digest. Without the padding line
+			// below, a full SerializeCommonFactset inside this gate's refusal
+			// branch survives the whole suite -- and on the 4 MiB fixture
+			// TestAnUncarriableSupplyIsRefusedBeforeItIsFramed builds, that
+			// hoist costs 4,203,384 bytes, 100.0% of an honest verification
+			// there.
+			fs.ProjectorRevision = padding
 			fs.ContractVersion = big
 			return p4offline.VerifyCommonFactset(fs)
 		}, p4offline.ErrFactsetDigest, "factset contract is", false},
@@ -693,6 +712,13 @@ func TestFirstGatesDoNotMaterializeSuppliedText(t *testing.T) {
 		}, p4offline.ErrFactsetInconsistent, "completeness of", true},
 		{"a resolution artifact contract version", func() error {
 			a := unknownArtifact()
+			// The artifact's half of the same fact: SerializeResolutionArtifact
+			// writes ResolutionFactsDigestVersion, not a.ContractVersion.
+			// Without the padding line below the same hoist survives, and on
+			// the 20,000-reference fixture that test builds it costs
+			// about 10.59 MB -- again 100.0% of an honest verification
+			// there.
+			a.ProjectorRevision = padding
 			a.ContractVersion = big
 			return p4offline.VerifyResolutionArtifact(a)
 		}, p4offline.ErrResolutionDigest, "artifact contract is", false},
@@ -701,6 +727,43 @@ func TestFirstGatesDoNotMaterializeSuppliedText(t *testing.T) {
 			a.ObligationsRevision = big
 			return p4offline.VerifyResolutionArtifact(a)
 		}, p4offline.ErrResolutionDigest, "artifact obligations revision is", false},
+		{"a resolution facts digest", func() error {
+			// A ROW HERE NEEDS A NAMED REFUSAL TO ASSERT. A gate returning the
+			// bare sentinel names no fault and no extent, so this table could
+			// say nothing about it; this one names both, which is what makes
+			// the rule -- the FIELD and the EXTENT, never the caller's text --
+			// a property of it rather than a vacuous pass.
+			a := unknownArtifact()
+			a.ResolutionFactsDigest = big
+			return p4offline.VerifyResolutionArtifact(a)
+		}, p4offline.ErrResolutionDigest, "resolution facts digest of", false},
+		{"a source-round registry version", func() error {
+			// Without this row the refusal could render the CALLER'S version
+			// instead of the package's constant -- strconv.Quote(reg.Version)
+			// where the code writes strconv.Quote(SourceRoundRegistryVersion)
+			// -- and a 1 MiB Version would come back as a 1 MiB refusal, with
+			// the whole suite green. The mutant is named rather than its
+			// measurement quoted, because a figure whose generating mutant is
+			// unstated is the thing doc.go's nested-hex note retires. The three
+			// sibling version/contract gates are rows here for the same reason,
+			// and this clause belongs beside them.
+			reg := p4offline.ReconcileSourceRounds([]p4offline.SourceRoundClaim{{
+				Episode:       p4offline.EpisodeIdentity{CollectorEpoch: 1, CollectorSessionID: "s", PoolInstanceID: "p", RoundIncarnationID: "r1", EventID: "e1"},
+				Attempt:       predictioneval.AttemptKey{CollectorEpoch: 1, CollectorSessionID: "s", PoolInstanceID: "p", AttemptID: 1},
+				FactsetDigest: strings.Repeat("a", 64),
+			}})
+			reg.Version = big
+			return p4offline.VerifySourceRoundRegistry(reg)
+		}, p4offline.ErrSourceRoundRegistry, "registry version is", false},
+		{"a source-round registry digest", func() error {
+			reg := p4offline.ReconcileSourceRounds([]p4offline.SourceRoundClaim{{
+				Episode:       p4offline.EpisodeIdentity{CollectorEpoch: 1, CollectorSessionID: "s", PoolInstanceID: "p", RoundIncarnationID: "r1", EventID: "e1"},
+				Attempt:       predictioneval.AttemptKey{CollectorEpoch: 1, CollectorSessionID: "s", PoolInstanceID: "p", AttemptID: 1},
+				FactsetDigest: strings.Repeat("a", 64),
+			}})
+			reg.Digest = big
+			return p4offline.VerifySourceRoundRegistry(reg)
+		}, p4offline.ErrSourceRoundRegistry, "registry digest of", false},
 		{"a resolution outcome, below the digest gate", func() error {
 			a := unknownArtifact()
 			a.Outcome = p4offline.ResolutionOutcome(big)
@@ -722,7 +785,17 @@ func TestFirstGatesDoNotMaterializeSuppliedText(t *testing.T) {
 			_, derr := res.Decision(good)
 			return derr
 		}, p4offline.ErrDecisionBinding, "evaluated over a factset digest of", false},
-	} {
+	}
+	// THE ROW COUNT IS ASSERTED, not described. firstGateTableRows is the one
+	// place the number is written; the comments beside it quote that constant
+	// rather than a figure of their own, and
+	// TestTheSuppliedTextExtentCensusMatchesAScan does the same for the
+	// production call sites this table's rows correspond to.
+	if len(cases) != firstGateTableRows {
+		t.Fatalf("this table carries %d rows; firstGateTableRows says %d",
+			len(cases), firstGateTableRows)
+	}
+	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			runtime.GC()
 			var before, after runtime.MemStats
@@ -760,7 +833,14 @@ func TestFirstGatesDoNotMaterializeSuppliedText(t *testing.T) {
 			// the REFUSAL does not add another copy on top.
 			budgetBytes := uint64(len(big)) / 2
 			if tc.belowDigest {
-				budgetBytes = 3 * uint64(len(big))
+				// 2.5x, NOT 3x. The three below-digest rows measure about
+				// 2.02x -- one framing to verify the digest, one to reach the
+				// gate -- and a second framing inside the refusal measures
+				// about 3.03x. A 3x line catches that by under 1% of itself,
+				// which is a line that will stop catching it the first time
+				// the fixture grows. 2.5x sits midway: the honest reading is
+				// 81% of it and the mutant 121%.
+				budgetBytes = 5 * uint64(len(big)) / 2
 			}
 			if allocated > budgetBytes {
 				t.Fatalf("the refusing call allocated %d bytes against a %d-byte supplied string (budget %d)",
@@ -807,6 +887,43 @@ func TestFirstGatesDoNotMaterializeSuppliedText(t *testing.T) {
 		if !strings.Contains(derr.Error(), strconv.Itoa(len(res.FactsetDigest))+" bytes") {
 			t.Fatalf("the supplied result digest must be reported by extent: %v", derr)
 		}
+
+		// AND THE SAME CONVERSE AT VerifyCommonFactset'S OWN COMPARISON, which
+		// sits on the same side of this rule for the same reason. The shape
+		// gate eight lines above it bounds the supplied digest, so reporting
+		// that digest by EXTENT could only ever render the constant "64 bytes"
+		// -- a sentence that reads the same for every mismatch there is.
+		// Without this row, reverting the comparison to an extent survives the
+		// whole suite; the SUPPLIED digest must be named, like decisionOf's,
+		// and the extent must be gone.
+		wrong := good
+		wrong.Digest = strings.Repeat("b", 64)
+		werr := p4offline.VerifyCommonFactset(wrong)
+		if !errors.Is(werr, p4offline.ErrFactsetDigest) {
+			t.Fatalf("a well-formed WRONG digest must be refused by the comparison: %v", werr)
+		}
+		if !strings.Contains(werr.Error(), strconv.Quote(wrong.Digest)) {
+			t.Fatalf("the supplied digest is gated to 64 hex above and must be NAMED: %v", werr)
+		}
+		if strings.Contains(werr.Error(), "64 bytes") {
+			t.Fatalf("a gated digest reported by extent reads the same for every mismatch: %v", werr)
+		}
+		if !strings.Contains(werr.Error(), strconv.Quote(good.Digest)) {
+			t.Fatalf("the refusal must also name the digest the values produce: %v", werr)
+		}
+		// AND IN THE RIGHT ORDER, AND UNDER ITS CLASS. Both digests are 64 hex
+		// characters, so swapping them reads perfectly and says the opposite --
+		// this package's own digest presented as the caller's. Containment
+		// cannot see it; position can. The errors.Join order is asserted for
+		// the same reason it is at the registry: errors.Is is order-blind, so
+		// nothing else would notice the class leaving the first line.
+		if at, intro := strings.Index(werr.Error(), strconv.Quote(wrong.Digest)),
+			strings.Index(werr.Error(), "which digest to "); intro < 0 || at > intro {
+			t.Fatalf("the SUPPLIED digest must be named before the derived one: %v", werr)
+		}
+		if !strings.HasPrefix(werr.Error(), p4offline.ErrFactsetDigest.Error()) {
+			t.Fatalf("the refusal must lead with the class it joins: %v", werr)
+		}
 	})
 
 	t.Run("and each refusal still names the constant it wanted", func(t *testing.T) {
@@ -821,8 +938,14 @@ func TestFirstGatesDoNotMaterializeSuppliedText(t *testing.T) {
 		fs = good
 		fs.Protocol = big
 		e2 := p4offline.VerifyCommonFactset(fs)
+		// WELL-FORMED BUT WRONG, which is now the case that reaches the digest
+		// comparison at all. A 1 MiB digest is refused one gate earlier, by its
+		// SHAPE, and that gate exists precisely so a constant-size malformed
+		// field cannot buy work proportional to the payload -- so it cannot name
+		// a digest it deliberately never computed. The ill-shaped case is
+		// asserted separately below.
 		fs = good
-		fs.Digest = big
+		fs.Digest = strings.Repeat("b", 64)
 		e3 := p4offline.VerifyCommonFactset(fs)
 		fs = good
 		fs.StealthProof = p4offline.StealthProof(big)
@@ -835,6 +958,13 @@ func TestFirstGatesDoNotMaterializeSuppliedText(t *testing.T) {
 		a = unknownArtifact()
 		a.ObligationsRevision = big
 		e6 := p4offline.VerifyResolutionArtifact(a)
+		reg := p4offline.ReconcileSourceRounds([]p4offline.SourceRoundClaim{{
+			Episode:       p4offline.EpisodeIdentity{CollectorEpoch: 1, CollectorSessionID: "s", PoolInstanceID: "p", RoundIncarnationID: "r1", EventID: "e1"},
+			Attempt:       predictioneval.AttemptKey{CollectorEpoch: 1, CollectorSessionID: "s", PoolInstanceID: "p", AttemptID: 1},
+			FactsetDigest: strings.Repeat("a", 64),
+		}})
+		reg.Version = big
+		e7 := p4offline.VerifySourceRoundRegistry(reg)
 
 		for _, tc := range []struct {
 			err  error
@@ -845,6 +975,7 @@ func TestFirstGatesDoNotMaterializeSuppliedText(t *testing.T) {
 			{e4, strconv.Quote(string(p4offline.StealthProofOff))},
 			{e5, strconv.Quote(p4offline.ResolutionFactsDigestVersion)},
 			{e6, strconv.Quote(p4offline.ResolutionObligationsRevision)},
+			{e7, strconv.Quote(p4offline.SourceRoundRegistryVersion)},
 		} {
 			if tc.err == nil || !strings.Contains(tc.err.Error(), tc.want) {
 				t.Fatalf("the refusal must name the constant it wanted (%s): %v", tc.want, tc.err)
@@ -863,10 +994,94 @@ func TestFirstGatesDoNotMaterializeSuppliedText(t *testing.T) {
 		if e3 == nil || !strings.Contains(e3.Error(), strconv.Quote(good.Digest)) {
 			t.Fatalf("the digest fault must name the digest the values produce (%s): %v", good.Digest, e3)
 		}
+		// AND THE ILL-SHAPED DIGEST IS REFUSED BY ITS SHAPE, before anything is
+		// scanned or framed. It reports the supplied EXTENT and the requirement,
+		// and must NOT quote the caller's bytes -- a 1 MiB digest quoted back is
+		// the very materialization this whole test is about.
+		fs = good
+		fs.Digest = big
+		eShape := p4offline.VerifyCommonFactset(fs)
+		if !errors.Is(eShape, p4offline.ErrFactsetDigest) {
+			t.Fatalf("a digest of the wrong shape must be refused: %v", eShape)
+		}
+		if !strings.Contains(eShape.Error(), "64 lower-case hex digits") {
+			t.Fatalf("the shape refusal must name the requirement: %v", eShape)
+		}
+		if strings.Contains(eShape.Error(), big[:64]) {
+			t.Fatal("the shape refusal quoted the caller's digest back at them")
+		}
+		if strings.Contains(eShape.Error(), strconv.Quote(good.Digest)) {
+			t.Fatalf("the shape refusal must not name a digest it never computed: %v", eShape)
+		}
 		if e1.Error() == e2.Error() {
 			t.Fatalf("the two faults must be distinguishable: %v / %v", e1, e2)
 		}
 	})
+}
+
+// bigFactsetText is the payload that makes an honest factset verification
+// expensive enough for the two cost ratios below to mean anything.
+//
+// IT IS FOUR MEGABYTES. At one megabyte an honest verification
+// measures about 1.058 MB against a 1 MiB floor -- under 1% of headroom,
+// so a change in how canonical.buf grows would fail these tests on their
+// CONTROL rather than on the property they guard, which is the least
+// informative way for a test to break. One constant, one floor, and about 4x of
+// room under it.
+const bigFactsetText = 4 << 20
+
+// TestAMalformedFactsetDigestIsRefusedBeforeTheFactsetIsFramed is the factset
+// sibling of the registry's and the artifact's cost tests, and it is the one
+// easiest to leave out, because a row in
+// TestFirstGatesDoNotMaterializeSuppliedText looks like it already covers this
+// gate.
+//
+// It does not, and the gap is measurable: rewriting the gate as
+// `!isCanonicalHex(fs.Digest, 64) && fs.Digest != commonFactsetDigest(fs)` is
+// semantically identical and O(payload), and it survives the whole suite at the
+// ENTIRE cost of framing the payload -- 25,021 times the true refusal against
+// this fixture, a multiple that moves whenever bigFactsetText does, which is why
+// the assertion below is a ratio to an honest verification and not a constant.
+// The row that looks at this gate in
+// TestFirstGatesDoNotMaterializeSuppliedText cannot see it, and the reason is
+// worth keeping: that row pokes fs.Digest, and SerializeCommonFactset does not
+// READ fs.Digest -- the digest is OF the values -- so a 1 MiB digest leaves the
+// payload tiny and the budget is never approached. The payload has to go
+// somewhere the framing actually reads.
+func TestAMalformedFactsetDigestIsRefusedBeforeTheFactsetIsFramed(t *testing.T) {
+	_, _, good := selectedCase(t, nil, nil)
+	fs := good
+	fs.ProjectorRevision = strings.Repeat("p", bigFactsetText)
+	fs.Digest = digestOf(p4offline.SerializeCommonFactset(fs))
+	if err := p4offline.VerifyCommonFactset(fs); err != nil {
+		t.Fatalf("the unpoked control must verify: %v", err)
+	}
+	malformed := fs
+	malformed.Digest = "x"
+	if !errors.Is(p4offline.VerifyCommonFactset(malformed), p4offline.ErrFactsetDigest) {
+		t.Fatal("a producer-impossible digest must be refused")
+	}
+	// The same single-shot instrument the artifact's sibling uses, and the same
+	// denominator rule: an HONEST verification, not a well-formed wrong digest,
+	// so the assertion cannot be satisfied by two refusals that both stop early.
+	measure := func(f func()) uint64 {
+		runtime.GC()
+		var before, after runtime.MemStats
+		runtime.ReadMemStats(&before)
+		f()
+		runtime.ReadMemStats(&after)
+		return after.TotalAlloc - before.TotalAlloc
+	}
+	cheap := measure(func() { _ = p4offline.VerifyCommonFactset(malformed) })
+	honest := measure(func() { _ = p4offline.VerifyCommonFactset(fs) })
+	t.Logf("a malformed digest allocated %d bytes; an honest verification allocated %d", cheap, honest)
+	if honest < 1<<20 {
+		t.Fatalf("the fixture must make an honest verification expensive, got %d bytes", honest)
+	}
+	if cheap*100 > honest {
+		t.Fatalf("a one-byte malformed digest costs %d bytes against %d for an honest verification: "+
+			"a constant-size malformed field must not buy work proportional to the payload", cheap, honest)
+	}
 }
 
 // nonFiniteValues are one representative of each class encoding/json refuses.
@@ -1336,9 +1551,9 @@ func TestEveryReachableFactsetStringRefusesInvalidUTF8(t *testing.T) {
 	}
 	// The count is exact, like the float sibling's, and for the same reason: a
 	// slack bound would let half the positions disappear without tripping. It
-	// is a property of the FIXTURE — 15 scalar positions, two outcome ids, the
-	// four settings strings, Digest, and the two contract identifiers — not of
-	// the type. IncompleteReasons is nil on this fixture and so is NOT among
+	// is a property of the FIXTURE — 13 scalar positions, two outcome ids, the
+	// four settings strings, Digest, and the two contract identifiers, which is
+	// the 22 asserted below — not of the type. IncompleteReasons is nil on this fixture and so is NOT among
 	// them; that is why the hand-written subtest below exists.
 	_, found := sites()
 	if want := 22; len(found) != want {

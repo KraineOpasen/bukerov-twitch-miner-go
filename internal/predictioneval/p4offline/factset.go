@@ -493,11 +493,15 @@ func commonFactsetDigest(fs CommonFactset) string {
 	return sha256Hex(SerializeCommonFactset(fs))
 }
 
-// VerifyCommonFactset refuses a value the artifact's own encoding cannot
-// express, then recomputes the digest, then re-derives the labels from the
-// values, and refuses any mismatch. The value gate is ahead of the digest on
+// VerifyCommonFactset refuses a foreign contract or protocol, then a digest
+// that is not this package's shape, then a value the artifact's own encoding
+// cannot express, then recomputes the digest, re-derives the labels, and
+// refuses any mismatch. The value gate is ahead of the digest COMPARISON on
 // purpose; checkFactsetValuesExpressible says why, and names the precedence
-// shift that placement carries.
+// shift that placement carries. The SHAPE gate above it is newer and carries a
+// shift of its own, recorded at the gate. This sentence says COMPARISON rather
+// than "digest" because the shape gate now sits between the two, and the value
+// gate precedes only the comparison.
 func VerifyCommonFactset(fs CommonFactset) error {
 	// THE FIRST GATE ON EVERY FACTSET PATH IN THIS PACKAGE, and it used to pay
 	// for its own refusal: these three fields are plain exported strings that
@@ -511,7 +515,9 @@ func VerifyCommonFactset(fs CommonFactset) error {
 		return errors.Join(ErrFactsetDigest, errors.New("p4offline: factset protocol is "+
 			suppliedTextExtent(fs.Protocol)+", this package writes only "+strconv.Quote(ProtocolVersion)))
 	}
-	// AHEAD OF THE DIGEST, but NOT for the reason the two gates above are ahead
+	// AHEAD OF THE DIGEST COMPARISON -- and below the digest's SHAPE gate, which
+	// was inserted between this paragraph and the scan it documents -- but NOT
+	// for the reason the two gates above are ahead
 	// of it. Those two are placed by the refusal-COST rule: they used to pay
 	// for their own refusal, and a wrong contract version is not a value an
 	// encoding cannot express. This one is placed for a semantic reason -- a
@@ -529,14 +535,41 @@ func VerifyCommonFactset(fs CommonFactset) error {
 	// position now reports the encoding fault rather than the vocabulary one,
 	// and a factset bad in both a string and a float now names whichever the
 	// order below reaches first rather than always the float.
+	//
+	// THE DIGEST'S SHAPE FIRST, for the reason a review lane gave and this file
+	// already argues one gate up: a constant-size malformed field must not buy
+	// work proportional to the payload. commonFactsetDigest emits 64 lower-case
+	// hex digits, so a digest of any other shape is refusable in O(1), before
+	// the value scan and before the framing.
+	//
+	// IT CARRIES A SENTINEL SHIFT OF ITS OWN: for the subset where the digest
+	// is not merely WRONG but ILL-SHAPED, this gate REVERSES the shift recorded
+	// two paragraphs up. A factset that is BOTH unexpressible AND carries an
+	// ill-shaped digest came back as ErrFactsetInconsistent between the two
+	// commits and comes back as ErrFactsetDigest now; one whose digest is
+	// well-formed but wrong still comes back as ErrFactsetInconsistent, because
+	// this gate does not see it. No factset moves between verified and refused
+	// either way -- a caller switching on the sentinel sees a different one for
+	// that class, which is the same kind of shift p3b.go records for its own
+	// digest-shape gate and the reason both are written down rather than left
+	// to be discovered.
+	if !isCanonicalHex(fs.Digest, 64) {
+		return errors.Join(ErrFactsetDigest, errors.New("p4offline: factset digest of "+
+			suppliedTextExtent(fs.Digest)+" is not this package's 64 lower-case hex digits"))
+	}
 	if err := checkFactsetValuesExpressible(fs); err != nil {
 		return err
 	}
 	if want := commonFactsetDigest(fs); fs.Digest != want {
-		// `want` is this package's own 64 hex digits and is quoted; the
-		// supplied digest is not, because nothing gates its length here.
-		return errors.Join(ErrFactsetDigest, errors.New("p4offline: factset digest of "+
-			suppliedTextExtent(fs.Digest)+" does not match its values, which digest to "+strconv.Quote(want)))
+		// BOTH DIGESTS ARE QUOTED, and the shape gate eight lines up is what
+		// makes the supplied one safe to quote. With its shape already proved,
+		// suppliedTextExtent here could only ever render the constant
+		// "64 bytes" -- a sentence that reads the same for every mismatch
+		// there is -- so reporting this digest by extent would say nothing.
+		// decisionOf quotes its operand under the same precondition, for the
+		// same reason.
+		return errors.Join(ErrFactsetDigest, errors.New("p4offline: factset digest "+
+			strconv.Quote(fs.Digest)+" does not match its values, which digest to "+strconv.Quote(want)))
 	}
 	return checkFactsetConsistency(fs)
 }

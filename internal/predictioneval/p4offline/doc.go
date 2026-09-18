@@ -240,11 +240,16 @@
 //
 // # Sharp edges on the exported surface, not repaired here
 //
-// An independent misuse-resistance review found three exported shapes whose
-// correct use depends on reading a doc comment. Each is documented at its own
-// declaration and pinned by a test so it cannot drift; none is REDESIGNED
-// here, because each fix changes an approved public seam and that is an owner
-// decision, not a mechanical one:
+// An independent misuse-resistance review found four exported shapes whose
+// correct use depends on reading a doc comment. The FIRST THREE are documented
+// at their own declarations and carry a test that states the contract -- though
+// for the ladder methods that test records that the COMPILER, and not its
+// assertions, is what catches a drift. The
+// fourth is recorded only here, and the distinction is one a later lane had to
+// point out: what its tests pin are the three RUNTIME gates it describes, not
+// the type-level hazard itself, and DigestReference's own declaration says
+// nothing about it. None is REDESIGNED here, because each fix changes an
+// approved public seam and that is an owner decision, not a mechanical one:
 //
 //   - [ProveCommonCutoff] takes the cutoff as a bare int64 with no presence
 //     bit, so an absent cutoff reads as position 0 and the predicate reports
@@ -259,9 +264,34 @@
 //   - [PayoutEvidence.PrimaryDenominatorMember] and
 //     [PayoutEvidence.PlacedBetDenominatorMember] read as the denominator
 //     answer and are only the payout seam's CONDITION;
-//     [AssessDenominatorMembership] applies four more. The cheap path is the
-//     wrong one. The fix is a name that reads wrong at the call site, which
-//     would move a JSON key and so the artifact's framing.
+//     [AssessDenominatorMembership] applies every gate its membership
+//     vocabulary names, which is more than these two and is a const block
+//     rather than a number written here. The cheap path is the wrong one.
+//     The fix is a name that reads wrong at the call site, which would move a
+//     JSON key and so the artifact's framing.
+//   - THE TWO DIGEST SPELLINGS ARE BOTH `string`. This package keeps a bare
+//     64-hex digest and a "sha256:"-prefixed reference deliberately distinct,
+//     and [DigestReference] is a func(string) string rather than a type, so
+//     every slot holding either is a plain string and the compiler cannot tell
+//     them apart. Every digest a verifier CHECKS AGAINST ITS OWN DERIVATION is
+//     gated at runtime -- a raw hex digest in a reference slot, a reference in
+//     a raw slot, and a doubly prefixed value are all refused by name.
+//     "Checks", not "reads": VerifySourceRoundRegistry READS
+//     SourceRoundClaim.FactsetDigest on several paths and derives nothing from
+//     it, which is the slot below. ONE SLOT IS NOT GATED, so "each reachable
+//     slot" would be the wrong sentence: SourceRoundClaim.FactsetDigest is
+//     held only to being non-empty and expressible (the WHAT REMAINS entry
+//     below), so a reference there reconciles, the registry VERIFIES, and the
+//     fault surfaces downstream as CASE_NOT_CANONICAL_SOURCE_ROUND rather than
+//     as a digest fault -- a caller who spelled one digest the other way is
+//     told something true about a different thing. It is listed because the
+//     misuse is easy to write and hard to see:
+//     DigestReference(DigestReferencePrefix + hex) reads like a well-formed
+//     reference and is a 78-character double-prefixed value
+//     the gates refuse, so a test built that way would compare two malformed
+//     digests and pass for the wrong reason. The fix is two named string
+//     types, which marshal identically so no framing moves -- and which is an
+//     owner decision because it changes an approved public seam.
 //
 // # Multi-clause guards: what is pinned, what is argued, and what is measured
 //
@@ -271,11 +301,33 @@
 // MEASUREMENT rather than an impression, because an earlier version of this
 // paragraph named three files and was wrong about which.
 //
-// Two sweeps, each dropping exactly one top-level clause and running the whole
+// The sweeps below each drop exactly one top-level clause and run the whole
 // package suite, with a byte-identical restore per mutant:
 //
-//   - The 26 compound `s.require` guards in actionmap.go: 66 mutants,
-//     **66 killed, 0 survived**. That half is closed. Before the repair it was
+//   - THE `s.require` GUARDS IN actionmap.go WHOSE CONDITION IS COMPOUND IN
+//     PLACE. There are 48 of them by the definition stated at the head of this
+//     section, in which `A || B` is compound just as `A && B` is: 26 are
+//     `&&`-joined and carry 66 top-level clauses, 22 are `||`-joined and carry
+//     51. BOTH SETS ARE SWEPT, and the verdicts are in this commit's message
+//     rather than here, because a count written into a comment is a count
+//     nothing re-derives. A review lane established the 48 by an AST census,
+//     which is the only way this number should ever be stated: the two sets
+//     differ by their top-level operator alone, so a sweep scoped to one of
+//     them leaves the other unmeasured.
+//
+//     "IN PLACE" IS LOAD-BEARING AND WAS NOT SAID AT FIRST. A further TWELVE
+//     call sites pass a compound predicate that was bound to a NAME a line or
+//     more earlier -- stealthClean, stoppedIntact, unreachedIntact,
+//     healthWitnessedOpen, gateOpen, postGateNotReached, healthNotReached:
+//     seven predicates carrying 24 distinct top-level clauses. The syntactic
+//     definition excludes them, so 48 is not a wrong count, but the rationale
+//     at the head of this section applies to them identically and neither
+//     sweep has touched them. `unreachedIntact` is an eight-term conjunction
+//     and is the guard rows four and five of
+//     TestARefusedShapeIsNotAlsoToldArtefactsOfItsOwnRefusal reach, so it is
+//     not untested -- it is unswept, which is a different thing and is said
+//     here rather than left to be inferred from "48". Before the repair the
+//     `&&` half was
 //     **31 survivors of 66** -- 28 in the P2 exit arms and 3 in MapP3bAction's
 //     own guards (the two clauses of STOP_FIELDS_WITHOUT_STOP_POSITION and the
 //     count conjunct of NO_CANDIDATE_REACHED). An earlier version of this
@@ -284,12 +336,52 @@
 //     re-ran the sweep against the commit BEFORE the repair -- actionmap.go's
 //     bytes are unchanged since, so only a pre-repair test suite shows the
 //     survivors -- and measured 31.
+//     THREE OF THE 51 ||-CLAUSE MUTANTS ARE EQUIVALENT AND ARE DECLARED AS
+//     SUCH, not counted as survivors. All three drop the `stop < 0` precondition
+//     from `s.require(stop < 0 || executedBefore(stop), "STAGES_NOT_RUN_BEFORE_STOP")`,
+//     at the legacy-failure, indeterminate and unsupported arms.
+//     `executedBefore(i)` is a conjunction of four terms each shaped
+//     `i <= <stage index> || ...`, and every stage index is at least 0, so at
+//     i == -1 every term holds by its left disjunct and the helper returns true
+//     unconditionally. The guard cannot fire when stop < 0 with or without the
+//     precondition, so no input distinguishes the two programs. This is an
+//     argued equivalence and not the "I tried one mutant form" mistake that was
+//     made twice on the comment fence: the OTHER form of the same guard,
+//     dropping `executedBefore(stop)` and keeping the precondition, IS in the
+//     campaign and IS killed, so the guard's substance is held and only its
+//     dead-at-stop<0 prefix is unreachable. The remaining 48 are killed, eight
+//     of them only after
+//     TestARefusedShapeIsNotAlsoToldArtefactsOfItsOwnRefusal was written,
+//     because the existing table asserts CONTAINMENT of the expected tag and a
+//     guard naming one contradiction too many passes that.
+//
+//     WHICH ELEVEN SURVIVED IS NOT THE SET A READER WOULD GUESS. actionmap.go
+//     has eleven `stop < 0 ||` preconditions -- three on the legacy-failure arm
+//     and four on each of the indeterminate and unsupported arms -- and TWO of
+//     them, the health clause of the latter two, were already held by the
+//     `alone` rows of that same table, which is exactly what the comment beside
+//     that map says they are for. The eleven survivors are the OTHER nine of
+//     those preconditions plus two that have nothing to do with a stop: the
+//     stake gate's `State != exec` before its reason vocabulary, and the
+//     filter's before its applied flag. Those two fire only on a stage that did
+//     not execute yet carries a value, which UNREACHED_STAGE_CARRIES_A_VALUE
+//     already refuses, so the bound is the same -- an extra contradiction on an
+//     already refused evaluation -- but it is a different argument and is
+//     stated rather than folded into the other one. The three no-stage `alone`
+//     rows sit on a fixture where all eight stages are NOT_REACHED, so
+//     `unreachedAfter(-1)`, which ranges over all eight, is true there and the
+//     `onlyStop` and `unreachedAfter` artefacts never appear: that is why those
+//     two classes needed new rows and the health clause did not.
+//
 //   - Every single-line `if` condition in all thirteen production files:
 //     141 mutants, 65 killed, **63 survived**, 13 that do not compile.
 //     entropy.go and actionmap.go are clean; the survivors are concentrated in
 //     factset.go, p3b.go, placement.go and evidence.go. THAT SWEEP PREDATES
-//     the value gate below and has not been re-run over it: the gate adds
-//     conditions to factset.go that the census does not count. Each of them
+//     the value gate below AND the three digest-shape gates added after it
+//     (factset.go, resolution.go and evidence.go, plus the split of
+//     evidence.go's one `||` clause into two statements), and has not been
+//     re-run over any of them: they add conditions the census does not count.
+//     Each of them
 //     was killed individually by a disposable mutant, so the exposure has
 //     almost certainly not grown -- but the number above is the old number,
 //     said plainly rather than quietly reused, because this file's own
@@ -401,6 +493,91 @@
 //     for no round.) The alternative, blanking only the offending string, moves
 //     that aliasing into the CANONICAL position, which is the one place this
 //     package cannot afford it.
+//   - SOURCE-ROUND VERIFICATION IS PER-VERDICT, SO A RUN IS QUADRATIC IN ITS
+//     OWN SIZE. Reported by a security review lane, reproduced, and NOT
+//     repaired. AssessDenominatorMembership re-verifies the whole registry for
+//     every case it judges, and a verification hashes every claim, flattens the
+//     entries and reconciles them again. The DURABLE part is the shape: one
+//     verification grows linearly in N and the run of N grows quadratically, so
+//     doubling N from 64 to 128 to 256 multiplies the run's total by about 3.8
+//     each time. On a registry of N single-attempt claims over distinct rounds
+//     that is 0.542 / 1.044 / 1.987 MiB per verification and 34.71 / 133.63 /
+//     508.71 MiB for the run -- 0.57 / 1.09 / 2.08 MB and 36.4 / 140.1 /
+//     533.4 MB in units of 10^6, which the nested-hex note below uses. EVERY
+//     FIGURE IN THIS BLOCK WAS MEASURED WITHOUT THE RACE DETECTOR; under -race
+//     the same run reads about 0.4% higher, which is the detector's bookkeeping
+//     and not the amplification.
+//     THE UNIT IS SPELLED OUT because the same run reads 4.9% apart in MiB and
+//     in MB -- 2^20/10^6 -- which is a gap large enough to pass for a fixture
+//     effect and is not one. The absolutes DO move with the claim shape, which
+//     is why the fixture is named: against this one, a two-byte claim digest is
+//     about 20% cheaper (19% at N = 256), 16-byte session and pool ids 36.5% to
+//     37.7% dearer, and 36-character ones 82% to 107% dearer. The RATIO is what
+//     survives a change of shape. The fix is the one the lane named, and this
+//     package already has
+//     a template for -- verify once and carry an immutable verified handle, as
+//     VerifiedP3bRuleset does -- but it changes the signature of the function
+//     where seam 12 composes with seams 3 and 10, which is an approved seam
+//     rather than an implementation detail, and there is no non-test caller
+//     today because the shape needs a runner this package deliberately does not
+//     contain. Designing that API now would be guessing at a consumer that does
+//     not exist; it belongs with the runner, and with the seam re-approved.
+//   - NESTED HEX IN claimKey, reported by a code review lane and reproduced at
+//     19.1x the input: EpisodeIdentity.String() hex-encodes the framed
+//     identity, claimKey frames that and hex-encodes it again, and
+//     registryDigest copies the key once more, so a 1 MiB episode identifier
+//     costs about 20 MB to reconcile ONE claim. Every fix THAT REMOVES THE
+//     NESTED HEX changes claimKey's framing, which changes the registry
+//     digest, which is pinned by an INDEPENDENT golden generated by
+//     testdata/synthetic/gen_golden_digests.py -- so removing it means changing
+//     a digested artifact's framing, bumping SourceRoundRegistryVersion and
+//     regenerating that golden independently. The unqualified form of that
+//     sentence, read unqualified as "every fix", would be FALSE, and the
+//     counterexample is not hypothetical but built. Framing the episode identity's
+//     bytes directly and hex-encoding them into the key in one pass
+//     (EpisodeIdentity.framedBytes with a canonical-side strHexOf, so the KEY's
+//     bytes are unchanged) leaves all four goldens green: it removes the
+//     intermediate materialization, not the nesting, so the digest is preserved
+//     and the class is NOT closed.
+//     NO FIGURE IS QUOTED FOR THE VARIANT, because its SIGN depends on how the
+//     one-pass writer grows its buffer: appending two bytes at a time measures
+//     WORSE than the status quo, and growing the buffer to the exact width
+//     measures better. A variant whose direction depends on an unstated detail
+//     has no single figure, so it gets none here and the next round measures
+//     rather than inherits. What IS established is existence, by execution,
+//     with the goldens green. Unlike the three digest-shape gates repaired
+//     beside it, this is a constant-factor amplification of input the caller
+//     already materialized, not a constant-size field amplified by the payload.
+//   - A SUPPLIED CLAIM'S FACTSET DIGEST IS HELD ONLY TO BEING NON-EMPTY AND
+//     EXPRESSIBLE -- ReconcileSourceRounds routes it to INVALID on an empty
+//     value and on invalid UTF-8, and on nothing else -- found
+//     by a review lane one field below the gate this round added, and
+//     reproduced: VerifySourceRoundRegistry returns nil for a registry whose
+//     claim carries a 1 MiB FactsetDigest, and pays about 14.75 MB to say so --
+//     14.06x the supplied field, and the SAME figure before this round's gates
+//     existed, so it is a carried item rather than a regression. It is the
+//     class the nested-hex note above describes, a constant factor over input
+//     the caller has already materialized, not the class the three shape gates
+//     closed. The obvious repair is wrong, and the lane built it to find out:
+//     gating the VERIFIER alone breaks the fixed point, because the producer
+//     would still route such a claim to its round, and this package's own tests
+//     catch it -- a 64-hex gate over the claims fails eight of them, among them
+//     TestReconcileSourceRoundsNeverMintsARegistryItsOwnVerifierRefuses,
+//     because the suite's own fixtures carry two-byte digests. An exact-length
+//     gate (len != 64) fails the same eight; a length CEILING (len > 64),
+//     which is the minimal shape that closes the amplification, leaves the
+//     whole suite green AT THE VERIFIER. It does not at the producer: routing
+//     a digest past that ceiling to INVALID in ReconcileSourceRounds fails
+//     TestTheExpressibilityRoutingAllocatesNothing, whose 250-claim fixture
+//     carries a 4,096-byte FactsetDigest and asserts a canonical claim for
+//     every entry. The figures are quoted per SIDE because they differ by
+//     side, which is the part a reader planning the repair needs.
+//     Closing it means routing a non-64-hex digest
+//     to INVALID in ReconcileSourceRounds AND gating it in the verifier,
+//     together -- so it costs that fixture as well, which
+//     SourceRoundRegistryVersion bumped and the independent golden regenerated
+//     -- the same shape of change as the nested hex, and not one to take inside
+//     a repair round.
 //   - AND THE FAIL-CLOSED RULE HAS ONE FAIL-OPEN CARVE-OUT, stated here because
 //     this round's own lesson is that a trade absorbed in silence is the defect
 //     behind the defect. A claim whose ROUND NAME is itself unreadable names no

@@ -986,7 +986,7 @@ type rawSignal struct {
 // holds the current minimum is what drops the indices two lists share.
 // evidence_internal_test.go asserts the property rather than assuming it.
 //
-// ---- WHAT THIS SEAM HAS COST, IN THREE ROUNDS ----
+// ---- WHAT THIS SEAM HAS COST ----
 //
 // The honest version of this narrative matters more than usual here, because
 // two earlier versions of it asserted things that were not true, and an
@@ -1833,10 +1833,10 @@ func classifySignals(recs []predictioneval.SourceRecord) []rawSignal {
 	//
 	// SCOPED TO ITS OWN INCARNATION, and the scope is not cosmetic. Signals
 	// are matched to episodes by EventID among other keys, so this mark reaches
-	// every episode of the public round. A previous version of this comment
-	// claimed that could only add a reason and never flip an admission, because
-	// such a start carries an attempt id a sibling does not own and is already
-	// refused as an unattributed intervention. That was FALSE: attempt ids are
+	// every episode of the public round, and it can FLIP AN ADMISSION rather
+	// than merely add a reason. The argument that it cannot -- that such a
+	// start carries an attempt id a sibling does not own, and so is already
+	// refused as an unattributed intervention -- does not hold: attempt ids are
 	// scoped to the pool, not the incarnation, so a sibling on the same pool
 	// can own the id, collect no intervention, and be excluded by this mark
 	// alone. The consuming site therefore honours the mark only on the
@@ -2141,9 +2141,9 @@ func checkRegistryTextExpressible(reg SourceRoundRegistry) error {
 		// Canonical is framed by registryDigest as a BOOLEAN only, so a
 		// canonical claim is the one ENTRY-LEVEL position whose bytes the digest
 		// does not cover. (Version and Digest are outside it too: Version is
-		// held by the constant comparison above this gate, Digest by the digest
-		// comparison BELOW it -- one gate later, which a review lane corrected
-		// an earlier wording on.) Re-reconciliation catches a fabricated
+		// held by the constant comparison above this gate, and Digest by TWO
+		// gates -- its SHAPE above this scan and its VALUE in the comparison
+		// below.) Re-reconciliation catches a fabricated
 		// canonical claim, but only by disagreeing; this names it.
 		if e.Canonical != nil {
 			if what := claimTextFault(*e.Canonical); what != "" {
@@ -2212,9 +2212,8 @@ func ReconcileSourceRounds(claims []SourceRoundClaim) SourceRoundRegistry {
 		// would write the unrepresentable bytes into the registry on exactly
 		// the path meant to keep them out.
 		//
-		// What is ASSERTED about the cost is narrower than an earlier wording
-		// here claimed, and a review lane drew the line: what
-		// TestTheExpressibilityRoutingAllocatesNothing measures is that
+		// WHAT IS ASSERTED ABOUT THE COST IS NARROW, and worth stating exactly:
+		// what TestTheExpressibilityRoutingAllocatesNothing measures is that
 		// claimTextFault and expressibleClaim allocate ZERO -- not this
 		// function's total, and not a routing-present-against-absent
 		// comparison. That comparison was run, at nine sizes and widths, and
@@ -2346,7 +2345,10 @@ var ErrEvidenceRetention = errors.New("p4offline: the dataset's shape retains mo
 // exported output and is an owner decision rather than a mechanical one.
 const maxRetainedManualSignals = 1 << 20
 
-// VerifySourceRoundRegistry re-derives a registry from the claims its own
+// VerifySourceRoundRegistry refuses a foreign version, then a digest that is
+// not this package's shape, then a value the registry's own encoding cannot
+// express, then a digest that does not match the entries -- and then it
+// re-derives the registry from the claims its own
 // entries carry: the registry must be exactly what [ReconcileSourceRounds]
 // produces from them — the same entries, statuses and canonical claims,
 // under a digest that matches the entries — so a registry whose entries
@@ -2367,15 +2369,77 @@ func VerifySourceRoundRegistry(reg SourceRoundRegistry) error {
 	// rule with nothing on the other side of it: a materialization must not
 	// precede a gate that can refuse without it. The flattening,
 	// ReconcileSourceRounds, the per-claim framing and registryDigest all used
-	// to run above a condition whose first two clauses are constant
-	// comparisons -- and every clause returns the SAME sentinel, so no
-	// precedence is at stake in moving them. Measured through the exported
+	// to run above the two constant-time gates below, which is a move no
+	// precedence objects to: both return the SAME sentinel every later refusal
+	// here returns, and moving a gate ABOVE a materialization cannot change
+	// which refusal a caller sees, because the materialization refuses nothing.
+	// That is the only claim this paragraph makes, and it does not extend to
+	// the gates themselves: once the digest clause NAMES itself, moving it
+	// relative to its neighbours is observable in both directions, which
+	// TestADigestsSHAPEIsJudgedAboveTheScanThatReadsTheSupply and
+	// TestAnO1GateAboveAShapeGateStillSpeaksFirst pin in both.
+	// Measured through the exported
 	// function on a one-byte-wrong Version: 8,865,720 / 19,038,200 /
 	// 37,564,760 / 76,808,072 bytes and 8.9 / 28.9 / 55.8 / 105.1 ms at
 	// n = 2,000 / 4,000 / 8,000 / 16,000 claims -- 59% of the cost of a VALID
 	// verification, to refuse on a string comparison. Flat and free now.
-	if reg.Version != SourceRoundRegistryVersion || reg.Digest == "" {
-		return ErrSourceRoundRegistry
+	//
+	// IT NAMES ITSELF TOO, which it did not when this clause and the one below
+	// were a single condition. A review lane counted the result: of the
+	// five refusal positions this clause's split creates, only the TEXT SCAN
+	// named itself -- it has always returned a joined "is not valid UTF-8" --
+	// and the other four returned the identical bare sentinel, so a caller
+	// could not tell "written by an older version of this
+	// package" -- benign, and a reason to re-derive rather than to alarm --
+	// from the tampering signal this function exists to raise. Both sibling
+	// verifiers name every position. Three of the four are named here and
+	// below; the fourth, the re-reconciliation at the end, is left bare on
+	// purpose, because the sentinel's own sentence IS that position's
+	// diagnosis.
+	if reg.Version != SourceRoundRegistryVersion {
+		return errors.Join(ErrSourceRoundRegistry, errors.New("p4offline: registry version is "+
+			suppliedTextExtent(reg.Version)+", this package writes only "+strconv.Quote(SourceRoundRegistryVersion)))
+	}
+	// THE DIGEST IS HELD TO ITS SHAPE, NOT MERELY TO BEING NON-EMPTY, and the
+	// difference is the whole finding. `Digest == ""` let a NONEMPTY but
+	// producer-impossible digest -- one byte, "x" -- through this constant-time
+	// clause and on into the text scan and the full registryDigest framing
+	// before the mismatch was found. Measured: 11,930 allocations at 1,000
+	// claims and 95,939 at 8,000, identical to a well-formed wrong digest,
+	// which is a constant-size malformed field bought at a price proportional
+	// to the whole registry. registryDigest emits exactly 64 lower-case hex
+	// digits, so anything else is refusable here, in O(1), for free.
+	//
+	// IT IS A SEPARATE CLAUSE FROM THE VERSION, AND IT NAMES ITSELF. Written as
+	// one `||` condition returning the bare sentinel it made the promise two
+	// gates below -- "naming the position it refused instead of returning the
+	// bare sentinel" -- false for every registry whose digest is ALSO
+	// ill-shaped, which a review lane caught: the text gate's named refusal
+	// was unreachable behind a bare one. Naming it also separates it from the
+	// COMPARISON further down, which returned the same bare sentinel until the
+	// same round named that too -- so at this verifier, and only at this one,
+	// "refused on the digest's shape" and "refused on the digest's value" were
+	// genuinely indistinguishable. Naming it does NOT create the observable for
+	// this gate's ORDER against the text scan below: that scan already returned
+	// a joined, named "is not valid UTF-8" refusal at this commit's parent
+	// 0b3cd2f -- not at the branch's base bd4d2727, where this file does not
+	// exist yet -- so the
+	// order was observable before this gate existed. The sentinel is unchanged
+	// either way, so no caller switching on it moves.
+	//
+	// ONE IDENTITY SHIFT COMES WITH IT, and it is stated here rather than left
+	// to be found, because the two sibling gates state theirs. At this commit's
+	// PARENT 0b3cd2f every registry refusal above the re-reconciliation EXCEPT THE
+	// TEXT SCAN returned the bare sentinel value, so the shift is wider than
+	// the clause this gate replaced: a foreign Version, every ill-shaped
+	// digest -- the empty one from `reg.Digest == ""`, the rest from the
+	// comparison below -- and the comparison itself all used to come back bare
+	// and now come back joined and named. errors.Is is unaffected, and no caller in this repository
+	// compares any of the three sentinels by identity -- checked by a review
+	// lane against the whole repo, not assumed.
+	if !isCanonicalHex(reg.Digest, 64) {
+		return errors.Join(ErrSourceRoundRegistry, errors.New("p4offline: registry digest of "+
+			suppliedTextExtent(reg.Digest)+" is not this package's 64 lower-case hex digits"))
 	}
 	// AND THE DIGEST GATE ABOVE THE RECONCILIATION, which is the same mistake
 	// one gate later -- the failure mode this package has now made twice, and
@@ -2388,20 +2452,30 @@ func VerifySourceRoundRegistry(reg SourceRoundRegistry) error {
 	// 16,000 claims -- 100.0% of the cost of a VALID verification, to refuse on
 	// a 64-character comparison. Halved by asking the digest first.
 	//
-	// AHEAD OF THE DIGEST, AND CHEAPER THAN IT -- but not, as an earlier wording
-	// here claimed, "the same bytes registryDigest is about to hash". A review
-	// lane refuted that: registryDigest hashes claimKey's HEX EXPANSION of a
-	// framing of each claim, several times the claim's own width, and it never
-	// touches the canonical claim's bytes at all, which this walk does. Cheaper
-	// is the measured part -- at 2,000 claims this gate is 570 microseconds
-	// against registryDigest's 28.2 milliseconds. What it buys is refusing an
+	// AHEAD OF THE DIGEST, AND CHEAPER THAN IT -- but NOT over the same bytes.
+	// registryDigest hashes claimKey's HEX EXPANSION of a framing of each
+	// claim, several times the claim's own width, and it never touches the
+	// canonical claim's bytes at all, which this walk does. Cheaper is the
+	// measured part, and by a wide margin: at 2,000 claims this gate costs a
+	// small fraction of registryDigest, tens of times less. NO NARROWER BAND IS
+	// WRITTEN HERE, because a band set from one machine's reading falls outside
+	// the next machine's: a wall-clock ratio is a property of the host and the
+	// estimator, not of the ordering this sentence is about. What it buys is
+	// refusing an
 	// uncarriable registry before a full framing pass, and naming the position
 	// it refused instead of returning the bare sentinel.
 	if err := checkRegistryTextExpressible(reg); err != nil {
 		return err
 	}
-	if reg.Digest != registryDigest(reg.Entries) {
-		return ErrSourceRoundRegistry
+	// THE SUPPLIED DIGEST IS QUOTED HERE, not reduced to its extent, and only
+	// because the shape gate above has already proved it 64 lower-case hex --
+	// the same precondition under which decisionOf quotes its operand, and for
+	// the same reason: reporting a gated digest by extent renders "64 bytes"
+	// for every mismatch there is, which is a sentence that reads the same for
+	// every input.
+	if want := registryDigest(reg.Entries); reg.Digest != want {
+		return errors.Join(ErrSourceRoundRegistry, errors.New("p4offline: registry digest "+
+			strconv.Quote(reg.Digest)+" does not match its entries, which digest to "+strconv.Quote(want)))
 	}
 	var claims []SourceRoundClaim
 	for _, e := range reg.Entries {

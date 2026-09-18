@@ -807,7 +807,7 @@ func TestP2ActionMapRequiresACoherentExecutedPercentCap(t *testing.T) {
 }
 
 // TestP2ExitArmClausesArePinnedOneAtATime is the systematic answer to a
-// finding that this package had been half-making for two rounds.
+// finding this package had been half-making.
 //
 // MapP2Action's exit arms are written as compound requirements -- `s.require(A
 // && B, "TAG")` -- and every existing case that names one of those tags
@@ -980,6 +980,120 @@ func TestP2ExitArmClausesArePinnedOneAtATime(t *testing.T) {
 			if m := p4offline.MapP2Action(ev); m.Legal ||
 				!containsString(m.Illegality, "STAGES_REACHED_BEFORE_DECISION") {
 				t.Fatalf("want STAGES_REACHED_BEFORE_DECISION for %s: %+v", tc.name, m)
+			}
+		})
+	}
+}
+
+// TestARefusedShapeIsNotAlsoToldArtefactsOfItsOwnRefusal pins the illegality set
+// EXACTLY, which the table above cannot: that table asserts CONTAINMENT, so a
+// guard that names one more contradiction than it should passes it.
+//
+// WHAT IT PROTECTS. shapeCheck.require ACCUMULATES rather than
+// short-circuiting, so when `stopAt` finds no stage of the claimed kind, `stop`
+// is -1 and every guard below `s.require(stop >= 0, ...)` still runs. MOST of
+// those carry a `stop < 0 ||` precondition -- not all: HEALTH_REACHED_AFTER_-
+// LEGACY_FAILURE and both LEGACY_FAILURE_PRESENT guards sit below it and carry
+// none. There are ELEVEN such preconditions, and the count per arm differs:
+// THREE on the legacy-failure arm -- that stages ran out of order before the
+// stop, that another stage stopped, that stages were reached after it -- and
+// FOUR on the indeterminate and unsupported arms, which add that the health
+// gate contradicts the stopping stage. Dropping any of them cannot change a
+// VERDICT, because the evaluation is refused either way; it changes which
+// contradictions the refusal names.
+//
+// TWO OF THE ELEVEN WERE ALREADY HELD, and by the table above rather than by
+// this test: its `alone` rows pin exactly the health clause of the
+// indeterminate and unsupported arms, which is what the comment beside that map
+// says they are for. This test holds the other nine, of which three are
+// equivalent (below), so it kills six of them.
+//
+// WHY THE FIRST THREE ROWS LOOK LIKE THIS. The three no-stage rows in the table
+// above are built on the pre-decision `exit` fixture, on which all eight stages
+// are NOT_REACHED -- so `unreachedAfter(-1)`, which ranges over all eight, is
+// true there and the artefact never appears. Reaching it needs a stage that
+// RAN, and reaching `onlyStop(-1)` needs a stage stopping in a DIFFERENT kind
+// from the one claimed, so `stopAt` returns -1 while a stopping stage is still
+// there to be found.
+//
+// ROWS FOUR AND FIVE ARE NOT ABOUT A STOP AT ALL. They drive the two `State !=
+// exec` preconditions -- on the stake gate's reason vocabulary and on the
+// filter's applied flag -- which are the other two clause-1 drops nothing held.
+// Both fire only on a stage that did not execute yet carries a value, and
+// `GateNone` is the empty string, so the pre-existing row for a reason on an
+// unreached gate used an IN-VOCABULARY reason and could not see it. Those
+// shapes are already refused by UNREACHED_STAGE_CARRIES_A_VALUE, so the bound
+// is the same: an extra contradiction on an already refused evaluation.
+//
+// ONE PRECONDITION IS NOT COVERED HERE AND CANNOT BE. `executedBefore(i)` is a
+// conjunction of terms each of the form `i <= <stage index> || ...`, and every
+// stage index is at least 0, so at i == -1 every term holds by its left
+// disjunct and `executedBefore(-1)` is unconditionally true. Its guard cannot
+// fire when stop < 0 whether the precondition is there or not: that mutant is
+// equivalent at all three arms, and doc.go records it as one rather than this
+// test pretending to hold it.
+func TestARefusedShapeIsNotAlsoToldArtefactsOfItsOwnRefusal(t *testing.T) {
+	placed := p2Eval(p2Inputs())
+	in := p2Inputs()
+	in.ReachedDecision = false
+	exit := p2Eval(in)
+
+	cases := []struct {
+		name string
+		base predictioneval.Evaluation
+		poke func(*predictioneval.Evaluation)
+		want []string
+	}{
+		{"legacy failure claimed with no failed stage, beside a stage stopped another way", exit,
+			func(e *predictioneval.Evaluation) {
+				e.Action, e.LegacyFailure = predictioneval.ActionLegacyFailure, "PINNED_POLICY_PANIC_ABSENT_OUTCOME"
+				e.Stealth.State = predictioneval.StageStateIndeterminate
+			},
+			[]string{"STEALTH_REALIZATION_PRESENT", "NO_STAGE_FAILED"}},
+		{"indeterminate claimed with no indeterminate stage, on a fixture whose stages ran", placed,
+			func(e *predictioneval.Evaluation) {
+				e.Action = predictioneval.ActionIndeterminate
+				e.Stealth.State = predictioneval.StageStateUnsupported
+			},
+			[]string{"STEALTH_REALIZATION_PRESENT", "NO_STAGE_INDETERMINATE"}},
+		{"unsupported claimed with no unsupported stage, beside a stage stopped another way", exit,
+			func(e *predictioneval.Evaluation) {
+				e.Action = predictioneval.ActionUnsupported
+				e.Stealth.State = predictioneval.StageStateIndeterminate
+			},
+			[]string{"STEALTH_REALIZATION_PRESENT", "NO_STAGE_UNSUPPORTED"}},
+		{"an unreached stake gate carrying a reason outside the vocabulary", exit,
+			func(e *predictioneval.Evaluation) {
+				e.StakeGate.Reason = "SOMETHING_NOT_IN_THE_VOCABULARY"
+			},
+			[]string{"UNREACHED_STAGE_CARRIES_A_VALUE"}},
+		{"an unreached filter that claims it applied", exit,
+			func(e *predictioneval.Evaluation) {
+				e.Filter.Applied = true
+			},
+			[]string{"UNREACHED_STAGE_CARRIES_A_VALUE"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ev := tc.base
+			ev.Limitations = append([]string(nil), ev.Limitations...)
+			tc.poke(&ev)
+			got := p4offline.MapP2Action(ev).Illegality
+			want := map[string]int{}
+			for _, w := range tc.want {
+				want[w]++
+			}
+			for _, g := range got {
+				want[g]--
+			}
+			for name, n := range want {
+				if n > 0 {
+					t.Fatalf("the refusal must name %q and does not: got %v, want exactly %v", name, got, tc.want)
+				}
+				if n < 0 {
+					t.Fatalf("the refusal names %q, which is an artefact of the refusal it already gave: "+
+						"got %v, want exactly %v", name, got, tc.want)
+				}
 			}
 		})
 	}

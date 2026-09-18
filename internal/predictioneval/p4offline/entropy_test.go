@@ -217,6 +217,32 @@ func TestEntropyRefusesOutOfProtocolInputs(t *testing.T) {
 		{"upper-case digest", with(func(c *p4offline.EntropyCoordinates) {
 			c.CommonFactsetDigest = p4offline.DigestReference(strings.Repeat("AB", 32))
 		}), 1, p4offline.ErrEntropyCoordinates},
+		// THE BYTES ADJACENT TO THE HEX CLASS. These belong here and not only
+		// in the digest-shape table, because this is the gate where widening
+		// the class by one byte stops being a message and starts admitting an
+		// out-of-protocol coordinate that draws a full schedule. One row per
+		// neighbour of [0-9a-f]: '/' below '0', ':' above '9', '`' below 'a',
+		// 'g' above 'f'. All four, because none of the four was covered
+		// anywhere before this round: each widening left the whole suite green,
+		// and each let EntropyMAC draw a full schedule from an out-of-protocol
+		// digest. 'g' is here even though another table also carries it,
+		// because that table cannot see THIS gate. The SEPARATOR is here for
+		// the same reason.
+		{"a slash where a hex digit belongs", with(func(c *p4offline.EntropyCoordinates) {
+			c.CommonFactsetDigest = p4offline.DigestReference(strings.Repeat("a", 63) + "/")
+		}), 1, p4offline.ErrEntropyCoordinates},
+		{"a colon where a hex digit belongs", with(func(c *p4offline.EntropyCoordinates) {
+			c.CommonFactsetDigest = p4offline.DigestReference(strings.Repeat("a", 63) + ":")
+		}), 1, p4offline.ErrEntropyCoordinates},
+		{"a backtick where a hex digit belongs", with(func(c *p4offline.EntropyCoordinates) {
+			c.CommonFactsetDigest = p4offline.DigestReference(strings.Repeat("a", 63) + "`")
+		}), 1, p4offline.ErrEntropyCoordinates},
+		{"a g where a hex digit belongs", with(func(c *p4offline.EntropyCoordinates) {
+			c.CommonFactsetDigest = p4offline.DigestReference(strings.Repeat("a", 63) + "g")
+		}), 1, p4offline.ErrEntropyCoordinates},
+		{"the right length with the wrong separator", with(func(c *p4offline.EntropyCoordinates) {
+			c.CommonFactsetDigest = "sha256_" + strings.Repeat("a", 64)
+		}), 1, p4offline.ErrEntropyCoordinates},
 		{"short digest", with(func(c *p4offline.EntropyCoordinates) {
 			c.CommonFactsetDigest = p4offline.DigestReference(strings.Repeat("ab", 31))
 		}), 1, p4offline.ErrEntropyCoordinates},

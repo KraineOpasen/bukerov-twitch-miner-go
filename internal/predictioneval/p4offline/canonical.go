@@ -63,29 +63,25 @@ func (c *canonical) digest() string {
 // suppliedTextExtent names a caller-supplied string by its LENGTH, for a
 // refusal message.
 //
-// THE RULE THIS ENFORCES, written down once because it has now been rediscovered
-// EIGHT successive review rounds on this branch -- and stated on the third
-// scoping, in the only terms that have survived review. The headline said FOUR and "the fourth
-// attempt" for two rounds after its own body said five and said the scope had
-// been wrong twice; a reader meets this sentence first, so it was the one
-// sentence in the package a claim sweep could least afford to skip, and it
-// skipped it twice.
+// THE RULE THIS ENFORCES is written down once, here, because a sweep for its
+// instances has to start from a statement of the rule rather than from a count
+// of how many have been found.
 //
 // THE RULE: no expression may MATERIALIZE caller-supplied text on a path that
 // has not already bounded that text. Where the text must be spoken about, name
 // the FAULT and the EXTENT instead.
 //
-// The scope has been wrong twice and each wording is recorded, because each one
-// is how the next round was missed:
+// TWO SCOPES NARROWER THAN THIS ONE DO NOT HOLD, and each is recorded because
+// each is a way of reading the rule that lets an instance through:
 //
-//   - "the FIRST statement of an exported function" missed three arms sitting
-//     further down the same two functions -- CommonFactset's stealth-proof and
+//   - SCOPING IT TO THE FIRST STATEMENT of an exported function misses three
+//     arms sitting further down the same two functions -- CommonFactset's stealth-proof and
 //     completeness arms and ResolutionArtifact's outcome arm -- reached the
 //     moment the digest verifies, which a caller can make it do, because the
 //     serializers are exported and the digest is an unkeyed SHA-256 that
 //     detects change and not origin.
-//   - "any GATE whose operand is caller-supplied" then missed the fifth
-//     instance, which is not a gate at all: the derivation argument that
+//   - SCOPING IT TO GATES misses a further instance, which is not a gate at
+//     all: the derivation argument that
 //     P3bCaseResult.Decision builds for decisionOf. Go evaluates arguments
 //     before the call, so it was fully built before decisionOf's first gate
 //     ran -- 3,686,696 bytes on a 1 MiB ruleset id, for a call that then
@@ -96,10 +92,10 @@ func (c *canonical) digest() string {
 // expression -- anywhere, gate or not. What matters is whether the bound has
 // already run on the path that reaches it.
 //
-// THE SIXTH INSTANCE DID NOT BREAK THAT WORDING. It broke the way the wording
-// was APPLIED, which is worth separating, because the first five rounds were
-// each a scope that was too narrow and this one was not. It sat at the same
-// call site as the fifth, one gate later: the thunk moved the derivation behind
+// ONE INSTANCE DOES NOT BREAK THAT SCOPE AT ALL. It breaks the way the scope
+// is APPLIED, which is worth separating, because the two above are scopes
+// narrower than the rule and this one is not. It sits at the same call site as
+// the one above, one gate later: the thunk moved the derivation behind
 // decisionOf's binding gates, and asking "has a bound run on the path that
 // reaches it?" gave the answer "yes, the gates above" -- true, and beside the
 // point, because a LATER check refuses every caller-built result in one string
@@ -108,7 +104,7 @@ func (c *canonical) digest() string {
 // Measured: 75,527,248 bytes on a 16 MiB ruleset id, 4.50x the input, for a
 // refusal that costs O(1).
 //
-// THE EIGHTH ROUND FOUND TWO MORE, BOTH OF THE SECOND KIND, and both in code
+// A LATER ROUND FOUND TWO MORE, BOTH OF THE SECOND KIND, and both in code
 // this branch had repaired one gate earlier -- which is now the single most
 // common way an instance survives: the repair stops at the gate that was
 // reported. VerifyP3bRuleset checked its declared NATIVE digest for shape, an
@@ -122,7 +118,7 @@ func (c *canonical) digest() string {
 // 16,000 claims, 100.0% of the cost of a valid verification, to refuse on 64
 // characters.
 //
-// A DIFFERENT CLASS ENTIRELY, recorded here because eight rounds of reviewing
+// A DIFFERENT CLASS ENTIRELY, recorded here because round after round of reviewing
 // THIS one walked straight past it, and so did two mechanical censuses -- 150
 // functions and 251 early returns, 539 materialization nodes. walkRulesetValue
 // recurses on a JSON array and nothing bounded the recursion, so a document
@@ -175,65 +171,102 @@ func (c *canonical) digest() string {
 // contract-spelling check one line below, and a review that read the two arms
 // as the same defect was wrong about which one the caller controls.
 //
-// THE INVENTORY, counted once so the next reader does not have to re-derive it,
-// and split by which half of the rule each site is under. Five consecutive
-// rounds each found one of these counts wrong, so they are read off the source
-// by a scan -- and the round after the FIRST time that sentence appeared, two of
-// them were wrong again, because the sentence was written and the scan was not
-// run. It is run now: 10 production call sites of suppliedTextExtent, 9 rows in
-// the class table.
+// THE INVENTORY IS DERIVED, NOT WRITTEN. It lives in fence_test.go as
+// suppliedTextExtentCensus, a map from function to call-site count that
+// TestTheSuppliedTextExtentCensusMatchesAScan holds against an AST walk of this
+// package's production files; the class table's row count lives beside it as
+// firstGateTableRows, and the table asserts its own length against it.
 //
-// FOURTEEN sites are repaired under the TEXT half -- do not materialize
-// caller-supplied text on a path that has not bounded it:
+// WHY IT MOVED. A count maintained by hand is a count that will be wrong, and a
+// scan a comment merely suggests is a scan nobody runs. This package learned
+// that once already as Rule E, where a convention presented as a machine check
+// was made into one; the census is the same repair applied to a census.
 //
-//	4 predate this helper and have their own tests --
-//	    VerifyP3bRuleset's identity gate (rulesetIdentityFault),
-//	    ValidateDrawTrace's two gates,
-//	    bindEntropyCoordinates' round gate.
-//	10 call this helper --
-//	    3 in VerifyCommonFactset (contract, protocol, digest),
-//	    2 in checkFactsetConsistency (the stealth-proof arm and the
-//	      completeness arm), both reached through VerifyCommonFactset,
-//	    2 in VerifyResolutionArtifact (contract, obligations),
-//	    1 in its outcome arm,
-//	    1 in decisionOf,
-//	    1 in walkRulesetObject's unknown-key gate.
+// AND A RULE THIS PACKAGE NOW HOLDS ITSELF TO: a comment may state what the
+// CODE used to do -- a sentinel that moved, a gate that was absent -- because a
+// reader can check that against the history and a caller can act on it. It may
+// not state what a COMMENT used to say. That kind of sentence cites review
+// iterations this repository never recorded, so nobody reading it can audit it
+// -- and a claim nobody can audit is a claim nothing can correct, which is how
+// a wrong one survives a round that was looking for it.
 //
-// FIVE sites are repaired under the WORK half -- do not do work above a gate
-// that can refuse without it, when the refusing path throws that work away:
-// decisionOf's mint check (one seam, both Decision callers),
-// VerifySourceRoundRegistry's two constant clauses and, one round later, its
-// digest comparison, evaluateProjected's word-array copy above the two identity
-// gates, and VerifyP3bRuleset's native-digest shape gate.
+// THE TEXT HALF -- do not materialize caller-supplied text on a path that has
+// not bounded it -- covers every site in that census plus four that predate the
+// helper and have their own tests: VerifyP3bRuleset's identity gate
+// (rulesetIdentityFault), ValidateDrawTrace's two gates, and
+// bindEntropyCoordinates' round gate.
 //
-// A fifteenth text site is repaired under the same rule WITHOUT this helper,
+// THE WORK HALF -- do not do work above a gate that can refuse without it, when
+// the refusing path throws that work away -- is a list rather than a count, for
+// the same reason: decisionOf's mint check (one seam, both Decision callers);
+// VerifySourceRoundRegistry's constant Version clause, its digest-shape gate
+// and, one round later, its digest comparison; the factset's and the resolution
+// artifact's own digest-shape gates, each above a full framing pass;
+// evaluateProjected's word-array copy above the two identity gates; and
+// VerifyP3bRuleset's TWO declared-digest shape gates, each above the
+// full-buffer hash of the carrier.
+//
+// One further text site is repaired under the same rule WITHOUT this helper,
 // because it is not a gate and there is nothing to name: decisionOf takes its
 // derivation as a thunk, so the caller's text is not built before the gates
-// ABOVE that thunk. That is the fifth instance, and the reason the rule above
-// is scoped to materialization rather than to gates. It is one seam with TWO
+// ABOVE that thunk. That is the instance the rule above is scoped to
+// materialization for, rather than to gates. It is one seam with TWO
 // production callers -- P2CaseResult.Decision and P3bCaseResult.Decision --
 // and its test drives both, because a repair that lives at three places and is
 // pinned at one leaves the other free to regress in silence. It did: an
 // independent lane reverted the P2 caller alone and the whole suite passed.
 //
-// THE SENTENCE THAT USED TO STAND HERE SAID "never built on the refusing
-// path", and it was FALSE for a whole refusing path -- the underived one. A
+// "NEVER BUILT ON THE REFUSING PATH" WOULD BE FALSE HERE, for a whole refusing
+// path -- the underived one. A
 // caller cannot set the unexported witness, so every result built outside this
 // package refuses at the mint check; that check ran AFTER the derivation and
 // after the decision was framed, and three independent probes measured
 // 4,748,224 / 18,903,904 / 75,527,120 bytes for a 1 / 4 / 16 MiB ruleset id, on
-// a 99-byte refusal. That is the SIXTH instance. It is repaired at the seam
+// a 99-byte refusal. That is the instance that sharpened the QUESTION rather
+// than the scope. It is repaired at the seam
 // rather than at the fields: decisionOf takes the mint check as a predicate and
 // runs it below its own gates and above the materialization, so every field
 // feeding either derivation is covered at once -- the ruleset id measured here,
 // and equally RulesetRawSHA256, NativeConfigDigest, the two trace identities
 // and P2's Binding.Digest, none of which any gate bounds either.
 //
-// TestFirstGatesDoNotMaterializeSuppliedText is the registry for the nine
-// reachable through an exported verifier as a plain first-gate comparison. It
-// names where the other six are pinned rather than duplicating them -- the
-// tenth helper site, walkRulesetObject's, needs a raw document and a raised
-// ceiling to reach, so it has its own test.
+// TestFirstGatesDoNotMaterializeSuppliedText is the registry for those of them
+// reachable through an exported verifier -- most as a plain first-gate
+// comparison, three from below a digest gate, kept in one table because they
+// share the refusal RULE rather than the position. Its length is asserted
+// against firstGateTableRows, and the sites it does NOT carry are named in its
+// own header rather than counted here; walkRulesetObject's needs a raw document
+// and a raised ceiling to reach, so it has its own test.
+//
+// A SECOND CROSS-ARTIFACT REGISTRY sits beside it, and is named here because
+// nothing else points at it: digestShapeGates in evidence_test.go carries
+// THREE OF THE SIX digest-SHAPE gates -- which bytes each refuses, and what
+// its refusal states. The other three are not in it and are covered where they
+// live: p3b.go's two by TestBothDeclaredDigestsAreHeldToTheirShapeByTheirOwnGates and
+// TestNativeDigestShapeIsJudgedBeforeTheDocumentIsRead, and
+// checkEntropyCoordinates' by TestEntropyRefusesOutOfProtocolInputs. A reader
+// who takes that table for the whole class will miss the other three -- and at
+// this commit's PARENT, 0b3cd2f, two of those three were held only to a LENGTH,
+// which is the reading this pointer exists to head off. The parent is named
+// rather than "the base commit": this branch's base is bd4d2727, where none of
+// these files exist yet, so a reader sent there would find nothing to check.
+//
+// THE ORDER OF A GATE against the O(1) gates above it is a separate property
+// again, and it is held for five of the six: the three cross-artifact ones by
+// TestAnO1GateAboveAShapeGateStillSpeaksFirst, which builds its own rows rather
+// than reading that table, and p3b.go's two by their own tests. The sixth,
+// checkEntropyCoordinates' reference gate, is NOT held: hoisting it above the
+// trajectory gate or sinking it below the paired-opportunity gates leaves the
+// whole suite green. Every clause there is O(1) and every one returns
+// ErrEntropyCoordinates, so no input and no sentinel moves -- what moves is
+// which fault a caller is told about for coordinates wrong in more than one
+// way, which is exactly the property the five pinned orders exist for.
+//
+// BOTH OF THOSE TABLES LIVE IN evidence_test.go and cover factset.go and
+// resolution.go from there, which the repository's "tests belong
+// next to the code they cover" rule does not fit, because no one file holds a
+// class that spans three. It is left where it is; this pointer is the smaller
+// change.
 func suppliedTextExtent(s string) string {
 	return strconv.Itoa(len(s)) + " bytes"
 }

@@ -410,6 +410,71 @@ func rulesetIdentityFault(r P3bRuleset) string {
 	}
 }
 
+// rulesetDecodeFaultCeiling is the widest a decoder's own sentence may be
+// before this package stops passing it through. Every fault the walker below
+// raises is a constant plus an extent, and none approaches it; what does is a
+// fault encoding/json wrote.
+const rulesetDecodeFaultCeiling = 512
+
+// decodeFault reports a decoder fault by its EXTENT once the decoder's own
+// sentence passes rulesetDecodeFaultCeiling, and passes it through as written
+// below that.
+//
+// THE PROMISE IS THEREFORE A CONSTANT AND NOT AN EXTENT, which is worth
+// stating plainly because the shorter way of saying it claims more than holds.
+// A fault under the ceiling still reaches a caller as the library wrote it, and
+// for an UnmarshalTypeError that means up to about 450 digits of the caller's
+// own number literal. What this package can promise is that no refusal it
+// returns is PROPORTIONAL to what a caller supplied; it cannot promise that
+// none of the caller's bytes appear in one, because the walker's own diagnoses
+// quote keys and this ceiling is what keeps them intact.
+//
+// IT ALSO DROPS THE LIBRARY ERROR'S TYPE above the ceiling, because what it
+// returns there is a fresh errors.New and not a wrapper: errors.As stops
+// finding *json.UnmarshalTypeError once a fault is reported by extent. No
+// caller in this repository does that, and wrapping would defeat the point --
+// the wrapped error's Error() is the caller-proportional sentence the ceiling
+// exists to keep out of the refusal. Recorded because it narrows what a future
+// caller can do, not because anything today depends on it.
+//
+// IT MEASURES THE SENTENCE BY MATERIALIZING IT, which is the rule's own shape
+// read one level down and is why the promise is scoped to the REFUSAL rather
+// than to the work. err.Error() renders the library's sentence -- the caller's
+// literal inside it -- before the ceiling can judge its length, because there
+// is nothing else to judge. What the ceiling bounds is what LEAVES this
+// package: a caller-proportional sentence is built once, here, and never
+// returned, never joined and never stored.
+//
+// THE CEILING IS PINNED FROM BOTH SIDES by a row of
+// TestADecoderFaultIsReportedByItsExtent, because a ceiling nothing straddles
+// is a constant nothing holds. The decoder quotes the literal into a sentence
+// of otherwise fixed wording, so one more digit is one more byte and the widest
+// sentence that still passes through lands ON the ceiling: it cannot be raised,
+// lowered, or moved by a single byte without a named failure.
+//
+// THE RULE APPLIES TO ERRORS THIS PACKAGE DID NOT WRITE. encoding/json puts the
+// offending NUMBER LITERAL into UnmarshalTypeError.Value -- "cannot unmarshal
+// number 999...9 into Go value of type float64" -- so joining that error
+// through rendered the caller's own bytes back at them. Measured: a
+// 65,671-byte document whose one over-long literal is 65,536 digits produced a
+// 65,675-byte refusal carrying the literal verbatim, at a size well inside
+// rulesetRawCeiling's flat allowance, so no raised ceiling was needed to reach
+// it. This is the TEXT half of the rule stated in canonical.go, at the one
+// place in this package where the sentence is written by the standard library.
+//
+// A CEILING RATHER THAN A TYPE SWITCH, because the fault is the library's to
+// word and may be worded differently tomorrow: what this package can promise is
+// that no refusal it returns is proportional to what a caller supplied. Every
+// diagnosis the walker in this file writes is a constant plus an extent and
+// passes through untouched.
+func decodeFault(err error) error {
+	if msg := err.Error(); len(msg) > rulesetDecodeFaultCeiling {
+		return errors.New("p4offline: the decoder refused the raw document with a fault of " +
+			suppliedTextExtent(msg))
+	}
+	return err
+}
+
 // VerifyP3bRuleset checks every binding of a supplied ruleset.
 func VerifyP3bRuleset(r P3bRuleset) (VerifiedP3bRuleset, error) {
 	if r.RulesetID == "" || r.Config.ConfigID != r.RulesetID {
@@ -462,13 +527,13 @@ func VerifyP3bRuleset(r P3bRuleset) (VerifiedP3bRuleset, error) {
 			errors.New("p4offline: raw bytes hash to "+got+", declared "+r.RawSHA256))
 	}
 	if err := checkRulesetKeys(r.RawBytes); err != nil {
-		return VerifiedP3bRuleset{}, errors.Join(ErrRulesetRawDecode, err)
+		return VerifiedP3bRuleset{}, errors.Join(ErrRulesetRawDecode, decodeFault(err))
 	}
 	dec := json.NewDecoder(bytes.NewReader(r.RawBytes))
 	dec.DisallowUnknownFields()
 	var decoded predictioneval.OrderedRulesConfig
 	if err := dec.Decode(&decoded); err != nil {
-		return VerifiedP3bRuleset{}, errors.Join(ErrRulesetRawDecode, err)
+		return VerifiedP3bRuleset{}, errors.Join(ErrRulesetRawDecode, decodeFault(err))
 	}
 	if rest := bytes.TrimSpace(r.RawBytes[dec.InputOffset():]); len(rest) != 0 {
 		return VerifiedP3bRuleset{}, errors.Join(ErrRulesetRawDecode,
@@ -492,6 +557,13 @@ func VerifyP3bRuleset(r P3bRuleset) (VerifiedP3bRuleset, error) {
 		return VerifiedP3bRuleset{}, errors.Join(ErrRulesetNativeDigest,
 			errors.New("p4offline: core reports "+digest+", declared "+r.NativeConfigDigest))
 	}
+	// NOTHING KILLS THIS GATE TODAY, and that is recorded here rather than left
+	// to be rediscovered, the way the count guard above it is. configsEqual
+	// covers every field OrderedRulesConfig currently has -- including the
+	// nil-against-empty Detailed asymmetry it deliberately admits, which the
+	// core digests identically -- so no exported call reaches this branch, and
+	// a mutant that deletes it passes the whole suite. It is here for the
+	// field that is added next.
 	if decodedDigest, err := nativeConfigDigest(decoded); err != nil || decodedDigest != digest {
 		return VerifiedP3bRuleset{}, errors.Join(ErrRulesetConfigMismatch,
 			errors.New("p4offline: the core digests the decoded document differently from the supplied config"))

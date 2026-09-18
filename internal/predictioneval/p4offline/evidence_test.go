@@ -749,6 +749,26 @@ func TestSourceRoundRegistryVerifierAdmitsOnlyReconciliationsOwnOutput(t *testin
 			t.Fatalf("got %v", err)
 		}
 	})
+
+	t.Run("and this position stays BARE, which is a contract and not a habit", func(t *testing.T) {
+		// THE FIFTH REFUSAL POSITION. The other four name themselves, so a
+		// caller distinguishes this one by the ABSENCE of a second line -- and
+		// an absence nothing asserts is a convention that collapses the moment
+		// a later round leaves some other position bare. A review lane raised
+		// exactly that. It stays bare on purpose: the sentinel's own sentence,
+		// "does not re-derive from its entries", IS this position's diagnosis,
+		// so joining a second line would repeat it. This test already drives
+		// the position; the assertion is one line, and it is what makes "bare
+		// means re-reconciliation" checkable.
+		reg := cloneRegistry(conflict)
+		c := a1
+		reg.Entries[0].Canonical = &c
+		err := p4offline.VerifySourceRoundRegistry(restampRegistry(reg))
+		if err == nil || err.Error() != p4offline.ErrSourceRoundRegistry.Error() {
+			t.Fatalf("the re-reconciliation is the one position that answers with the sentinel "+
+				"alone, because the sentinel already says what went wrong: %v", err)
+		}
+	})
 }
 
 // cloneRegistry copies a registry deep enough for a test to tamper with one
@@ -3254,11 +3274,12 @@ func TestAClaimThisPackageCannotReconcileContestsItsRoundRatherThanLeavingIt(t *
 // every case here, which is exactly the hole a lane demonstrated in the
 // factset's sibling by replacing all of its labels with one.
 //
-// Two positions are named by nothing and say so, for two different reasons an
-// earlier comment ran together: Version is refused by the constant comparison
-// that runs first, and Digest by the digest comparison, which holds it to this
-// package's own 64 hex digits. Neither can carry an invalid byte past its gate,
-// and neither gate says which position it refused.
+// EVERY POSITION IS NAMED NOW, including the two that were not. At this
+// commit's PARENT 0b3cd2f Version was refused by a constant comparison that said nothing about
+// itself, and Digest by the digest COMPARISON, which did the same, so a table
+// skipping them cost nothing. Both name themselves here, so a skip would decline to
+// assert a property the code has -- and a revert of either refusal would go
+// uncaught. Both are rows.
 func TestASuppliedRegistryCarryingTextItCannotExpressIsRefused(t *testing.T) {
 	const invalid = "\xff\xfe\x80"
 	mint := func() p4offline.SourceRoundRegistry {
@@ -3281,8 +3302,15 @@ func TestASuppliedRegistryCarryingTextItCannotExpressIsRefused(t *testing.T) {
 	}
 	const p = "SourceRoundRegistry.Entries[0]"
 	names := map[string]string{
-		p + ".EventID": "entry 0 event id",
-		p + ".Status":  "entry 0 status",
+		// THE REGISTRY'S OWN TWO, which had no rows while their clauses
+		// returned the bare sentinel. The Version clause is refused above
+		// everything, so it never reaches the text scan; the digest is held to
+		// 64 lower-case hex, so an invalid byte is a shape fault. Both say
+		// which position they refused now, and both are asserted here.
+		"SourceRoundRegistry.Version":                 "registry version is",
+		"SourceRoundRegistry.Digest":                  "registry digest of",
+		p + ".EventID":                                "entry 0 event id",
+		p + ".Status":                                 "entry 0 status",
 		p + ".Claims[0].Episode.CollectorSessionID":   "entry 0 claim 0 episode collector session id",
 		p + ".Claims[0].Episode.PoolInstanceID":       "entry 0 claim 0 episode pool instance id",
 		p + ".Claims[0].Episode.RoundIncarnationID":   "entry 0 claim 0 episode round incarnation id",
@@ -3298,8 +3326,18 @@ func TestASuppliedRegistryCarryingTextItCannotExpressIsRefused(t *testing.T) {
 		p + ".Canonical.*.Attempt.PoolInstanceID":     "entry 0 canonical claim attempt pool instance id",
 		p + ".Canonical.*.FactsetDigest":              "entry 0 canonical claim factset digest",
 	}
-	if len(names)+2 != len(found) {
-		t.Fatalf("%d positions are named and 2 are held to constants, against %d reached", len(names), len(found))
+	if len(names) != len(found) {
+		t.Fatalf("%d positions are named, against %d reached", len(names), len(found))
+	}
+	// AND WHY each position is refused. Most are refused for their ENCODING.
+	// The registry's own two are refused ABOVE the text scan -- Version by a
+	// constant comparison and Digest by its shape -- so an invalid byte there
+	// never reaches the encoding question at all. They are still refused and
+	// they still name their position, which is what this test is for; asserting
+	// the encoding fault for them would assert a path they do not take.
+	why := map[string]string{
+		"SourceRoundRegistry.Version": "this package writes only",
+		"SourceRoundRegistry.Digest":  "is not this package's 64 lower-case hex digits",
 	}
 	for i, site := range found {
 		t.Run(site.path, func(t *testing.T) {
@@ -3311,13 +3349,18 @@ func TestASuppliedRegistryCarryingTextItCannotExpressIsRefused(t *testing.T) {
 			}
 			want, named := names[site.path]
 			if !named {
-				return // Version by its constant, Digest by its own hex: refused unnamed
+				t.Fatalf("%s is reached by the walker and named by no row; every position "+
+					"this registry can carry must say which one it refused", site.path)
 			}
 			if !strings.Contains(err.Error(), want) {
 				t.Fatalf("the refusal must name the position it refused:\n got %v\nwant a mention of %q", err, want)
 			}
-			if !strings.Contains(err.Error(), "is not valid UTF-8") {
-				t.Fatalf("the refusal must say WHY, not merely which: %v", err)
+			wantWhy, ok := why[site.path]
+			if !ok {
+				wantWhy = "is not valid UTF-8"
+			}
+			if !strings.Contains(err.Error(), wantWhy) {
+				t.Fatalf("the refusal must say WHY, not merely which (%q): %v", wantWhy, err)
 			}
 		})
 	}
@@ -3532,6 +3575,835 @@ func TestAnUnreconcilableClaimContestsARoundTwoSessionsAGREEDOn(t *testing.T) {
 			}
 			if err := p4offline.VerifySourceRoundRegistry(back); err != nil {
 				t.Fatalf("the registry failed its own re-derivation after a JSON round trip: %v", err)
+			}
+		})
+	}
+}
+
+// TestAMalformedRegistryDigestIsRefusedBeforeTheRegistryIsFramed measures ONE
+// of the three gates a review lane found missing -- the registry's -- and the
+// rule is the same one this package states twice and had applied unevenly. The
+// artifact's is measured by its own sibling in resolution_test.go and the
+// factset's by TestAMalformedFactsetDigestIsRefusedBeforeTheFactsetIsFramed.
+//
+// THE FACTSET NEEDED A COST TEST OF ITS OWN, because the row for it in
+// TestFirstGatesDoNotMaterializeSuppliedText pins the gate's REFUSAL and never
+// its cost: SerializeCommonFactset does not READ fs.Digest -- the digest is OF
+// the values -- so a 1 MiB digest leaves that row's payload tiny and its budget
+// unapproached. The comparison quotes the digest now, so deleting the gate does
+// blow that budget, but a budget a gate's absence happens to trip is still not
+// a measurement of what the gate costs.
+//
+// A digest is CONSTANT-SIZE. Holding it merely to being non-empty let a
+// one-byte, producer-impossible value -- "x" -- through the constant-time
+// clause and on into a text scan and a full framing pass before the mismatch
+// was found. Measured before the repair: 11,930 allocations at 1,000 claims
+// and 95,939 at 8,000 -- in each case the same as a well-formed wrong digest,
+// which is the signature of the defect: a constant-size malformed field bought
+// at a price proportional to the whole artifact. The resolution artifact's
+// figures for the same defect are at its own gate, in resolution.go.
+//
+// The assertion is the RATIO between a malformed digest and an HONEST
+// verification, not an absolute figure, because an absolute is a property of
+// the fixture that produced it. The denominator is an honest verification and
+// not a well-formed WRONG digest, which is the weaker assertion the body
+// rejects two paragraphs down: comparing two refusals would pass on two
+// differently-malformed inputs.
+func TestAMalformedRegistryDigestIsRefusedBeforeTheRegistryIsFramed(t *testing.T) {
+	claims := make([]p4offline.SourceRoundClaim, 2000)
+	for i := range claims {
+		id := strconv.Itoa(i)
+		claims[i] = p4offline.SourceRoundClaim{
+			Episode:       p4offline.EpisodeIdentity{CollectorEpoch: 1, CollectorSessionID: "s", PoolInstanceID: "p", RoundIncarnationID: "r" + id, EventID: "e" + id},
+			Attempt:       predictioneval.AttemptKey{CollectorEpoch: 1, CollectorSessionID: "s", PoolInstanceID: "p", AttemptID: uint64(i)},
+			FactsetDigest: strings.Repeat("a", 64)}
+	}
+	reg := p4offline.ReconcileSourceRounds(claims)
+	if err := p4offline.VerifySourceRoundRegistry(reg); err != nil {
+		t.Fatalf("the unpoked control must verify: %v", err)
+	}
+	malformed, wrong := reg, reg
+	malformed.Digest = "x"
+	wrong.Digest = strings.Repeat("b", 64)
+	if !errors.Is(p4offline.VerifySourceRoundRegistry(malformed), p4offline.ErrSourceRoundRegistry) ||
+		!errors.Is(p4offline.VerifySourceRoundRegistry(wrong), p4offline.ErrSourceRoundRegistry) {
+		t.Fatal("both shapes of bad digest must be refused")
+	}
+	// The denominator is an HONEST verification -- what a caller with a real
+	// registry pays -- rather than a well-formed wrong digest, so the assertion
+	// cannot be satisfied by two differently-malformed inputs both refusing
+	// early.
+	cheap := testing.AllocsPerRun(5, func() { _ = p4offline.VerifySourceRoundRegistry(malformed) })
+	honest := testing.AllocsPerRun(5, func() { _ = p4offline.VerifySourceRoundRegistry(reg) })
+	if honest < 1000 {
+		t.Fatalf("the fixture must make an honest verification expensive, got %.0f allocations", honest)
+	}
+	if cheap*100 > honest {
+		t.Fatalf("a one-byte malformed digest costs %.0f allocations against %.0f for an honest verification: "+
+			"a constant-size malformed field must not buy work proportional to the registry", cheap, honest)
+	}
+}
+
+// shapeRefusal is the phrase the three digest-SHAPE gates UNDER TEST HERE share
+// and no other refusal in this package carries, so a test can tell "refused for
+// the digest's shape" from "refused for the digest's value". Three of SIX: this
+// package also holds a digest to its shape in p3b.go twice (the declared native
+// digest and the declared raw hash) and in checkEntropyCoordinates. Those three
+// state their requirements in their own words, are not reachable through this
+// table, and are pinned by their own tests.
+//
+// The distinction it draws was genuinely unavailable at ONE of the three until
+// this round: VerifySourceRoundRegistry's shape gate and its digest comparison
+// both returned the same bare sentinel. At the artifact the comparison already
+// named itself, so only the shape half was missing there.
+const shapeRefusal = "is not this package's"
+
+// namedDigest is one digest value under test, labelled for the subtest name.
+type namedDigest struct{ name, digest string }
+
+// digestShapeGate is one exported verifier that holds a digest to its SHAPE
+// before reading the artifact that digest certifies.
+//
+// The three gates are ONE rule written three times, and a table of ill-shaped
+// digests does not automatically pin either half of it.
+//
+// WHICH BYTES: isCanonicalHex returns on the LENGTH check BEFORE the character
+// loop runs, so a fixture that differs from a real digest only in its length
+// never reaches the character class at all, whatever its bytes are. Each gate
+// reduced to exactly that branch -- `!isCanonicalHex(d, 64)` rewritten as
+// `len(d) != 64`, and `!isDigestReference(d)` as `len(d) != len(prefix)+64` --
+// survives any table built only of length-wrong digests. Every row here that
+// differs from a real digest in anything OTHER than its length kills those,
+// which is most of them. NO COUNT IS QUOTED: firstGateTableRows and the census
+// in fence_test.go are where this package writes a count it means to keep. The
+// HELPER-level mutants -- dropping isCanonicalHex's character class, dropping
+// isDigestReference's prefix test -- are killed at this commit's parent
+// 0b3cd2f too (not at the branch's base bd4d2727, where this file does not
+// exist yet), by
+// TestEntropyRefusesOutOfProtocolInputs' "upper-case digest" and "another
+// prefix of the same length" rows. This table kills them again, and that is a
+// second line of defence, not the finding.
+//
+// WHERE: a placement argued in COST is a placement a cost instrument cannot
+// see. The artifact's gate moved BELOW the scan it is supposed to precede
+// leaves every byte-ratio assertion green, because the scan ALLOCATES NOTHING
+// -- 0 B/op and 0 allocs/op on a 20,000-reference fixture, about a millisecond
+// of CPU. What a cost test can pin is "refused before the FRAMING", and the
+// cost tests are named for the framing. Both halves of the rule are pinned
+// BEHAVIOURALLY here -- by which refusal comes back -- so neither depends on a
+// fixture being expensive.
+type digestShapeGate struct {
+	name string
+	// verify runs the verifier over a fixture that verifies unpoked, with the
+	// supplied digest substituted and nothing else changed.
+	verify func(digest string) error
+	// verifyLossy runs it over the same fixture ALSO carrying a string the
+	// artifact's own encoding cannot express, so WHICH refusal comes back
+	// names WHICH gate ran first.
+	verifyLossy func(digest string) error
+	// sentinel is what every refusal on this artifact joins.
+	sentinel error
+	// wantRequirement is the SHAPE this gate holds the digest to, in the
+	// gate's own words. Asserting only that the refusal came from the shape
+	// gate leaves the gate free to state a shape the producer does not emit.
+	// The artifact's refusal made to name "sha512:" is caught by this field and
+	// by nothing else in the suite; the factset's and the registry's made to
+	// name 32 digits are caught here first and by their own sibling tests too.
+	wantRequirement string
+	// wellFormed has the right SHAPE and the wrong VALUE: the shape gate must
+	// hand it on to the comparison below, which refuses it for another reason.
+	wellFormed string
+	// badShapes are digests this package's own producer cannot emit.
+	badShapes []namedDigest
+}
+
+// digestShapeGates builds the three gates over fixtures that verify unpoked.
+//
+// Each fixture is rebuilt per call rather than shared: the registry's Entries
+// is a slice, and a lossy case that poked a shared one would change the value
+// the honest control is measured against -- the same aliasing that made an
+// earlier walker in this suite mint canonical claims the producer never
+// emitted.
+func digestShapeGates(t *testing.T) []digestShapeGate {
+	t.Helper()
+	const lossyText = "\xff\xfe\x80"
+	hex64 := strings.Repeat("a", 64)
+	upper := strings.ToUpper(hex64)
+
+	// THE FACTSET IS DERIVED ONCE, HERE, on the parent test's goroutine.
+	// selectedCase reports a broken fixture with t.Fatalf, and these closures
+	// are called from inside t.Run subtests: a t.Fatalf on the PARENT's t from
+	// a subtest's goroutine is a cross-goroutine FailNow, which Go reports as
+	// "subtest may have called FailNow on a parent test" instead of as the
+	// fixture failure it is. Latent -- the fixture does not fail today -- and
+	// repaired anyway, because the day it does fail is the day the diagnostic
+	// matters. The copy each closure takes is safe: every closure assigns only
+	// scalar fields and nothing appends to the shared Outcomes slice. The
+	// REGISTRY is deliberately not hoisted the same way, because its lossy case
+	// pokes Entries, and a shared slice would carry that into the honest
+	// control.
+	_, _, baseFactset := selectedCase(t, nil, nil)
+	newFactset := func() p4offline.CommonFactset { return baseFactset }
+	newArtifact := func() p4offline.ResolutionArtifact {
+		return p4offline.ResolutionNotRecorded(
+			p4offline.PublicRoundIdentity{EventID: "e1", ChannelID: "c1"}, []string{"o1", "o2"}, nil, "pr")
+	}
+	newRegistry := func() p4offline.SourceRoundRegistry {
+		return p4offline.ReconcileSourceRounds([]p4offline.SourceRoundClaim{{
+			Episode:       p4offline.EpisodeIdentity{CollectorEpoch: 1, CollectorSessionID: "s", PoolInstanceID: "p", RoundIncarnationID: "r1", EventID: "e1"},
+			Attempt:       predictioneval.AttemptKey{CollectorEpoch: 1, CollectorSessionID: "s", PoolInstanceID: "p", AttemptID: 1},
+			FactsetDigest: hex64,
+		}})
+	}
+	for _, c := range []struct {
+		what string
+		err  error
+	}{
+		{"factset", p4offline.VerifyCommonFactset(newFactset())},
+		{"artifact", p4offline.VerifyResolutionArtifact(newArtifact())},
+		{"registry", p4offline.VerifySourceRoundRegistry(newRegistry())},
+	} {
+		if c.err != nil {
+			t.Fatalf("the %s fixture must verify unpoked: %v", c.what, c.err)
+		}
+	}
+
+	// THE PLAIN SHAPE is 64 lower-case hex digits, which is what the factset
+	// and the registry each declare. Both length branches are covered, and the
+	// character class is covered at the front, at the end, and ONE BYTE OUTSIDE
+	// EACH OF ITS FOUR EDGES. The edges are the point. A class widened by one
+	// byte still refuses 'A', 'z' and '-', so a table carrying only bytes far
+	// from an edge leaves every one-byte widening alive; the four that matter
+	// are '/' below '0', ':' above '9', '`' below 'a' and 'g' above 'f'. A gate
+	// that checks only the first byte, only the length, or a class one byte too
+	// wide is what such a table lets through.
+	plain := []namedDigest{
+		{"empty", ""},
+		{"one byte", "x"},
+		{"63 hex digits", hex64[:63]},
+		{"65 hex digits", hex64 + "a"},
+		{"64 upper-case hex digits", upper},
+		{"one upper-case digit at the end", hex64[:63] + "A"},
+		{"one upper-case digit at the front", "A" + hex64[1:]},
+		{"one non-hex letter at the end", hex64[:63] + "g"},
+		{"one non-hex letter at the front", "g" + hex64[1:]},
+		{"64 non-hex letters", strings.Repeat("z", 64)},
+		{"64 characters that are not letters at all", strings.Repeat("-", 64)},
+		// THE FOUR BYTES ADJACENT TO THE CLASS, which is what "both halves at
+		// each end" has to mean and did not. The class is [0-9a-f]; its
+		// neighbours are '/' (0x2F), ':' (0x3A), '`' (0x60) and 'g' (0x67).
+		// NO EDGE WAS DRIVEN AS AN EDGE, so a one-byte widening at any of them
+		// survived the whole suite -- and not as a message. Three are rows of
+		// this table named for the byte they drive; the fourth, 'g', is the
+		// byte the two "non-hex letter" rows above already carry, so it earns
+		// no row of its own and is named here instead.
+		// No position is given for them, because a pointer to a row's place in
+		// a table is wrong the moment a row is inserted. isCanonicalHex is
+		// what isDigestReference calls, so under each widening EntropyMAC
+		// ACCEPTED an out-of-protocol CommonFactsetDigest and drew a full
+		// schedule from it. Measured, one byte at a time.
+		{"a slash, the byte below '0'", hex64[:63] + "/"},
+		{"a colon, the byte above '9'", hex64[:63] + ":"},
+		{"a backtick, the byte below 'a'", hex64[:63] + "`"},
+		// THE OTHER SPELLING, and a length this package never writes. Neither
+		// table had a row for either, so all three gates could be widened to
+		// accept a DigestReference where a bare digest belongs -- the exact
+		// confusion doc.go lists as a sharp edge -- or to accept 32 digits,
+		// with the whole suite green. A review lane measured the first at
+		// about 50,800x on a 2,000-claim registry, because the widened gate hands the
+		// value to the framing below it.
+		{"a digest reference where a bare digest belongs", p4offline.DigestReference(hex64)},
+		{"32 hex digits, which is an MD5's width", hex64[:32]},
+	}
+	// THE ARTIFACT'S SHAPE is a DigestReference: the prefix and then the same
+	// 64 digits. The prefix is a second thing to get wrong and had no case at
+	// all, so the right-length-wrong-prefix and wrong-case-prefix rows below
+	// are the ones a prefix-blind gate cannot survive.
+	prefixed := []namedDigest{
+		{"empty", ""},
+		{"one byte", "x"},
+		{"the right length with no prefix at all", strings.Repeat("a", len(p4offline.DigestReferencePrefix)+64)},
+		{"an upper-case prefix", strings.ToUpper(p4offline.DigestReferencePrefix) + hex64},
+		{"a prefix this package does not write", "sha512:" + hex64},
+		{"the prefix without a separator", "sha256" + hex64},
+		// THE SEPARATOR BYTE, which nothing in this package held until a review
+		// lane showed it. Every other prefix row here fails on some OTHER byte
+		// -- no prefix at all, an upper-case one, a foreign one, a doubled one,
+		// or a wrong length -- so a gate that compared only the six letters
+		// passed the whole suite. It is not a message-only gap: the same
+		// isDigestReference guards EntropyMAC's coordinates, where the mutant
+		// ACCEPTED an out-of-protocol digest outright.
+		{"the right length with the wrong separator", "sha256_" + hex64},
+		{"the right length with a NUL for the separator", "sha256\x00" + hex64},
+		{"the prefix twice", p4offline.DigestReference(p4offline.DigestReference(hex64))},
+		{"63 hex digits behind the prefix", p4offline.DigestReference(hex64[:63])},
+		{"65 hex digits behind the prefix", p4offline.DigestReference(hex64 + "a")},
+		{"64 upper-case hex digits behind the prefix", p4offline.DigestReference(upper)},
+		{"one upper-case digit at the end", p4offline.DigestReference(hex64[:63] + "A")},
+		{"one non-hex letter at the end", p4offline.DigestReference(hex64[:63] + "g")},
+		{"one non-hex letter at the front", p4offline.DigestReference("g" + hex64[1:])},
+		{"a bare digest where a reference belongs", hex64},
+		{"32 hex digits behind the prefix", p4offline.DigestReference(hex64[:32])},
+	}
+
+	return []digestShapeGate{
+		{
+			name: "VerifyCommonFactset",
+			verify: func(d string) error {
+				fs := newFactset()
+				fs.Digest = d
+				return p4offline.VerifyCommonFactset(fs)
+			},
+			verifyLossy: func(d string) error {
+				fs := newFactset()
+				fs.ProjectorRevision = lossyText
+				fs.Digest = d
+				return p4offline.VerifyCommonFactset(fs)
+			},
+			sentinel:        p4offline.ErrFactsetDigest,
+			wantRequirement: "is not this package's 64 lower-case hex digits",
+			wellFormed:      strings.Repeat("b", 64),
+			badShapes:       plain,
+		},
+		{
+			name: "VerifyResolutionArtifact",
+			verify: func(d string) error {
+				a := newArtifact()
+				a.ResolutionFactsDigest = d
+				return p4offline.VerifyResolutionArtifact(a)
+			},
+			verifyLossy: func(d string) error {
+				a := newArtifact()
+				a.Round.ChannelID = lossyText
+				a.ResolutionFactsDigest = d
+				return p4offline.VerifyResolutionArtifact(a)
+			},
+			sentinel:        p4offline.ErrResolutionDigest,
+			wantRequirement: `is not this package's "sha256:" prefix and 64 lower-case hex digits`,
+			wellFormed:      p4offline.DigestReference(strings.Repeat("b", 64)),
+			badShapes:       prefixed,
+		},
+		{
+			name: "VerifySourceRoundRegistry",
+			verify: func(d string) error {
+				reg := newRegistry()
+				reg.Digest = d
+				return p4offline.VerifySourceRoundRegistry(reg)
+			},
+			verifyLossy: func(d string) error {
+				reg := newRegistry()
+				reg.Entries[0].EventID = lossyText
+				reg.Digest = d
+				return p4offline.VerifySourceRoundRegistry(reg)
+			},
+			sentinel:        p4offline.ErrSourceRoundRegistry,
+			wantRequirement: "is not this package's 64 lower-case hex digits",
+			wellFormed:      strings.Repeat("b", 64),
+			badShapes:       plain,
+		},
+	}
+}
+
+// TestEachNamedRegistryRefusalSaysWhichPositionRefusedIt pins the repair of an
+// asymmetry a review lane counted across VerifySourceRoundRegistry's refusal
+// positions: of the five its clause split creates, only the text scan named
+// itself and the other four returned the identical bare sentinel with identical
+// text, while the sibling verifiers name every position they own. A caller
+// could not tell "this registry was written by an older version of this
+// package" -- benign, and a reason to re-derive -- from the tampering signal
+// this function exists to raise.
+//
+// Three of the four are named now. The fourth, the re-reconciliation at the
+// end, is left bare DELIBERATELY, because the sentinel's own sentence ("does not
+// re-derive from its entries") is exactly that position's diagnosis; it is not
+// asserted here because reaching it from outside the package needs a digest
+// this package computes, and TestSourceRoundRegistryVerifierAdmitsOnlyReconciliationsOwnOutput
+// already drives it.
+//
+// NAMED is in the title on purpose, and the title is now true of all four:
+// the Version clause, the digest-shape gate, the digest comparison and the text
+// scan. The fifth position is the bare one above, which is not a named refusal
+// and is pinned as a contract where it is driven. The title says NAMED and not
+// EACH for that reason: a title that promised every position would promise one
+// this test does not drive.
+//
+// Pairwise distinctness is the load-bearing assertion. Asserting only that each
+// message contains its own phrase would pass a verifier that returned all four
+// phrases at every position.
+func TestEachNamedRegistryRefusalSaysWhichPositionRefusedIt(t *testing.T) {
+	newRegistry := func() p4offline.SourceRoundRegistry {
+		return p4offline.ReconcileSourceRounds([]p4offline.SourceRoundClaim{{
+			Episode:       p4offline.EpisodeIdentity{CollectorEpoch: 1, CollectorSessionID: "s", PoolInstanceID: "p", RoundIncarnationID: "r1", EventID: "e1"},
+			Attempt:       predictioneval.AttemptKey{CollectorEpoch: 1, CollectorSessionID: "s", PoolInstanceID: "p", AttemptID: 1},
+			FactsetDigest: strings.Repeat("a", 64),
+		}})
+	}
+	if err := p4offline.VerifySourceRoundRegistry(newRegistry()); err != nil {
+		t.Fatalf("the unpoked control must verify: %v", err)
+	}
+	seen := map[string]string{}
+	cases := []struct {
+		name string
+		poke func(*p4offline.SourceRoundRegistry)
+		// names is what the refusal must say for its own position.
+		names []string
+		// quotes is a value the refusal must carry VERBATIM, as
+		// strconv.Quote renders it. It exists because "names" alone cannot
+		// tell a diagnosis from a template: the comparison's refusal below
+		// reads the same for every mismatch there is if the supplied digest
+		// is reported by EXTENT, and reporting it by extent survived every
+		// other assertion here. The digest is safe to quote at that position
+		// precisely because the shape gate above it has already bounded it.
+		quotes func(p4offline.SourceRoundRegistry) string
+	}{
+		{"a foreign version", func(r *p4offline.SourceRoundRegistry) {
+			r.Version = "NOT_A_VERSION_THIS_PACKAGE_WRITES"
+		}, []string{"registry version is", "33 bytes"}, nil},
+		{"a digest of the wrong shape", func(r *p4offline.SourceRoundRegistry) {
+			r.Digest = "x"
+		}, []string{"registry digest of", "1 bytes", "is not this package's 64 lower-case hex digits"}, nil},
+		{"an entry carrying text the registry cannot express", func(r *p4offline.SourceRoundRegistry) {
+			// THE FOURTH NAMED POSITION, and the reason this test's name is
+			// "Each Named" rather than "Each": the text scan has always named
+			// itself, so a title that said EACH would over-promise by one. It
+			// is driven here rather than only in
+			// TestASuppliedRegistryCarryingTextItCannotExpressIsRefused,
+			// because what THIS test adds is that the four named refusals are
+			// mutually distinguishable, and a fourth that is never compared
+			// against the other three cannot show that.
+			r.Entries[0].EventID = "\xff\xfe\x80"
+		}, []string{"entry 0 event id", "is not valid UTF-8"}, nil},
+		{"an entry altered under a minted digest", func(r *p4offline.SourceRoundRegistry) {
+			// The realistic tampering shape, and the one that reaches the
+			// COMPARISON: the digest is this package's own, so it passes the
+			// shape gate and then disagrees with the entries it no longer
+			// describes.
+			r.Entries[0].Status = p4offline.SourceRoundConflict
+		}, []string{"registry digest", "does not match its entries", "which digest to"},
+			func(r p4offline.SourceRoundRegistry) string { return r.Digest }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			reg := newRegistry()
+			tc.poke(&reg)
+			err := p4offline.VerifySourceRoundRegistry(reg)
+			if !errors.Is(err, p4offline.ErrSourceRoundRegistry) {
+				t.Fatalf("want %v, got %v", p4offline.ErrSourceRoundRegistry, err)
+			}
+			for _, want := range tc.names {
+				if !strings.Contains(err.Error(), want) {
+					t.Fatalf("the refusal must name the position it refused (%q): %v", want, err)
+				}
+			}
+			// A "this is not the bare sentinel" row belongs here by symmetry and
+			// is NOT written: every row's `names` carries a phrase the bare
+			// sentinel does not, so the loop above fires first on any
+			// regression to it: the mutant such a row would exist for is
+			// already killed four lines up. This package's own rule is that a
+			// row nothing can break is decoration.
+			// AND THE SENTINEL LEADS, at these positions too. errors.Join
+			// renders its arguments in order and errors.Is cannot see that
+			// order, so swapping them moves the CLASS out of the first line
+			// and leaves a reader with the diagnosis and no category. The
+			// digest-shape table pins this at the three shape gates; these are
+			// the three positions the same round wrote or re-worded, and the
+			// swap survived at every one of them.
+			if !strings.HasPrefix(err.Error(), p4offline.ErrSourceRoundRegistry.Error()) {
+				t.Fatalf("the refusal must lead with the class it joins: %v", err)
+			}
+			if tc.quotes != nil {
+				if want := strconv.Quote(tc.quotes(reg)); !strings.Contains(err.Error(), want) {
+					t.Fatalf("the refusal must carry the value it refused (%s), not a rendering of "+
+						"its length that reads the same for every input: %v", want, err)
+				}
+				if strings.Contains(err.Error(), "64 bytes") {
+					t.Fatalf("a digest the gate above has already bounded must be NAMED, not "+
+						"reduced to its extent: %v", err)
+				}
+				// AND IN THE RIGHT ORDER. Both digests are 64 hex characters,
+				// so a refusal that swaps them reads perfectly and says the
+				// opposite: it names this package's own digest as the caller's.
+				// Containment cannot see that -- both values are present either
+				// way -- so the assertion is POSITION: the supplied digest must
+				// come before the phrase that introduces the derived one. This
+				// is the same swap-survives-containment failure this package
+				// already recorded at the binding gate.
+				// `names` above already requires "which digest to", so this
+				// asks only about ORDER.
+				at := strings.Index(err.Error(), strconv.Quote(tc.quotes(reg)))
+				if intro := strings.Index(err.Error(), "which digest to "); at > intro {
+					t.Fatalf("the SUPPLIED digest must be named before the derived one: %v", err)
+				}
+				if !strings.Contains(err.Error(), `which digest to "`) {
+					t.Fatalf("the derived digest must be quoted too: %v", err)
+				}
+			}
+			seen[err.Error()] = tc.name
+		})
+	}
+	// COUNTED AND READ, not probed. A membership test inside the loop above
+	// cannot fail if the map is keyed by anything else -- a review lane re-keyed
+	// it by row name and the whole suite stayed green, because the lookup then
+	// simply never hits. Counting alone does not fix that: four row names are
+	// four distinct keys too. So the keys are also READ, and a key that is not a
+	// refusal of this artifact is not a refusal at all.
+	if len(seen) != len(cases) {
+		t.Errorf("%d rows produced %d distinct refusals; each named position must be "+
+			"distinguishable from the others: %v", len(cases), len(seen), seen)
+	}
+	for msg, row := range seen {
+		if !strings.HasPrefix(msg, p4offline.ErrSourceRoundRegistry.Error()) {
+			t.Errorf("the key recorded for %q is not a refusal this verifier produced: %q", row, msg)
+		}
+	}
+}
+
+// TestAnUncarriableSupplyIsRefusedBeforeItIsFramed pins this round's own rule
+// ONE GATE LOWER than the round pinned it, at the text scan, at all THREE
+// verifiers -- a factset, a registry and a resolution artifact -- which is why
+// its name says SUPPLY rather than naming one of them.
+//
+// The three cost tests beside this one all poke the DIGEST, so they stop at the
+// shape gate and never reach the scan below it. A review lane hoisted the
+// digest MATERIALIZATION above that scan at all three verifiers -- a
+// materialization above a gate that can refuse without it, which is the
+// sentence this whole round exists to enforce -- and every one of them survived
+// the entire suite, measured without the race detector: 46,394x at the
+// registry, 22,845x at the factset, 57,562x at
+// the artifact -- the artifact and the factset each 100.0% of the cost of an honest
+// verification. evidence.go's own comment already CLAIMED the property
+// ("refusing an uncarriable registry before a full framing pass") with nothing
+// asserting it, and the file two gates up calls this "the failure mode this
+// package has now made twice". It was reachable a third time.
+//
+// The fixtures are large AND carry a string the artifact's encoding cannot
+// express, with a digest of the RIGHT SHAPE, so the shape gate passes them on
+// and the scan is what refuses. The denominator is an honest verification of
+// the same large fixture, as at the three siblings.
+func TestAnUncarriableSupplyIsRefusedBeforeItIsFramed(t *testing.T) {
+	const lossy = "\xff\xfe\x80"
+	hex64 := strings.Repeat("a", 64)
+	_, _, base := selectedCase(t, nil, nil)
+
+	// EVERY BUILDER TAKES ITS SIZE, so the same fixture can be made large
+	// enough to dominate an honest verification and small enough that nothing
+	// payload-sized can hide inside a refusal of it.
+	factsetOf := func(n int, poke bool) p4offline.CommonFactset {
+		fs := base
+		fs.ProjectorRevision = strings.Repeat("p", n)
+		fs.Digest = digestOf(p4offline.SerializeCommonFactset(fs))
+		if poke {
+			fs.ProjectorRevision += lossy
+		}
+		return fs
+	}
+	registryOf := func(n int, poke bool) p4offline.SourceRoundRegistry {
+		claims := make([]p4offline.SourceRoundClaim, n)
+		for i := range claims {
+			id := strconv.Itoa(i)
+			claims[i] = p4offline.SourceRoundClaim{
+				Episode:       p4offline.EpisodeIdentity{CollectorEpoch: 1, CollectorSessionID: "s", PoolInstanceID: "p", RoundIncarnationID: "r" + id, EventID: "e" + id},
+				Attempt:       predictioneval.AttemptKey{CollectorEpoch: 1, CollectorSessionID: "s", PoolInstanceID: "p", AttemptID: uint64(i)},
+				FactsetDigest: hex64}
+		}
+		reg := p4offline.ReconcileSourceRounds(claims)
+		if poke {
+			reg.Entries[0].EventID = lossy
+		}
+		return reg
+	}
+	artifactOf := func(n int, poke bool) p4offline.ResolutionArtifact {
+		refs := make([]p4offline.EvidenceReference, n)
+		ids := make([]string, n)
+		for i := range refs {
+			refs[i] = p4offline.EvidenceReference{ObservationID: "obs" + strconv.Itoa(i), Kind: "k", Phase: "p", RoundState: "RESOLVED", EventID: "e1"}
+			ids[i] = "o" + strconv.Itoa(i)
+		}
+		a := p4offline.ProjectResolution(p4offline.ResolutionEvidence{
+			Round: p4offline.PublicRoundIdentity{EventID: "e1"}, OrderedOutcomeIDs: ids,
+			Claim: p4offline.ResolutionUnknown, Availability: p4offline.AvailabilityNotRecorded,
+			EvidenceReferences: refs, ProjectorRevision: "pr", ProofRevision: "x"})
+		if poke {
+			a.Round.ChannelID = lossy
+		}
+		return a
+	}
+
+	measure := func(f func()) uint64 {
+		runtime.GC()
+		var before, after runtime.MemStats
+		runtime.ReadMemStats(&before)
+		f()
+		runtime.ReadMemStats(&after)
+		return after.TotalAlloc - before.TotalAlloc
+	}
+	// EVERY FIXTURE IS BUILT ONCE, HERE, and never inside a measured closure.
+	// Built in the closure, both readings are dominated by four megabytes of
+	// construction and the ratio measures nothing: the factset pair comes back
+	// at about 12.60 MB against about 12.60 MB -- the fixture twice, give or
+	// take a few hundred bytes run to run -- and a refusal that read the whole
+	// payload would still pass. Each poked fixture is built
+	// independently of its honest twin, because the registry's poke writes
+	// through Entries, which a shared slice would carry into the control.
+	honestFS, lossyFS, tinyFS := factsetOf(bigFactsetText, false), factsetOf(bigFactsetText, true), factsetOf(1, true)
+	honestReg, lossyReg, tinyReg := registryOf(2000, false), registryOf(2000, true), registryOf(1, true)
+	honestArt, lossyArt, tinyArt := artifactOf(20000, false), artifactOf(20000, true), artifactOf(1, true)
+	for _, tc := range []struct {
+		name     string
+		honest   func() error
+		refusing func() error
+		// The SAME refusal over a fixture too small to hide anything in. See
+		// the scale assertion below for what it is for.
+		refusingTiny func() error
+	}{
+		{"VerifyCommonFactset",
+			func() error { return p4offline.VerifyCommonFactset(honestFS) },
+			func() error { return p4offline.VerifyCommonFactset(lossyFS) },
+			func() error { return p4offline.VerifyCommonFactset(tinyFS) }},
+		{"VerifySourceRoundRegistry",
+			func() error { return p4offline.VerifySourceRoundRegistry(honestReg) },
+			func() error { return p4offline.VerifySourceRoundRegistry(lossyReg) },
+			func() error { return p4offline.VerifySourceRoundRegistry(tinyReg) }},
+		{"VerifyResolutionArtifact",
+			func() error { return p4offline.VerifyResolutionArtifact(honestArt) },
+			func() error { return p4offline.VerifyResolutionArtifact(lossyArt) },
+			func() error { return p4offline.VerifyResolutionArtifact(tinyArt) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := tc.honest(); err != nil {
+				t.Fatalf("the unpoked control must verify: %v", err)
+			}
+			for _, refusing := range []func() error{tc.refusing, tc.refusingTiny} {
+				if err := refusing(); err == nil || !strings.Contains(err.Error(), "is not valid UTF-8") {
+					t.Fatalf("the SCAN must be what refuses this fixture, not a gate above it: %v", err)
+				}
+			}
+			cheap := measure(func() { _ = tc.refusing() })
+			tiny := measure(func() { _ = tc.refusingTiny() })
+			honest := measure(func() { _ = tc.honest() })
+			t.Logf("refused for its encoding: %d bytes at size, %d at one; honest verification: %d", cheap, tiny, honest)
+			if honest < 1<<20 {
+				t.Fatalf("the fixture must make an honest verification expensive, got %d bytes", honest)
+			}
+			if cheap*4 > honest {
+				t.Fatalf("an uncarriable artifact costs %d bytes against %d for an honest verification: "+
+					"the digest must not be framed above the gate that refuses without it", cheap, honest)
+			}
+			// AND THE RATIO ALONE IS NOT THE PROPERTY. A ratio lets a refusal
+			// grow with the payload as long as it stays under a QUARTER of an
+			// honest verification, and a review lane walked straight through
+			// that door: hoisting the registry's OTHER payload-sized
+			// materialization -- the claim flattening three lines below the
+			// scan -- into exactly the position this test is named for cost
+			// 768,808 bytes against a true 184 and passed, because 4.0% is
+			// less than 25%. This refusal reads no payload, so its cost must
+			// not move with the payload's size at all. The tiny fixture is the
+			// same refusal over one claim, one reference, one byte of text;
+			// the slack absorbs an error string that names a field, never one
+			// that carries a payload.
+			if cheap > tiny+256 {
+				t.Fatalf("refusing costs %d bytes at size against %d at one: a refusal that reads no "+
+					"payload must not scale with it", cheap, tiny)
+			}
+		})
+	}
+}
+
+// TestAnO1GateAboveAShapeGateStillSpeaksFirst pins the FIVE orders the three
+// shape gates create and that nothing else holds.
+//
+// TestADigestsSHAPEIsJudgedAboveTheScanThatReadsTheSupply holds each shape
+// gate ABOVE the scan beneath it. Nothing holds any of them BELOW the
+// constant-time gates above them, and without this table all FIVE hoists
+// survive the whole suite: the registry's Version clause trading places with
+// its digest clause, the artifact's shape gate lifted over its contract gate
+// and over its obligations gate, and the factset's over its contract gate and
+// over its protocol gate. Every one of those gates is O(1) and
+// every one of those refusals is truthful, so no hoist is a correctness hole.
+// What they change is WHICH QUESTION gets answered -- and telling a caller that
+// their digest is the wrong shape, when the artifact is not this package's KIND
+// at all, answers a question they did not ask about an artifact this package
+// will not read either way.
+//
+// Each case carries its converse, because "the gate above spoke" is also what
+// you would see if the shape gate had stopped looking entirely.
+func TestAnO1GateAboveAShapeGateStillSpeaksFirst(t *testing.T) {
+	hex64 := strings.Repeat("a", 64)
+	newRegistry := func() p4offline.SourceRoundRegistry {
+		return p4offline.ReconcileSourceRounds([]p4offline.SourceRoundClaim{{
+			Episode:       p4offline.EpisodeIdentity{CollectorEpoch: 1, CollectorSessionID: "s", PoolInstanceID: "p", RoundIncarnationID: "r1", EventID: "e1"},
+			Attempt:       predictioneval.AttemptKey{CollectorEpoch: 1, CollectorSessionID: "s", PoolInstanceID: "p", AttemptID: 1},
+			FactsetDigest: hex64,
+		}})
+	}
+	newArtifact := func() p4offline.ResolutionArtifact {
+		return p4offline.ResolutionNotRecorded(
+			p4offline.PublicRoundIdentity{EventID: "e1", ChannelID: "c1"}, []string{"o1", "o2"}, nil, "pr")
+	}
+	_, _, baseFactset := selectedCase(t, nil, nil)
+	newFactset := func() p4offline.CommonFactset { return baseFactset }
+	for _, tc := range []struct {
+		name      string
+		bothBad   func() error
+		shapeOnly func() error
+		names     string
+	}{
+		{"a registry's VERSION, above its digest's shape", func() error {
+			r := newRegistry()
+			r.Version = "NOT_A_VERSION_THIS_PACKAGE_WRITES"
+			r.Digest = "x"
+			return p4offline.VerifySourceRoundRegistry(r)
+		}, func() error {
+			r := newRegistry()
+			r.Digest = "x"
+			return p4offline.VerifySourceRoundRegistry(r)
+		}, "registry version is"},
+		{"an artifact's CONTRACT, above its digest's shape", func() error {
+			a := newArtifact()
+			a.ContractVersion = "NOT_A_CONTRACT_THIS_PACKAGE_WRITES"
+			a.ResolutionFactsDigest = "x"
+			return p4offline.VerifyResolutionArtifact(a)
+		}, func() error {
+			a := newArtifact()
+			a.ResolutionFactsDigest = "x"
+			return p4offline.VerifyResolutionArtifact(a)
+		}, "artifact contract is"},
+		{"an artifact's OBLIGATIONS revision, above its digest's shape", func() error {
+			a := newArtifact()
+			a.ObligationsRevision = "NOT_A_REVISION_THIS_PACKAGE_WRITES"
+			a.ResolutionFactsDigest = "x"
+			return p4offline.VerifyResolutionArtifact(a)
+		}, func() error {
+			a := newArtifact()
+			a.ResolutionFactsDigest = "x"
+			return p4offline.VerifyResolutionArtifact(a)
+		}, "artifact obligations revision is"},
+		{"a factset's CONTRACT, above its digest's shape", func() error {
+			fs := newFactset()
+			fs.ContractVersion = "NOT_A_CONTRACT_THIS_PACKAGE_WRITES"
+			fs.Digest = "x"
+			return p4offline.VerifyCommonFactset(fs)
+		}, func() error {
+			fs := newFactset()
+			fs.Digest = "x"
+			return p4offline.VerifyCommonFactset(fs)
+		}, "factset contract is"},
+		{"a factset's PROTOCOL, above its digest's shape", func() error {
+			fs := newFactset()
+			fs.Protocol = "NOT_A_PROTOCOL_THIS_PACKAGE_WRITES"
+			fs.Digest = "x"
+			return p4offline.VerifyCommonFactset(fs)
+		}, func() error {
+			fs := newFactset()
+			fs.Digest = "x"
+			return p4offline.VerifyCommonFactset(fs)
+		}, "factset protocol is"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := tc.shapeOnly(); err == nil || !strings.Contains(err.Error(), shapeRefusal) {
+				t.Fatalf("an ill-shaped digest ALONE must be named by the shape gate: %v", err)
+			}
+			err := tc.bothBad()
+			if err == nil {
+				t.Fatal("an artifact wrong in both ways must be refused")
+			}
+			if !strings.Contains(err.Error(), tc.names) {
+				t.Fatalf("the gate above must speak first, naming %q: %v", tc.names, err)
+			}
+			if strings.Contains(err.Error(), shapeRefusal) {
+				t.Fatalf("the digest's shape was judged above a gate that sits over it: %v", err)
+			}
+		})
+	}
+}
+
+// TestADigestIsHeldToItsDIGITSAndNotMerelyToItsLength pins WHICH BYTES each
+// shape gate refuses.
+//
+// Asserting only that a bad digest is REFUSED proves nothing about the gate: a
+// digest of the right length and the wrong characters is refused by the
+// COMPARISON below the gate too, for a different reason, and every fixture the
+// adding round carried was a one-byte "x" that only the length branch had to
+// see. So the assertion is WHICH refusal comes back. The well-formed-wrong row
+// is the converse and is not decoration: without it a gate that refused
+// EVERYTHING would pass every row above.
+func TestADigestIsHeldToItsDIGITSAndNotMerelyToItsLength(t *testing.T) {
+	for _, g := range digestShapeGates(t) {
+		t.Run(g.name, func(t *testing.T) {
+			err := g.verify(g.wellFormed)
+			if !errors.Is(err, g.sentinel) {
+				t.Fatalf("a well-formed WRONG digest must still be refused, got %v", err)
+			}
+			if strings.Contains(err.Error(), shapeRefusal) {
+				t.Fatalf("a digest of the right SHAPE must reach the comparison, not the shape gate: %v", err)
+			}
+			for _, bad := range g.badShapes {
+				t.Run(bad.name, func(t *testing.T) {
+					err := g.verify(bad.digest)
+					if !errors.Is(err, g.sentinel) {
+						t.Fatalf("want %v, got %v", g.sentinel, err)
+					}
+					// THE REQUIREMENT, IN THE GATE'S OWN WORDS, and only that:
+					// every wantRequirement is a superstring of shapeRefusal,
+					// so a separate shapeRefusal row here could not fail unless
+					// this one failed first. It is a digest the producer cannot
+					// emit, so the SHAPE gate must be what refuses it -- the
+					// comparison below refuses it too, for a reason that is not
+					// why it is wrong. shapeRefusal earns its place in the
+					// NEGATIVE assertions, where nothing dominates it.
+					if !strings.Contains(err.Error(), g.wantRequirement) {
+						t.Fatalf("the refusal must state the shape it holds the digest to (%q): %v",
+							g.wantRequirement, err)
+					}
+					// AND THE SENTINEL LEADS. errors.Join renders its arguments
+					// in order, and errors.Is cannot see that order, so swapping
+					// them moved the class out of the first line with the whole
+					// suite green at all three gates.
+					if !strings.HasPrefix(err.Error(), g.sentinel.Error()) {
+						t.Fatalf("the refusal must lead with the class it joins: %v", err)
+					}
+					// A "the refusal does not quote the digest back" row belongs
+					// here by symmetry and is NOT written: a one-byte digest is
+					// a substring of almost any sentence -- "x" is in both
+					// "prefix" and "hex" -- so the row passes or fails on the
+					// wording of the message rather than on the property. That
+					// property is pinned where it can be seen, over a 1 MiB
+					// digest, in TestFirstGatesDoNotMaterializeSuppliedText.
+				})
+			}
+		})
+	}
+}
+
+// TestADigestsSHAPEIsJudgedAboveTheScanThatReadsTheSupply pins WHERE each
+// shape gate sits, by behaviour rather than by cost.
+//
+// The cost tests cannot see this. The artifact's gate moved below the scan runs
+// that scan to completion and leaves every cost test green -- the scan
+// allocates NOTHING, 0 B/op and 0 allocs/op, so no byte ratio can see the move
+// whatever its denominator.
+// An artifact bad in BOTH ways settles it: with the gate above, the refusal
+// names the digest's shape; with the gate below, it names the encoding fault.
+func TestADigestsSHAPEIsJudgedAboveTheScanThatReadsTheSupply(t *testing.T) {
+	const encodingRefusal = "is not valid UTF-8"
+	for _, g := range digestShapeGates(t) {
+		t.Run(g.name, func(t *testing.T) {
+			// THE CONTROL FIRST: the lossy fixture must be one the scan
+			// actually refuses. Without this row the case below could pass
+			// because the fixture was never lossy at all.
+			control := g.verifyLossy(g.wellFormed)
+			if control == nil || !strings.Contains(control.Error(), encodingRefusal) {
+				t.Fatalf("the lossy fixture must be refused by the scan, or the case below proves nothing: %v", control)
+			}
+			both := g.verifyLossy("x")
+			if !errors.Is(both, g.sentinel) {
+				t.Fatalf("want %v, got %v", g.sentinel, both)
+			}
+			if !strings.Contains(both.Error(), shapeRefusal) {
+				t.Fatalf("an artifact bad in BOTH ways must be refused by the gate that costs nothing: %v", both)
+			}
+			if strings.Contains(both.Error(), encodingRefusal) {
+				t.Fatalf("the scan ran above the shape gate: %v", both)
 			}
 		})
 	}

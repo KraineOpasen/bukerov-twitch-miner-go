@@ -2397,6 +2397,190 @@ func countRulesetTokenBytes(doc []byte) int {
 // now"), which is why orderedRulesUnreadRefusal re-exports none of the
 // supplied text. This gate now follows the same rule: it reports the FAULT and
 // the lengths, never the values.
+// TestADecoderFaultIsReportedByItsExtent pins the one place in this package
+// where the sentence in a refusal is written by the standard library.
+//
+// encoding/json puts the offending NUMBER LITERAL into
+// UnmarshalTypeError.Value, so a refusal that joined the decoder's error
+// through returned the caller's own bytes: a 65,671-byte document whose one
+// over-long literal is 65,536 digits produced a 65,675-byte refusal carrying
+// the literal verbatim. rulesetRawCeiling does not bound it -- the fixture
+// below sits inside the flat allowance, with no raised ceiling at all.
+//
+// THE SMALL DIAGNOSES MUST SURVIVE, which is why the repair is a ceiling and
+// not a rewrite: every fault the walker in p3b.go writes is a constant plus an
+// extent, and the LAST subtest below holds one of them to its own words.
+func TestADecoderFaultIsReportedByItsExtent(t *testing.T) {
+	ruleset := func(body string) p4offline.P3bRuleset {
+		sum := sha256.Sum256([]byte(body))
+		return p4offline.P3bRuleset{
+			RulesetID:          "c1",
+			Config:             predictioneval.OrderedRulesConfig{ConfigID: "c1"},
+			RawBytes:           []byte(body),
+			RawSHA256:          hex.EncodeToString(sum[:]),
+			NativeConfigDigest: strings.Repeat("a", 64),
+		}
+	}
+
+	t.Run("a decoder fault that quoted the document", func(t *testing.T) {
+		literal := strings.Repeat("9", 1<<16)
+		body := `{"configId":"c1","hasDefault":true,"default":{"points":1,"rawMinPercent":` +
+			literal + `,"attemptRate":1,"delaySeconds":1,"stealth":false},"rules":[]}`
+		_, err := p4offline.VerifyP3bRuleset(ruleset(body))
+		if !errors.Is(err, p4offline.ErrRulesetRawDecode) {
+			t.Fatalf("an undecodable document must be refused as one: %v", err)
+		}
+		t.Logf("a %d-byte document with a %d-digit literal; the refusal carries %d bytes",
+			len(body), len(literal), len(err.Error()))
+		if strings.Contains(err.Error(), literal) {
+			t.Fatal("the refusal re-exported the document it refused")
+		}
+		if n := len(err.Error()); n > 1024 {
+			t.Fatalf("the refusal carries %d bytes; a refusal must name the fault and the extent, not the input", n)
+		}
+		if !strings.Contains(err.Error(), "with a fault of") || !strings.Contains(err.Error(), " bytes") {
+			t.Fatalf("the refusal must name the EXTENT of the fault it could not quote: %v", err)
+		}
+	})
+
+	t.Run("a decoder fault at the SECOND join site", func(t *testing.T) {
+		// THE OTHER JOIN SITE, which the row above does not reach. The walker
+		// converts every number through json.Token, so a literal float64
+		// cannot hold refuses THERE; one that float64 holds but the target
+		// field does not reaches dec.Decode instead, and encoding/json quotes
+		// the literal into that error too. `maxValue` is a uint32 and
+		// 0.000...001 is a float64 of zero, so this document walks clean and
+		// decodes dirty.
+		literal := "0." + strings.Repeat("0", 1<<16) + "1"
+		body := `{"configId":"c1","hasDefault":true,"default":{"points":{"maxValue":` +
+			literal + `,"rawPercent":1},"rawMinPercent":0,"rawMaxPercent":1}}`
+		_, err := p4offline.VerifyP3bRuleset(ruleset(body))
+		if !errors.Is(err, p4offline.ErrRulesetRawDecode) {
+			t.Fatalf("an undecodable document must be refused as one: %v", err)
+		}
+		t.Logf("a %d-byte document with a %d-character literal; the refusal carries %d bytes",
+			len(body), len(literal), len(err.Error()))
+		if strings.Contains(err.Error(), literal) {
+			t.Fatal("the refusal re-exported the document it refused")
+		}
+		if n := len(err.Error()); n > 1024 {
+			t.Fatalf("the refusal carries %d bytes; a refusal must name the fault and the extent, not the input", n)
+		}
+	})
+
+	t.Run("and the band below the ceiling is where the library's words still stand", func(t *testing.T) {
+		// THE BOUNDARY, pinned from both sides. A ceiling nothing straddles is
+		// a constant nothing holds: raising rulesetDecodeFaultCeiling from 512
+		// to 900 -- which widens the pass-through band from about 450 bytes of
+		// a caller's literal to about 840 -- left the whole suite green until
+		// this row. The rows above use a 65,536-digit literal, three orders of
+		// magnitude past the line, so they cannot see it move.
+		//
+		// The boundary is FOUND rather than written, because what the ceiling
+		// bounds is the DECODER'S SENTENCE and this package does not own its
+		// wording: the row searches for the widest literal still carried
+		// verbatim, then holds that width and the next one to the two sides of
+		// the constant.
+		// `carries` reports whether a literal of the given width is refused as a
+		// DECODE fault, whether that refusal quotes it, and how long the refusal
+		// reads. A literal float64 CAN hold is not a decode fault at all: it
+		// converts, the document decodes, and the ruleset is refused further down
+		// for disagreeing with the supplied config instead. The band this row
+		// searches therefore begins past float64's range, not at one digit.
+		carries := func(digits int) (decodeFault, carried bool, extent int) {
+			lit := strings.Repeat("9", digits)
+			body := `{"configId":"c1","hasDefault":true,"default":{"points":{"maxValue":1,"rawPercent":1},"rawMinPercent":` +
+				lit + `,"rawMaxPercent":1}}`
+			_, err := p4offline.VerifyP3bRuleset(ruleset(body))
+			if !errors.Is(err, p4offline.ErrRulesetRawDecode) {
+				return false, false, 0
+			}
+			return true, strings.Contains(err.Error(), lit), len(err.Error())
+		}
+		const widest = 4096
+		if fault, _, _ := carries(widest); !fault {
+			t.Fatalf("a %d-digit literal must overflow the conversion the walker performs", widest)
+		}
+		// THE FIRST BOUNDARY, which is float64's and not this package's: the
+		// narrowest literal that is a decode fault at all. It is found rather than
+		// written because the search below needs a width that IS a decode fault to
+		// stand on, and a width that is not says nothing about the ceiling.
+		narrowest := 1
+		if fault, _, _ := carries(narrowest); !fault {
+			lo, hi := narrowest, widest
+			for lo+1 < hi {
+				mid := (lo + hi) / 2
+				if fault, _, _ := carries(mid); fault {
+					hi = mid
+				} else {
+					lo = mid
+				}
+			}
+			narrowest = hi
+		}
+		if _, carried, _ := carries(narrowest); !carried {
+			t.Fatalf("the narrowest literal refused as a decode fault is %d digits and its refusal already reports an extent: there is no pass-through band left for the ceiling to bound",
+				narrowest)
+		}
+		if _, carried, _ := carries(widest); carried {
+			t.Fatalf("a %d-digit literal is still carried verbatim: the ceiling is not bounding anything", widest)
+		}
+		// THE SECOND BOUNDARY, which IS this package's: the widest literal the
+		// refusal still quotes. Both sides of it are held below.
+		lo, hi := narrowest, widest
+		for lo+1 < hi {
+			mid := (lo + hi) / 2
+			if _, carried, _ := carries(mid); carried {
+				lo = mid
+			} else {
+				hi = mid
+			}
+		}
+		_, _, under := carries(lo)
+		_, overCarried, over := carries(hi)
+		// THE SENTINEL'S OWN SENTENCE plus the newline errors.Join writes is what
+		// each refusal carries besides the decoder's, so subtracting it gives the
+		// length the ceiling actually compares against.
+		framing := len(p4offline.ErrRulesetRawDecode.Error()) + 1
+		t.Logf("a decode fault begins at %d digits; the widest literal carried verbatim is %d, in a %d-byte refusal holding %d bytes of decoder sentence; %d digits reads %d bytes",
+			narrowest, lo, under, under-framing, hi, over)
+		if overCarried {
+			t.Fatal("the width one past the boundary is still carried verbatim")
+		}
+		// The decoder quotes the literal into a sentence of otherwise fixed
+		// wording, so one more digit is one more byte and the widest sentence that
+		// still passes lands EXACTLY ON the ceiling -- never a byte under it.
+		//
+		// SO THIS IS AN EQUALITY AND NOT A BAND. A band one byte wide reads as the
+		// safer assertion and is the weaker one: it admits a ceiling one byte
+		// LOWER, which moves the widest passing sentence down with it and back
+		// inside the band. That is the one move a two-sided band cannot see, and
+		// the equality is what sees it. 512 is rulesetDecodeFaultCeiling, which an
+		// external test cannot name.
+		if sentence := under - framing; sentence != 512 {
+			t.Fatalf("the widest decoder sentence that still passes through reads %d bytes; it must be EXACTLY the 512-byte ceiling, because one more digit is one more byte",
+				sentence)
+		}
+		if over > 512 {
+			t.Fatalf("past the ceiling the refusal must be an extent, and it carries %d bytes", over)
+		}
+	})
+
+	t.Run("and a small diagnosis still says what it said", func(t *testing.T) {
+		// A fault this package wrote, below the ceiling: it must pass through
+		// word for word, or the repair would have cost every diagnosis in the
+		// file to bound the one the library writes.
+		body := `{"configId":"c1","nope":1}`
+		_, err := p4offline.VerifyP3bRuleset(ruleset(body))
+		if !errors.Is(err, p4offline.ErrRulesetRawDecode) {
+			t.Fatalf("an unknown key must be refused as a decode fault: %v", err)
+		}
+		if !strings.Contains(err.Error(), "is not spelled as the contract spells it") {
+			t.Fatalf("the walker's own diagnosis must survive the ceiling: %v", err)
+		}
+	})
+}
+
 func TestRulesetIdentityRefusalDoesNotMaterializeSuppliedText(t *testing.T) {
 	// A mebibyte is far below the sizes that made this expensive, and far above
 	// any bound an error message should carry. The assertion is a fixed budget,
@@ -2433,6 +2617,80 @@ func TestRulesetIdentityRefusalDoesNotMaterializeSuppliedText(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("an empty carrier is refused as a hash fault, by name", func(t *testing.T) {
+		// THE ONE REFUSING BRANCH OF THIS VERIFIER NOTHING HELD. Neutralize it
+		// and the suite stays green while the sentinel a caller sees moves
+		// from ErrRulesetRawHash to ErrRulesetRawDecode -- an empty carrier
+		// hashes to the empty digest, so the comparison below passes it on to
+		// a decoder that reports EOF. Which fault a caller is told about is
+		// the property; the sentinel alone is what a caller switches on.
+		empty := sha256.Sum256(nil)
+		_, err := p4offline.VerifyP3bRuleset(p4offline.P3bRuleset{
+			RulesetID:          "c1",
+			Config:             predictioneval.OrderedRulesConfig{ConfigID: "c1"},
+			RawBytes:           nil,
+			RawSHA256:          hex.EncodeToString(empty[:]),
+			NativeConfigDigest: strings.Repeat("0", 64),
+		})
+		if !errors.Is(err, p4offline.ErrRulesetRawHash) {
+			t.Fatalf("an empty carrier must be refused as a hash fault: %v", err)
+		}
+		if !strings.Contains(err.Error(), "no raw ruleset bytes supplied") {
+			t.Fatalf("and it must say which fault it is: %v", err)
+		}
+	})
+
+	t.Run("and neither gate above the ceiling copies the CARRIER", func(t *testing.T) {
+		// THE ROWS ABOVE MEASURE THE IDENTITY STRING, not RawBytes, and those
+		// are different bounds. rulesetRawCeiling is where a supplier-controlled
+		// buffer stops being paid for, so every gate at or above it refuses
+		// while the carrier is still unbounded and must refuse without reading
+		// it. Two can be driven with a carrier of a caller's choosing -- the
+		// identity gate and the ceiling gate itself -- and they are the rows
+		// below; the third, `len(r.RawBytes) == 0`, cannot see a large carrier
+		// by construction. Without these rows a copy of RawBytes inside either
+		// refusal survives the whole suite.
+		const carrierBudget = 4096
+		carrier := make([]byte, 4<<20)
+		for i := range carrier {
+			carrier[i] = '{'
+		}
+		measure := func(r p4offline.P3bRuleset) (uint64, error) {
+			runtime.GC()
+			var before, after runtime.MemStats
+			runtime.ReadMemStats(&before)
+			_, err := p4offline.VerifyP3bRuleset(r)
+			runtime.ReadMemStats(&after)
+			return after.TotalAlloc - before.TotalAlloc, err
+		}
+		mismatched, mErr := measure(p4offline.P3bRuleset{
+			RulesetID: "wanted-id",
+			Config:    predictioneval.OrderedRulesConfig{ConfigID: "other-id"},
+			RawBytes:  carrier,
+		})
+		t.Logf("a %d-byte carrier; the identity refusal allocated %d bytes", len(carrier), mismatched)
+		if !errors.Is(mErr, p4offline.ErrRulesetIdentity) {
+			t.Fatalf("this fixture must reach the identity gate: %v", mErr)
+		}
+		if mismatched > carrierBudget {
+			t.Fatalf("the identity refusal allocated %d bytes beside a %d-byte carrier it never reads (budget %d)",
+				mismatched, len(carrier), carrierBudget)
+		}
+		overCeiling, cErr := measure(p4offline.P3bRuleset{
+			RulesetID: "wanted-id",
+			Config:    predictioneval.OrderedRulesConfig{ConfigID: "wanted-id"},
+			RawBytes:  carrier,
+		})
+		t.Logf("a %d-byte carrier; the ceiling refusal allocated %d bytes", len(carrier), overCeiling)
+		if !errors.Is(cErr, p4offline.ErrRulesetRawSize) {
+			t.Fatalf("this fixture must reach the ceiling gate: %v", cErr)
+		}
+		if overCeiling > carrierBudget {
+			t.Fatalf("the ceiling refusal allocated %d bytes beside a %d-byte carrier it never reads (budget %d)",
+				overCeiling, len(carrier), carrierBudget)
+		}
+	})
 
 	t.Run("the refusal still says which side is wrong", func(t *testing.T) {
 		// Declining to quote the values must not cost the diagnosis: the reader
@@ -2923,8 +3181,8 @@ func TestEntropyBindingRefusalDoesNotMaterializeTheFactsetRound(t *testing.T) {
 // this line said 175, which is the figure the report that raised the finding
 // quoted rather than the figure this test logs. The test prints its own: run it
 // with -v and it says `error is 225 bytes`.)
-// TestNativeDigestShapeIsJudgedBeforeTheDocumentIsRead is the EIGHTH round's
-// instance, and it is the same failure mode as the sixth: the repair stopped at
+// TestNativeDigestShapeIsJudgedBeforeTheDocumentIsRead is another instance of
+// that class, and the same failure mode as one before it: the repair stopped at
 // the gate that was reported.
 //
 // Both digests a ruleset declares are checked for SHAPE by an O(1) test that
@@ -2974,8 +3232,8 @@ func deeplyNestedRuleset(n int) p4offline.P3bRuleset {
 // TestRulesetNestingIsBoundedBeforeItRecurses pins the bound on the walk's one
 // recursive arm.
 //
-// THE DEFECT THIS CLOSES WAS NOT A COST DEFECT, which is why eight rounds of
-// refusal-cost review walked past it, and why two mechanical censuses -- 150
+// THE DEFECT THIS CLOSES WAS NOT A COST DEFECT, which is why round after round
+// of refusal-cost review walked past it, and why two mechanical censuses -- 150
 // functions and 251 early returns, 539 materialization nodes -- did not see it
 // either. walkRulesetValue recurses on a JSON array and nothing bounded the
 // recursion. Nested empty arrays cost two bytes a level, so a document sitting
@@ -3130,6 +3388,86 @@ func TestNativeDigestShapeIsJudgedBeforeTheDocumentIsRead(t *testing.T) {
 	})
 }
 
+// TestBothDeclaredDigestsAreHeldToTheirShapeByTheirOwnGates pins the two
+// declared-digest shape gates that sit one line apart, and the sibling the
+// sentinel alone cannot reach.
+//
+// THE SHAPE GATE AND THE COMPARISON BELOW IT SHARE A SENTINEL. Both refuse with
+// ErrRulesetRawHash, and the comparison refuses every input the shape gate does
+// -- no non-64-hex value can equal sha256Hex of anything -- so errors.Is sees
+// the same class either way and deleting the shape gate outright leaves the
+// whole suite green. Only the MESSAGE distinguishes them, which makes the
+// message the thing to assert: a caller told "raw bytes hash to X, declared Y"
+// is being told its BYTES disagree with its hash, when what is actually wrong
+// is that the declared hash is not a hash at all.
+//
+// AND BOTH GATES ARE HELD TO THEIR DIGITS, not merely to a length. A one-byte
+// fixture reaches only isCanonicalHex's LENGTH branch and returns before the
+// character loop, so `!isCanonicalHex(d, 64)` rewritten as `len(d) != 64`
+// survives a table built only of short values -- the same hole
+// TestADigestIsHeldToItsDIGITSAndNotMerelyToItsLength closes at the three
+// gates it covers, which are not these. It is not cosmetic at the native
+// digest: under that widening a 64-character non-hex value costs the whole
+// verification -- full-buffer SHA-256, key walk, decode, trailing scan,
+// configsEqual and the native probe -- about 160,300x the true 72-byte refusal
+// on a 1 MiB document, which is the amplification the gate exists
+// to prevent.
+func TestBothDeclaredDigestsAreHeldToTheirShapeByTheirOwnGates(t *testing.T) {
+	hex64 := strings.Repeat("a", 64)
+	for _, tc := range []struct {
+		name   string
+		digest string
+	}{
+		{"one byte", "x"},
+		{"64 upper-case hex digits", strings.ToUpper(hex64)},
+		{"64 characters, none of them hex", strings.Repeat("z", 64)},
+		{"a digest reference where a bare hash belongs", p4offline.DigestReference(hex64)},
+	} {
+		t.Run("the declared raw hash: "+tc.name, func(t *testing.T) {
+			rs := rulesetFrom(t, cfgDefaultOnly("c1", 0, 1))
+			rs.RawSHA256 = tc.digest
+			_, err := p4offline.VerifyP3bRuleset(rs)
+			if !errors.Is(err, p4offline.ErrRulesetRawHash) {
+				t.Fatalf("a malformed raw hash must be refused as one: %v", err)
+			}
+			if !strings.Contains(err.Error(), "declared raw hash is not 64 lower-case hex digits") {
+				t.Fatalf("the SHAPE gate must be what refuses it, not the comparison below: %v", err)
+			}
+			if strings.Contains(err.Error(), "raw bytes hash to") {
+				t.Fatalf("the comparison's sentence answers a question this input did not ask: %v", err)
+			}
+		})
+		t.Run("the declared native digest: "+tc.name, func(t *testing.T) {
+			rs := rulesetFrom(t, cfgDefaultOnly("c1", 0, 1))
+			rs.NativeConfigDigest = tc.digest
+			_, err := p4offline.VerifyP3bRuleset(rs)
+			if !errors.Is(err, p4offline.ErrRulesetNativeDigest) {
+				t.Fatalf("a malformed native digest must be refused as one: %v", err)
+			}
+			if !strings.Contains(err.Error(), "declared native digest is not 64 lower-case hex digits") {
+				t.Fatalf("the SHAPE gate must be what refuses it: %v", err)
+			}
+		})
+	}
+
+	t.Run("and the native digest's gate speaks first", func(t *testing.T) {
+		// THE ORDER BETWEEN THE TWO SHAPE GATES, which the precedence subtest
+		// beside TestNativeDigestShapeIsJudgedBeforeTheDocumentIsRead cannot
+		// reach: that one drives a WELL-FORMED wrong RawSHA256, so the raw
+		// hash's own shape gate never fires and swapping the two is invisible.
+		// Both ill-shaped is the input that tells them apart.
+		rs := rulesetFrom(t, cfgDefaultOnly("c1", 0, 1))
+		rs.NativeConfigDigest, rs.RawSHA256 = "x", "x"
+		_, err := p4offline.VerifyP3bRuleset(rs)
+		if !errors.Is(err, p4offline.ErrRulesetNativeDigest) {
+			t.Fatalf("the native digest's shape fault is named first: %v", err)
+		}
+		if errors.Is(err, p4offline.ErrRulesetRawHash) {
+			t.Fatalf("the raw hash's shape fault must not pre-empt it: %v", err)
+		}
+	})
+}
+
 func TestRulesetKeyRefusalsDoNotMaterializeTheSuppliedKey(t *testing.T) {
 	const budget = 1024
 	big := strings.Repeat("k", 1<<20)
@@ -3210,8 +3548,8 @@ func TestRulesetKeyRefusalsDoNotMaterializeTheSuppliedKey(t *testing.T) {
 
 	t.Run("and a legitimate ruleset is still verified", func(t *testing.T) {
 		// Bounding a refusal must not become the reason honest input is
-		// refused; this is the false-refusal control the last four rounds of
-		// this class each needed.
+		// refused; this is the false-refusal control every round of this class
+		// has needed.
 		if _, err := p4offline.VerifyP3bRuleset(rulesetFrom(t, cfgDefaultOnly("c1", 0, 1))); err != nil {
 			t.Fatalf("a legitimate ruleset must still verify: %v", err)
 		}
