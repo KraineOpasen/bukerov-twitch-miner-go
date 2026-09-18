@@ -869,8 +869,13 @@ func TestFirstGatesDoNotMaterializeSuppliedText(t *testing.T) {
 	})
 }
 
-// nonFiniteValues are every float64 encoding/json refuses. There are no
-// others: a finite value always encodes, both zeroes included.
+// nonFiniteValues are one representative of each class encoding/json refuses.
+// It is NOT every such float64: a NaN has many bit patterns and this list
+// carries one of them (math.NaN() is 7ff8000000000001 here, while 0/0 and
+// Inf-Inf both give fff8000000000000). The gate tests IS-NaN rather than a bit
+// pattern, so one representative exercises it; the list is a sample, and
+// saying otherwise would contradict doc.go's own point that a NaN has many
+// bit patterns. A finite value always encodes, both zeroes included.
 var nonFiniteValues = []struct {
 	name string
 	v    float64
@@ -901,8 +906,14 @@ func withFilter(e *predictioneval.SourceDecisionEnvelope) {
 //     rather than a preference;
 //   - the DATASET path refuses it, so no such factset is ever built;
 //   - the VERIFY path refuses it as ErrFactsetInconsistent and NOT as
-//     ErrFactsetDigest — which is how the test sees that the check ran BEFORE
-//     the digest was computed, rather than after it;
+//     ErrFactsetDigest — which places the check ahead of the digest GATE. It
+//     does not, by itself, place it ahead of the HASHING: an implementation
+//     that hashed first and compared later would satisfy this too. The code
+//     computes and compares in one statement, so the two coincide there;
+//   - the artifact the finding actually described — a factset whose digest was
+//     computed OVER the non-finite value, so the digest is RIGHT — is refused.
+//     That case used to return nil, and no assertion above reaches it, because
+//     every other poke here leaves a stale digest;
 //   - the same poke with a FINITE value is refused by the digest gate instead,
 //     which is the control that keeps the third assertion from passing merely
 //     because a poked factset fails somehow.
@@ -969,19 +980,36 @@ func TestNonFiniteFactsetValuesAreRefusedBeforeTheyAreDigested(t *testing.T) {
 					t.Fatalf("BuildCommonFactset = %v, want ErrFactsetInconsistent", err)
 				}
 
-				// The verify path, ahead of the digest.
+				// The verify path, ahead of the digest GATE.
 				err := p4offline.VerifyCommonFactset(poked(nf.v))
 				if !errors.Is(err, p4offline.ErrFactsetInconsistent) {
 					t.Fatalf("VerifyCommonFactset = %v, want ErrFactsetInconsistent", err)
 				}
 				if errors.Is(err, p4offline.ErrFactsetDigest) {
-					t.Fatalf("refused by the digest gate, so the value was hashed first: %v", err)
+					t.Fatalf("refused by the digest gate rather than by the value: %v", err)
+				}
+
+				// THE ARTIFACT THE FINDING DESCRIBED: a factset whose digest is
+				// computed over the non-finite value, so the digest is RIGHT
+				// and every assertion above — which all leave a stale digest —
+				// misses it. This is the case that used to return nil.
+				sealed := poked(nf.v)
+				sealed.Digest = digestOf(p4offline.SerializeCommonFactset(sealed))
+				if err := p4offline.VerifyCommonFactset(sealed); !errors.Is(err, p4offline.ErrFactsetInconsistent) {
+					t.Fatalf("a self-consistent digest over %v = %v, want ErrFactsetInconsistent", nf.name, err)
 				}
 
 				// The control: the same poke with a finite value reaches the
-				// digest gate, so the assertion above is about finiteness.
+				// digest gate, so the assertions above are about finiteness.
 				if err := p4offline.VerifyCommonFactset(poked(7.5)); !errors.Is(err, p4offline.ErrFactsetDigest) {
 					t.Fatalf("finite poke = %v, want ErrFactsetDigest", err)
+				}
+				// And the same value, re-sealed, verifies — so "sealed" above
+				// refused for the value and not for the act of re-sealing.
+				finite := poked(7.5)
+				finite.Digest = digestOf(p4offline.SerializeCommonFactset(finite))
+				if err := p4offline.VerifyCommonFactset(finite); err != nil {
+					t.Fatalf("a re-sealed finite factset = %v, want nil", err)
 				}
 			})
 		}
@@ -995,10 +1023,26 @@ type floatSite struct {
 	at   reflect.Value
 }
 
-// reachableFloats walks a factset by REFLECTION and collects every float64 an
-// encoder would have to write, allocating a nil pointer on the way so an
-// optional branch is reached too. It derives the positions from the TYPE, not
-// from any list this package or its tests maintain.
+// reachableFloats walks a factset VALUE by reflection and collects the float64
+// positions it can reach through structs, pointers and slice elements. It
+// derives them from the shape it is given rather than from any list this file
+// maintains.
+//
+// WHAT IT DOES NOT REACH, stated because the test below would otherwise be
+// read as a completeness guarantee it does not provide: there is no case for
+// reflect.Map or reflect.Interface, so a float behind either is missed; an
+// EMPTY slice contributes no position, so a float in a slice the fixture
+// leaves empty is missed; and a `json:"-"` field would be collected although
+// no encoder writes it. Today every type reachable from a CommonFactset is a
+// plain struct, pointer or non-empty slice and no field is tagged "-", so the
+// walk is exact HERE. A float added behind a map or an interface would not
+// fail the test below, and the count assertion would not catch it either.
+//
+// It allocates a nil pointer as it goes so an optional branch is reachable.
+// On the present fixture that branch never fires — Settings, FilterCondition,
+// BetTotalUsers and BetTotalPoints are all non-nil — and if it ever did, the
+// allocation would change serializeOptionalInt64's framing and so the digest,
+// which would make the finite-value control below pass for the wrong reason.
 func reachableFloats(v reflect.Value, path string, out *[]floatSite) {
 	switch v.Kind() {
 	case reflect.Float64, reflect.Float32:
@@ -1028,12 +1072,12 @@ func reachableFloats(v reflect.Value, path string, out *[]floatSite) {
 // TestEveryReachableFactsetFloatRefusesANonFiniteValue is the same guarantee
 // stated independently of the implementation's list of fields.
 //
-// The test above names five positions because the finding named five. This one
-// names none: it walks the TYPE, sets each float64 it can reach to NaN in turn,
-// and requires a refusal at each. A float added to the factset later — or to
-// one of the native input types it embeds — fails here without anyone editing
-// this file, which is the only way this guarantee survives a change nobody
-// connects to it.
+// The test above names the five positions the canonical framing hands to
+// canonical.f64. This one names none of them: it walks the fixture, sets each
+// float64 it reaches to NaN in turn, and requires a refusal at each. A float
+// added to the factset later — or to one of the native input types it embeds —
+// fails here without anyone editing this file, PROVIDED it sits in a shape the
+// walker reaches. See reachableFloats for the shapes it does not.
 func TestEveryReachableFactsetFloatRefusesANonFiniteValue(t *testing.T) {
 	sites := func() (p4offline.CommonFactset, []floatSite) {
 		_, fs := selectedFactset(t, withFilter, nil)
@@ -1043,8 +1087,12 @@ func TestEveryReachableFactsetFloatRefusesANonFiniteValue(t *testing.T) {
 	}
 	_, found := sites()
 	// Two outcomes carrying three ratios each, the settings delay and the
-	// filter condition's value. The count is asserted so that a walker that
-	// silently reached nothing could not pass the loop below.
+	// filter condition's value. This is a property of the FIXTURE — of
+	// synthOutcomes returning two outcomes and of withFilter being applied —
+	// not of the CommonFactset type, so changing the fixture's outcome count
+	// fails here with a count mismatch rather than a coverage failure. It is
+	// asserted so that a walker which silently reached nothing could not pass
+	// the loop below; it does not backstop a float in a shape the walker skips.
 	if want := 2*3 + 1 + 1; len(found) != want {
 		var paths []string
 		for _, s := range found {
@@ -1067,7 +1115,124 @@ func TestEveryReachableFactsetFloatRefusesANonFiniteValue(t *testing.T) {
 			if err := p4offline.VerifyCommonFactset(fs2); !errors.Is(err, p4offline.ErrFactsetDigest) {
 				t.Fatalf("finite value at %s = %v, want ErrFactsetDigest", site.path, err)
 			}
-			_ = fs2
 		})
+	}
+}
+
+// nanDataset builds the same episode as the fixture but with one non-finite
+// value in the recorded envelope, so nothing can be derived from it.
+func nanDataset(t *testing.T, place func(*predictioneval.SourceDecisionEnvelope)) predictioneval.SourceDataset {
+	t.Helper()
+	s := newSynth()
+	s.due("r1", "e1", 1)
+	env := synthPlacedEnvelope()
+	withFilter(env)
+	place(env)
+	s.terminal("r1", "e1", 1, predictioneval.PhaseAutoDecided, "OK", env)
+	s.call("r1", "e1", 1, 50, 0)
+	return s.dataset()
+}
+
+// TestADatasetThatDerivesNothingStillSaysSoAsNotDerived pins the seam the value
+// gate could most easily have broken, and did break in its first form.
+//
+// derivedOpportunity verifies the CALLER's factset, then rebuilds from the
+// DATASET and compares digests. Once the rebuild can fail on a value, the naive
+// spelling returns the rebuild's own error — and that error talks about "this
+// factset", while the caller's factset is fine and holds 60 where the dataset
+// holds NaN. Two things go wrong at once: the message blames the wrong
+// artifact, and errors.Is(err, ErrFactsetNotDerived) flips from true to false
+// for an input class ErrFactsetNotDerived's own doc describes exactly.
+//
+// An independent review lane found this; no test in the package reached it,
+// because every other case pins the contract with a FINITE dataset.
+func TestADatasetThatDerivesNothingStillSaysSoAsNotDerived(t *testing.T) {
+	_, good := selectedFactset(t, withFilter, nil)
+	if err := p4offline.VerifyCommonFactset(good); err != nil {
+		t.Fatalf("the caller's factset must be valid for this test to mean anything: %v", err)
+	}
+	for _, tc := range []struct {
+		name  string
+		place func(*predictioneval.SourceDecisionEnvelope)
+	}{
+		{"outcome odds", func(e *predictioneval.SourceDecisionEnvelope) { e.Outcomes[0].Odds = math.NaN() }},
+		{"settings delay", func(e *predictioneval.SourceDecisionEnvelope) { e.Settings.Delay = math.Inf(1) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			bad := nanDataset(t, tc.place)
+			for _, call := range []struct {
+				name string
+				run  func() error
+			}{
+				{"ProjectFactualPlacement", func() error {
+					_, err := p4offline.ProjectFactualPlacement(bad, good)
+					return err
+				}},
+				{"ClaimSourceRound", func() error {
+					_, err := p4offline.ClaimSourceRound(bad, good)
+					return err
+				}},
+			} {
+				err := call.run()
+				if !errors.Is(err, p4offline.ErrFactsetNotDerived) {
+					t.Fatalf("%s = %v, want ErrFactsetNotDerived", call.name, err)
+				}
+				// The cause stays readable rather than being swallowed.
+				if !errors.Is(err, p4offline.ErrFactsetInconsistent) {
+					t.Fatalf("%s dropped the cause: %v", call.name, err)
+				}
+				// And it must not claim the caller's factset is the unencodable
+				// one: that factset verified at the top of this test.
+				if strings.Contains(err.Error(), "this factset's own encoding") &&
+					!strings.Contains(err.Error(), "the dataset derives no factset") {
+					t.Fatalf("%s blames the caller's factset: %v", call.name, err)
+				}
+			}
+		})
+	}
+	// The control: with a FINITE dataset that simply derives a different
+	// factset, the same seam still reports ErrFactsetNotDerived — so the
+	// assertions above are not satisfied by every dataset whatsoever.
+	other := nanDataset(t, func(e *predictioneval.SourceDecisionEnvelope) { e.Outcomes[0].Odds = 9.5 })
+	if _, err := p4offline.ProjectFactualPlacement(other, good); !errors.Is(err, p4offline.ErrFactsetNotDerived) {
+		t.Fatalf("a merely different finite dataset = %v, want ErrFactsetNotDerived", err)
+	}
+}
+
+// TestTheValueGateAddsNoPerOutcomeAllocation pins the WORK half of
+// canonical.go's rule at the one place this change could break it.
+//
+// The value gate walks the caller's outcome slice ahead of the digest gate.
+// fs.Outcomes is an exported field nothing bounds, so a string built once per
+// outcome and read only on the refusing branch is an allocation per element
+// that every non-refusing element throws away. The first form of this gate did
+// exactly that, and two independent review lanes measured it at 2.00x this
+// function's allocation count.
+//
+// The guarantee is stated as a SLOPE rather than as an absolute count, because
+// an absolute count would pin the canonical framing's own allocations too and
+// would move for reasons that have nothing to do with this gate. Doubling the
+// outcomes must add about one allocation per added outcome — the framing's —
+// and not two.
+func TestTheValueGateAddsNoPerOutcomeAllocation(t *testing.T) {
+	refusedWith := func(n int) float64 {
+		_, fs := selectedFactset(t, withFilter, nil)
+		outs := make([]predictioneval.OutcomeInput, n)
+		for i := range outs {
+			outs[i] = predictioneval.OutcomeInput{Slot: i, Present: true, ID: "o",
+				PercentageUsers: 1, Odds: 2, OddsPercentage: 3}
+		}
+		fs.Outcomes = outs
+		fs.Digest = strings.Repeat("0", 64) // refused by the digest gate
+		return testing.AllocsPerRun(3, func() { _ = p4offline.VerifyCommonFactset(fs) })
+	}
+	const n = 20000
+	one, two := refusedWith(n), refusedWith(2*n)
+	perOutcome := (two - one) / float64(n)
+	t.Logf("allocs: %.0f at %d outcomes, %.0f at %d — %.2f per added outcome",
+		one, n, two, 2*n, perOutcome)
+	if perOutcome > 1.5 {
+		t.Fatalf("the value gate allocates %.2f per outcome on the refusing path; "+
+			"the framing alone is about 1, so a label is being built and discarded", perOutcome)
 	}
 }

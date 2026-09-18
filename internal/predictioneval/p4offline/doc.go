@@ -287,7 +287,13 @@
 //   - Every single-line `if` condition in all thirteen production files:
 //     141 mutants, 65 killed, **63 survived**, 13 that do not compile.
 //     entropy.go and actionmap.go are clean; the survivors are concentrated in
-//     factset.go, p3b.go, placement.go and evidence.go.
+//     factset.go, p3b.go, placement.go and evidence.go. THAT SWEEP PREDATES
+//     the value gate below and has not been re-run over it: the gate adds
+//     conditions to factset.go that the census does not count. Each of them
+//     was killed individually by a disposable mutant, so the exposure has
+//     almost certainly not grown -- but the number above is the old number,
+//     said plainly rather than quietly reused, because this file's own
+//     discipline is that a count nobody re-scanned is a count that is wrong.
 //
 // Those 63 are a measured COVERAGE limitation, not 63 defects. Independent
 // review proved non-equivalence for two of them and both are now pinned per
@@ -312,9 +318,9 @@
 // case: a NaN has many bit patterns, the architectures this project ships for
 // do not agree on which one an arithmetic NaN carries, and a factset carrying
 // one PASSED [VerifyCommonFactset] while encoding/json refused to write it at
-// all -- which the package's own storage-and-rederivation argument assumes it
-// can. A certificate for an artifact nobody can store is worse than a wrong
-// one, because nothing downstream ever gets far enough to disagree with it.
+// all, though every exported field of the artifact carries a JSON tag. A
+// certificate for an artifact nobody can encode is worse than a wrong one,
+// because nothing downstream ever gets far enough to disagree with it.
 //
 // An earlier round reported and reproduced that and did NOT repair it, on two
 // grounds: that the producer's reach was not established, and that refusing a
@@ -323,21 +329,57 @@
 // the refusal is checkFactsetValuesExpressible, on the build path and the
 // verify path, ahead of the digest on each.
 //
-//	Reach. The two settings floats are decoded from config.json by
-//	encoding/json, which cannot express a non-finite value at all. The three
-//	outcome ratios are computed in internal/models under guards -- the totals
-//	must be positive, and the odds divisor is the outcome's own points, which
-//	the totals sum over -- so reaching one needs a negative point count from
-//	the platform. Neither is a shape an honest producer writes.
+//	Reach. This package never computes these floats: projectOutcomes copies
+//	them verbatim out of the recorded envelope, so what bounds them is the
+//	STORE, not the arithmetic that first produced them. Two gates close it.
+//	internal/analytics refuses to persist a non-finite value at all --
+//	observationFiniteFloat, applied to the delay, the filter value and the
+//	three outcome ratios -- and the payload is written and read back as JSON,
+//	which has no token for one. A dataset from internal/predictioneval/reader
+//	therefore cannot carry a non-finite float, and the BUILD-path gate is
+//	defence in depth; the VERIFY-path gate, which a hand-built factset reaches
+//	directly, is the load-bearing one.
+//	A FIRST DRAFT OF THIS PARAGRAPH ARGUED THE ARITHMETIC INSTEAD, and said
+//	reaching a non-finite ratio "needs a negative point count from the
+//	platform". That was FALSE, and two of three review lanes affirmed it
+//	before a third ran it: internal/models sums the outcomes' points into an
+//	int without an overflow check, so three NON-NEGATIVE counts
+//	(9223372036854775296, 9223372036854775296, 1030) wrap the total to 6 and
+//	drive roundFloat(total/points, 2) to exactly 0, making 100/odds +Inf; and
+//	int(1e30) is -9223372036854775808 on this target, so a POSITIVE platform
+//	number manufactures the negative count locally. The claim is recorded here
+//	because the lesson is the branch's oldest one: an argument two readers
+//	accept is not a measurement.
 //	Narrowing. Every FINITE value is accepted exactly as before, however large
 //	or small, both zeroes included; the framing, the digest and the vocabulary
-//	are untouched. What the seam lost is only the values it could not have
-//	carried out of the process anyway.
+//	are untouched. What the seam refuses is a value this package would
+//	otherwise have CERTIFIED and encoding/json would have rejected -- not
+//	every route such a value has out of the process, since
+//	[SerializeCommonFactset] is exported and ungated and still frames one
+//	(1,030 bytes for the fixture carrying a +Inf).
 //
-// WHAT REMAINS, because framing is still by bits: +0.0 and -0.0 are equal
-// under comparison and both encode, and they still frame apart. That is a
-// digest separating two spellings of one fact -- not a certificate for a fact
-// that cannot be written down -- and it is not repaired here.
+// WHAT REMAINS, and it is more than the float story, so it is listed rather
+// than summarised:
+//
+//   - Framing is still by bits, so +0.0 and -0.0 -- equal under comparison,
+//     both encodable, and both round-tripping through JSON with the sign bit
+//     intact -- still frame apart. That is a digest separating two spellings
+//     of one fact, not a certificate for a fact that cannot be written down.
+//   - INVALID UTF-8 IN A HASHED STRING IS NOT REFUSED, and it fails worse than
+//     the NaN this section repairs. Reproduced: HealthReason = "\xff\xfe\x80",
+//     digest recomputed, [VerifyCommonFactset] returns nil, json.Marshal
+//     SUCCEEDS, and the bytes come back as "ef bf bd ef bf bd ef bf bd" --
+//     U+FFFD substituted three times -- so the decoded factset fails its own
+//     digest. A NaN fails loudly at Marshal and the storer knows at once; this
+//     fails silently and resurfaces as the one signal this package reserves
+//     for tampering. The same holds for every hashed string field. It is NOT
+//     repaired here: the reported class was a value that cannot be ENCODED,
+//     this is a value that encodes LOSSILY, and refusing it is a separate
+//     behavioural narrowing with its own reachability question. Named here so
+//     the next round inherits a fact rather than an absence.
+//
+// An independent review lane found that second item because this section's
+// first draft claimed the float repair had settled the whole class.
 //
 // Nothing here was checked against real P1/P1.5 data: no production dataset
 // is proven available, no dataset window (T0/T1) or dataset binding is

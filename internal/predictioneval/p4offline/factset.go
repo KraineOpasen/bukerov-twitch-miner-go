@@ -232,7 +232,15 @@ func derivedOpportunity(ds predictioneval.SourceDataset, fs CommonFactset) (Epis
 	}
 	rebuilt, err := buildFactset(ep)
 	if err != nil {
-		return EpisodeSelection{}, err
+		// THE DATASET IS WHAT FAILED TO DERIVE, not the caller's factset: that
+		// one verified three lines up. Returning the rebuild's own sentinel
+		// would blame the wrong artifact -- and would withdraw
+		// ErrFactsetNotDerived for an input class its own doc describes
+		// exactly, so a caller switching on it would stop seeing a case it
+		// used to see. The cause is joined rather than dropped, so an auditor
+		// still reads why the dataset derives nothing.
+		return EpisodeSelection{}, errors.Join(ErrFactsetNotDerived,
+			errors.New("p4offline: the dataset derives no factset for this episode"), err)
 	}
 	if rebuilt.Digest != fs.Digest {
 		return EpisodeSelection{}, errors.Join(ErrFactsetNotDerived,
@@ -245,6 +253,14 @@ func derivedOpportunity(ds predictioneval.SourceDataset, fs CommonFactset) (Epis
 // projects the selected opportunity's inputs into a digested, outcome-free
 // factset. It takes the DATASET, not a selection: a selection is an exported
 // value anyone can build, and nothing downstream may rest on its flags.
+//
+// It can return ErrFactsetInconsistent, which the build path could not return
+// before the value gate existed. The consequence is larger than the value and
+// is named here rather than left to be met: an episode whose inputs hold a
+// non-finite float yields NO factset rather than an INCOMPLETE one, so the
+// CASE leaves the cohort with the value. That is fail-closed and deliberate —
+// a label derived from a value the artifact cannot carry would be a label
+// about nothing — but it is a case lost, not merely a field refused.
 func BuildCommonFactset(ds predictioneval.SourceDataset, episode EpisodeIdentity) (CommonFactset, error) {
 	ep, err := selectedOpportunity(ds, episode)
 	if err != nil {
@@ -433,8 +449,11 @@ func commonFactsetDigest(fs CommonFactset) string {
 	return sha256Hex(SerializeCommonFactset(fs))
 }
 
-// VerifyCommonFactset recomputes the digest, then re-derives the labels from
-// the values, and refuses any mismatch.
+// VerifyCommonFactset refuses a value the artifact's own encoding cannot
+// express, then recomputes the digest, then re-derives the labels from the
+// values, and refuses any mismatch. The value gate is ahead of the digest on
+// purpose; checkFactsetValuesExpressible says why, and names the precedence
+// shift that placement carries.
 func VerifyCommonFactset(fs CommonFactset) error {
 	// THE FIRST GATE ON EVERY FACTSET PATH IN THIS PACKAGE, and it used to pay
 	// for its own refusal: these three fields are plain exported strings that
@@ -448,11 +467,20 @@ func VerifyCommonFactset(fs CommonFactset) error {
 		return errors.Join(ErrFactsetDigest, errors.New("p4offline: factset protocol is "+
 			suppliedTextExtent(fs.Protocol)+", this package writes only "+strconv.Quote(ProtocolVersion)))
 	}
-	// AHEAD OF THE DIGEST, and for the same reason the two gates above are
-	// ahead of it: a value this artifact's encoding cannot express must not be
-	// hashed into a certificate that says it verified. Both this gate and the
-	// build path call one validator, so a factset cannot be refused by one and
-	// accepted by the other.
+	// AHEAD OF THE DIGEST, but NOT for the reason the two gates above are ahead
+	// of it. Those two are placed by the refusal-COST rule: they used to pay
+	// for their own refusal, and a wrong contract version is not a value an
+	// encoding cannot express. This one is placed for a semantic reason -- a
+	// value that cannot be written down must not be hashed into a certificate
+	// saying it verified. Both this gate and the build path call one
+	// validator, so a factset cannot be refused by one and accepted by the
+	// other.
+	//
+	// ONE CONSEQUENCE, a precedence shift rather than a behaviour change,
+	// stated the way p3b.go states its own: a factset that is BOTH non-finite
+	// AND carries a wrong digest used to come back as ErrFactsetDigest and now
+	// comes back as ErrFactsetInconsistent. A caller switching on the sentinel
+	// sees a different one for that class.
 	if err := checkFactsetValuesExpressible(fs); err != nil {
 		return err
 	}
@@ -468,16 +496,23 @@ func VerifyCommonFactset(fs CommonFactset) error {
 // checkFactsetValuesExpressible refuses a factset holding a value its own
 // artifact form cannot carry.
 //
-// Every field of a [CommonFactset] carries a JSON tag and the digest exists to
-// travel beside the encoded artifact, but encoding/json refuses NaN and both
+// Every exported field of a [CommonFactset] carries a JSON tag, so JSON is a
+// form this artifact is declared for; encoding/json refuses NaN and both
 // infinities outright. A non-finite float therefore produced a factset this
-// package CERTIFIED and no consumer could write down — the one shape that
-// makes a verified artifact useless rather than merely wrong.
+// package CERTIFIED and no consumer could encode — the shape that makes a
+// verified artifact useless rather than merely wrong.
 //
 // The positions are exactly the five the canonical framing hands to
 // [canonical.f64]: the three outcome ratios and the two settings values. The
 // framing and the digest are unchanged; only the refusal is new, and it runs
-// before the digest on both paths so an unwritable value is never hashed.
+// ahead of BOTH of this package's digest computations — buildFactset's and
+// VerifyCommonFactset's — so neither hashes a value it cannot encode.
+//
+// WHAT THAT LAST SENTENCE DOES NOT SAY. [SerializeCommonFactset] is exported
+// and ungated, so a caller may still frame a non-finite factset by hand and
+// hash the bytes itself: 1,030 bytes for the fixture carrying a +Inf. Those
+// bytes leave the process perfectly well. What no longer exists is a factset
+// THIS PACKAGE certifies that encoding/json would refuse.
 //
 // The value is the factset's OWN float, not a caller's text, and a float64
 // formats to at most a few bytes, so naming it costs a bounded amount. See
@@ -492,15 +527,25 @@ func checkFactsetValuesExpressible(fs CommonFactset) error {
 		return errors.Join(ErrFactsetInconsistent, errors.New("p4offline: "+what+" is "+
 			strconv.FormatFloat(v, 'g', -1, 64)+", which this factset's own encoding cannot express"))
 	}
+	// The index is folded in HERE, inside the refusal, rather than into a label
+	// built once per outcome above the switch. fs.Outcomes is a caller's slice
+	// that nothing bounds before the digest gate, and such a label is
+	// discarded on every iteration but the refusing one -- canonical.go's WORK
+	// half, whose discriminator answers yes. Two independent review lanes
+	// measured the version that got this wrong at 2.00x this function's
+	// allocation count: 1,999,875 allocations against 999,975 on 1,000,000
+	// outcomes refused by the digest gate.
+	outcome := func(i int, what string, v float64) error {
+		return unexpressible("outcome "+strconv.Itoa(i)+" "+what, v)
+	}
 	for i, o := range fs.Outcomes {
-		at := "outcome " + strconv.Itoa(i) + " "
 		switch {
 		case !finiteFloat(o.PercentageUsers):
-			return unexpressible(at+"percentage users", o.PercentageUsers)
+			return outcome(i, "percentage users", o.PercentageUsers)
 		case !finiteFloat(o.Odds):
-			return unexpressible(at+"odds", o.Odds)
+			return outcome(i, "odds", o.Odds)
 		case !finiteFloat(o.OddsPercentage):
-			return unexpressible(at+"odds percentage", o.OddsPercentage)
+			return outcome(i, "odds percentage", o.OddsPercentage)
 		}
 	}
 	if s := fs.Settings; s != nil {
