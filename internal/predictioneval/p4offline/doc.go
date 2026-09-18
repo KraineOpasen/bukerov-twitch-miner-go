@@ -362,40 +362,35 @@
 //	[SerializeCommonFactset] is exported and ungated and still frames one
 //	(1,030 bytes for the fixture carrying a +Inf).
 //
-// WHAT REMAINS, and it is more than the float story, so it is listed rather
-// than summarised:
+// WHAT REMAINS, listed rather than summarised, because a summary is how the
+// item below this list came to be denied for a round:
 //
 //   - Framing is still by bits, so +0.0 and -0.0 -- equal under comparison,
 //     both encodable, and both round-tripping through JSON with the sign bit
 //     intact -- still frame apart. That is a digest separating two spellings
 //     of one fact, not a certificate for a fact that cannot be written down.
-//   - INVALID UTF-8 IN A HASHED STRING IS NOT REFUSED, and it fails worse than
-//     the NaN this section repairs. Reproduced: HealthReason = "\xff\xfe\x80",
-//     digest recomputed, [VerifyCommonFactset] returns nil, json.Marshal
-//     SUCCEEDS, and the bytes come back as "ef bf bd ef bf bd ef bf bd" --
-//     U+FFFD substituted three times -- so the decoded factset fails its own
-//     digest. A NaN fails loudly at Marshal and the storer knows at once; this
-//     fails silently and resurfaces as the one signal this package reserves
-//     for tampering. It holds for the FREE-TEXT positions, not for every
-//     hashed string: scanned, 10 of 16 behave this way -- ProjectorRevision,
-//     TerminalObservationID, the two episode and two attempt identifiers,
-//     Outcomes[].ID, Settings.Strategy, Settings.DelayMode,
-//     FilterCondition.By and HealthReason -- while HealthState, Completeness,
-//     StealthProof, PreDecisionExit, IncompleteReasons and Protocol are
-//     refused earlier by a closed vocabulary or a derived value and never
-//     reach the round trip. It is NOT repaired here: the reported class was a
-//     value that cannot be ENCODED, this one encodes LOSSILY, and refusing it
-//     is a separate behavioural narrowing with its own reachability question.
-//     Named here so the next round inherits a fact rather than an absence.
-//   - A THIRD round-trip class exists and is benign, recorded so it is not
-//     rediscovered as a defect: IncompleteReasons = []string{} verifies,
-//     marshals, and comes back as nil -- a different Go value -- which still
-//     verifies, because the framing writes c.count(len(...)) and 0 is 0 either
-//     way. The digest is stable by design. Outcomes, which carries no
-//     omitempty, does not behave this way.
+//   - A BENIGN round-trip class, recorded so it is not rediscovered as
+//     a defect: IncompleteReasons = []string{} verifies, marshals, and comes
+//     back as nil -- a different Go value -- which still verifies, because the
+//     framing writes c.count(len(...)) and 0 is 0 either way. The digest is
+//     stable by design. Outcomes, which carries no omitempty, does not behave
+//     this way.
 //
-// An independent review lane found that second item because this section's
-// first draft claimed the float repair had settled the whole class.
+// A SECOND CLASS WAS HERE FOR ONE ROUND AND IS NOW REPAIRED, which is worth
+// recording as a process fact rather than quietly deleting. Invalid UTF-8 in a
+// hashed string verified, marshalled WITHOUT error, came back as U+FFFD and
+// then failed its own digest -- silently, and presenting as the one signal
+// this package reserves for tampering. A local lane found it because this
+// section's first draft claimed the float repair had settled the whole class;
+// it was recorded as out of scope on the reasoning that the reported class was
+// a value that cannot be ENCODED while this one encodes LOSSILY. An external
+// lane then ranked it P1 and named the two things that settle it: this
+// package's own coverage_test.go round-trips a factset through JSON, so the
+// round trip is a supported path rather than a hypothetical one, and
+// checkEntropyCoordinates in this same package ALREADY requires valid UTF-8 of
+// three identities -- the precedent was three functions away. Both are right,
+// and checkFactsetValuesExpressible now checks every string the framing
+// hashes. Being out of scope is a judgement, and this one was wrong.
 //
 // Nothing here was checked against real P1/P1.5 data: no production dataset
 // is proven available, no dataset window (T0/T1) or dataset binding is

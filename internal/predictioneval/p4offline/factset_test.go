@@ -1091,11 +1091,15 @@ func reachableFloats(v reflect.Value, path string, out *[]floatSite) {
 // fails here without anyone editing this file, PROVIDED it sits in a shape the
 // walker reaches. See reachableFloats for the shapes it does not.
 func TestEveryReachableFactsetFloatRefusesANonFiniteValue(t *testing.T) {
-	sites := func() (p4offline.CommonFactset, []floatSite) {
+	// A POINTER, for the reason the string walk below states: every site here
+	// happens to sit behind a pointer or a slice today, so a copy would work
+	// by accident, and a float added as a direct field would silently stop
+	// being poked.
+	sites := func() (*p4offline.CommonFactset, []floatSite) {
 		_, fs := selectedFactset(t, withFilter, nil)
 		var out []floatSite
 		reachableFloats(reflect.ValueOf(&fs).Elem(), "CommonFactset", &out)
-		return fs, out
+		return &fs, out
 	}
 	_, found := sites()
 	// Two outcomes carrying three ratios each, the settings delay and the
@@ -1116,15 +1120,15 @@ func TestEveryReachableFactsetFloatRefusesANonFiniteValue(t *testing.T) {
 		t.Run(site.path, func(t *testing.T) {
 			fs, s := sites()
 			s[i].at.SetFloat(math.NaN())
-			if _, err := json.Marshal(fs); err == nil {
+			if _, err := json.Marshal(*fs); err == nil {
 				t.Fatalf("json.Marshal accepted a NaN at %s", site.path)
 			}
-			if err := p4offline.VerifyCommonFactset(fs); !errors.Is(err, p4offline.ErrFactsetInconsistent) {
+			if err := p4offline.VerifyCommonFactset(*fs); !errors.Is(err, p4offline.ErrFactsetInconsistent) {
 				t.Fatalf("VerifyCommonFactset at %s = %v, want ErrFactsetInconsistent", site.path, err)
 			}
 			fs2, s2 := sites()
 			s2[i].at.SetFloat(11)
-			if err := p4offline.VerifyCommonFactset(fs2); !errors.Is(err, p4offline.ErrFactsetDigest) {
+			if err := p4offline.VerifyCommonFactset(*fs2); !errors.Is(err, p4offline.ErrFactsetDigest) {
 				t.Fatalf("finite value at %s = %v, want ErrFactsetDigest", site.path, err)
 			}
 		})
@@ -1252,4 +1256,140 @@ func TestTheValueGateAddsNoPerOutcomeAllocation(t *testing.T) {
 		t.Fatalf("the value gate allocates %.2f per outcome on the refusing path; "+
 			"the framing alone is about 1, so a label is being built and discarded", perOutcome)
 	}
+}
+
+// reachableStrings is reachableFloats for strings, with the same scope and the
+// same blind spots — see that function's comment, which applies verbatim.
+func reachableStrings(v reflect.Value, path string, out *[]floatSite) {
+	switch v.Kind() {
+	case reflect.String:
+		*out = append(*out, floatSite{path: path, at: v})
+	case reflect.Pointer:
+		if v.IsNil() {
+			if !v.CanSet() {
+				return
+			}
+			v.Set(reflect.New(v.Type().Elem()))
+		}
+		reachableStrings(v.Elem(), path+".*", out)
+	case reflect.Slice, reflect.Array:
+		for i := 0; i < v.Len(); i++ {
+			reachableStrings(v.Index(i), path+"["+strconv.Itoa(i)+"]", out)
+		}
+	case reflect.Struct:
+		for i := 0; i < v.NumField(); i++ {
+			if v.Type().Field(i).PkgPath != "" {
+				continue
+			}
+			reachableStrings(v.Field(i), path+"."+v.Type().Field(i).Name, out)
+		}
+	}
+}
+
+// TestEveryReachableFactsetStringRefusesInvalidUTF8 pins the SECOND half of the
+// value gate, and it is the half that was recorded as a known limitation for a
+// round before an external lane ranked it P1.
+//
+// The failure is quieter than the non-finite one and therefore worse. A NaN is
+// refused by encoding/json at the point of marshalling, so whoever is storing
+// the artifact learns immediately. An invalid UTF-8 byte marshals WITHOUT
+// error: Go substitutes U+FFFD, the stored artifact is a different value from
+// the one that was certified, and it fails its OWN digest when it is read back
+// — which is the single signal this package reserves for tampering. The
+// package's own coverage_test.go round-trips a factset through JSON, so that
+// is a supported path here and not a hypothetical one.
+//
+// Each position is poked with the digest RESEALED over the poked value, which
+// is the artifact the finding describes: one this package would certify. The
+// control per position is a VALID multi-byte string that already contains
+// U+FFFD, which must not be refused for its encoding — otherwise this gate
+// would be refusing the very substitution it exists to prevent.
+func TestEveryReachableFactsetStringRefusesInvalidUTF8(t *testing.T) {
+	const invalid = "\xff\xfe\x80"
+	const validWide = "ok-\u00e9-\uFFFD"
+	const utf8Fault = "is not valid UTF-8"
+
+	sealed := func(fs p4offline.CommonFactset) p4offline.CommonFactset {
+		fs.Digest = digestOf(p4offline.SerializeCommonFactset(fs))
+		return fs
+	}
+	// A POINTER, not a copy. The walker's sites point into the factset it was
+	// handed, so returning it by value would hide the mutation of any field
+	// that is not itself behind a pointer or a slice — which is most of them
+	// here, and is exactly how the first draft of this test passed a position
+	// it had not actually poked.
+	sites := func() (*p4offline.CommonFactset, []floatSite) {
+		_, fs := selectedFactset(t, withFilter, nil)
+		var out []floatSite
+		reachableStrings(reflect.ValueOf(&fs).Elem(), "CommonFactset", &out)
+		return &fs, out
+	}
+	_, found := sites()
+	if len(found) < 12 {
+		t.Fatalf("reached only %d string positions; the walk is not covering the factset", len(found))
+	}
+	for i, site := range found {
+		if site.path == "CommonFactset.Digest" {
+			continue // the seal itself, not a framed value
+		}
+		t.Run(site.path, func(t *testing.T) {
+			fs, s := sites()
+			s[i].at.SetString(invalid)
+			err := p4offline.VerifyCommonFactset(sealed(*fs))
+			if err == nil {
+				t.Fatalf("invalid UTF-8 at %s was CERTIFIED", site.path)
+			}
+			// The two contract identifiers are refused by the gates that are
+			// documented as the first on every factset path — they are held to
+			// exact constants, so an invalid byte cannot survive them either
+			// way. Every other position must be refused BY THE ENCODING, and
+			// naming that difference is what keeps this assertion honest: a
+			// blanket "some error" would pass even if the value gate did
+			// nothing at all.
+			if site.path == "CommonFactset.ContractVersion" || site.path == "CommonFactset.Protocol" {
+				if !errors.Is(err, p4offline.ErrFactsetDigest) {
+					t.Fatalf("%s = %v, want the contract gate", site.path, err)
+				}
+				return
+			}
+			if !strings.Contains(err.Error(), utf8Fault) {
+				t.Fatalf("invalid UTF-8 at %s = %v, want a %q refusal", site.path, err, utf8Fault)
+			}
+			if !errors.Is(err, p4offline.ErrFactsetInconsistent) {
+				t.Fatalf("invalid UTF-8 at %s did not carry ErrFactsetInconsistent: %v", site.path, err)
+			}
+			// The control: a valid multi-byte string, U+FFFD included, is
+			// never refused FOR ITS ENCODING. It may still be refused by a
+			// closed vocabulary, which is a different gate and a different
+			// message.
+			fs2, s2 := sites()
+			s2[i].at.SetString(validWide)
+			if err := p4offline.VerifyCommonFactset(sealed(*fs2)); err != nil &&
+				strings.Contains(err.Error(), utf8Fault) {
+				t.Fatalf("valid UTF-8 at %s was refused for its encoding: %v", site.path, err)
+			}
+		})
+	}
+	// IncompleteReasons is empty on this fixture, so the walk above never
+	// reaches it. It is framed, so it is checked, and it is poked here by hand
+	// rather than left to a walker that cannot see an empty slice.
+	t.Run("IncompleteReasons element", func(t *testing.T) {
+		_, fs := selectedFactset(t, withFilter, nil)
+		fs.IncompleteReasons = []string{invalid}
+		err := p4offline.VerifyCommonFactset(sealed(fs))
+		if err == nil || !strings.Contains(err.Error(), utf8Fault) {
+			t.Fatalf("invalid UTF-8 reason = %v, want a %q refusal", err, utf8Fault)
+		}
+	})
+	// And the dataset path refuses it too, not only a supplied factset.
+	t.Run("the dataset path", func(t *testing.T) {
+		ds := datasetWithEnvelope(t, func(e *predictioneval.SourceDecisionEnvelope) {
+			e.Outcomes[0].ID = invalid
+		})
+		ep := singleEpisode(t, mustSelect(t, ds))
+		_, err := p4offline.BuildCommonFactset(ds, ep.Episode)
+		if err == nil || !strings.Contains(err.Error(), utf8Fault) {
+			t.Fatalf("BuildCommonFactset = %v, want a %q refusal", err, utf8Fault)
+		}
+	})
 }

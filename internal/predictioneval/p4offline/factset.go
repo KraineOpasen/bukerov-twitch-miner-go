@@ -4,6 +4,7 @@ import (
 	"errors"
 	"math"
 	"strconv"
+	"unicode/utf8"
 
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/predictioneval"
 )
@@ -502,33 +503,112 @@ func VerifyCommonFactset(fs CommonFactset) error {
 // package CERTIFIED and no consumer could encode — the shape that makes a
 // verified artifact useless rather than merely wrong.
 //
-// The positions are exactly the five the canonical framing hands to
-// [canonical.f64]: the three outcome ratios and the two settings values. The
-// framing and the digest are unchanged; only the refusal is new, and it runs
-// ahead of BOTH digest computations this package makes over a CommonFactset —
-// buildFactset's and VerifyCommonFactset's — so neither hashes a value it
-// cannot encode. (The package digests other artifacts elsewhere; the only one
-// that frames these same five floats is BindP2Config's, and it calls
+// TWO HALVES, one for each way the encoding can fail the artifact.
+//
+//   - A NON-FINITE FLOAT cannot be encoded at all. The positions are exactly
+//     the five the canonical framing hands to [canonical.f64]: the three
+//     outcome ratios and the two settings values.
+//   - AN INVALID UTF-8 STRING encodes, and encodes WRONG: encoding/json
+//     substitutes U+FFFD, so the factset comes back a different value and
+//     fails its OWN digest — a lossy round trip that presents as the one
+//     signal this package reserves for tampering. That is the quieter failure
+//     of the two, and coverage_test.go round-trips a factset through JSON, so
+//     it is a supported path rather than a hypothetical one. Every string the
+//     framing hashes is checked, in the framing's own order.
+//
+// The second half was recorded as a known limitation for one round and
+// repaired only when an external lane ranked it P1 and named the two things
+// that settle it: that round trip is a supported path here, and this package
+// already requires valid UTF-8 of the entropy coordinates (see
+// checkEntropyCoordinates). The precedent was three functions away.
+//
+// The framing and the digest are unchanged; only the refusal is new, and it
+// runs ahead of BOTH digest computations this package makes over a
+// CommonFactset — buildFactset's and VerifyCommonFactset's — so neither hashes
+// a value it cannot carry. (The package digests other artifacts elsewhere; the
+// only one that frames these same values is BindP2Config's, and it calls
 // VerifyCommonFactset first, so it is gated through this one.)
 //
-// WHAT THAT LAST SENTENCE DOES NOT SAY. [SerializeCommonFactset] is exported
-// and ungated, so a caller may still frame a non-finite factset by hand and
-// hash the bytes itself: 1,030 bytes for the fixture carrying a +Inf. Those
-// bytes leave the process perfectly well. What no longer exists is a factset
-// THIS PACKAGE certifies that encoding/json would refuse.
+// WHAT THAT DOES NOT SAY. [SerializeCommonFactset] is exported and ungated, so
+// a caller may still frame such a factset by hand and hash the bytes itself:
+// 1,030 bytes for the fixture carrying a +Inf. Those bytes leave the process
+// perfectly well. What no longer exists is a factset THIS PACKAGE certifies
+// that its own encoding would refuse or silently alter.
 //
-// The value is the factset's OWN float, not a caller's text, and a float64
-// formats to at most a few bytes, so naming it costs a bounded amount. See
-// suppliedTextExtent for the rule this obeys.
+// NAMING THE OFFENDER. A float is the factset's own value and formats to at
+// most 24 bytes, so the refusal names it. A string is caller-supplied text
+// that nothing bounds here — and it is unrepresentable by hypothesis — so the
+// refusal names the FIELD and never the value. See suppliedTextExtent.
 //
 // WHAT THIS DOES NOT DO. It bounds nothing else: every finite value, however
-// large or small, and both zeroes, are accepted exactly as before. It is not a
-// plausibility check on an odds or a percentage, and it says nothing about
-// whether the value is the one the platform reported.
+// large or small, and both zeroes, are accepted exactly as before, as is every
+// valid UTF-8 string including one that already contains U+FFFD. It is not a
+// plausibility check on an odds, a percentage or an identifier, and it says
+// nothing about whether a value is the one the platform reported.
 func checkFactsetValuesExpressible(fs CommonFactset) error {
 	unexpressible := func(what string, v float64) error {
 		return errors.Join(ErrFactsetInconsistent, errors.New("p4offline: "+what+" is "+
 			strconv.FormatFloat(v, 'g', -1, 64)+", which this factset's own encoding cannot express"))
+	}
+	// THE STRING HALF, in the framing's own order so the correspondence can be
+	// checked by eye as well as by the test that walks the type. The refusal
+	// names the FIELD and never the value: the value is caller-supplied text
+	// that nothing bounds here, and the whole point is that it is not
+	// representable, so quoting it would be both unbounded and unreadable.
+	// See suppliedTextExtent for the rule.
+	lossy := func(what string) error {
+		return errors.Join(ErrFactsetInconsistent, errors.New("p4offline: "+what+
+			" is not valid UTF-8, so this factset's own encoding cannot carry it unchanged"))
+	}
+	for _, f := range [...]struct {
+		what string
+		v    string
+	}{
+		{"contract version", fs.ContractVersion},
+		{"protocol", fs.Protocol},
+		{"projector revision", fs.ProjectorRevision},
+		{"episode collector session id", fs.Episode.CollectorSessionID},
+		{"episode pool instance id", fs.Episode.PoolInstanceID},
+		{"episode round incarnation id", fs.Episode.RoundIncarnationID},
+		{"episode event id", fs.Episode.EventID},
+		{"attempt collector session id", fs.Attempt.CollectorSessionID},
+		{"attempt pool instance id", fs.Attempt.PoolInstanceID},
+		{"terminal observation id", fs.TerminalObservationID},
+		{"completeness", string(fs.Completeness)},
+		{"pre-decision exit", fs.PreDecisionExit},
+		{"stealth proof", string(fs.StealthProof)},
+		{"health state", fs.HealthState},
+		{"health reason", fs.HealthReason},
+	} {
+		if !utf8.ValidString(f.v) {
+			return lossy(f.what)
+		}
+	}
+	for i, r := range fs.IncompleteReasons {
+		if !utf8.ValidString(r) {
+			return lossy("incompleteness reason " + strconv.Itoa(i))
+		}
+	}
+	if s := fs.Settings; s != nil {
+		switch {
+		case !utf8.ValidString(s.Strategy):
+			return lossy("settings strategy")
+		case !utf8.ValidString(s.DelayMode):
+			return lossy("settings delay mode")
+		}
+		if fc := s.FilterCondition; fc != nil {
+			switch {
+			case !utf8.ValidString(fc.By):
+				return lossy("settings filter condition subject")
+			case !utf8.ValidString(fc.Where):
+				return lossy("settings filter condition comparator")
+			}
+		}
+	}
+	for i, out := range fs.Outcomes {
+		if !utf8.ValidString(out.ID) {
+			return lossy("outcome " + strconv.Itoa(i) + " id")
+		}
 	}
 	// The index is folded in HERE, inside the refusal, rather than into a label
 	// built once per outcome above the switch. fs.Outcomes is a caller's slice
