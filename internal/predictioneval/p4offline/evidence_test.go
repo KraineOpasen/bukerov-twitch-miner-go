@@ -3141,6 +3141,43 @@ func TestAClaimThisPackageCannotReconcileContestsItsRoundRatherThanLeavingIt(t *
 		})
 	}
 
+	// THE CARVE-OUT, PINNED AS AN EXCEPTION RATHER THAN LEFT TO BE FOUND. The
+	// four cases above all leave the claim NAMING its round. When the unreadable
+	// string is the round name ITSELF there is no round left to name, so the
+	// claim contests nothing and a round whose only competitor was corrupted
+	// that way keeps its canonical claim. A review lane graded that a blocker;
+	// it stands, and the assertion below is the argument in executable form:
+	// corrupting the round name reaches EXACTLY what withholding the claim
+	// reaches, and no reconciler can detect withholding. If that ever stops
+	// being true, this test fails and the carve-out gets re-decided instead of
+	// quietly widening.
+	t.Run("a claim whose round NAME is unreadable names no round, so it contests none", func(t *testing.T) {
+		poisoned := honestB
+		poisoned.Episode.EventID += invalid
+		got := p4offline.ReconcileSourceRounds([]p4offline.SourceRoundClaim{honestA, poisoned})
+		withheld := p4offline.ReconcileSourceRounds([]p4offline.SourceRoundClaim{honestA})
+		if err := p4offline.VerifySourceRoundRegistry(got); err != nil {
+			t.Fatalf("verify: %v", err)
+		}
+		if at, ok := registryCarriesOnlyExpressibleText(got); !ok {
+			t.Fatalf("the minted registry still carries text it cannot express, at %s", at)
+		}
+		// E1 keeps its canonical claim -- the fail-open half, stated out loud.
+		gotC, withheldC := canonicalOf(got, "E1"), canonicalOf(withheld, "E1")
+		if gotC == nil || withheldC == nil || *gotC != *withheldC || *gotC != honestA {
+			t.Fatalf("corrupting a round name must reach exactly what withholding the claim reaches:\n corrupted %+v\n withheld  %+v", got.Entries, withheld.Entries)
+		}
+		// And the ONLY difference from withholding is the extra INVALID row, so
+		// corruption is strictly more visible than withholding, never less.
+		if len(got.Entries) != len(withheld.Entries)+1 {
+			t.Fatalf("want exactly one extra entry over withholding, got %d against %d: %+v", len(got.Entries), len(withheld.Entries), got.Entries)
+		}
+		extra := got.Entries[len(got.Entries)-1]
+		if extra.Status != p4offline.SourceRoundInvalid || extra.EventID != "" || extra.Canonical != nil {
+			t.Fatalf("the extra entry must be an INVALID one naming no round: %+v", extra)
+		}
+	})
+
 	// THE NO-FALSE-REFUSAL CONTROL, and it is the half that makes the rule a
 	// rule rather than a blanket refusal: an unreadable claim about a DIFFERENT
 	// round leaves this one alone, and an honest round on its own still gets its

@@ -389,12 +389,28 @@
 //     same information the blanking exists to discard; it is recorded here
 //     instead of being given a field nothing else needs.
 //   - The registry's INVALID entries can alias: two claims that differ only in
-//     strings neither of which can be carried blank to the same value. They
-//     stand for no round and carry no canonical claim, and each is still
-//     counted as its own entry, so nothing leaves the denominator -- but the
-//     two are no longer told apart. The alternative, blanking only the
-//     offending string, moves that aliasing into the CANONICAL position, which
-//     is the one place this package cannot afford it.
+//     strings neither of which can be carried blank to the same value. Neither
+//     carries a canonical claim, and each is still counted as its own entry, so
+//     nothing leaves the denominator -- but the two are no longer told apart.
+//     (An earlier version of this bullet said they "stand for no round", which
+//     the repair it shipped beside had just made false: a blanked claim KEEPS
+//     its round name, and two such entries name the same round. A review lane
+//     caught it. Only a claim whose round NAME was the unreadable string stands
+//     for no round.) The alternative, blanking only the offending string, moves
+//     that aliasing into the CANONICAL position, which is the one place this
+//     package cannot afford it.
+//   - AND THE FAIL-CLOSED RULE HAS ONE FAIL-OPEN CARVE-OUT, stated here because
+//     this round's own lesson is that a trade absorbed in silence is the defect
+//     behind the defect. A claim whose ROUND NAME is itself unreadable names no
+//     round, so it contests none, and a round whose only competing claim was
+//     corrupted that way keeps its canonical claim. A review lane graded that a
+//     blocker. It stands because corrupting a round name reaches exactly what
+//     WITHHOLDING the claim reaches -- the same registry plus one INVALID row
+//     saying a claim was unreadable -- and no reconciler can detect withholding;
+//     while the alternative, letting an unnameable claim contest every round,
+//     would let one byte deny a whole registry and would attribute to every
+//     round a claim that was about one. roundsWithUnreconcilableClaims argues
+//     it at the site and a named test pins it as an exception.
 //
 // A SECOND CLASS WAS HERE FOR ONE ROUND AND IS NOW REPAIRED, and the way it
 // was repaired is worth recording rather than quietly deleting, because the
@@ -445,8 +461,10 @@
 //	                     expressibleClaim now drops the claim's DIGEST instead,
 //	                     which routes it to INVALID just as well and keeps the
 //	                     round name, and roundsWithUnreconcilableClaims holds
-//	                     that round fail-closed. checkRegistryTextExpressible
-//	                     gates the verifier as the other two are gated
+//	                     that round fail-closed -- with one carve-out, listed
+//	                     under WHAT REMAINS, where the unreadable string is the
+//	                     round name itself. checkRegistryTextExpressible gates
+//	                     the verifier as the other two are gated
 //	P3bRuleset           CLOSED, and now with receipts rather than an argument:
 //	                     all five of its string positions are refused, by three
 //	                     different gates -- the two config strings against the

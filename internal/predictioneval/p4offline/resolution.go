@@ -333,8 +333,10 @@ func ProjectResolution(ev ResolutionEvidence) ResolutionArtifact {
 // evidenceTextFault names the first string in the evidence that the artifact's
 // own encoding cannot carry unchanged, or "" when there is none.
 //
-// It allocates nothing and copies nothing, which is what lets expressibleEvidence
-// leave honest evidence alone entirely.
+// On HONEST evidence it allocates nothing and copies nothing, which is what lets
+// expressibleEvidence leave such evidence alone entirely. On the refusal path it
+// allocates once for the two positions that carry an index, which a review lane
+// measured and an earlier unqualified "allocates nothing" claimed away.
 func evidenceTextFault(ev ResolutionEvidence) string {
 	for _, f := range [...]struct{ what, v string }{
 		{"round event id", ev.Round.EventID},

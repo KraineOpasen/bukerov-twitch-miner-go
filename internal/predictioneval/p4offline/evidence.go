@@ -284,9 +284,13 @@ type SourceRoundEntry struct {
 // factset digest.
 //
 // INVALID also holds the claims this registry's encoding cannot carry: a claim
-// with invalid UTF-8 in any of its strings is recorded with those strings, and
-// its round name, dropped. See expressibleClaim for why the bytes are not kept
-// and why the round name goes with them.
+// with invalid UTF-8 in any of its strings is recorded with those strings
+// dropped and its FACTSET DIGEST dropped with them, so it still names the round
+// it spoke about and that round is held fail-closed. (Unless the unreadable
+// string was the round name, in which case there is no round left to name; see
+// roundsWithUnreconcilableClaims, which argues that carve-out.) An earlier
+// version dropped the round name instead, and this comment described it; see
+// expressibleClaim for why that was fail-open.
 type SourceRoundRegistry struct {
 	Version string             `json:"version"`
 	Entries []SourceRoundEntry `json:"entries"`
@@ -2009,9 +2013,40 @@ func expressibleClaim(c SourceRoundClaim) SourceRoundClaim {
 }
 
 // roundsWithUnreconcilableClaims names every public round that a claim spoke
-// about WITHOUT this package being able to reconcile what it said -- because its
-// digest was absent, or because expressibleClaim removed it along with text the
-// registry cannot carry.
+// about NAMEABLY but unreconcilably -- because the claim's digest was absent, or
+// because expressibleClaim removed it along with text the registry cannot carry.
+//
+// NAMEABLY IS THE CARVE-OUT, and it is fail-open at exactly one point, so it is
+// argued here rather than left to be found. When the unreadable string is the
+// ROUND NAME ITSELF, expressibleClaim blanks it and the claim reaches this
+// function naming nothing, so it contests nothing -- and a round whose only
+// competing claim was corrupted that way keeps its canonical claim. A review
+// lane graded that a blocker. The reason it stands is the comparison the lane
+// itself drew and this package can check:
+//
+//	competing claim's pool instance id corrupted -> E1 CONFLICT, no canonical
+//	competing claim's ROUND NAME corrupted       -> E1 UNIQUE, canonical
+//	competing claim simply never supplied        -> E1 UNIQUE, canonical
+//
+// The last two differ only in that the corrupted one ALSO leaves an INVALID
+// entry, so corrupting a round name is strictly more visible than withholding
+// the claim, and withholding is something no reconciler can detect ("it cannot
+// tell a derived claim from a fabricated one"). The attacker's reachable
+// outcome set is unchanged; what a corrupted round name buys is one extra row
+// saying a claim was unreadable.
+//
+// The alternative -- letting a claim that names no readable round contest EVERY
+// round -- is worse in the direction this round already got wrong once: it hands
+// one byte the power to deny a whole registry, where today one claim denies one
+// round. And it would invent a fact, attributing to every round a claim that
+// was about exactly one. This package's existing reading agrees: an episode with
+// no public round identity is SOURCE_ROUND_IDENTITY_MISSING, excluded, and
+// contaminates nothing.
+//
+// What is genuinely lost is auditability of WHICH round was contested, and that
+// information does not exist to be kept. Pinned as a documented exception in
+// TestAClaimThisPackageCannotReconcileContestsItsRoundRatherThanLeavingIt, so it
+// cannot change in silence.
 //
 // SUCH A ROUND IS FAIL-CLOSED, and that is the whole point. This package's rule
 // is that two claims on one round are the same evidence only when every field
@@ -2096,9 +2131,11 @@ func checkRegistryTextExpressible(reg SourceRoundRegistry) error {
 		}
 		// Canonical is framed by registryDigest as a BOOLEAN only, so a
 		// canonical claim is the one ENTRY-LEVEL position whose bytes the digest
-		// does not cover. (Version and Digest are outside it too, and are held
-		// by the two gates above this one.) Re-reconciliation catches a
-		// fabricated canonical claim, but only by disagreeing; this names it.
+		// does not cover. (Version and Digest are outside it too: Version is
+		// held by the constant comparison above this gate, Digest by the digest
+		// comparison BELOW it -- one gate later, which a review lane corrected
+		// an earlier wording on.) Re-reconciliation catches a fabricated
+		// canonical claim, but only by disagreeing; this names it.
 		if e.Canonical != nil {
 			if what := claimTextFault(*e.Canonical); what != "" {
 				return lossy(i, "canonical claim "+what)
@@ -2122,11 +2159,15 @@ func checkRegistryTextExpressible(reg SourceRoundRegistry) error {
 // CONFLICT, and a conflict has no canonical claim: it is fail-closed, not
 // tie-broken.
 //
-// A CLAIM THIS PACKAGE CANNOT RECONCILE CONTESTS ITS ROUND RATHER THAN LEAVING
-// IT. That is the same reading, applied to the one case that used to escape it:
-// a claim with no factset digest, or one whose text this registry's encoding
-// cannot carry, is not KNOWN to agree with the round's other claims, so the
-// round is fail-closed (roundsWithUnreconcilableClaims). An earlier version
+// A CLAIM THIS PACKAGE CANNOT RECONCILE CONTESTS THE ROUND IT NAMES RATHER THAN
+// LEAVING IT. That is the same reading, applied to the one case that used to
+// escape it: a claim that still NAMES a round but carries no reconcilable
+// evidence about it -- no factset digest, or text this registry's encoding
+// cannot carry -- is not KNOWN to agree with the round's other claims, so the
+// round is fail-closed (roundsWithUnreconcilableClaims). A claim whose ROUND
+// NAME is itself unreadable names no round and contests none; that carve-out is
+// fail-open, is argued at roundsWithUnreconcilableClaims, and is pinned as an
+// exception rather than described as closed. An earlier version
 // routed such a claim out of its round entirely, and two independent review
 // lanes showed what that cost — ONE invalid byte appended to a competing claim
 // dissolved a CONFLICT into a UNIQUE with a canonical claim, and the case
