@@ -5,8 +5,10 @@ package p4offline_test
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"math"
+	"reflect"
 	"runtime"
 	"strconv"
 	"strings"
@@ -865,4 +867,207 @@ func TestFirstGatesDoNotMaterializeSuppliedText(t *testing.T) {
 			t.Fatalf("the two faults must be distinguishable: %v / %v", e1, e2)
 		}
 	})
+}
+
+// nonFiniteValues are every float64 encoding/json refuses. There are no
+// others: a finite value always encodes, both zeroes included.
+var nonFiniteValues = []struct {
+	name string
+	v    float64
+}{
+	{"NaN", math.NaN()},
+	{"+Inf", math.Inf(1)},
+	{"-Inf", math.Inf(-1)},
+}
+
+// withFilter gives the fixture a finite filter condition, so the two settings
+// float positions are both present and both reachable.
+func withFilter(e *predictioneval.SourceDecisionEnvelope) {
+	e.Settings.FilterCondition = &predictioneval.SourceFilterCondition{
+		By: predictioneval.OutcomePercentageUsers, Where: predictioneval.ConditionGT, Value: 25,
+	}
+}
+
+// TestNonFiniteFactsetValuesAreRefusedBeforeTheyAreDigested pins the repair of
+// a defect two independent reviews reported: a non-finite float made a factset
+// that VerifyCommonFactset ACCEPTED and that encoding/json refuses to write, so
+// this package certified an artifact no consumer could store — while the
+// package's own storage-and-rederivation argument assumes it can.
+//
+// Each case asserts four things, because no one of them alone would fail for
+// the right reason:
+//
+//   - the poked value really is unserializable, so the refusal has a cause
+//     rather than a preference;
+//   - the DATASET path refuses it, so no such factset is ever built;
+//   - the VERIFY path refuses it as ErrFactsetInconsistent and NOT as
+//     ErrFactsetDigest — which is how the test sees that the check ran BEFORE
+//     the digest was computed, rather than after it;
+//   - the same poke with a FINITE value is refused by the digest gate instead,
+//     which is the control that keeps the third assertion from passing merely
+//     because a poked factset fails somehow.
+func TestNonFiniteFactsetValuesAreRefusedBeforeTheyAreDigested(t *testing.T) {
+	positions := []struct {
+		name  string
+		place func(*predictioneval.SourceDecisionEnvelope, float64)
+		poke  func(*p4offline.CommonFactset, float64)
+	}{
+		{"outcome percentage users",
+			func(e *predictioneval.SourceDecisionEnvelope, v float64) { e.Outcomes[0].PercentageUsers = v },
+			func(fs *p4offline.CommonFactset, v float64) { fs.Outcomes[0].PercentageUsers = v }},
+		{"outcome odds",
+			func(e *predictioneval.SourceDecisionEnvelope, v float64) { e.Outcomes[1].Odds = v },
+			func(fs *p4offline.CommonFactset, v float64) { fs.Outcomes[1].Odds = v }},
+		{"outcome odds percentage",
+			func(e *predictioneval.SourceDecisionEnvelope, v float64) { e.Outcomes[0].OddsPercentage = v },
+			func(fs *p4offline.CommonFactset, v float64) { fs.Outcomes[0].OddsPercentage = v }},
+		{"settings delay",
+			func(e *predictioneval.SourceDecisionEnvelope, v float64) { e.Settings.Delay = v },
+			func(fs *p4offline.CommonFactset, v float64) { fs.Settings.Delay = v }},
+		{"settings filter condition value",
+			func(e *predictioneval.SourceDecisionEnvelope, v float64) { e.Settings.FilterCondition.Value = v },
+			func(fs *p4offline.CommonFactset, v float64) { fs.Settings.FilterCondition.Value = v }},
+	}
+
+	t.Run("the finite fixture still builds, verifies and encodes", func(t *testing.T) {
+		_, fs := selectedFactset(t, withFilter, nil)
+		if err := p4offline.VerifyCommonFactset(fs); err != nil {
+			t.Fatalf("VerifyCommonFactset: %v", err)
+		}
+		if _, err := json.Marshal(fs); err != nil {
+			t.Fatalf("json.Marshal: %v", err)
+		}
+		if _, err := p4offline.BindP2Config(fs); err != nil {
+			t.Fatalf("BindP2Config: %v", err)
+		}
+	})
+
+	for _, pos := range positions {
+		for _, nf := range nonFiniteValues {
+			t.Run(pos.name+" "+nf.name, func(t *testing.T) {
+				// The cause: this value cannot be written down at all.
+				poked := func(v float64) p4offline.CommonFactset {
+					_, fs := selectedFactset(t, withFilter, nil)
+					pos.poke(&fs, v)
+					return fs
+				}
+				if _, err := json.Marshal(poked(nf.v)); err == nil {
+					t.Fatalf("json.Marshal accepted %v; this case proves nothing", nf.name)
+				}
+
+				// The dataset path: no such factset is built.
+				s := newSynth()
+				s.due("r1", "e1", 1)
+				env := synthPlacedEnvelope()
+				withFilter(env)
+				pos.place(env, nf.v)
+				s.terminal("r1", "e1", 1, predictioneval.PhaseAutoDecided, "OK", env)
+				s.call("r1", "e1", 1, 50, 0)
+				ds := s.dataset()
+				ep := singleEpisode(t, mustSelect(t, ds))
+				if _, err := p4offline.BuildCommonFactset(ds, ep.Episode); !errors.Is(err, p4offline.ErrFactsetInconsistent) {
+					t.Fatalf("BuildCommonFactset = %v, want ErrFactsetInconsistent", err)
+				}
+
+				// The verify path, ahead of the digest.
+				err := p4offline.VerifyCommonFactset(poked(nf.v))
+				if !errors.Is(err, p4offline.ErrFactsetInconsistent) {
+					t.Fatalf("VerifyCommonFactset = %v, want ErrFactsetInconsistent", err)
+				}
+				if errors.Is(err, p4offline.ErrFactsetDigest) {
+					t.Fatalf("refused by the digest gate, so the value was hashed first: %v", err)
+				}
+
+				// The control: the same poke with a finite value reaches the
+				// digest gate, so the assertion above is about finiteness.
+				if err := p4offline.VerifyCommonFactset(poked(7.5)); !errors.Is(err, p4offline.ErrFactsetDigest) {
+					t.Fatalf("finite poke = %v, want ErrFactsetDigest", err)
+				}
+			})
+		}
+	}
+}
+
+// floatSite is one settable float64 inside a factset, with the path that
+// reached it.
+type floatSite struct {
+	path string
+	at   reflect.Value
+}
+
+// reachableFloats walks a factset by REFLECTION and collects every float64 an
+// encoder would have to write, allocating a nil pointer on the way so an
+// optional branch is reached too. It derives the positions from the TYPE, not
+// from any list this package or its tests maintain.
+func reachableFloats(v reflect.Value, path string, out *[]floatSite) {
+	switch v.Kind() {
+	case reflect.Float64, reflect.Float32:
+		*out = append(*out, floatSite{path: path, at: v})
+	case reflect.Pointer:
+		if v.IsNil() {
+			if !v.CanSet() {
+				return
+			}
+			v.Set(reflect.New(v.Type().Elem()))
+		}
+		reachableFloats(v.Elem(), path+".*", out)
+	case reflect.Slice, reflect.Array:
+		for i := 0; i < v.Len(); i++ {
+			reachableFloats(v.Index(i), path+"["+strconv.Itoa(i)+"]", out)
+		}
+	case reflect.Struct:
+		for i := 0; i < v.NumField(); i++ {
+			if v.Type().Field(i).PkgPath != "" {
+				continue // unexported: no encoder writes it and nothing can set it
+			}
+			reachableFloats(v.Field(i), path+"."+v.Type().Field(i).Name, out)
+		}
+	}
+}
+
+// TestEveryReachableFactsetFloatRefusesANonFiniteValue is the same guarantee
+// stated independently of the implementation's list of fields.
+//
+// The test above names five positions because the finding named five. This one
+// names none: it walks the TYPE, sets each float64 it can reach to NaN in turn,
+// and requires a refusal at each. A float added to the factset later — or to
+// one of the native input types it embeds — fails here without anyone editing
+// this file, which is the only way this guarantee survives a change nobody
+// connects to it.
+func TestEveryReachableFactsetFloatRefusesANonFiniteValue(t *testing.T) {
+	sites := func() (p4offline.CommonFactset, []floatSite) {
+		_, fs := selectedFactset(t, withFilter, nil)
+		var out []floatSite
+		reachableFloats(reflect.ValueOf(&fs).Elem(), "CommonFactset", &out)
+		return fs, out
+	}
+	_, found := sites()
+	// Two outcomes carrying three ratios each, the settings delay and the
+	// filter condition's value. The count is asserted so that a walker that
+	// silently reached nothing could not pass the loop below.
+	if want := 2*3 + 1 + 1; len(found) != want {
+		var paths []string
+		for _, s := range found {
+			paths = append(paths, s.path)
+		}
+		t.Fatalf("reached %d float positions, want %d: %s", len(found), want, strings.Join(paths, ", "))
+	}
+	for i, site := range found {
+		t.Run(site.path, func(t *testing.T) {
+			fs, s := sites()
+			s[i].at.SetFloat(math.NaN())
+			if _, err := json.Marshal(fs); err == nil {
+				t.Fatalf("json.Marshal accepted a NaN at %s", site.path)
+			}
+			if err := p4offline.VerifyCommonFactset(fs); !errors.Is(err, p4offline.ErrFactsetInconsistent) {
+				t.Fatalf("VerifyCommonFactset at %s = %v, want ErrFactsetInconsistent", site.path, err)
+			}
+			fs2, s2 := sites()
+			s2[i].at.SetFloat(11)
+			if err := p4offline.VerifyCommonFactset(fs2); !errors.Is(err, p4offline.ErrFactsetDigest) {
+				t.Fatalf("finite value at %s = %v, want ErrFactsetDigest", site.path, err)
+			}
+			_ = fs2
+		})
+	}
 }

@@ -304,18 +304,40 @@
 // earlier. The remainder are neither pinned nor individually argued, and that
 // is the honest state: the number above is the exposure.
 //
-// # Framing a float has no NaN or infinity discipline
+// # Framing a float by its bits, and the values that framing used to admit
 //
 // canonical.go frames a float by its BITS, so two values a decimal rendering
 // would round together stay distinguishable. It does not follow that two
-// INDISTINGUISHABLE values frame alike. A NaN has many bit patterns and the
-// architectures this project ships for do not agree on which one an arithmetic
-// NaN carries, so the same fact can digest differently on two targets; and a
-// factset carrying a NaN passes [VerifyCommonFactset] but cannot be encoded by
-// encoding/json at all, which the package's own storage-and-rederivation
-// argument assumes it can. Reported by review, reproduced, and NOT repaired
-// here: whether the producer can emit a NaN at all was not established, and
-// refusing one is a behavioural narrowing of an approved seam.
+// INDISTINGUISHABLE values frame alike, and a non-finite value was the sharp
+// case: a NaN has many bit patterns, the architectures this project ships for
+// do not agree on which one an arithmetic NaN carries, and a factset carrying
+// one PASSED [VerifyCommonFactset] while encoding/json refused to write it at
+// all -- which the package's own storage-and-rederivation argument assumes it
+// can. A certificate for an artifact nobody can store is worse than a wrong
+// one, because nothing downstream ever gets far enough to disagree with it.
+//
+// An earlier round reported and reproduced that and did NOT repair it, on two
+// grounds: that the producer's reach was not established, and that refusing a
+// value narrows an approved seam. A second, independent review raised it again
+// on a later head. Both grounds were then SETTLED rather than restated, and
+// the refusal is checkFactsetValuesExpressible, on the build path and the
+// verify path, ahead of the digest on each.
+//
+//	Reach. The two settings floats are decoded from config.json by
+//	encoding/json, which cannot express a non-finite value at all. The three
+//	outcome ratios are computed in internal/models under guards -- the totals
+//	must be positive, and the odds divisor is the outcome's own points, which
+//	the totals sum over -- so reaching one needs a negative point count from
+//	the platform. Neither is a shape an honest producer writes.
+//	Narrowing. Every FINITE value is accepted exactly as before, however large
+//	or small, both zeroes included; the framing, the digest and the vocabulary
+//	are untouched. What the seam lost is only the values it could not have
+//	carried out of the process anyway.
+//
+// WHAT REMAINS, because framing is still by bits: +0.0 and -0.0 are equal
+// under comparison and both encode, and they still frame apart. That is a
+// digest separating two spellings of one fact -- not a certificate for a fact
+// that cannot be written down -- and it is not repaired here.
 //
 // Nothing here was checked against real P1/P1.5 data: no production dataset
 // is proven available, no dataset window (T0/T1) or dataset binding is

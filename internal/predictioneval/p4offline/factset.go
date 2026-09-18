@@ -2,6 +2,7 @@ package p4offline
 
 import (
 	"errors"
+	"math"
 	"strconv"
 
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/predictioneval"
@@ -85,7 +86,9 @@ var (
 	ErrFactsetDigest = errors.New("p4offline: common factset digest does not verify")
 	// ErrFactsetInconsistent is a factset whose labels — completeness, the
 	// stealth proof, the incompleteness reasons — are not what its own
-	// values derive.
+	// values derive, or which holds a value its own encoding cannot express
+	// (see checkFactsetValuesExpressible). Both are the same fault at
+	// different depths: the artifact does not support what carrying it claims.
 	ErrFactsetInconsistent = errors.New("p4offline: common factset labels are not derived from its values")
 	// ErrFactsetNotDerived is a factset that verifies on its own but is not
 	// the one the dataset derives for its episode.
@@ -292,6 +295,12 @@ func buildFactset(ep EpisodeSelection) (CommonFactset, error) {
 	if fs.OutcomesPresent && fs.Outcomes == nil {
 		fs.Outcomes = []predictioneval.OutcomeInput{}
 	}
+	// AHEAD OF EVERY DERIVED LABEL AND OF THE DIGEST: this package does not
+	// issue a certificate for a value the artifact it certifies cannot carry.
+	// See checkFactsetValuesExpressible.
+	if err := checkFactsetValuesExpressible(fs); err != nil {
+		return CommonFactset{}, err
+	}
 	fs.StealthProof = deriveStealthProof(fs.Settings)
 
 	var reasons []string
@@ -439,6 +448,14 @@ func VerifyCommonFactset(fs CommonFactset) error {
 		return errors.Join(ErrFactsetDigest, errors.New("p4offline: factset protocol is "+
 			suppliedTextExtent(fs.Protocol)+", this package writes only "+strconv.Quote(ProtocolVersion)))
 	}
+	// AHEAD OF THE DIGEST, and for the same reason the two gates above are
+	// ahead of it: a value this artifact's encoding cannot express must not be
+	// hashed into a certificate that says it verified. Both this gate and the
+	// build path call one validator, so a factset cannot be refused by one and
+	// accepted by the other.
+	if err := checkFactsetValuesExpressible(fs); err != nil {
+		return err
+	}
 	if want := commonFactsetDigest(fs); fs.Digest != want {
 		// `want` is this package's own 64 hex digits and is quoted; the
 		// supplied digest is not, because nothing gates its length here.
@@ -447,6 +464,59 @@ func VerifyCommonFactset(fs CommonFactset) error {
 	}
 	return checkFactsetConsistency(fs)
 }
+
+// checkFactsetValuesExpressible refuses a factset holding a value its own
+// artifact form cannot carry.
+//
+// Every field of a [CommonFactset] carries a JSON tag and the digest exists to
+// travel beside the encoded artifact, but encoding/json refuses NaN and both
+// infinities outright. A non-finite float therefore produced a factset this
+// package CERTIFIED and no consumer could write down — the one shape that
+// makes a verified artifact useless rather than merely wrong.
+//
+// The positions are exactly the five the canonical framing hands to
+// [canonical.f64]: the three outcome ratios and the two settings values. The
+// framing and the digest are unchanged; only the refusal is new, and it runs
+// before the digest on both paths so an unwritable value is never hashed.
+//
+// The value is the factset's OWN float, not a caller's text, and a float64
+// formats to at most a few bytes, so naming it costs a bounded amount. See
+// suppliedTextExtent for the rule this obeys.
+//
+// WHAT THIS DOES NOT DO. It bounds nothing else: every finite value, however
+// large or small, and both zeroes, are accepted exactly as before. It is not a
+// plausibility check on an odds or a percentage, and it says nothing about
+// whether the value is the one the platform reported.
+func checkFactsetValuesExpressible(fs CommonFactset) error {
+	unexpressible := func(what string, v float64) error {
+		return errors.Join(ErrFactsetInconsistent, errors.New("p4offline: "+what+" is "+
+			strconv.FormatFloat(v, 'g', -1, 64)+", which this factset's own encoding cannot express"))
+	}
+	for i, o := range fs.Outcomes {
+		at := "outcome " + strconv.Itoa(i) + " "
+		switch {
+		case !finiteFloat(o.PercentageUsers):
+			return unexpressible(at+"percentage users", o.PercentageUsers)
+		case !finiteFloat(o.Odds):
+			return unexpressible(at+"odds", o.Odds)
+		case !finiteFloat(o.OddsPercentage):
+			return unexpressible(at+"odds percentage", o.OddsPercentage)
+		}
+	}
+	if s := fs.Settings; s != nil {
+		if !finiteFloat(s.Delay) {
+			return unexpressible("settings delay", s.Delay)
+		}
+		if s.FilterCondition != nil && !finiteFloat(s.FilterCondition.Value) {
+			return unexpressible("settings filter condition value", s.FilterCondition.Value)
+		}
+	}
+	return nil
+}
+
+// finiteFloat is true for every value encoding/json can write: neither
+// infinity and no NaN. Both zeroes are finite.
+func finiteFloat(v float64) bool { return !math.IsInf(v, 0) && !math.IsNaN(v) }
 
 // checkFactsetConsistency refuses a factset whose labels are not what its
 // values derive: a stealth proof the settings do not give, a COMPLETE beside
