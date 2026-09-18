@@ -505,8 +505,11 @@ func VerifyCommonFactset(fs CommonFactset) error {
 // The positions are exactly the five the canonical framing hands to
 // [canonical.f64]: the three outcome ratios and the two settings values. The
 // framing and the digest are unchanged; only the refusal is new, and it runs
-// ahead of BOTH of this package's digest computations — buildFactset's and
-// VerifyCommonFactset's — so neither hashes a value it cannot encode.
+// ahead of BOTH digest computations this package makes over a CommonFactset —
+// buildFactset's and VerifyCommonFactset's — so neither hashes a value it
+// cannot encode. (The package digests other artifacts elsewhere; the only one
+// that frames these same five floats is BindP2Config's, and it calls
+// VerifyCommonFactset first, so it is gated through this one.)
 //
 // WHAT THAT LAST SENTENCE DOES NOT SAY. [SerializeCommonFactset] is exported
 // and ungated, so a caller may still frame a non-finite factset by hand and

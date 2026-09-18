@@ -346,10 +346,14 @@
 //	int without an overflow check, so three NON-NEGATIVE counts
 //	(9223372036854775296, 9223372036854775296, 1030) wrap the total to 6 and
 //	drive roundFloat(total/points, 2) to exactly 0, making 100/odds +Inf; and
-//	int(1e30) is -9223372036854775808 on this target, so a POSITIVE platform
-//	number manufactures the negative count locally. The claim is recorded here
-//	because the lesson is the branch's oldest one: an argument two readers
-//	accept is not a measurement.
+//	int(float64(1e30)) is -9223372036854775808 on THIS target, so a POSITIVE
+//	platform number manufactures the negative count locally. (Written with the
+//	explicit conversion because the constant form is a compile error, and
+//	"this target" is load-bearing: an out-of-range float-to-int conversion is
+//	implementation-defined, and arm64 -- which this project cross-compiles for
+//	-- saturates instead. The overflow above does not depend on it.) The
+//	retracted claim is recorded here because the lesson is the branch's oldest
+//	one: an argument two readers accept is not a measurement.
 //	Narrowing. Every FINITE value is accepted exactly as before, however large
 //	or small, both zeroes included; the framing, the digest and the vocabulary
 //	are untouched. What the seam refuses is a value this package would
@@ -372,11 +376,23 @@
 //     U+FFFD substituted three times -- so the decoded factset fails its own
 //     digest. A NaN fails loudly at Marshal and the storer knows at once; this
 //     fails silently and resurfaces as the one signal this package reserves
-//     for tampering. The same holds for every hashed string field. It is NOT
-//     repaired here: the reported class was a value that cannot be ENCODED,
-//     this is a value that encodes LOSSILY, and refusing it is a separate
-//     behavioural narrowing with its own reachability question. Named here so
-//     the next round inherits a fact rather than an absence.
+//     for tampering. It holds for the FREE-TEXT positions, not for every
+//     hashed string: scanned, 10 of 16 behave this way -- ProjectorRevision,
+//     TerminalObservationID, the two episode and two attempt identifiers,
+//     Outcomes[].ID, Settings.Strategy, Settings.DelayMode,
+//     FilterCondition.By and HealthReason -- while HealthState, Completeness,
+//     StealthProof, PreDecisionExit, IncompleteReasons and Protocol are
+//     refused earlier by a closed vocabulary or a derived value and never
+//     reach the round trip. It is NOT repaired here: the reported class was a
+//     value that cannot be ENCODED, this one encodes LOSSILY, and refusing it
+//     is a separate behavioural narrowing with its own reachability question.
+//     Named here so the next round inherits a fact rather than an absence.
+//   - A THIRD round-trip class exists and is benign, recorded so it is not
+//     rediscovered as a defect: IncompleteReasons = []string{} verifies,
+//     marshals, and comes back as nil -- a different Go value -- which still
+//     verifies, because the framing writes c.count(len(...)) and 0 is 0 either
+//     way. The digest is stable by design. Outcomes, which carries no
+//     omitempty, does not behave this way.
 //
 // An independent review lane found that second item because this section's
 // first draft claimed the float repair had settled the whole class.

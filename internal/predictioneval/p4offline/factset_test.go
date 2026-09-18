@@ -918,24 +918,31 @@ func withFilter(e *predictioneval.SourceDecisionEnvelope) {
 //     which is the control that keeps the third assertion from passing merely
 //     because a poked factset fails somehow.
 func TestNonFiniteFactsetValuesAreRefusedBeforeTheyAreDigested(t *testing.T) {
+	// says is the text the refusal must carry. It is asserted because the
+	// index is otherwise a free variable: an independent lane showed that
+	// replacing strconv.Itoa(i) with strconv.Itoa(0) leaves the whole package
+	// suite green, so the restructuring that closed an allocation defect in
+	// this very expression had its own correctness unpinned. Two of the five
+	// positions poke outcome 1, so a constant index cannot satisfy both.
 	positions := []struct {
 		name  string
+		says  string
 		place func(*predictioneval.SourceDecisionEnvelope, float64)
 		poke  func(*p4offline.CommonFactset, float64)
 	}{
-		{"outcome percentage users",
+		{"outcome percentage users", "outcome 0 percentage users is",
 			func(e *predictioneval.SourceDecisionEnvelope, v float64) { e.Outcomes[0].PercentageUsers = v },
 			func(fs *p4offline.CommonFactset, v float64) { fs.Outcomes[0].PercentageUsers = v }},
-		{"outcome odds",
+		{"outcome odds", "outcome 1 odds is",
 			func(e *predictioneval.SourceDecisionEnvelope, v float64) { e.Outcomes[1].Odds = v },
 			func(fs *p4offline.CommonFactset, v float64) { fs.Outcomes[1].Odds = v }},
-		{"outcome odds percentage",
+		{"outcome odds percentage", "outcome 0 odds percentage is",
 			func(e *predictioneval.SourceDecisionEnvelope, v float64) { e.Outcomes[0].OddsPercentage = v },
 			func(fs *p4offline.CommonFactset, v float64) { fs.Outcomes[0].OddsPercentage = v }},
-		{"settings delay",
+		{"settings delay", "settings delay is",
 			func(e *predictioneval.SourceDecisionEnvelope, v float64) { e.Settings.Delay = v },
 			func(fs *p4offline.CommonFactset, v float64) { fs.Settings.Delay = v }},
-		{"settings filter condition value",
+		{"settings filter condition value", "settings filter condition value is",
 			func(e *predictioneval.SourceDecisionEnvelope, v float64) { e.Settings.FilterCondition.Value = v },
 			func(fs *p4offline.CommonFactset, v float64) { fs.Settings.FilterCondition.Value = v }},
 	}
@@ -987,6 +994,11 @@ func TestNonFiniteFactsetValuesAreRefusedBeforeTheyAreDigested(t *testing.T) {
 				}
 				if errors.Is(err, p4offline.ErrFactsetDigest) {
 					t.Fatalf("refused by the digest gate rather than by the value: %v", err)
+				}
+				// The refusal must name the position it refused, index
+				// included; see the table's comment for why.
+				if want := pos.says + " " + nf.name; !strings.Contains(err.Error(), want) {
+					t.Fatalf("refusal does not name the position: want %q in %v", want, err)
 				}
 
 				// THE ARTIFACT THE FINDING DESCRIBED: a factset whose digest is
@@ -1119,9 +1131,13 @@ func TestEveryReachableFactsetFloatRefusesANonFiniteValue(t *testing.T) {
 	}
 }
 
-// nanDataset builds the same episode as the fixture but with one non-finite
-// value in the recorded envelope, so nothing can be derived from it.
-func nanDataset(t *testing.T, place func(*predictioneval.SourceDecisionEnvelope)) predictioneval.SourceDataset {
+// datasetWithEnvelope builds the fixture's episode with one value replaced in
+// the recorded envelope. The replacement need not be non-finite: the control
+// at the end of the test below uses it with a finite value to get a dataset
+// that derives a DIFFERENT factset, which is the ordinary route to the same
+// sentinel and is what keeps the assertions above from being satisfied by any
+// dataset whatsoever.
+func datasetWithEnvelope(t *testing.T, place func(*predictioneval.SourceDecisionEnvelope)) predictioneval.SourceDataset {
 	t.Helper()
 	s := newSynth()
 	s.due("r1", "e1", 1)
@@ -1139,8 +1155,9 @@ func nanDataset(t *testing.T, place func(*predictioneval.SourceDecisionEnvelope)
 // derivedOpportunity verifies the CALLER's factset, then rebuilds from the
 // DATASET and compares digests. Once the rebuild can fail on a value, the naive
 // spelling returns the rebuild's own error — and that error talks about "this
-// factset", while the caller's factset is fine and holds 60 where the dataset
-// holds NaN. Two things go wrong at once: the message blames the wrong
+// factset", while the caller's factset is fine and holds the fixture's own
+// finite value — 1.66 for the odds, 6 for the delay — where the dataset holds
+// the non-finite one. Two things go wrong at once: the message blames the wrong
 // artifact, and errors.Is(err, ErrFactsetNotDerived) flips from true to false
 // for an input class ErrFactsetNotDerived's own doc describes exactly.
 //
@@ -1159,7 +1176,7 @@ func TestADatasetThatDerivesNothingStillSaysSoAsNotDerived(t *testing.T) {
 		{"settings delay", func(e *predictioneval.SourceDecisionEnvelope) { e.Settings.Delay = math.Inf(1) }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			bad := nanDataset(t, tc.place)
+			bad := datasetWithEnvelope(t, tc.place)
 			for _, call := range []struct {
 				name string
 				run  func() error
@@ -1193,7 +1210,7 @@ func TestADatasetThatDerivesNothingStillSaysSoAsNotDerived(t *testing.T) {
 	// The control: with a FINITE dataset that simply derives a different
 	// factset, the same seam still reports ErrFactsetNotDerived — so the
 	// assertions above are not satisfied by every dataset whatsoever.
-	other := nanDataset(t, func(e *predictioneval.SourceDecisionEnvelope) { e.Outcomes[0].Odds = 9.5 })
+	other := datasetWithEnvelope(t, func(e *predictioneval.SourceDecisionEnvelope) { e.Outcomes[0].Odds = 9.5 })
 	if _, err := p4offline.ProjectFactualPlacement(other, good); !errors.Is(err, p4offline.ErrFactsetNotDerived) {
 		t.Fatalf("a merely different finite dataset = %v, want ErrFactsetNotDerived", err)
 	}
