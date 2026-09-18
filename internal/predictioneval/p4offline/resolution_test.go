@@ -412,26 +412,30 @@ func TestEveryReachableResolutionStringRefusesInvalidUTF8(t *testing.T) {
 		a.ResolutionFactsDigest = p4offline.DigestReference(digestOf(p4offline.SerializeResolutionArtifact(a)))
 		return a
 	}
-	// THE FIXTURE CARRIES A REFUSAL, and that is a correction rather than a
-	// detail. Refusals is framed by SerializeResolutionArtifact and scanned by
-	// checkResolutionStringsExpressible, but reachableStrings contributes
-	// NOTHING for an empty slice -- so with the plain winner fixture the walk
-	// reached 19 positions and Refusals was not among them. A review lane
-	// deleted the Refusals loop from the gate and the entire suite stayed green.
-	// The blind spot is documented on the walker; documenting it is not the same
-	// as compensating for it, and the fixture is where the compensation belongs.
 	sites := func() (*p4offline.ResolutionArtifact, []floatSite) {
 		a := winnerArtifact("o1")
-		a.Refusals = []string{p4offline.ResolutionRefusalEvidenceMissing}
-		a = sealed(a)
 		var out []floatSite
 		reachableStrings(reflect.ValueOf(&a).Elem(), "ResolutionArtifact", &out)
 		return &a, out
 	}
+	// THE UNPOKED CONTROL MUST VERIFY, or every "was CERTIFIED" assertion below
+	// passes for a reason unrelated to the poke. This baseline was briefly LOST:
+	// an attempt to reach Refusals through the walker put a refusal on this
+	// WINNER_KNOWN fixture and resealed it, which the package rightly refuses as
+	// not the projection of its own facts ("re-projecting the artifact's facts
+	// yields WINNER_KNOWN with refusals"). A review lane caught it. Refusals is
+	// covered by its own case below instead, on an artifact that legitimately
+	// carries one.
+	control, _ := sites()
+	if err := p4offline.VerifyResolutionArtifact(*control); err != nil {
+		t.Fatalf("the unpoked control must verify: %v", err)
+	}
 	// EXACT, not a floor. `len(found) < 8` was the guard here, which could not
-	// tell 19 from 20 and so could not notice the position that was missing.
+	// tell 19 from 20 and so could not notice that Refusals was missing --
+	// reachableStrings contributes NOTHING for an empty slice, and this fixture
+	// carries none.
 	_, found := sites()
-	if want := 20; len(found) != want {
+	if want := 19; len(found) != want {
 		var paths []string
 		for _, f := range found {
 			paths = append(paths, f.path)
@@ -470,6 +474,44 @@ func TestEveryReachableResolutionStringRefusesInvalidUTF8(t *testing.T) {
 				t.Fatalf("valid UTF-8 at %s was refused for its encoding: %v", site.path, err)
 			}
 		})
+	}
+}
+
+// TestAResolutionRefusalIsHeldToTheSameEncoding closes the position the walker
+// cannot reach.
+//
+// Refusals is framed by SerializeResolutionArtifact and scanned by
+// checkResolutionStringsExpressible, but reachableStrings contributes nothing
+// for an EMPTY slice and the walker's fixture carries none -- so a review lane
+// deleted the Refusals loop from the gate and the whole suite stayed green.
+// Putting a refusal on the walker's WINNER_KNOWN fixture does not work: an
+// artifact that names a winner AND carries refusals is not the projection of
+// its own facts, and the package refuses it for that instead, which would
+// silently retire every assertion in the walker. So this drives an artifact
+// that legitimately carries a refusal -- an UNKNOWN one, which is the only kind
+// that does -- and pokes the refusal itself.
+func TestAResolutionRefusalIsHeldToTheSameEncoding(t *testing.T) {
+	const invalid = "\xff\xfe\x80"
+	ev := goodWinnerEvidence()
+	ev.ProofBasis = "" // earns a refusal on its own terms, so the artifact is honest
+	a := p4offline.ProjectResolution(ev)
+	if a.Outcome != p4offline.ResolutionUnknown || len(a.Refusals) == 0 {
+		t.Fatalf("the fixture must be an artifact that legitimately carries refusals: %+v", a)
+	}
+	if err := p4offline.VerifyResolutionArtifact(a); err != nil {
+		t.Fatalf("the unpoked control must verify: %v", err)
+	}
+	a.Refusals[0] = invalid
+	a.ResolutionFactsDigest = p4offline.DigestReference(digestOf(p4offline.SerializeResolutionArtifact(a)))
+	err := p4offline.VerifyResolutionArtifact(a)
+	if err == nil {
+		t.Fatal("invalid UTF-8 in a refusal was CERTIFIED")
+	}
+	if !strings.Contains(err.Error(), "is not valid UTF-8") {
+		t.Fatalf("want a refusal naming the encoding fault, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "refusal 0") {
+		t.Fatalf("the refusal must name WHICH refusal it refused: %v", err)
 	}
 }
 

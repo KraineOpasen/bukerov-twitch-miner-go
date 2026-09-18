@@ -2066,6 +2066,12 @@ func expressibleClaim(c SourceRoundClaim) SourceRoundClaim {
 func roundsWithUnreconcilableClaims(invalid []SourceRoundClaim) map[string]bool {
 	var out map[string]bool
 	for _, c := range invalid {
+		// Cost-only, and STATED RATHER THAN PINNED, as this package labels such
+		// code elsewhere: a claim with an empty round name cannot reach a group
+		// either way, since the same emptiness is what routed it here, so
+		// contested[""] could never be consulted. What this skips is allocating
+		// the map for a registry of round-nameless claims. A review lane
+		// confirmed removing it preserves behaviour over the reachable domain.
 		if c.Episode.EventID == "" {
 			continue // names no round, so it contests none
 		}
@@ -2106,8 +2112,11 @@ func roundsWithUnreconcilableClaims(invalid []SourceRoundClaim) map[string]bool 
 // claim are checked before the caller-sized Claims slice, which is
 // factset.go's stated rule: a supplier who pairs one bad canonical claim with a
 // huge valid Claims slice would otherwise turn a constant-time refusal into
-// work over the whole slice. A review lane measured the inverted form at
-// 15.8 ms against 339 ns on 200,000 claims.
+// work over the whole slice. Two review lanes measured the inverted form at
+// roughly fifty thousand times the work on a 200,000-claim entry; the RATIO
+// reproduced for both, the absolute figures did not, because they depend on a
+// fixture neither wrote down. Pinned behaviourally, by which fault is named, in
+// TestAConstantSizeRegistryPositionIsRefusedBeforeACallerSizedSlice.
 //
 // THE INDEX LABEL IS BUILT INSIDE THE REFUSAL, not once per entry above the
 // checks -- canonical.go's WORK half, and the same correction

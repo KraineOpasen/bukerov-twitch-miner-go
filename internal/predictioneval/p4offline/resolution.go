@@ -381,18 +381,27 @@ func evidenceTextFault(ev ResolutionEvidence) string {
 // artifact that comes back is one this package can verify and store.
 //
 // It does not touch Claim: an unrepresentable claim is outside the vocabulary
-// and the switch below already refuses it there. Checked rather than assumed,
+// and the switch in ProjectResolution ABOVE already refuses it there. Checked rather than assumed,
 // in "an unrepresentable claim is refused by the vocabulary, not carried".
 //
 // HONEST EVIDENCE IS RETURNED UNTOUCHED, and that is a repair rather than an
 // optimisation. The first version copied both slices unconditionally, and
 // ProjectResolution then copies them AGAIN into the artifact, so every honest
-// projection paid two copies where it used to pay one — a review lane measured
-// +12,009,584 bytes and +22.4% allocation at 100,000 references, on a path where
-// nothing is lossy. Worst of all on the verifier's re-projection, which runs
-// only AFTER checkResolutionStringsExpressible has proved every string valid, so
-// the second copy there was provably waste. The scan below decides first, and
-// only lossy evidence is copied at all.
+// projection paid two copies where it used to pay one, on a path where nothing
+// is lossy. Worst of all on the verifier's re-projection, which runs only AFTER
+// checkResolutionStringsExpressible has proved every string valid, so the second
+// copy there was provably waste. The scan below decides first, and only lossy
+// evidence is copied at all.
+//
+// THE SIZE OF THAT SAVING IS NOT QUOTED HERE, and the reason is this package's
+// own rule catching this package out. An earlier wording gave "+12,009,584 bytes
+// and +22.4% at 100,000 references" -- two figures from two DIFFERENT fixtures,
+// neither written down, and a review lane showed no single fixture reaches both.
+// The same commit had just retracted nine other absolute figures on exactly that
+// ground, and then added more. What is true and fixture-independent: the saving
+// is one copy of each slice per honest projection, and
+// TestExpressibleEvidenceLeavesHonestEvidenceAlone asserts it as ALIASING rather
+// than as a number.
 //
 // THE TWO SLICES ARE COPIED BEFORE ANYTHING IS BLANKED. ProjectResolution takes
 // its evidence by value, which protects the scalars and protects nothing else:

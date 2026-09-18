@@ -1061,10 +1061,10 @@ func TestTheExpressibilityRoutingAllocatesNothing(t *testing.T) {
 //
 // expressibleEvidence copied both of the evidence's slices unconditionally, and
 // ProjectResolution copies them AGAIN into the artifact, so every honest
-// projection paid two copies where it used to pay one -- a review lane measured
-// +22.4% allocation at 100,000 references, on a path where nothing is lossy, and
-// worst on the verifier's re-projection, which runs only after every string has
-// already been proved valid. Honest evidence is now returned untouched, which is
+// projection paid two copies where it used to pay one, on a path where nothing
+// is lossy, and worst on the verifier's re-projection, which runs only after
+// every string has already been proved valid. (An earlier wording quoted a
+// percentage here; see expressibleEvidence for why the figures are gone.) Honest evidence is now returned untouched, which is
 // asserted here as ALIASING rather than as a count: the returned slices must be
 // the caller's own, not copies of them.
 func TestExpressibleEvidenceLeavesHonestEvidenceAlone(t *testing.T) {
@@ -1132,7 +1132,9 @@ func TestExpressibleClaimIsIdempotentAndRoutesBackToInvalid(t *testing.T) {
 		Attempt:       predictioneval.AttemptKey{CollectorEpoch: 3, CollectorSessionID: "as", PoolInstanceID: "ap", AttemptID: 9},
 		FactsetDigest: "d",
 	}
-	// Position i of this list is bit i of the mask AND index i of kept below.
+	// Position i of this list is bit i of the mask, and for i in 0..5 also index
+	// i of the kept list below. The seventh, FactsetDigest, has no entry there:
+	// it is dropped unconditionally and is checked on its own.
 	set := []func(*SourceRoundClaim){
 		func(c *SourceRoundClaim) { c.Episode.CollectorSessionID = invalid },
 		func(c *SourceRoundClaim) { c.Episode.PoolInstanceID = invalid },

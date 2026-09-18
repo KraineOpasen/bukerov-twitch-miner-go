@@ -3163,9 +3163,18 @@ func TestAClaimThisPackageCannotReconcileContestsItsRoundRatherThanLeavingIt(t *
 			t.Fatalf("the minted registry still carries text it cannot express, at %s", at)
 		}
 		// E1 keeps its canonical claim -- the fail-open half, stated out loud.
+		// The expectation is written down rather than taken from the other run:
+		// comparing two calls of the same function to each other would pin only
+		// that it is consistent with itself, which a review lane pointed out. The
+		// equality against `withheld` is asserted too, because equivalence to
+		// withholding is the ARGUMENT for the carve-out, but honestA is the
+		// independent oracle.
 		gotC, withheldC := canonicalOf(got, "E1"), canonicalOf(withheld, "E1")
-		if gotC == nil || withheldC == nil || *gotC != *withheldC || *gotC != honestA {
-			t.Fatalf("corrupting a round name must reach exactly what withholding the claim reaches:\n corrupted %+v\n withheld  %+v", got.Entries, withheld.Entries)
+		if gotC == nil || *gotC != honestA {
+			t.Fatalf("E1 must keep exactly the claim it would have kept: got %+v, want %+v", gotC, honestA)
+		}
+		if withheldC == nil || *withheldC != honestA {
+			t.Fatalf("the withheld-claim baseline is not what this test assumes: %+v", withheld.Entries)
 		}
 		// And the ONLY difference from withholding is the extra INVALID row, so
 		// corruption is strictly more visible than withholding, never less.
@@ -3183,10 +3192,18 @@ func TestAClaimThisPackageCannotReconcileContestsItsRoundRatherThanLeavingIt(t *
 	// round leaves this one alone, and an honest round on its own still gets its
 	// canonical claim.
 	t.Run("an unreadable claim about another round does not contest this one", func(t *testing.T) {
+		// E2 CARRIES AN HONEST CLAIM OF ITS OWN, and that is the correction a
+		// review lane made to this case. Without it, E2's only claim was the
+		// unreadable one, so "E2 has no canonical claim" was true whatever the
+		// code did -- it stayed green even with roundsWithUnreconcilableClaims
+		// returning nil. A guard that holds either way pins nothing.
+		honestE2 := honestA
+		honestE2.Episode.EventID = "E2"
+		honestE2.Episode.RoundIncarnationID = "r2"
 		elsewhere := honestB
 		elsewhere.Episode.EventID = "E2"
 		elsewhere.Episode.PoolInstanceID += invalid
-		reg := p4offline.ReconcileSourceRounds([]p4offline.SourceRoundClaim{honestA, elsewhere})
+		reg := p4offline.ReconcileSourceRounds([]p4offline.SourceRoundClaim{honestA, honestE2, elsewhere})
 		if err := p4offline.VerifySourceRoundRegistry(reg); err != nil {
 			t.Fatalf("verify: %v", err)
 		}
@@ -3194,8 +3211,14 @@ func TestAClaimThisPackageCannotReconcileContestsItsRoundRatherThanLeavingIt(t *
 		if c == nil || *c != honestA {
 			t.Fatalf("E1 is uncontested and must keep its canonical claim: %+v", reg.Entries)
 		}
+		// E2 WOULD have a canonical claim on its honest claim alone; it must not
+		// keep one once an unreadable claim names it.
+		alone := p4offline.ReconcileSourceRounds([]p4offline.SourceRoundClaim{honestE2})
+		if a := canonicalOf(alone, "E2"); a == nil || *a != honestE2 {
+			t.Fatalf("the fixture must give E2 a claim that WOULD be canonical: %+v", alone.Entries)
+		}
 		if canonicalOf(reg, "E2") != nil {
-			t.Fatalf("E2 was spoken about unreadably and must have no canonical claim: %+v", reg.Entries)
+			t.Fatalf("E2 was spoken about unreadably and must lose its canonical claim: %+v", reg.Entries)
 		}
 	})
 	t.Run("an uncontested round keeps its canonical claim", func(t *testing.T) {
@@ -3409,6 +3432,109 @@ func TestTheRefusalNamesWhichEntryAndWhichClaim(t *testing.T) {
 			t.Fatalf("the registry failed its own re-derivation after a JSON round trip: %v", err)
 		}
 	})
+}
+
+// TestAConstantSizeRegistryPositionIsRefusedBeforeACallerSizedSlice pins the
+// ordering checkRegistryTextExpressible calls load-bearing, which nothing pinned.
+//
+// The gate checks the entry's two constant-size strings and its single canonical
+// claim BEFORE the caller-sized Claims slice -- factset.go's rule, whose sibling
+// IS pinned (TestAConstantSizePositionIsRefusedBeforeACallerSizedSlice). Here it
+// was backed by a measurement and by nothing executable: a mutation swapping the
+// two survived the whole suite, found independently by this round's mutation
+// campaign and by a review lane. Only an entry bad in BOTH positions tells the
+// orders apart, and no test had one.
+//
+// The assertion is which fault is NAMED, because that is the observable
+// consequence; the cost argument is what the order is FOR. A lane measured the
+// inverted form at roughly fifty thousand times the work on a 200,000-claim
+// entry -- the ratio reproduces, the absolute figures are fixture-dependent and
+// so are not asserted here.
+func TestAConstantSizeRegistryPositionIsRefusedBeforeACallerSizedSlice(t *testing.T) {
+	const invalid = "\xff\xfe\x80"
+	reg := p4offline.ReconcileSourceRounds([]p4offline.SourceRoundClaim{{
+		Episode:       p4offline.EpisodeIdentity{CollectorEpoch: 1, CollectorSessionID: "s", PoolInstanceID: "p", RoundIncarnationID: "r", EventID: "e1"},
+		Attempt:       predictioneval.AttemptKey{CollectorEpoch: 1, CollectorSessionID: "s", PoolInstanceID: "p", AttemptID: 1},
+		FactsetDigest: "d1"}})
+	if err := p4offline.VerifySourceRoundRegistry(reg); err != nil {
+		t.Fatalf("the unpoked control must verify: %v", err)
+	}
+	if reg.Entries[0].Canonical == nil {
+		t.Fatalf("the fixture needs a canonical claim to poke: %+v", reg.Entries[0])
+	}
+	reg.Entries[0].Claims[0].Episode.PoolInstanceID = invalid
+	reg.Entries[0].Canonical.Attempt.CollectorSessionID = invalid
+	err := p4offline.VerifySourceRoundRegistry(reg)
+	if !errors.Is(err, p4offline.ErrSourceRoundRegistry) {
+		t.Fatalf("an entry bad in both positions was CERTIFIED (err %v)", err)
+	}
+	if !strings.Contains(err.Error(), "entry 0 canonical claim attempt collector session id") {
+		t.Fatalf("the constant-size position must be refused first:\n got %v\nwant a mention of the canonical claim", err)
+	}
+	if strings.Contains(err.Error(), "claim 0 episode pool instance id") {
+		t.Fatalf("the caller-sized slice was scanned before the constant-size position: %v", err)
+	}
+}
+
+// TestAnUnreconcilableClaimContestsARoundTwoSessionsAGREEDOn is the arm the
+// whole fail-closed rule left untouched, and it is the one where agreement
+// makes the round look settled.
+//
+// Every case in the sibling test leaves the contested round's group holding ONE
+// claim, so only the UNIQUE arm was ever reached. DEDUPLICATED_IDENTICAL is the
+// shape this package calls the ordinary one -- "what a session loaded twice
+// produces" -- and a review lane showed that scoping `contested` to single-claim
+// groups survived the entire suite while turning exactly this shape back into a
+// canonical claim.
+func TestAnUnreconcilableClaimContestsARoundTwoSessionsAGREEDOn(t *testing.T) {
+	const invalid = "\xff\xfe\x80"
+	agreed := p4offline.SourceRoundClaim{
+		Episode:       p4offline.EpisodeIdentity{CollectorEpoch: 1, CollectorSessionID: "s", PoolInstanceID: "p", RoundIncarnationID: "r", EventID: "E1"},
+		Attempt:       predictioneval.AttemptKey{CollectorEpoch: 1, CollectorSessionID: "s", PoolInstanceID: "p", AttemptID: 1},
+		FactsetDigest: "d1"}
+	// The control: loaded twice and nothing else, this round IS settled.
+	twice := p4offline.ReconcileSourceRounds([]p4offline.SourceRoundClaim{agreed, agreed})
+	if len(twice.Entries) != 1 || twice.Entries[0].Status != p4offline.SourceRoundDeduplicatedIdentical ||
+		twice.Entries[0].Canonical == nil || *twice.Entries[0].Canonical != agreed {
+		t.Fatalf("two identical claims collapse to one canonical claim: %+v", twice.Entries)
+	}
+	for _, tc := range []struct {
+		name  string
+		third p4offline.SourceRoundClaim
+	}{
+		{"whose text cannot be carried", func() p4offline.SourceRoundClaim {
+			c := agreed
+			c.Episode.PoolInstanceID += invalid
+			return c
+		}()},
+		{"which carries no factset digest", func() p4offline.SourceRoundClaim {
+			c := agreed
+			c.FactsetDigest = ""
+			return c
+		}()},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			reg := p4offline.ReconcileSourceRounds([]p4offline.SourceRoundClaim{agreed, agreed, tc.third})
+			if err := p4offline.VerifySourceRoundRegistry(reg); err != nil {
+				t.Fatalf("verify: %v", err)
+			}
+			for _, e := range reg.Entries {
+				if e.EventID == "E1" && e.Canonical != nil {
+					t.Fatalf("a claim this package could not reconcile left E1 settled: %+v", e)
+				}
+				if e.EventID == "E1" && e.Status == p4offline.SourceRoundDeduplicatedIdentical {
+					t.Fatalf("agreement between the readable claims does not settle a round a third claim contested: %+v", e)
+				}
+			}
+			var back p4offline.SourceRoundRegistry
+			if err := json.Unmarshal(mustMarshal(t, reg), &back); err != nil {
+				t.Fatal(err)
+			}
+			if err := p4offline.VerifySourceRoundRegistry(back); err != nil {
+				t.Fatalf("the registry failed its own re-derivation after a JSON round trip: %v", err)
+			}
+		})
+	}
 }
 
 // TestADerivedClaimIsNeverRoutedInvalidForItsText is the no-false-refusal

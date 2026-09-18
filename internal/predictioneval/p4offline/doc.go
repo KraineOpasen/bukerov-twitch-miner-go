@@ -376,8 +376,10 @@
 //     stable by design. Outcomes, which carries no omitempty, does not behave
 //     this way.
 //   - BLANKING COSTS REPORTING FIDELITY IN ProjectResolution, found by a review
-//     lane and REPORTED RATHER THAN REPAIRED. Two identities that are both
-//     unrepresentable both blank to "" and then compare EQUAL, so an artifact
+//     lane and REPORTED RATHER THAN REPAIRED. Two identities that blank to the
+//     SAME value then compare EQUAL -- which covers one unrepresentable identity
+//     beside one that was legitimately EMPTY, not only the case where both are
+//     unrepresentable, as an earlier wording had it. So an artifact
 //     whose evidence contradicted its round earns TEXT_NOT_EXPRESSIBLE and
 //     ROUND_IDENTITY_MISSING where a readable version of the same evidence
 //     would also have earned EVIDENCE_ROUND_MISMATCH. The VERDICT is unaffected
@@ -486,7 +488,12 @@
 // recorded three hundred lines above as defence in depth. What holds is the
 // weaker and still useful thing: a verifier gate is the half that gets written
 // first and the half that gets mistaken for the whole repair, and in this
-// package the exported producer went unchecked three times running.
+// package the exported producer went unchecked TWICE -- at ProjectResolution and
+// at ReconcileSourceRounds. (An earlier wording said "three times running",
+// which contradicted the partition sentence a dozen lines above it: the factset
+// gate landed on the build path and the verify path in ONE commit, so that
+// producer was never left unchecked. A review lane caught the arithmetic, which
+// is the second time this file has been wrong about its own count.)
 //
 // AND THE REPAIR IS NOT AUTOMATICALLY SAFER THAN THE DEFECT. The registry's
 // first repair round-tripped correctly and was fail-open; the defect it
