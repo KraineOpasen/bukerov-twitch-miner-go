@@ -3718,6 +3718,19 @@ func TestNoP3bRulesetCarryingTextItCannotExpressIsVerified(t *testing.T) {
 	// exact reflection count; this one now does too. The fixture carries a
 	// detailed rule so the per-rule strings are reached, because an empty slice
 	// contributes nothing to the walk.
+	// WHAT THIS GUARD IS, AND WHY A MUTATION OF IT CANNOT BE KILLED. It is a
+	// tripwire for a FUTURE edit, not an assertion about today's code: it fires
+	// when someone adds a string to this artifact or to a type it nests. No test
+	// adds or removes such a field, so `!=` and `<` behave identically over the
+	// suite's reachable domain and a mutation swapping them SURVIVES -- recorded
+	// here rather than counted as a weak test, per the equivalence clause in
+	// docs/agents/quality-gates.md. A review lane verified the guard trips for a
+	// new string on P3bRuleset, OrderedRulesConfig, OrderedRule, OrderedRulesDefault
+	// and OrderedRulesPoints, which is the property it exists for.
+	//
+	// It also only COUNTS. It does not check that a newly reached position is
+	// refused, so it turns a silent escape into a loud one rather than closing
+	// it -- which is what the comment above claims and is all it claims.
 	withRule := rulesetFrom(t, withComparator(predictioneval.ComparatorGe))
 	var found []floatSite
 	reachableStrings(reflect.ValueOf(&withRule).Elem(), "P3bRuleset", &found)
