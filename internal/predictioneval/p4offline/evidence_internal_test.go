@@ -996,20 +996,20 @@ func TestUnspentStartKeepsTheFIRSTIndexOnItsScope(t *testing.T) {
 	}
 }
 
-// TestTheExpressibilityRoutingAllocatesNothing pins the cost the routing's own
-// comment claims, and it is internal because the two functions it measures are
-// not reachable from outside.
+// TestTheExpressibilityRoutingAllocatesNothing pins the cost the routing and the
+// verifier gate claim, and its FIRST form is the reason it is written this way.
 //
-// ReconcileSourceRounds now runs an O(len) test on every claim AHEAD of two
-// O(1) ones -- deliberately, since the cheap clauses decide what is recorded
-// and would record the very bytes the expensive one exists to keep out. That
-// inversion is only defensible if the scan is a scan and nothing more. It is:
-// with the routing added and removed, ReconcileSourceRounds allocates the same
-// COUNT at every size and width measured -- 867 / 1,733 / 3,530 at n = 64 /
-// 128 / 256 one-byte identities, 932 / 1,863 / 3,789 at 64 bytes and 998 /
-// 1,993 / 4,047 at 4,096 -- identical on both sides. Those figures are a
-// measurement of the whole function and would not notice a small regression,
-// so what is ASSERTED here is the exact thing: zero.
+// It asserted zero allocations for checkRegistryTextExpressible on a ONE-ENTRY
+// registry. The gate built its index label -- "entry " + strconv.Itoa(i) + " "
+// -- once per entry, above every check, and threw it away on every entry that
+// did not refuse. strconv.Itoa returns a cached string for 0..99, so a
+// one-entry fixture measures exactly the range where the defect is invisible.
+// Two independent review lanes measured what it actually cost: one allocation
+// for every entry past index 99, on the HONEST path, above the digest -- 1,900
+// on a clean 2,000-entry registry. The label is now built inside the refusal,
+// which is canonical.go's WORK half and the same correction
+// checkFactsetValuesExpressible already carries, and the fixture here crosses
+// the cache boundary so the assertion can see it.
 func TestTheExpressibilityRoutingAllocatesNothing(t *testing.T) {
 	wide := strings.Repeat("w", 4096)
 	good := SourceRoundClaim{
@@ -1020,7 +1020,26 @@ func TestTheExpressibilityRoutingAllocatesNothing(t *testing.T) {
 	}
 	bad := good
 	bad.Attempt.PoolInstanceID = "\xff\xfe\x80"
-	cleanRegistry := ReconcileSourceRounds([]SourceRoundClaim{good})
+
+	// PAST THE SMALL-INTEGER CACHE, deliberately: at 250 entries the indices run
+	// well beyond 99, where strconv.Itoa stops returning a cached string.
+	claims := make([]SourceRoundClaim, 0, 250)
+	for i := 0; i < 250; i++ {
+		c := good
+		c.Episode.EventID = "e" + strconv.Itoa(i)
+		claims = append(claims, c)
+	}
+	many := ReconcileSourceRounds(claims)
+	if len(many.Entries) != 250 {
+		t.Fatalf("fixture: %d entries, want 250", len(many.Entries))
+	}
+	// A canonical claim on every entry, so the gate's canonical branch is walked
+	// too rather than skipped.
+	for _, e := range many.Entries {
+		if e.Canonical == nil {
+			t.Fatalf("fixture: entry %q has no canonical claim", e.EventID)
+		}
+	}
 
 	for _, tc := range []struct {
 		name string
@@ -1028,8 +1047,8 @@ func TestTheExpressibilityRoutingAllocatesNothing(t *testing.T) {
 	}{
 		{"claimTextFault on a claim it accepts", func() { _ = claimTextFault(good) }},
 		{"claimTextFault on a claim it refuses", func() { _ = claimTextFault(bad) }},
-		{"checkRegistryTextExpressible on a registry it accepts", func() { _ = checkRegistryTextExpressible(cleanRegistry) }},
 		{"expressibleClaim", func() { _ = expressibleClaim(bad) }},
+		{"checkRegistryTextExpressible on a 250-entry registry it accepts", func() { _ = checkRegistryTextExpressible(many) }},
 	} {
 		if got := testing.AllocsPerRun(200, tc.run); got != 0 {
 			t.Errorf("%s allocates %.0f times, want 0", tc.name, got)
@@ -1037,19 +1056,74 @@ func TestTheExpressibilityRoutingAllocatesNothing(t *testing.T) {
 	}
 }
 
+// TestExpressibleEvidenceLeavesHonestEvidenceAlone pins the other half of the
+// same discipline, one file over.
+//
+// expressibleEvidence copied both of the evidence's slices unconditionally, and
+// ProjectResolution copies them AGAIN into the artifact, so every honest
+// projection paid two copies where it used to pay one -- a review lane measured
+// +22.4% allocation at 100,000 references, on a path where nothing is lossy, and
+// worst on the verifier's re-projection, which runs only after every string has
+// already been proved valid. Honest evidence is now returned untouched, which is
+// asserted here as ALIASING rather than as a count: the returned slices must be
+// the caller's own, not copies of them.
+func TestExpressibleEvidenceLeavesHonestEvidenceAlone(t *testing.T) {
+	ev := ResolutionEvidence{
+		Round:              PublicRoundIdentity{EventID: "e1"},
+		OrderedOutcomeIDs:  []string{"o1", "o2"},
+		Claim:              ResolutionWinnerKnown,
+		WinnerOutcomeID:    "o2",
+		ProofBasis:         ProofBasisPlatformResolvedWinner,
+		EvidenceReferences: []EvidenceReference{{ObservationID: "obs", Kind: "k", Phase: "p", RoundState: "RESOLVED", EventID: "e1"}},
+		Availability:       AvailabilityAvailable,
+		ProjectorRevision:  "pr",
+		ProofRevision:      "x",
+	}
+	out, lossy := expressibleEvidence(ev)
+	if lossy {
+		t.Fatal("honest evidence must not be reported lossy")
+	}
+	if &out.OrderedOutcomeIDs[0] != &ev.OrderedOutcomeIDs[0] {
+		t.Error("honest evidence's outcome ids were copied; the artifact copies them again, so this copy is pure waste")
+	}
+	if &out.EvidenceReferences[0] != &ev.EvidenceReferences[0] {
+		t.Error("honest evidence's references were copied; the artifact copies them again, so this copy is pure waste")
+	}
+	if got := testing.AllocsPerRun(200, func() { _ = evidenceTextFault(ev) }); got != 0 {
+		t.Errorf("evidenceTextFault allocates %.0f times, want 0", got)
+	}
+	// And the lossy path still copies, or blanking would rewrite the caller's
+	// own evidence -- the defect the copies exist to prevent.
+	bad := ev
+	bad.OrderedOutcomeIDs = []string{"o1", "\xff\xfe\x80"}
+	lossyOut, wasLossy := expressibleEvidence(bad)
+	if !wasLossy {
+		t.Fatal("evidence carrying invalid UTF-8 must be reported lossy")
+	}
+	if &lossyOut.OrderedOutcomeIDs[0] == &bad.OrderedOutcomeIDs[0] {
+		t.Fatal("lossy evidence was blanked IN PLACE, rewriting the caller's own value")
+	}
+	if bad.OrderedOutcomeIDs[1] != "\xff\xfe\x80" {
+		t.Fatalf("the caller's evidence was modified: %q", bad.OrderedOutcomeIDs[1])
+	}
+}
+
 // TestExpressibleClaimIsIdempotentAndRoutesBackToInvalid pins the property the
 // registry's whole self-re-derivation rests on, and it is the one this repair
-// could most easily have got subtly wrong.
+// got WRONG the first time.
 //
 // VerifySourceRoundRegistry flattens a registry's entries and reconciles them
 // AGAIN, so every claim ReconcileSourceRounds records has to land where it
-// landed the first time. A blanked claim therefore has to satisfy two things
-// at once: it must be expressible (or the first clause would blank it a second
-// time, which is harmless only because expressibleClaim is idempotent), and it
-// must still reach the INVALID bucket (or the second pass would reconcile it as
-// evidence and the registry would not re-derive). The second is why the round
-// name is dropped even when the round name was valid -- the one part of this
-// repair that costs information, and the part with no other way to be right.
+// landed the first time. A blanked claim therefore has to satisfy two things at
+// once: it must be expressible, and it must still reach the INVALID bucket.
+//
+// THE FIRST VERSION SATISFIED BOTH BY DROPPING THE ROUND NAME, and that was a
+// fail-open: a claim that no longer names its round leaves that round's group,
+// so one invalid byte on a competing claim dissolved a CONFLICT. The digest is
+// the right field to drop -- it routes the claim to INVALID just as well, and
+// the round name it keeps is what lets roundsWithUnreconcilableClaims hold the
+// round fail-closed. So this now pins the OPPOSITE of what it used to: the
+// round name SURVIVES wherever it was expressible.
 func TestExpressibleClaimIsIdempotentAndRoutesBackToInvalid(t *testing.T) {
 	const invalid = "\xff\xfe\x80"
 	full := SourceRoundClaim{
@@ -1058,6 +1132,7 @@ func TestExpressibleClaimIsIdempotentAndRoutesBackToInvalid(t *testing.T) {
 		Attempt:       predictioneval.AttemptKey{CollectorEpoch: 3, CollectorSessionID: "as", PoolInstanceID: "ap", AttemptID: 9},
 		FactsetDigest: "d",
 	}
+	// Position i of this list is bit i of the mask AND index i of kept below.
 	set := []func(*SourceRoundClaim){
 		func(c *SourceRoundClaim) { c.Episode.CollectorSessionID = invalid },
 		func(c *SourceRoundClaim) { c.Episode.PoolInstanceID = invalid },
@@ -1080,41 +1155,38 @@ func TestExpressibleClaimIsIdempotentAndRoutesBackToInvalid(t *testing.T) {
 			t.Fatalf("mask %d: a claim carrying invalid UTF-8 was called expressible", mask)
 		}
 		once := expressibleClaim(c)
-		if claimTextFault(once) != "" {
-			t.Fatalf("mask %d: expressibleClaim left text it cannot express: %+v", mask, once)
+		if what := claimTextFault(once); what != "" {
+			t.Fatalf("mask %d: expressibleClaim left text it cannot express at %s: %+v", mask, what, once)
 		}
-		if once.Episode.EventID != "" {
-			t.Fatalf("mask %d: a blanked claim still names a round, so it would reconcile as evidence on the second pass: %+v", mask, once)
+		// The routing lever. Without this the blanked claim would be grouped as
+		// evidence on the second pass and the registry would not re-derive.
+		if once.FactsetDigest != "" {
+			t.Fatalf("mask %d: a blanked claim kept its evidence identity, so it would reconcile as evidence on the second pass: %+v", mask, once)
 		}
 		if twice := expressibleClaim(once); twice != once {
 			t.Fatalf("mask %d: expressibleClaim is not idempotent: %+v then %+v", mask, once, twice)
 		}
 		// The numbers are expressible and are kept; so is every identity
-		// component that was valid. Losing them would be a silent narrowing of
-		// what an INVALID entry records.
+		// component that was valid -- INCLUDING the round name, which is what
+		// keeps the round the claim contested visible in the registry.
 		if once.Episode.CollectorEpoch != full.Episode.CollectorEpoch ||
 			once.Attempt.CollectorEpoch != full.Attempt.CollectorEpoch ||
 			once.Attempt.AttemptID != full.Attempt.AttemptID {
 			t.Fatalf("mask %d: an expressible number was dropped: %+v", mask, once)
 		}
-		for i, kept := range []struct {
-			got, want string
-		}{
+		for i, kept := range []struct{ got, want string }{
 			{once.Episode.CollectorSessionID, full.Episode.CollectorSessionID},
 			{once.Episode.PoolInstanceID, full.Episode.PoolInstanceID},
 			{once.Episode.RoundIncarnationID, full.Episode.RoundIncarnationID},
+			{once.Episode.EventID, full.Episode.EventID},
 			{once.Attempt.CollectorSessionID, full.Attempt.CollectorSessionID},
 			{once.Attempt.PoolInstanceID, full.Attempt.PoolInstanceID},
-			{once.FactsetDigest, full.FactsetDigest},
 		} {
-			// Position i of this list corresponds to set entry i, skipping
-			// EventID, which is dropped unconditionally and is checked above.
-			at := i
-			if i >= 3 {
-				at = i + 1
+			if mask&(1<<i) == 0 && kept.got != kept.want {
+				t.Fatalf("mask %d: a VALID component at position %d was dropped: %q, want %q", mask, i, kept.got, kept.want)
 			}
-			if mask&(1<<at) == 0 && kept.got != kept.want {
-				t.Fatalf("mask %d: a VALID component at position %d was dropped: %q, want %q", mask, at, kept.got, kept.want)
+			if mask&(1<<i) != 0 && kept.got != "" {
+				t.Fatalf("mask %d: an unrepresentable component at position %d was kept: %q", mask, i, kept.got)
 			}
 		}
 	}

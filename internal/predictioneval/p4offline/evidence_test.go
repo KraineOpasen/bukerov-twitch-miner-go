@@ -2858,11 +2858,21 @@ func TestReconcileSourceRoundsNeverMintsARegistryItsOwnVerifierRefuses(t *testin
 				t.Fatalf("the minted registry still carries text it cannot express, at %s", at)
 			}
 			// The claim is not dropped: it is COUNTED, as one INVALID entry
-			// standing for no round. A denominator-disciplined package does not
-			// get to make a fact it cannot carry disappear.
+			// that still NAMES THE ROUND IT SPOKE ABOUT. A denominator-
+			// disciplined package does not get to make a fact it cannot carry
+			// disappear, and an earlier version of this repair erased the round
+			// name here -- which let one invalid byte dissolve a CONFLICT and
+			// left the registry with no trace that the round had been contested.
+			wantEvent := "e1"
+			if name == "Episode.EventID" {
+				wantEvent = "" // the round name itself was the unrepresentable string
+			}
 			if len(reg.Entries) != 1 || reg.Entries[0].Status != p4offline.SourceRoundInvalid ||
-				reg.Entries[0].EventID != "" || len(reg.Entries[0].Claims) != 1 || reg.Entries[0].Canonical != nil {
-				t.Fatalf("want one INVALID entry naming no round and claiming nothing, got %+v", reg.Entries)
+				reg.Entries[0].EventID != wantEvent || len(reg.Entries[0].Claims) != 1 || reg.Entries[0].Canonical != nil {
+				t.Fatalf("want one INVALID entry naming round %q and claiming nothing, got %+v", wantEvent, reg.Entries)
+			}
+			if reg.Entries[0].Claims[0].FactsetDigest != "" {
+				t.Fatalf("the recorded claim must have lost its evidence identity: %+v", reg.Entries[0].Claims[0])
 			}
 			raw, err := json.Marshal(reg)
 			if err != nil {
@@ -2914,7 +2924,7 @@ func TestReconcileSourceRoundsNeverMintsARegistryItsOwnVerifierRefuses(t *testin
 			set(&c, validWide)
 			reg := p4offline.ReconcileSourceRounds([]p4offline.SourceRoundClaim{c})
 			if len(reg.Entries) != 1 || reg.Entries[0].Status != p4offline.SourceRoundUnique || reg.Entries[0].Canonical == nil {
-				t.Fatalf("a valid multi-byte string is evidence: %+v", reg.Entries)
+				t.Fatalf("a valid multi-byte string is evidence: want one UNIQUE entry with a canonical claim, got %+v", reg.Entries)
 			}
 			if *reg.Entries[0].Canonical != c {
 				t.Fatalf("the canonical claim was altered: %+v, want %+v", *reg.Entries[0].Canonical, c)
@@ -2982,13 +2992,14 @@ func TestARegistryMixingCarriableAndUncarriableClaimsKeepsBothCounted(t *testing
 			reg.Entries[0].Canonical == nil || *reg.Entries[0].Canonical != good {
 			t.Fatalf("the carriable claim is still evidence for its own round: %+v", reg.Entries[0])
 		}
-		if reg.Entries[1].Status != p4offline.SourceRoundInvalid || reg.Entries[1].EventID != "" {
-			t.Fatalf("the uncarriable claim names no round: %+v", reg.Entries[1])
+		if reg.Entries[1].Status != p4offline.SourceRoundInvalid || reg.Entries[1].EventID != "e2" {
+			t.Fatalf("the uncarriable claim must still name the round it spoke about: %+v", reg.Entries[1])
 		}
-		// The uncarriable claim named e2, and dropping its round name must not
-		// let it be read as a second claim on e1.
-		if len(reg.Entries[1].Claims) != 1 || reg.Entries[1].Claims[0].Episode.EventID != "" {
-			t.Fatalf("%+v", reg.Entries[1])
+		// It named e2, and keeping that name must not let it be read as a claim
+		// on e1 -- nor let it be read as EVIDENCE about e2.
+		if len(reg.Entries[1].Claims) != 1 || reg.Entries[1].Claims[0].Episode.EventID != "e2" ||
+			reg.Entries[1].Claims[0].FactsetDigest != "" {
+			t.Fatalf("want one claim naming e2 with no evidence identity, got %+v", reg.Entries[1])
 		}
 	})
 
@@ -3006,11 +3017,155 @@ func TestARegistryMixingCarriableAndUncarriableClaimsKeepsBothCounted(t *testing
 		}
 		for i, e := range reg.Entries {
 			if e.Status != p4offline.SourceRoundInvalid || e.Canonical != nil || len(e.Claims) != 1 {
-				t.Fatalf("entry %d: %+v", i, e)
+				t.Fatalf("entry %d: want INVALID, one claim and no canonical claim, got %+v", i, e)
 			}
 		}
+		// They differ only in their (unrepresentable) round names, so once those
+		// are dropped they alias -- and BOTH are INVALID, standing for no round
+		// and carrying no canonical claim. That is the aliasing this repair
+		// accepts; what it does NOT accept is aliasing in the canonical
+		// position, which is why blanking only the offending string was
+		// rejected.
 		if reg.Entries[0].Claims[0] != reg.Entries[1].Claims[0] {
 			t.Fatalf("the two claims are expected to alias once their text is dropped: %+v", reg.Entries)
+		}
+	})
+}
+
+// TestAClaimThisPackageCannotReconcileContestsItsRoundRatherThanLeavingIt is
+// the regression test for the worst defect this branch has produced, and it is
+// worth reading as a lesson rather than a case list.
+//
+// The repair for the encoding class routed an uncarriable claim to INVALID with
+// its ROUND NAME dropped. That looked like the honest reduction -- a claim whose
+// text cannot be carried names no round it can carry -- and it was a fail-open
+// on the one axis this package declares fail-closed. A claim with no round name
+// leaves its round's GROUP, so appending ONE invalid byte to a competing claim
+// turned a CONFLICT, which has no canonical claim and counts for nobody, into a
+// UNIQUE whose canonical claim was the other, honest one. The registry verified,
+// round-tripped, and kept no trace that the round had ever been contested. Two
+// independent review lanes reproduced it; the writer did not.
+//
+// The trade the first version made was fixed-point property over round
+// association. It was avoidable: dropping the DIGEST instead routes the claim
+// to INVALID just as well and keeps the round name, and a round some claim spoke
+// about unreconcilably is then held fail-closed on its own evidence.
+//
+// The digestless claim takes the same path, and always could have. That case is
+// covered here too because the rule is one rule: this package treats "I cannot
+// read what this claim said about round R" identically however it came about.
+func TestAClaimThisPackageCannotReconcileContestsItsRoundRatherThanLeavingIt(t *testing.T) {
+	const invalid = "\xff\xfe\x80"
+	honestA := p4offline.SourceRoundClaim{
+		Episode:       p4offline.EpisodeIdentity{CollectorEpoch: 1, CollectorSessionID: "sA", PoolInstanceID: "pA", RoundIncarnationID: "rA", EventID: "E1"},
+		Attempt:       predictioneval.AttemptKey{CollectorEpoch: 1, CollectorSessionID: "sA", PoolInstanceID: "pA", AttemptID: 1},
+		FactsetDigest: "dA",
+	}
+	honestB := p4offline.SourceRoundClaim{
+		Episode:       p4offline.EpisodeIdentity{CollectorEpoch: 2, CollectorSessionID: "sB", PoolInstanceID: "pB", RoundIncarnationID: "rB", EventID: "E1"},
+		Attempt:       predictioneval.AttemptKey{CollectorEpoch: 2, CollectorSessionID: "sB", PoolInstanceID: "pB", AttemptID: 7},
+		FactsetDigest: "dB",
+	}
+	canonicalOf := func(reg p4offline.SourceRoundRegistry, event string) *p4offline.SourceRoundClaim {
+		for _, e := range reg.Entries {
+			if e.EventID == event && e.Canonical != nil {
+				return e.Canonical
+			}
+		}
+		return nil
+	}
+
+	// The baseline this must not be allowed to differ from: two honest claims
+	// that disagree are a CONFLICT and nothing is canonical.
+	base := p4offline.ReconcileSourceRounds([]p4offline.SourceRoundClaim{honestA, honestB})
+	if len(base.Entries) != 1 || base.Entries[0].Status != p4offline.SourceRoundConflict || canonicalOf(base, "E1") != nil {
+		t.Fatalf("two disagreeing claims on one round are a CONFLICT with no canonical claim: %+v", base.Entries)
+	}
+
+	for _, tc := range []struct {
+		name   string
+		break_ func(p4offline.SourceRoundClaim) p4offline.SourceRoundClaim
+	}{
+		{"one invalid byte in the competing claim's pool instance id", func(c p4offline.SourceRoundClaim) p4offline.SourceRoundClaim {
+			c.Episode.PoolInstanceID += invalid
+			return c
+		}},
+		{"one invalid byte in the competing claim's collector session id", func(c p4offline.SourceRoundClaim) p4offline.SourceRoundClaim {
+			c.Episode.CollectorSessionID += invalid
+			return c
+		}},
+		{"one invalid byte in the competing claim's factset digest", func(c p4offline.SourceRoundClaim) p4offline.SourceRoundClaim {
+			c.FactsetDigest += invalid
+			return c
+		}},
+		{"the competing claim carries no factset digest at all", func(c p4offline.SourceRoundClaim) p4offline.SourceRoundClaim {
+			c.FactsetDigest = ""
+			return c
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			reg := p4offline.ReconcileSourceRounds([]p4offline.SourceRoundClaim{honestA, tc.break_(honestB)})
+			if err := p4offline.VerifySourceRoundRegistry(reg); err != nil {
+				t.Fatalf("the registry this package minted does not verify: %v", err)
+			}
+			if at, ok := registryCarriesOnlyExpressibleText(reg); !ok {
+				t.Fatalf("the minted registry still carries text it cannot express, at %s", at)
+			}
+			// THE ASSERTION THIS TEST EXISTS FOR.
+			if c := canonicalOf(reg, "E1"); c != nil {
+				t.Fatalf("a claim this package could not reconcile handed E1 a canonical claim: %+v", *c)
+			}
+			for _, e := range reg.Entries {
+				if e.EventID == "E1" && e.Status != p4offline.SourceRoundConflict && e.Status != p4offline.SourceRoundInvalid {
+					t.Fatalf("E1 must stay fail-closed, got %v: %+v", e.Status, e)
+				}
+			}
+			// And the round the unreadable claim spoke about is still visible,
+			// which is what makes the suppression auditable rather than silent.
+			named := false
+			for _, e := range reg.Entries {
+				if e.Status == p4offline.SourceRoundInvalid && e.EventID == "E1" {
+					named = true
+				}
+			}
+			if !named {
+				t.Fatalf("the registry keeps no trace that E1 was contested: %+v", reg.Entries)
+			}
+			var back p4offline.SourceRoundRegistry
+			if err := json.Unmarshal(mustMarshal(t, reg), &back); err != nil {
+				t.Fatal(err)
+			}
+			if err := p4offline.VerifySourceRoundRegistry(back); err != nil {
+				t.Fatalf("the registry failed its own re-derivation after a JSON round trip: %v", err)
+			}
+		})
+	}
+
+	// THE NO-FALSE-REFUSAL CONTROL, and it is the half that makes the rule a
+	// rule rather than a blanket refusal: an unreadable claim about a DIFFERENT
+	// round leaves this one alone, and an honest round on its own still gets its
+	// canonical claim.
+	t.Run("an unreadable claim about another round does not contest this one", func(t *testing.T) {
+		elsewhere := honestB
+		elsewhere.Episode.EventID = "E2"
+		elsewhere.Episode.PoolInstanceID += invalid
+		reg := p4offline.ReconcileSourceRounds([]p4offline.SourceRoundClaim{honestA, elsewhere})
+		if err := p4offline.VerifySourceRoundRegistry(reg); err != nil {
+			t.Fatalf("verify: %v", err)
+		}
+		c := canonicalOf(reg, "E1")
+		if c == nil || *c != honestA {
+			t.Fatalf("E1 is uncontested and must keep its canonical claim: %+v", reg.Entries)
+		}
+		if canonicalOf(reg, "E2") != nil {
+			t.Fatalf("E2 was spoken about unreadably and must have no canonical claim: %+v", reg.Entries)
+		}
+	})
+	t.Run("an uncontested round keeps its canonical claim", func(t *testing.T) {
+		reg := p4offline.ReconcileSourceRounds([]p4offline.SourceRoundClaim{honestA})
+		c := canonicalOf(reg, "E1")
+		if c == nil || *c != honestA {
+			t.Fatalf("%+v", reg.Entries)
 		}
 	})
 }
@@ -3021,10 +3176,14 @@ func TestARegistryMixingCarriableAndUncarriableClaimsKeepsBothCounted(t *testing
 // The producer repair came first, and on its own it looked sufficient: with
 // ReconcileSourceRounds dropping what it cannot carry, and registryDigest
 // unexported, there was no way left to obtain a CONSISTENT uncarriable
-// registry, and a hand-edited one was already refused at every position -- this
-// test passed before checkRegistryTextExpressible existed, which is worth
-// saying plainly, because a test that passes on both sides of a change pins a
-// standing property and not that change.
+// registry, and a hand-edited one was already refused at every position.
+//
+// AN EARLIER, WEAKER FORM OF THIS TEST -- refusal only, no named position --
+// did pass before checkRegistryTextExpressible existed, and a comment here
+// claimed that of the CURRENT form too. A review lane refuted it by execution:
+// with the gate removed, 16 of these 18 positions fail, at the assertion that
+// the refusal must name what it refused. The weaker form pinned a standing
+// property; this one pins the gate.
 //
 // Two independent external reviews asked for the verifier gate regardless, and
 // the argument against it was the weak kind this branch keeps getting caught
@@ -3035,9 +3194,11 @@ func TestARegistryMixingCarriableAndUncarriableClaimsKeepsBothCounted(t *testing
 // every case here, which is exactly the hole a lane demonstrated in the
 // factset's sibling by replacing all of its labels with one.
 //
-// Two positions are named by nothing and say so: Version and Digest are
-// refused by the constant-comparison gates that run first, and a value held to
-// a constant cannot carry an invalid byte past them either way.
+// Two positions are named by nothing and say so, for two different reasons an
+// earlier comment ran together: Version is refused by the constant comparison
+// that runs first, and Digest by the digest comparison, which holds it to this
+// package's own 64 hex digits. Neither can carry an invalid byte past its gate,
+// and neither gate says which position it refused.
 func TestASuppliedRegistryCarryingTextItCannotExpressIsRefused(t *testing.T) {
 	const invalid = "\xff\xfe\x80"
 	mint := func() p4offline.SourceRoundRegistry {
@@ -3090,7 +3251,7 @@ func TestASuppliedRegistryCarryingTextItCannotExpressIsRefused(t *testing.T) {
 			}
 			want, named := names[site.path]
 			if !named {
-				return // Version and Digest: held to constants, refused unnamed
+				return // Version by its constant, Digest by its own hex: refused unnamed
 			}
 			if !strings.Contains(err.Error(), want) {
 				t.Fatalf("the refusal must name the position it refused:\n got %v\nwant a mention of %q", err, want)
@@ -3200,8 +3361,8 @@ func TestTheRefusalNamesWhichEntryAndWhichClaim(t *testing.T) {
 		if reg.Entries[0].Status != p4offline.SourceRoundConflict || len(reg.Entries[0].Claims) != 2 {
 			t.Fatalf("the uncarriable claim must not join or dissolve the conflict: %+v", reg.Entries[0])
 		}
-		if reg.Entries[2].Status != p4offline.SourceRoundInvalid || reg.Entries[2].EventID != "" {
-			t.Fatalf("%+v", reg.Entries[2])
+		if reg.Entries[2].Status != p4offline.SourceRoundInvalid || reg.Entries[2].EventID != "e1" {
+			t.Fatalf("the uncarriable claim must still name e1, the round it contested: %+v", reg.Entries[2])
 		}
 		var back p4offline.SourceRoundRegistry
 		if err := json.Unmarshal(mustMarshal(t, reg), &back); err != nil {
@@ -3218,11 +3379,14 @@ func TestTheRefusalNamesWhichEntryAndWhichClaim(t *testing.T) {
 //
 // The gate refuses a claim for its ENCODING, so the question it has to answer
 // is whether the sanctioned producer can emit one. It cannot, and the reason is
-// structural rather than incidental: ClaimSourceRound derives its claim from a
-// factset, and every string it copies -- the four episode identities, the two
-// attempt identities and the digest -- has already passed
-// checkFactsetValuesExpressible on that factset. This drives the real path
-// rather than asserting that, because "an argument two readers accept is not a
+// structural rather than incidental -- but the reason is SIX of seven strings,
+// not seven, which a review lane corrected by execution. ClaimSourceRound
+// derives its claim from a factset; the four episode identities and the two
+// attempt identities have already passed checkFactsetValuesExpressible on that
+// factset, and the seventh, the factset digest, is NOT in that validator's list
+// at all: what forces it expressible is the next gate, the comparison against
+// this package's own 64 hex digits. This drives the real path rather than
+// asserting either, because "an argument two readers accept is not a
 // measurement" is this branch's oldest lesson.
 func TestADerivedClaimIsNeverRoutedInvalidForItsText(t *testing.T) {
 	s := newSynth()

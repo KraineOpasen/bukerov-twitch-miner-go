@@ -3685,18 +3685,50 @@ func TestDecisionDoesNotBuildItsDerivationBeforeItsGates(t *testing.T) {
 // returns byte for byte.
 //
 // Also recorded, because it is a stronger closure one layer down and this
-// package does not own it: the native core REFUSES to digest a config whose
-// text it cannot encode (REFUSED/SUPPLIED_TEXT_NOT_ENCODABLE), so a supplier
-// cannot obtain an honest NativeConfigDigest for one in the first place. The
-// gates above are what this package can state on its own.
+// package does not own it: the native core refuses to digest a config whose
+// text it cannot encode, so a supplier cannot obtain an honest
+// NativeConfigDigest for one in the first place. WHICH refusal depends on the
+// field, which a review lane established by execution and an earlier wording
+// here ran together: an unencodable ConfigID is
+// REFUSED/SUPPLIED_TEXT_NOT_ENCODABLE, because the core's encodability scan
+// reads only the config id and the run id; an unencodable comparator is refused
+// one gate over, as REFUSED/CONFIG_OUT_OF_ADMITTED_DOMAIN. Either way no digest
+// is reported. The gates above are what this package can state on its own.
 func TestNoP3bRulesetCarryingTextItCannotExpressIsVerified(t *testing.T) {
 	const invalid = "\xff\xfe\x80"
 	base := predictioneval.OrderedRulesConfig{ConfigID: "cfg", HasDefault: true,
 		Default: predictioneval.OrderedRulesDefault{RawMinPercent: 0, RawMaxPercent: 100,
 			Points: predictioneval.OrderedRulesPoints{MaxValue: 10, RawPercent: 5}}}
+	withComparator := func(cmp predictioneval.OrderedRuleComparator) predictioneval.OrderedRulesConfig {
+		c := base
+		c.Detailed = []predictioneval.OrderedRule{{Comparator: cmp, RawThresholdPercent: 1,
+			RawAttemptRatePercent: 1, Points: predictioneval.OrderedRulesPoints{MaxValue: 1, RawPercent: 1}}}
+		return c
+	}
 	good := rulesetFrom(t, base)
 	if _, err := p4offline.VerifyP3bRuleset(good); err != nil {
 		t.Fatalf("the control must verify: %v", err)
+	}
+	// THE COMPLETENESS CLAIM ABOVE IS DEFENDED BY THIS, not by the case list
+	// below it. The cases are hand-written, and a hand-written list covers the
+	// positions someone remembered: a review lane added a Label string to
+	// predictioneval.OrderedRule -- with the two contract entries a real change
+	// would need -- and a ruleset carrying invalid UTF-8 in it VERIFIED with the
+	// whole module's suite green. The registry sibling defends itself with an
+	// exact reflection count; this one now does too. The fixture carries a
+	// detailed rule so the per-rule strings are reached, because an empty slice
+	// contributes nothing to the walk.
+	withRule := rulesetFrom(t, withComparator(predictioneval.ComparatorGe))
+	var found []floatSite
+	reachableStrings(reflect.ValueOf(&withRule).Elem(), "P3bRuleset", &found)
+	if want := 5; len(found) != want {
+		var paths []string
+		for _, f := range found {
+			paths = append(paths, f.path)
+		}
+		t.Fatalf("a P3bRuleset with one detailed rule reaches %d string positions, want %d: %s\n"+
+			"a new string on this artifact needs its own case above, or it escapes every gate",
+			len(found), want, strings.Join(paths, ", "))
 	}
 	var back p4offline.P3bRuleset
 	if err := json.Unmarshal(mustMarshal(t, good), &back); err != nil {
@@ -3710,12 +3742,6 @@ func TestNoP3bRulesetCarryingTextItCannotExpressIsVerified(t *testing.T) {
 		sum := sha256.Sum256(r.RawBytes)
 		r.RawSHA256 = hex.EncodeToString(sum[:])
 		return r
-	}
-	withComparator := func(cmp predictioneval.OrderedRuleComparator) predictioneval.OrderedRulesConfig {
-		c := base
-		c.Detailed = []predictioneval.OrderedRule{{Comparator: cmp, RawThresholdPercent: 1,
-			RawAttemptRatePercent: 1, Points: predictioneval.OrderedRulesPoints{MaxValue: 1, RawPercent: 1}}}
-		return c
 	}
 	for _, tc := range []struct {
 		name  string

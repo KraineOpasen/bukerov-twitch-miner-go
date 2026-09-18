@@ -12,8 +12,10 @@ import (
 	"encoding/json"
 	"errors"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/predictioneval"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/predictioneval/p4offline"
@@ -410,15 +412,31 @@ func TestEveryReachableResolutionStringRefusesInvalidUTF8(t *testing.T) {
 		a.ResolutionFactsDigest = p4offline.DigestReference(digestOf(p4offline.SerializeResolutionArtifact(a)))
 		return a
 	}
+	// THE FIXTURE CARRIES A REFUSAL, and that is a correction rather than a
+	// detail. Refusals is framed by SerializeResolutionArtifact and scanned by
+	// checkResolutionStringsExpressible, but reachableStrings contributes
+	// NOTHING for an empty slice -- so with the plain winner fixture the walk
+	// reached 19 positions and Refusals was not among them. A review lane
+	// deleted the Refusals loop from the gate and the entire suite stayed green.
+	// The blind spot is documented on the walker; documenting it is not the same
+	// as compensating for it, and the fixture is where the compensation belongs.
 	sites := func() (*p4offline.ResolutionArtifact, []floatSite) {
 		a := winnerArtifact("o1")
+		a.Refusals = []string{p4offline.ResolutionRefusalEvidenceMissing}
+		a = sealed(a)
 		var out []floatSite
 		reachableStrings(reflect.ValueOf(&a).Elem(), "ResolutionArtifact", &out)
 		return &a, out
 	}
+	// EXACT, not a floor. `len(found) < 8` was the guard here, which could not
+	// tell 19 from 20 and so could not notice the position that was missing.
 	_, found := sites()
-	if len(found) < 8 {
-		t.Fatalf("reached only %d string positions; the walk is not covering the artifact", len(found))
+	if want := 20; len(found) != want {
+		var paths []string
+		for _, f := range found {
+			paths = append(paths, f.path)
+		}
+		t.Fatalf("reached %d string positions, want %d: %s", len(found), want, strings.Join(paths, ", "))
 	}
 	for i, site := range found {
 		switch site.path {
@@ -455,56 +473,113 @@ func TestEveryReachableResolutionStringRefusesInvalidUTF8(t *testing.T) {
 	}
 }
 
+// artifactCarriesOnlyExpressibleText reports the first string position in a
+// resolution artifact that its own encoding cannot carry unchanged.
+//
+// It walks READ-ONLY. reachableStrings allocates a nil pointer in place so the
+// value behind it can be poked, which is right for a poking test and wrong for
+// an inspecting one; an inspection built on that walker would change the value
+// it is measuring. Its blind spots are the walker's: no map, no interface, and
+// an EMPTY slice contributes nothing -- which is why the caller must not rely on
+// it to notice an empty Refusals list.
+func artifactCarriesOnlyExpressibleText(a p4offline.ResolutionArtifact) (string, bool) {
+	var walk func(v reflect.Value, path string) (string, bool)
+	walk = func(v reflect.Value, path string) (string, bool) {
+		switch v.Kind() {
+		case reflect.String:
+			return path, utf8.ValidString(v.String())
+		case reflect.Pointer:
+			if v.IsNil() {
+				return "", true
+			}
+			return walk(v.Elem(), path+".*")
+		case reflect.Slice, reflect.Array:
+			for i := 0; i < v.Len(); i++ {
+				if at, ok := walk(v.Index(i), path+"["+strconv.Itoa(i)+"]"); !ok {
+					return at, false
+				}
+			}
+		case reflect.Struct:
+			for i := 0; i < v.NumField(); i++ {
+				if v.Type().Field(i).PkgPath != "" {
+					continue
+				}
+				if at, ok := walk(v.Field(i), path+"."+v.Type().Field(i).Name); !ok {
+					return at, false
+				}
+			}
+		}
+		return "", true
+	}
+	return walk(reflect.ValueOf(a), "ResolutionArtifact")
+}
+
 // TestProjectResolutionNeverMintsAnArtifactItsOwnVerifierRefuses closes the
 // producer half of the class the verifier gate above closes.
 //
-// Gating only VerifyResolutionArtifact left the package's own exported
-// projector able to MINT an artifact that fails its own verifier: an
-// invalid-UTF-8 Round.ChannelID yielded WINNER_KNOWN with NO refusals,
-// retaining the bad bytes. That is the same producer/verifier contradiction the
-// factset's build-path gate had already removed, and it survived one commit
-// because that repair was made at the verifier only.
+// Gating only VerifyResolutionArtifact left the package's own exported projector
+// able to MINT an artifact that fails its own verifier: an invalid-UTF-8
+// Round.ChannelID yielded WINNER_KNOWN with NO refusals, retaining the bad
+// bytes. That is the same producer/verifier contradiction the factset's
+// build-path gate had already removed, and it survived one commit because that
+// repair was made at the verifier only.
 //
-// Each case asserts the three things that together mean "asserts nothing, and
-// can be stored": the projection carries the refusal, it does NOT retain the
-// unrepresentable bytes, and the artifact it returns verifies and survives a
-// JSON round trip.
+// IT WALKS THE EVIDENCE BY REFLECTION RATHER THAN LISTING ITS FIELDS, and the
+// reason is a defect this test had in its first form: the list was written by
+// hand and reached ONE of EvidenceReference's six strings. A review lane deleted
+// each of the other five in turn and every one survived the whole suite -- with
+// keep(&refs[i].Kind) removed it reproduced this commit's own defect verbatim,
+// WINNER_KNOWN with no refusals and the bad bytes retained. A hand-written list
+// of positions is a list of the positions someone remembered. The registry
+// sibling walks; so does the verifier sibling; this one did not, and that is
+// exactly where the surviving mutants were.
+//
+// Each position asserts the three things that together mean "asserts nothing,
+// and can be stored": the projection carries the refusal, it does NOT retain the
+// unrepresentable bytes, and the artifact verifies and survives a JSON round
+// trip. Each also carries its own VALID-WIDE control, because a gate that
+// refused legitimate non-ASCII identities would be refusing the very U+FFFD
+// substitution it exists to prevent -- and a lane showed that an
+// expressibleEvidence widened to do exactly that survived the entire suite.
 func TestProjectResolutionNeverMintsAnArtifactItsOwnVerifierRefuses(t *testing.T) {
 	const invalid = "\xff\xfe\x80"
-	for _, tc := range []struct {
-		name  string
-		place func(*p4offline.ResolutionEvidence)
-		read  func(p4offline.ResolutionArtifact) string
-	}{
-		{"round channel id", func(e *p4offline.ResolutionEvidence) { e.Round.ChannelID = invalid },
-			func(a p4offline.ResolutionArtifact) string { return a.Round.ChannelID }},
-		{"round event id", func(e *p4offline.ResolutionEvidence) { e.Round.EventID = invalid },
-			func(a p4offline.ResolutionArtifact) string { return a.Round.EventID }},
-		{"an ordered outcome id", func(e *p4offline.ResolutionEvidence) { e.OrderedOutcomeIDs[1] = invalid },
-			func(a p4offline.ResolutionArtifact) string { return a.OrderedOutcomeIDs[1] }},
-		{"proof basis", func(e *p4offline.ResolutionEvidence) { e.ProofBasis = invalid },
-			func(a p4offline.ResolutionArtifact) string { return a.ProofBasis }},
-		{"projector revision", func(e *p4offline.ResolutionEvidence) { e.ProjectorRevision = invalid },
-			func(a p4offline.ResolutionArtifact) string { return a.ProjectorRevision }},
-		{"an evidence reference observation id",
-			func(e *p4offline.ResolutionEvidence) { e.EvidenceReferences[0].ObservationID = invalid },
-			func(a p4offline.ResolutionArtifact) string { return a.EvidenceReferences[0].ObservationID }},
-		{"winner outcome id", func(e *p4offline.ResolutionEvidence) { e.WinnerOutcomeID = invalid },
-			func(a p4offline.ResolutionArtifact) string { return a.WinnerOutcomeID }},
-		{"proof revision", func(e *p4offline.ResolutionEvidence) { e.ProofRevision = invalid },
-			func(a p4offline.ResolutionArtifact) string { return a.ProofRevision }},
-		// Availability is here although an unrepresentable value ALSO falls
-		// outside the closed vocabulary and is refused on that ground. The two
-		// refusals are not interchangeable: the vocabulary one would leave the
-		// bytes in the artifact, framed by the digest, so the artifact would
-		// still fail its own round trip while looking properly refused.
-		{"availability", func(e *p4offline.ResolutionEvidence) { e.Availability = p4offline.Availability(invalid) },
-			func(a p4offline.ResolutionArtifact) string { return string(a.Availability) }},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			ev := goodWinnerEvidence()
-			tc.place(&ev)
-			a := p4offline.ProjectResolution(ev)
+	const validWide = "ok-\u00e9-\uFFFD"
+
+	// A POINTER, for the reason the factset sibling records: the walker's sites
+	// point into the value it was handed, so returning it by value would hide
+	// the mutation of every field not behind a pointer or a slice.
+	sites := func() (*p4offline.ResolutionEvidence, []floatSite) {
+		ev := goodWinnerEvidence()
+		var out []floatSite
+		reachableStrings(reflect.ValueOf(&ev).Elem(), "ResolutionEvidence", &out)
+		return &ev, out
+	}
+	_, found := sites()
+	// EXACT, like the registry sibling's, and for the same reason: a slack
+	// bound lets a position disappear without tripping. It is a property of the
+	// FIXTURE together with the type -- 8 scalar positions (the round's two
+	// identities, the claim, the winner, the proof basis, the availability and
+	// the two revisions), the 2 ordered outcome ids, and the 6 strings of one
+	// evidence reference.
+	if want := 16; len(found) != want {
+		var paths []string
+		for _, f := range found {
+			paths = append(paths, f.path)
+		}
+		t.Fatalf("reached %d string positions, want %d: %s", len(found), want, strings.Join(paths, ", "))
+	}
+	for i, site := range found {
+		// Claim is the one framed-adjacent string expressibleEvidence does not
+		// touch, and it needs no clause: an unrepresentable claim is outside the
+		// closed vocabulary, so the projector refuses it there and never copies
+		// it into the artifact. Asserted rather than assumed, below.
+		if site.path == "ResolutionEvidence.Claim" {
+			continue
+		}
+		t.Run(site.path, func(t *testing.T) {
+			ev, s := sites()
+			s[i].at.SetString(invalid)
+			a := p4offline.ProjectResolution(*ev)
 
 			if a.Outcome != p4offline.ResolutionUnknown {
 				t.Fatalf("outcome = %v, want UNKNOWN: a refused projection must assert nothing", a.Outcome)
@@ -512,27 +587,49 @@ func TestProjectResolutionNeverMintsAnArtifactItsOwnVerifierRefuses(t *testing.T
 			if !containsString(a.Refusals, p4offline.ResolutionRefusalTextNotExpressible) {
 				t.Fatalf("refusals = %v, want %s", a.Refusals, p4offline.ResolutionRefusalTextNotExpressible)
 			}
-			if got := tc.read(a); got == invalid {
-				t.Fatalf("the projection RETAINED the unrepresentable bytes at %s", tc.name)
+			if at, ok := artifactCarriesOnlyExpressibleText(a); !ok {
+				t.Fatalf("the projection RETAINED unrepresentable bytes, at %s", at)
 			}
-			// What the drop is for: the artifact this package minted must be
-			// one it can itself verify and store.
 			if err := p4offline.VerifyResolutionArtifact(a); err != nil {
 				t.Fatalf("the package minted an artifact its own verifier refuses: %v", err)
 			}
-			raw, err := json.Marshal(a)
-			if err != nil {
-				t.Fatalf("json.Marshal: %v", err)
-			}
 			var back p4offline.ResolutionArtifact
-			if err := json.Unmarshal(raw, &back); err != nil {
+			if err := json.Unmarshal(mustMarshal(t, a), &back); err != nil {
 				t.Fatal(err)
 			}
 			if err := p4offline.VerifyResolutionArtifact(back); err != nil {
 				t.Fatalf("the artifact did not survive its own JSON round trip: %v", err)
 			}
 		})
+		t.Run("valid wide text at "+site.path, func(t *testing.T) {
+			ev, s := sites()
+			s[i].at.SetString(validWide)
+			a := p4offline.ProjectResolution(*ev)
+			if containsString(a.Refusals, p4offline.ResolutionRefusalTextNotExpressible) {
+				t.Fatalf("a valid multi-byte string was refused for its encoding: %v", a.Refusals)
+			}
+			if err := p4offline.VerifyResolutionArtifact(a); err != nil {
+				t.Fatalf("verify: %v", err)
+			}
+		})
 	}
+
+	// Claim's carve-out, checked rather than asserted.
+	t.Run("an unrepresentable claim is refused by the vocabulary, not carried", func(t *testing.T) {
+		ev := goodWinnerEvidence()
+		ev.Claim = p4offline.ResolutionOutcome(invalid)
+		a := p4offline.ProjectResolution(ev)
+		if a.Outcome != p4offline.ResolutionUnknown ||
+			!containsString(a.Refusals, p4offline.ResolutionRefusalClaimOutsideVocabulary) {
+			t.Fatalf("outcome=%v refusals=%v", a.Outcome, a.Refusals)
+		}
+		if at, ok := artifactCarriesOnlyExpressibleText(a); !ok {
+			t.Fatalf("the claim's bytes reached the artifact, at %s", at)
+		}
+		if err := p4offline.VerifyResolutionArtifact(a); err != nil {
+			t.Fatalf("verify: %v", err)
+		}
+	})
 
 	// The control: valid evidence still projects a WINNER_KNOWN with no
 	// refusals, so the gate above is not refusing everything.

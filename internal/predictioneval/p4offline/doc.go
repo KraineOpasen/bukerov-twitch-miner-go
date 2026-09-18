@@ -375,6 +375,26 @@
 //     framing writes c.count(len(...)) and 0 is 0 either way. The digest is
 //     stable by design. Outcomes, which carries no omitempty, does not behave
 //     this way.
+//   - BLANKING COSTS REPORTING FIDELITY IN ProjectResolution, found by a review
+//     lane and REPORTED RATHER THAN REPAIRED. Two identities that are both
+//     unrepresentable both blank to "" and then compare EQUAL, so an artifact
+//     whose evidence contradicted its round earns TEXT_NOT_EXPRESSIBLE and
+//     ROUND_IDENTITY_MISSING where a readable version of the same evidence
+//     would also have earned EVIDENCE_ROUND_MISMATCH. The VERDICT is unaffected
+//     -- lossy text always forces UNKNOWN, and VerifyResolutionArtifact does not
+//     re-project an UNKNOWN artifact, so no producer/verifier contradiction
+//     arises -- but Refusals is inside the digest and is the artifact's audit
+//     record, and a reader sees fewer reasons than the evidence earns.
+//     Repairing it means remembering WHICH strings were blanked, which is the
+//     same information the blanking exists to discard; it is recorded here
+//     instead of being given a field nothing else needs.
+//   - The registry's INVALID entries can alias: two claims that differ only in
+//     strings neither of which can be carried blank to the same value. They
+//     stand for no round and carry no canonical claim, and each is still
+//     counted as its own entry, so nothing leaves the denominator -- but the
+//     two are no longer told apart. The alternative, blanking only the
+//     offending string, moves that aliasing into the CANONICAL position, which
+//     is the one place this package cannot afford it.
 //
 // A SECOND CLASS WAS HERE FOR ONE ROUND AND IS NOW REPAIRED, and the way it
 // was repaired is worth recording rather than quietly deleting, because the
@@ -409,24 +429,24 @@
 //	                     free to mint what it refuses -- expressibleEvidence on
 //	                     ProjectResolution, which drops the text and refuses
 //	                     with TEXT_NOT_EXPRESSIBLE
-//	SourceRoundRegistry  PRODUCER REPAIRED. The row here used to read "closed
-//	                     by CONSTRUCTION: it re-derives from its own entries",
-//	                     which was true of a registry someone EDITED and said
-//	                     nothing about the one this package mints.
+//	SourceRoundRegistry  PRODUCER REPAIRED, TWICE. The row here first read
+//	                     "closed by CONSTRUCTION: it re-derives from its own
+//	                     entries", which was true of a registry someone EDITED
+//	                     and said nothing about the one this package mints.
 //	                     ReconcileSourceRounds minted a registry that verified,
 //	                     marshalled without error and then failed its own
-//	                     re-derivation. expressibleClaim now drops the text,
-//	                     and the round name with it, into an INVALID entry, and
-//	                     checkRegistryTextExpressible gates the verifier as the
-//	                     other two are gated. The gate was judged unnecessary
-//	                     first -- registryDigest is unexported and the
-//	                     reconciler is the only exported source of a registry,
-//	                     so the producer repair alone left no consistent
-//	                     uncarriable registry obtainable -- and two independent
-//	                     external reviews asked for it anyway. They were right:
-//	                     that argument rested on this package's exported
-//	                     SURFACE, which a later commit can change in silence,
-//	                     where the other two gates rest on the artifact
+//	                     re-derivation. THE FIRST REPAIR FOR THAT WAS WORSE THAN
+//	                     THE DEFECT: it dropped the claim's ROUND NAME, which
+//	                     took the claim out of its round's group, so one invalid
+//	                     byte on a competing claim dissolved a CONFLICT into a
+//	                     UNIQUE with a canonical claim and the case counted --
+//	                     fail-OPEN on the one axis this package declares
+//	                     fail-closed, with no trace left in the registry.
+//	                     expressibleClaim now drops the claim's DIGEST instead,
+//	                     which routes it to INVALID just as well and keeps the
+//	                     round name, and roundsWithUnreconcilableClaims holds
+//	                     that round fail-closed. checkRegistryTextExpressible
+//	                     gates the verifier as the other two are gated
 //	P3bRuleset           CLOSED, and now with receipts rather than an argument:
 //	                     all five of its string positions are refused, by three
 //	                     different gates -- the two config strings against the
@@ -435,11 +455,27 @@
 //	                     64 lower-case hex digits. RawBytes needs no clause:
 //	                     JSON carries []byte as base64
 //
-// One artifact was closed all along, two needed a gate and one needed its
-// PRODUCER repaired -- found by sweeping the class a third time after the
-// second sweep had declared it shut. The pattern across all four is the one
-// worth keeping: the verifier is the easy half, and the exported producer is
-// where the hole was every time it was there at all.
+// One artifact was closed all along, one needed only a gate, and two needed BOTH
+// a gate and their exported producer repaired. (An earlier version of this
+// sentence said "two needed a gate and one needed its PRODUCER repaired", which
+// contradicted the table two lines above it; a review lane caught the
+// arithmetic.)
+//
+// The pattern worth keeping is narrower than the one stated here for a round,
+// which claimed the producer "is where the hole was every time it was there at
+// all" -- a quantifier this file's own account of the factset contradicts,
+// since that instance was found at the VERIFIER and the build-path gate is
+// recorded three hundred lines above as defence in depth. What holds is the
+// weaker and still useful thing: a verifier gate is the half that gets written
+// first and the half that gets mistaken for the whole repair, and in this
+// package the exported producer went unchecked three times running.
+//
+// AND THE REPAIR IS NOT AUTOMATICALLY SAFER THAN THE DEFECT. The registry's
+// first repair round-tripped correctly and was fail-open; the defect it
+// replaced was un-round-trippable and fail-closed. Two independent review lanes
+// found that, and the writer did not. A repair that trades an invariant for a
+// property has to say which invariant, out loud, in the commit -- absorbing it
+// silently is how it happened.
 //
 // Nothing here was checked against real P1/P1.5 data: no production dataset
 // is proven available, no dataset window (T0/T1) or dataset binding is

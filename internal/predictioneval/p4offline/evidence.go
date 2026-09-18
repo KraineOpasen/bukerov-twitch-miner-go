@@ -1958,8 +1958,8 @@ func claimTextFault(c SourceRoundClaim) string {
 }
 
 // expressibleClaim drops from a claim every string this registry's own encoding
-// cannot carry unchanged -- and, whichever string was at fault, the round name
-// with them.
+// cannot carry unchanged -- and, whichever string was at fault, its factset
+// digest with them.
 //
 // DROPPING RATHER THAN REFUSING-AND-CARRYING is the rule expressibleEvidence
 // applies in resolution.go, for the same reason. Invalid UTF-8 is not a value
@@ -1967,27 +1967,30 @@ func claimTextFault(c SourceRoundClaim) string {
 // because encoding/json substitutes U+FFFD. A registry that frames those bytes
 // marshals without error, comes back different and then fails its OWN
 // re-derivation -- presenting as the one signal this package reserves for
-// tampering. Routing the claim to INVALID while still recording its bytes would
-// leave the registry exactly as unwritable as before, so the bytes must not be
-// carried at all.
+// tampering. Recording the claim while keeping its bytes would leave the
+// registry exactly as unwritable as before, so the bytes must not be kept.
 //
-// THE ROUND NAME GOES TOO, EVEN WHEN IT WAS VALID, and that is what makes this
-// idempotent rather than merely clean. VerifySourceRoundRegistry re-reconciles
-// a registry from its own entries, so whatever this returns has to land in the
-// same INVALID bucket on the second pass; the only thing that puts a claim
-// there is an empty round name or an empty digest, and a claim whose text this
-// registry cannot carry names no round it can carry.
+// THE DIGEST GOES TOO, AND WHICH FIELD THAT IS WAS A DEFECT ONCE. Something has
+// to route the blanked claim back to the INVALID bucket, or
+// VerifySourceRoundRegistry -- which re-reconciles a registry from its own
+// entries -- would group it as evidence on the second pass and the registry
+// would not re-derive. Only an empty round name or an empty digest does that to
+// an EXPRESSIBLE claim, which a blanked one is -- the text-fault arm above them
+// is what routed it here the first time, and cannot route it here again.
+// THE FIRST VERSION OF THIS FUNCTION DROPPED THE ROUND NAME, and two
+// independent review lanes showed what that cost: a claim that no longer names
+// its round leaves that round's group, so ONE invalid byte appended to a
+// competing claim dissolved a CONFLICT into a UNIQUE with a canonical claim,
+// and the case counted. That is fail-OPEN on the one axis this package declares
+// fail-closed, and the registry kept no trace of the round the discarded claim
+// had contested. Dropping the DIGEST instead keeps the round name, so the claim
+// still says which round it spoke about -- and roundsWithUnreconcilableClaims
+// below makes that round fail-closed.
 //
-// WHAT IS KEPT is everything expressible: both epochs, the attempt id, and any
-// identity component that was valid. Blanking only the OFFENDING string and
-// leaving the claim reconcilable was the other candidate, and it is wrong in
-// the direction this package cares most about: two claims differing only in an
-// unrepresentable pool instance id would blank to the same value, frame alike
-// and DEDUPLICATE_IDENTICAL -- the identity aliasing EpisodeIdentity.String's
-// length prefixes exist to prevent, arrived at in the CANONICAL position. Here
-// the aliasing that remains is between two INVALID entries, which stand for no
-// round and carry no canonical claim; the claims are still counted one entry
-// each, so nothing leaves the denominator.
+// WHAT IS KEPT is everything expressible: both epochs, the attempt id, the round
+// name, and any identity component that was valid. What is lost is the claim's
+// evidence identity, which is the honest reduction: this package cannot say what
+// the claim asserted, only which round it asserted it about.
 func expressibleClaim(c SourceRoundClaim) SourceRoundClaim {
 	keep := func(v string) string {
 		if utf8.ValidString(v) {
@@ -1998,11 +2001,116 @@ func expressibleClaim(c SourceRoundClaim) SourceRoundClaim {
 	c.Episode.CollectorSessionID = keep(c.Episode.CollectorSessionID)
 	c.Episode.PoolInstanceID = keep(c.Episode.PoolInstanceID)
 	c.Episode.RoundIncarnationID = keep(c.Episode.RoundIncarnationID)
-	c.Episode.EventID = ""
+	c.Episode.EventID = keep(c.Episode.EventID)
 	c.Attempt.CollectorSessionID = keep(c.Attempt.CollectorSessionID)
 	c.Attempt.PoolInstanceID = keep(c.Attempt.PoolInstanceID)
-	c.FactsetDigest = keep(c.FactsetDigest)
+	c.FactsetDigest = ""
 	return c
+}
+
+// roundsWithUnreconcilableClaims names every public round that a claim spoke
+// about WITHOUT this package being able to reconcile what it said -- because its
+// digest was absent, or because expressibleClaim removed it along with text the
+// registry cannot carry.
+//
+// SUCH A ROUND IS FAIL-CLOSED, and that is the whole point. This package's rule
+// is that two claims on one round are the same evidence only when every field
+// agrees, and anything else is a CONFLICT with no canonical claim. A claim whose
+// evidence identity is missing is not KNOWN to agree, so treating the round as
+// settled would be deciding a question this package cannot answer. It is the
+// same reading the CONFLICT arm already applies, extended to the one case that
+// used to escape it.
+//
+// It costs an honest registry nothing: ClaimSourceRound derives its digest from
+// a verified factset and its round name from a selected episode, so a derived
+// claim never lands in the invalid bucket at all.
+//
+// It is derivable from the CLAIMS, which is what makes the registry a fixed
+// point of its own re-reconciliation: a blanked claim still names its round on
+// the second pass, so the same rounds come back contested.
+func roundsWithUnreconcilableClaims(invalid []SourceRoundClaim) map[string]bool {
+	var out map[string]bool
+	for _, c := range invalid {
+		if c.Episode.EventID == "" {
+			continue // names no round, so it contests none
+		}
+		if out == nil {
+			out = map[string]bool{}
+		}
+		out[c.Episode.EventID] = true
+	}
+	return out
+}
+
+// checkRegistryTextExpressible refuses a registry carrying a string this
+// package's own encoding cannot carry unchanged.
+//
+// ITS NECESSITY IS A JUDGEMENT THAT WAS MADE THE OTHER WAY FIRST, so the
+// reasoning is here rather than in a review thread. The repair for this class
+// went into the PRODUCER: ReconcileSourceRounds drops what it cannot carry, and
+// since registryDigest is unexported and the reconciler is the only exported
+// source of a registry, no consistent uncarriable registry could then be
+// obtained at all. On that footing a scan here looked like work above a gate
+// that already refuses without it.
+//
+// TWO INDEPENDENT EXTERNAL REVIEWS ASKED FOR IT ANYWAY, and they were right,
+// for a reason neither had to state: that argument rests on the absence of an
+// exported serializer -- a property of this package's SURFACE, which the next
+// commit can change silently -- while the sibling gates in factset.go and
+// resolution.go rest on the artifact itself. This package has now been wrong
+// twice about a class it declared shut by reasoning, so the gate that cannot
+// quietly stop holding is the one to have.
+//
+// Both halves are kept, and neither substitutes for the other. Without the
+// producer repair this gate would make ReconcileSourceRounds mint registries
+// its own verifier refuses -- the exact producer/verifier contradiction this
+// round found at the factset and again at the resolution artifact.
+//
+// ORDER WITHIN AN ENTRY IS LOAD-BEARING, and the first version of this function
+// had it backwards. The two constant-size positions and the single canonical
+// claim are checked before the caller-sized Claims slice, which is
+// factset.go's stated rule: a supplier who pairs one bad canonical claim with a
+// huge valid Claims slice would otherwise turn a constant-time refusal into
+// work over the whole slice. A review lane measured the inverted form at
+// 15.8 ms against 339 ns on 200,000 claims.
+//
+// THE INDEX LABEL IS BUILT INSIDE THE REFUSAL, not once per entry above the
+// checks -- canonical.go's WORK half, and the same correction
+// checkFactsetValuesExpressible already carries. Built per entry it cost one
+// allocation for every entry past index 99, on the HONEST path, above the
+// digest: 1,900 allocations on a clean 2,000-entry registry. Two review lanes
+// measured it; the assertion that was supposed to catch it used a ONE-entry
+// fixture, where strconv.Itoa's small-integer cache hides it entirely.
+func checkRegistryTextExpressible(reg SourceRoundRegistry) error {
+	lossy := func(i int, what string) error {
+		return errors.Join(ErrSourceRoundRegistry, errors.New("p4offline: entry "+
+			strconv.Itoa(i)+" "+what+
+			" is not valid UTF-8, so this registry's own encoding cannot carry it unchanged"))
+	}
+	for i, e := range reg.Entries {
+		switch {
+		case !utf8.ValidString(e.EventID):
+			return lossy(i, "event id")
+		case !utf8.ValidString(string(e.Status)):
+			return lossy(i, "status")
+		}
+		// Canonical is framed by registryDigest as a BOOLEAN only, so a
+		// canonical claim is the one ENTRY-LEVEL position whose bytes the digest
+		// does not cover. (Version and Digest are outside it too, and are held
+		// by the two gates above this one.) Re-reconciliation catches a
+		// fabricated canonical claim, but only by disagreeing; this names it.
+		if e.Canonical != nil {
+			if what := claimTextFault(*e.Canonical); what != "" {
+				return lossy(i, "canonical claim "+what)
+			}
+		}
+		for j, c := range e.Claims {
+			if what := claimTextFault(c); what != "" {
+				return lossy(i, "claim "+strconv.Itoa(j)+" "+what)
+			}
+		}
+	}
+	return nil
 }
 
 // ReconcileSourceRounds is seam 3 across datasets: one public round, one
@@ -2014,81 +2122,33 @@ func expressibleClaim(c SourceRoundClaim) SourceRoundClaim {
 // CONFLICT, and a conflict has no canonical claim: it is fail-closed, not
 // tie-broken.
 //
+// A CLAIM THIS PACKAGE CANNOT RECONCILE CONTESTS ITS ROUND RATHER THAN LEAVING
+// IT. That is the same reading, applied to the one case that used to escape it:
+// a claim with no factset digest, or one whose text this registry's encoding
+// cannot carry, is not KNOWN to agree with the round's other claims, so the
+// round is fail-closed (roundsWithUnreconcilableClaims). An earlier version
+// routed such a claim out of its round entirely, and two independent review
+// lanes showed what that cost — ONE invalid byte appended to a competing claim
+// dissolved a CONFLICT into a UNIQUE with a canonical claim, and the case
+// counted. It costs an honest registry nothing: ClaimSourceRound derives its
+// digest from a verified factset and its round name from a selected episode, so
+// a derived claim never reaches the invalid bucket.
+//
 // THE REGISTRY IT RETURNS CAN ALWAYS BE WRITTEN DOWN AND READ BACK, and that
-// took a repair here rather than a gate one function later. A claim whose text
-// this encoding cannot carry is routed to INVALID with that text dropped
-// (expressibleClaim), so no registry this function mints can fail the
-// re-derivation VerifySourceRoundRegistry performs on it. It used to mint
-// exactly that: a registry that VERIFIED, marshalled without error and then
-// failed its own re-derivation, because the bytes it framed came back as
-// U+FFFD.
+// took a repair here rather than a gate one function later. It used to mint a
+// registry that VERIFIED, marshalled without error and then failed its own
+// re-derivation, because the bytes it framed came back as U+FFFD.
+// VerifySourceRoundRegistry carries the matching gate as the other two
+// verifiers do — see checkRegistryTextExpressible for why that gate was judged
+// unnecessary first and why the judgement was wrong. This repair is the half
+// that gate cannot do: without it, minting would produce registries the
+// verifier refuses.
 //
-// checkRegistryTextExpressible refuses a registry carrying a string this
-// package's own encoding cannot carry unchanged.
-//
-// ITS NECESSITY IS A JUDGEMENT THAT WAS MADE THE OTHER WAY FIRST, so the
-// reasoning is here rather than in a review thread. The repair for this class
-// went into the PRODUCER: ReconcileSourceRounds drops what it cannot carry, and
-// since registryDigest is unexported and the reconciler is the only exported
-// source of a registry, no consistent uncarriable registry could then be
-// obtained at all -- checked per position, and every hand-edited one is refused
-// by the two gates below. On that footing a scan here looked like work above a
-// gate that already refuses without it.
-//
-// TWO INDEPENDENT EXTERNAL REVIEWS ASKED FOR IT ANYWAY, and they were right,
-// for a reason neither had to state: that argument rests on the absence of an
-// exported serializer -- a property of this package's SURFACE, which the next
-// commit can change silently -- while the sibling gates in factset.go and
-// resolution.go rest on the artifact itself. This package has now been wrong
-// twice about a class it declared shut by reasoning, so the gate that cannot
-// quietly stop holding is the one to have. It is also the cheaper half of the
-// pair: a UTF-8 scan walks the same bytes registryDigest is about to HASH.
-//
-// Both halves are kept, and neither substitutes for the other. Without the
-// producer repair this gate would make ReconcileSourceRounds mint registries
-// its own verifier refuses -- the exact producer/verifier contradiction this
-// round found at the factset and again at the resolution artifact.
-func checkRegistryTextExpressible(reg SourceRoundRegistry) error {
-	lossy := func(what string) error {
-		return errors.Join(ErrSourceRoundRegistry, errors.New("p4offline: "+what+
-			" is not valid UTF-8, so this registry's own encoding cannot carry it unchanged"))
-	}
-	for i, e := range reg.Entries {
-		at := "entry " + strconv.Itoa(i) + " "
-		switch {
-		case !utf8.ValidString(e.EventID):
-			return lossy(at + "event id")
-		case !utf8.ValidString(string(e.Status)):
-			return lossy(at + "status")
-		}
-		for j, c := range e.Claims {
-			if what := claimTextFault(c); what != "" {
-				return lossy(at + "claim " + strconv.Itoa(j) + " " + what)
-			}
-		}
-		// Canonical is framed by registryDigest as a BOOLEAN only, so a
-		// canonical claim is the one position in a registry whose bytes the
-		// digest does not cover. Re-reconciliation catches a fabricated one --
-		// but only by disagreeing, and this names it.
-		if e.Canonical != nil {
-			if what := claimTextFault(*e.Canonical); what != "" {
-				return lossy(at + "canonical claim " + what)
-			}
-		}
-	}
-	return nil
-}
-
-// VerifySourceRoundRegistry carries the matching gate, as the other two
-// verifiers do -- see checkRegistryTextExpressible, which records why that gate
-// was judged unnecessary first and why the judgement was wrong. This repair is
-// the half that gate cannot do: without it, minting would produce registries
-// the verifier refuses.
-//
-// This refuses nothing ClaimSourceRound derives: every string a derived claim
-// carries has already passed checkFactsetValuesExpressible on the factset it
-// came from, which is pinned rather than argued in
-// TestADerivedClaimIsNeverRoutedInvalidForItsText.
+// This refuses nothing ClaimSourceRound derives. Six of a derived claim's seven
+// strings have already passed checkFactsetValuesExpressible on the factset they
+// came from; the seventh, the factset digest, is held to this package's own 64
+// hex digits by the digest comparison that follows it. Pinned rather than
+// argued in TestADerivedClaimIsNeverRoutedInvalidForItsText.
 func ReconcileSourceRounds(claims []SourceRoundClaim) SourceRoundRegistry {
 	out := SourceRoundRegistry{Version: SourceRoundRegistryVersion}
 	groups := map[string][]SourceRoundClaim{}
@@ -2100,11 +2160,19 @@ func ReconcileSourceRounds(claims []SourceRoundClaim) SourceRoundRegistry {
 		// cheap clauses do not merely refuse, they decide what is RECORDED,
 		// and what they record is the claim verbatim. Reaching them first
 		// would write the unrepresentable bytes into the registry on exactly
-		// the path meant to keep them out. Cost, measured rather than
-		// asserted, is in TestTheExpressibilityRoutingAllocatesNothing: the
-		// scan allocates nothing, and this function's total allocation count
-		// is identical with the routing present and absent at every size and
-		// identifier width measured.
+		// the path meant to keep them out.
+		//
+		// What is ASSERTED about the cost is narrower than an earlier wording
+		// here claimed, and a review lane drew the line: what
+		// TestTheExpressibilityRoutingAllocatesNothing measures is that
+		// claimTextFault and expressibleClaim allocate ZERO -- not this
+		// function's total, and not a routing-present-against-absent
+		// comparison. That comparison was run, at nine sizes and widths, and
+		// came back identical on both sides; a lane reproduced the invariant
+		// exactly and could not reproduce every absolute figure, because the
+		// fixture behind them was never written down. So the invariant is kept
+		// here and the absolute numbers are not: they were evidence for a
+		// reader who had the fixture, and nobody does.
 		case claimTextFault(c) != "":
 			invalid = append(invalid, expressibleClaim(c))
 		case c.Episode.EventID == "" || c.FactsetDigest == "":
@@ -2113,6 +2181,7 @@ func ReconcileSourceRounds(claims []SourceRoundClaim) SourceRoundRegistry {
 			groups[c.Episode.EventID] = append(groups[c.Episode.EventID], c)
 		}
 	}
+	contested := roundsWithUnreconcilableClaims(invalid)
 	ids := make([]string, 0, len(groups))
 	for id := range groups {
 		ids = append(ids, id)
@@ -2130,7 +2199,10 @@ func ReconcileSourceRounds(claims []SourceRoundClaim) SourceRoundRegistry {
 			}
 		}
 		switch {
-		case !identical:
+		// A round some claim spoke about unreconcilably is a CONFLICT whatever
+		// its reconcilable claims say, because this package cannot know whether
+		// the claim it could not read agreed with them.
+		case !identical || contested[id]:
 			entry.Status = SourceRoundConflict
 		case len(cs) == 1:
 			entry.Status = SourceRoundUnique
@@ -2265,10 +2337,16 @@ func VerifySourceRoundRegistry(reg SourceRoundRegistry) error {
 	// bytes and 34.9 / 75.1 / 144.6 / 192.8 ms at n = 2,000 / 4,000 / 8,000 /
 	// 16,000 claims -- 100.0% of the cost of a VALID verification, to refuse on
 	// a 64-character comparison. Halved by asking the digest first.
-	// AHEAD OF THE DIGEST, and cheaper than it: this scans the same bytes
-	// registryDigest is about to hash, without hashing them. An uncarriable
-	// registry is refused here rather than after a full framing pass, and an
-	// honest one pays a walk it was going to pay anyway.
+	//
+	// AHEAD OF THE DIGEST, AND CHEAPER THAN IT -- but not, as an earlier wording
+	// here claimed, "the same bytes registryDigest is about to hash". A review
+	// lane refuted that: registryDigest hashes claimKey's HEX EXPANSION of a
+	// framing of each claim, several times the claim's own width, and it never
+	// touches the canonical claim's bytes at all, which this walk does. Cheaper
+	// is the measured part -- at 2,000 claims this gate is 570 microseconds
+	// against registryDigest's 28.2 milliseconds. What it buys is refusing an
+	// uncarriable registry before a full framing pass, and naming the position
+	// it refused instead of returning the bare sentinel.
 	if err := checkRegistryTextExpressible(reg); err != nil {
 		return err
 	}

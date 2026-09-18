@@ -330,6 +330,44 @@ func ProjectResolution(ev ResolutionEvidence) ResolutionArtifact {
 	return a
 }
 
+// evidenceTextFault names the first string in the evidence that the artifact's
+// own encoding cannot carry unchanged, or "" when there is none.
+//
+// It allocates nothing and copies nothing, which is what lets expressibleEvidence
+// leave honest evidence alone entirely.
+func evidenceTextFault(ev ResolutionEvidence) string {
+	for _, f := range [...]struct{ what, v string }{
+		{"round event id", ev.Round.EventID},
+		{"round channel id", ev.Round.ChannelID},
+		{"winner outcome id", ev.WinnerOutcomeID},
+		{"proof basis", ev.ProofBasis},
+		{"projector revision", ev.ProjectorRevision},
+		{"proof revision", ev.ProofRevision},
+		{"availability", string(ev.Availability)},
+	} {
+		if !utf8.ValidString(f.v) {
+			return f.what
+		}
+	}
+	for i, id := range ev.OrderedOutcomeIDs {
+		if !utf8.ValidString(id) {
+			return "ordered outcome id " + strconv.Itoa(i)
+		}
+	}
+	for i, r := range ev.EvidenceReferences {
+		for _, f := range [...]struct{ what, v string }{
+			{"observation id", r.ObservationID}, {"collector session id", r.CollectorSessionID},
+			{"kind", r.Kind}, {"phase", r.Phase},
+			{"round state", r.RoundState}, {"event id", r.EventID},
+		} {
+			if !utf8.ValidString(f.v) {
+				return "evidence reference " + strconv.Itoa(i) + " " + f.what
+			}
+		}
+	}
+	return ""
+}
+
 // expressibleEvidence returns ev with every string the artifact would frame
 // replaced by "" if it is not valid UTF-8, and reports whether it replaced any.
 //
@@ -341,7 +379,18 @@ func ProjectResolution(ev ResolutionEvidence) ResolutionArtifact {
 // artifact that comes back is one this package can verify and store.
 //
 // It does not touch Claim: an unrepresentable claim is outside the vocabulary
-// and the switch below already refuses it there.
+// and the switch below already refuses it there. Checked rather than assumed,
+// in "an unrepresentable claim is refused by the vocabulary, not carried".
+//
+// HONEST EVIDENCE IS RETURNED UNTOUCHED, and that is a repair rather than an
+// optimisation. The first version copied both slices unconditionally, and
+// ProjectResolution then copies them AGAIN into the artifact, so every honest
+// projection paid two copies where it used to pay one — a review lane measured
+// +12,009,584 bytes and +22.4% allocation at 100,000 references, on a path where
+// nothing is lossy. Worst of all on the verifier's re-projection, which runs
+// only AFTER checkResolutionStringsExpressible has proved every string valid, so
+// the second copy there was provably waste. The scan below decides first, and
+// only lossy evidence is copied at all.
 //
 // THE TWO SLICES ARE COPIED BEFORE ANYTHING IS BLANKED. ProjectResolution takes
 // its evidence by value, which protects the scalars and protects nothing else:
@@ -351,11 +400,12 @@ func ProjectResolution(ev ResolutionEvidence) ResolutionArtifact {
 // worse defect than the one this gate was added to fix. Pinned by the
 // "caller's evidence is not rewritten" case, which fails without these copies.
 func expressibleEvidence(ev ResolutionEvidence) (ResolutionEvidence, bool) {
-	lossy := false
+	if evidenceTextFault(ev) == "" {
+		return ev, false
+	}
 	keep := func(v *string) {
 		if !utf8.ValidString(*v) {
 			*v = ""
-			lossy = true
 		}
 	}
 	keep(&ev.Round.EventID)
@@ -366,7 +416,6 @@ func expressibleEvidence(ev ResolutionEvidence) (ResolutionEvidence, bool) {
 	keep(&ev.ProofRevision)
 	if !utf8.ValidString(string(ev.Availability)) {
 		ev.Availability = ""
-		lossy = true
 	}
 	ids := append([]string(nil), ev.OrderedOutcomeIDs...)
 	for i := range ids {
@@ -383,7 +432,7 @@ func expressibleEvidence(ev ResolutionEvidence) (ResolutionEvidence, bool) {
 		keep(&refs[i].EventID)
 	}
 	ev.EvidenceReferences = refs
-	return ev, lossy
+	return ev, true
 }
 
 // SerializeResolutionArtifact renders the artifact's facts canonically:
