@@ -1,0 +1,15 @@
+{
+  "status": "PASS",
+  "vector_count": 7,
+  "checks_per_vector": [
+    "identity",
+    "LP byte length",
+    "LP SHA256",
+    "full HMAC SHA256",
+    "first8 BE hex16"
+  ],
+  "seed_equal": true,
+  "no_model_calls": true,
+  "no_comparative_metrics": true,
+  "scope": "Independent Python/Node implementations of approved algorithm, newly constructed synthetic fixture identities only. Not a real entropy schedule or performance evaluation."
+}
