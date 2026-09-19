@@ -1143,3 +1143,74 @@ func TestProjectResolutionNeverMintsAnArtifactItsOwnVerifierRefuses(t *testing.T
 		}
 	})
 }
+
+// TestAHoistedArmDefersToTheEncodingFaultOnTheStringItReads pins the
+// precedence the hoisted gates must not move.
+//
+// A REVIEW LANE FOUND THIS, and the fixture is why nothing else could.
+// TestEveryReachableResolutionStringRefusesInvalidUTF8 pokes a WINNER_KNOWN
+// artifact, so the UNKNOWN-names-a-winner arm never fires in it; the hoisted
+// gate reads WinnerOutcomeID only on an UNKNOWN artifact, and that
+// combination -- UNKNOWN, plus an identity that cannot be read -- is a row
+// neither test carried. Hoisting the arm above the expressibility scan
+// therefore silently swapped an encoding fault for a semantic claim about a
+// string nobody can read.
+//
+// The rule is that a field which is both unreadable AND semantically wrong is
+// named as UNREADABLE first, because that is the finding a caller can act on:
+// the semantic reading of bytes that do not decode is not a fact about the
+// artifact. Both hoisted arms defer on the string they read; this holds both.
+func TestAHoistedArmDefersToTheEncodingFaultOnTheStringItReads(t *testing.T) {
+	const invalid = "\xff"
+	unknown := func(t *testing.T) p4offline.ResolutionArtifact {
+		t.Helper()
+		a := p4offline.ProjectResolution(p4offline.ResolutionEvidence{
+			Round: p4offline.PublicRoundIdentity{EventID: "e1"}, OrderedOutcomeIDs: []string{"o1", "o2"},
+			Claim: p4offline.ResolutionUnknown, Availability: p4offline.AvailabilityNotRecorded,
+			ProjectorRevision: "rev", ProofRevision: "x"})
+		if err := p4offline.VerifyResolutionArtifact(a); err != nil {
+			t.Fatalf("the unpoked control must verify, or every row below passes for the wrong reason: %v", err)
+		}
+		return a
+	}
+	for _, tc := range []struct {
+		name string
+		poke func(*p4offline.ResolutionArtifact)
+		says string
+	}{
+		// THE CONTROLS COME FIRST: without them a gate that refuses
+		// everything as unreadable would pass the rows that matter.
+		{"a readable winner identity is a semantic claim", func(a *p4offline.ResolutionArtifact) {
+			a.WinnerOutcomeID = "o1"
+		}, "names a winner"},
+		{"a winner index alone is a semantic claim", func(a *p4offline.ResolutionArtifact) {
+			a.WinnerIndex = 0
+		}, "names a winner"},
+		{"an out-of-vocabulary outcome is a semantic claim", func(a *p4offline.ResolutionArtifact) {
+			a.Outcome = "NOT_AN_OUTCOME"
+		}, "is outside the vocabulary"},
+		// AND THESE ARE THE ROWS THE HOIST BROKE.
+		{"an UNREADABLE winner identity is an encoding fault", func(a *p4offline.ResolutionArtifact) {
+			a.WinnerOutcomeID = invalid
+		}, "is not valid UTF-8"},
+		{"an unreadable identity beside a bad index is still an encoding fault", func(a *p4offline.ResolutionArtifact) {
+			a.WinnerOutcomeID, a.WinnerIndex = invalid, 0
+		}, "is not valid UTF-8"},
+		{"an UNREADABLE outcome is an encoding fault", func(a *p4offline.ResolutionArtifact) {
+			a.Outcome = p4offline.ResolutionOutcome(invalid)
+		}, "is not valid UTF-8"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a := unknown(t)
+			tc.poke(&a)
+			a.ResolutionFactsDigest = p4offline.DigestReference(digestOf(p4offline.SerializeResolutionArtifact(a)))
+			err := p4offline.VerifyResolutionArtifact(a)
+			if err == nil {
+				t.Fatalf("this poke must be refused")
+			}
+			if !strings.Contains(err.Error(), tc.says) {
+				t.Fatalf("the refusal must say %q, got: %s", tc.says, strings.ReplaceAll(err.Error(), "\n", " | "))
+			}
+		})
+	}
+}

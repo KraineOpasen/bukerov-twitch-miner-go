@@ -647,16 +647,26 @@ func VerifyResolutionArtifact(a ResolutionArtifact) error {
 	// the WORK half of canonical.go's rule, at a site this package had listed
 	// only under the TEXT half.
 	//
-	// THE OUT-OF-VOCABULARY ARM DEFERS TO EXPRESSIBILITY, so an Outcome that
-	// is both unreadable and out of vocabulary is still named as unreadable
-	// and the precedence a caller sees does not move. Validating that ONE
-	// field is proportional to that field, not to the artifact.
+	// EACH ARM DEFERS TO EXPRESSIBILITY ON THE STRING IT READS, so a field
+	// that is both unreadable and semantically wrong is still named as
+	// UNREADABLE and the precedence a caller sees does not move. Validating
+	// one field is proportional to that field, not to the artifact.
+	//
+	// BOTH ARMS NEED IT AND ONLY THE FIRST HAD IT. A review lane found the
+	// second: an UNKNOWN artifact whose WinnerOutcomeID is invalid UTF-8 was
+	// told it "names a winner" -- a semantic claim about an identity that
+	// cannot be read -- where before the hoist it was told the identity is not
+	// valid UTF-8. The winner arm reads a string too, so it defers on the same
+	// terms. It defers on the STRING being unreadable rather than on which
+	// half of its condition fired, because an unreadable identity is the
+	// finding a caller needs first whichever half is true.
 	if a.Outcome != ResolutionWinnerKnown && a.Outcome != ResolutionRefund &&
 		a.Outcome != ResolutionUnknown && utf8.ValidString(string(a.Outcome)) {
 		return errors.Join(ErrResolutionNotDerivable, errors.New("p4offline: outcome of "+
 			suppliedTextExtent(string(a.Outcome))+" is outside the vocabulary"))
 	}
-	if a.Outcome == ResolutionUnknown && (a.WinnerOutcomeID != "" || a.WinnerIndex != -1) {
+	if a.Outcome == ResolutionUnknown && utf8.ValidString(a.WinnerOutcomeID) &&
+		(a.WinnerOutcomeID != "" || a.WinnerIndex != -1) {
 		return errors.Join(ErrResolutionNotDerivable, errors.New("p4offline: an UNKNOWN artifact names a winner"))
 	}
 	if err := checkResolutionStringsExpressible(a); err != nil {
