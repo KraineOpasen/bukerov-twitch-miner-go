@@ -4164,3 +4164,56 @@ func TestNoP3bRulesetCarryingTextItCannotExpressIsVerified(t *testing.T) {
 		})
 	}
 }
+
+// TestAnOutOfProtocolCoordinateIsRefusedWithoutProbingTheRuleset pins the
+// ORDER of the two gates at the top of the P3b evaluators.
+//
+// rs.check re-derives the verified ruleset's native digest by running the core
+// over the whole config, which is proportional to a caller-supplied ConfigID
+// that nothing bounds below 128 MiB. checkEntropyCoordinates' first clause is
+// one comparison against TrajectoryCount. With the probe above the comparison,
+// an out-of-protocol trajectory paid for the probe and threw it away: a
+// security review lane measured 2,113,748 B/op for a refusal settled by an
+// integer.
+//
+// BOTH SIDES ARE ASSERTED, because a ceiling alone passes if the fixture's
+// identifier never reaches the measured path: the wide fixture must refuse for
+// no more than the narrow one plus a constant, AND the wide fixture must be
+// genuinely wide, which the verified ruleset's own identity proves.
+func TestAnOutOfProtocolCoordinateIsRefusedWithoutProbingTheRuleset(t *testing.T) {
+	measure := func(f func() error) (uint64, error) {
+		runtime.GC()
+		var before, after runtime.MemStats
+		runtime.ReadMemStats(&before)
+		err := f()
+		runtime.ReadMemStats(&after)
+		return after.TotalAlloc - before.TotalAlloc, err
+	}
+	narrow := mustVerify(t, rulesetFrom(t, cfgWithRule("a", predictioneval.ComparatorGe, 50, 100)))
+	wide := mustVerify(t, rulesetFrom(t, cfgWithRule(strings.Repeat("a", 1<<20), predictioneval.ComparatorGe, 50, 100)))
+	if len(wide.RulesetID) != 1<<20 {
+		t.Fatalf("the wide fixture must carry a %d-byte identifier, it carries %d", 1<<20, len(wide.RulesetID))
+	}
+	out := p4offline.EntropyCoordinates{Trajectory: 1 << 30}
+	for _, tc := range []struct {
+		name string
+		rs   p4offline.VerifiedP3bRuleset
+	}{{"a one-byte identifier", narrow}, {"a 1 MiB identifier", wide}} {
+		t.Run(tc.name, func(t *testing.T) {
+			allocated, err := measure(func() error {
+				_, e := p4offline.EvaluateP3bCase(p4offline.CommonFactset{}, tc.rs, out)
+				return e
+			})
+			t.Logf("%s: the refusing call allocated %d bytes", tc.name, allocated)
+			if !errors.Is(err, p4offline.ErrEntropyCoordinates) {
+				t.Fatalf("an out-of-protocol trajectory must be refused as exactly that, got %v", err)
+			}
+			// The constant is generous against allocator rounding and still
+			// four orders of magnitude below one probe of the wide config.
+			if allocated > 8192 {
+				t.Fatalf("the refusal allocated %d bytes: it is settled by one comparison against TrajectoryCount and must not run the ruleset probe above it",
+					allocated)
+			}
+		})
+	}
+}

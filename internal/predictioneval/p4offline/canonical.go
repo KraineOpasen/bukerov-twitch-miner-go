@@ -80,6 +80,21 @@ func (c *canonical) digest() string {
 //     moment the digest verifies, which a caller can make it do, because the
 //     serializers are exported and the digest is an unkeyed SHA-256 that
 //     detects change and not origin.
+//     THE SAME THREE ARMS WERE AN INSTANCE OF THE WORK HALF and were listed
+//     only here, under the TEXT half. An adversarial review lane measured them:
+//     an eleven-byte out-of-vocabulary Outcome cost 13,436,051 B/op on a
+//     20,000-reference artifact and a seventeen-byte Completeness 16,885,191
+//     B/op on a 20,000-outcome factset -- in both cases 100% of a FULL honest
+//     verification of the same payload, for a verdict that reads one
+//     constant-size field. Fixing their MESSAGES left their COST untouched,
+//     which is the reading this note exists to stop: an instance can belong to
+//     both halves, and repairing the half you noticed is not repairing the
+//     site. The two arms whose verdict does not depend on the digest -- the
+//     outcome vocabulary with the UNKNOWN winner check, and the completeness
+//     vocabulary -- are now gated above the scan and the framing and refuse in
+//     72 and 168 bytes on a 1 MiB payload. The stealth-proof arm is NOT
+//     hoisted: it compares against a value derived from the settings, so it
+//     genuinely needs what is above it.
 //   - SCOPING IT TO GATES misses a further instance, which is not a gate at
 //     all: the derivation argument that
 //     P3bCaseResult.Decision builds for decisionOf. Go evaluates arguments
@@ -268,7 +283,24 @@ func (c *canonical) digest() string {
 // class that spans three. It is left where it is; this pointer is the smaller
 // change.
 func suppliedTextExtent(s string) string {
-	return strconv.Itoa(len(s)) + " bytes"
+	return suppliedExtent(len(s))
+}
+
+// suppliedExtent is the same sentence for an extent that is COMPUTED rather
+// than measured off a string in hand.
+//
+// IT EXISTS BECAUSE ONE EXTENT CANNOT BE MEASURED WITHOUT BUILDING THE VERY
+// TEXT THE CEILING EXCLUDES. decodeFault must report how wide a decoder's
+// sentence is without rendering it, and the sentence's width is the width of
+// the same sentence with its caller-supplied carrier blanked, plus the
+// carrier's own length -- an identity, because the carrier is concatenated in
+// whole. So the number is arithmetic and the string is never built.
+//
+// BOTH SPELLINGS ARE ONE CENSUS TARGET, because a second way to write an
+// extent is a second place a future edit can write one that nothing counts.
+// TestTheSuppliedTextExtentCensusMatchesAScan walks call sites of both names.
+func suppliedExtent(n int) string {
+	return strconv.Itoa(n) + " bytes"
 }
 
 // lpFrame frames the parts in order with the u64 big-endian length prefix and

@@ -576,6 +576,26 @@ func TestARefusalBelowADigestDoesNotFrameItsSupplyAgain(t *testing.T) {
 	//
 	// ONE ROW BELOW DOES NOT USE floorOf: the registry row's payload is not
 	// `big`, so its floor is the lower side of its own ratio, written there.
+	// TWO ROWS BELOW USE flatOf INSTEAD, and the reason is the finding that
+	// put it here. floorOf's premise -- "reaching this branch means the digest
+	// already verified, so one framing is paid and unavoidable" -- is FALSE
+	// for an arm whose verdict does not depend on the digest at all. An
+	// adversarial review lane measured two such arms at 100% of a full honest
+	// verification for a refusal settled by an eleven- and a seventeen-byte
+	// field, and both are now gated above the scan and the framing. For those
+	// rows the payload being OFF the measured path is the property, not a
+	// broken fixture, so the guard is a constant ceiling: a reintroduced
+	// framing of `big` overshoots it by more than two orders of magnitude.
+	// The positive control that the fixture is genuinely large is the `says`
+	// assertion above each call plus the unpoked control verifying.
+	flatOf := func(t *testing.T, allocated uint64) {
+		t.Helper()
+		const constantCeiling = 4096
+		if allocated > constantCeiling {
+			t.Fatalf("the refusing call allocated %d bytes on a %d-byte payload: this arm decides from a constant-size field and is gated ABOVE the scan and the framing, so its cost must not move with the payload (ceiling %d)",
+				allocated, len(big), constantCeiling)
+		}
+	}
 	floorOf := func(t *testing.T, allocated uint64, framings int) {
 		t.Helper()
 		if want := uint64(framings) * uint64(len(big)) * 9 / 10; allocated < want {
@@ -599,16 +619,9 @@ func TestARefusalBelowADigestDoesNotFrameItsSupplyAgain(t *testing.T) {
 		if !errors.Is(err, p4offline.ErrResolutionNotDerivable) || !strings.Contains(err.Error(), "names a winner") {
 			t.Fatalf("this fixture must reach the winner branch, or the budget below proves nothing: %v", err)
 		}
-		// ONE FRAMING, NOT TWO. Reaching this branch means the digest already
-		// verified, so one framing of the payload is paid and unavoidable:
-		// the refusal measures 1.01x the payload. A second framing inside the
-		// branch measures 2.02x. The line sits between them at 1.5x, which is
-		// half the payload of margin on either side.
-		floorOf(t, allocated, 1)
-		if allocated > uint64(len(big))+uint64(len(big))/2 {
-			t.Fatalf("the refusal allocated %d bytes on a %d-byte payload: reaching it costs one framing, and refusing must not add another",
-				allocated, len(big))
-		}
+		// NO FRAMING AT ALL. This arm reads WinnerOutcomeID and WinnerIndex
+		// and nothing else, so it is refused above the scan and the framing.
+		flatOf(t, allocated)
 	})
 
 	t.Run("an artifact whose facts do not re-project", func(t *testing.T) {
@@ -704,6 +717,14 @@ func TestARefusalBelowADigestDoesNotFrameItsSupplyAgain(t *testing.T) {
 				t.Logf("a %d-byte factset; the refusing call allocated %d bytes", len(big), allocated)
 				if !errors.Is(err, p4offline.ErrFactsetInconsistent) || !strings.Contains(err.Error(), tc.says) {
 					t.Fatalf("this poke must reach the arm that says %q: %v", tc.says, err)
+				}
+				// THE VOCABULARY ARM IS THE ONLY ONE OF THESE HOISTED, because
+				// it is the only one that reads a single constant-size field.
+				// Every other row here derives its verdict from the factset's
+				// values and must pay the one framing to reach its branch.
+				if tc.says == "is outside the vocabulary" {
+					flatOf(t, allocated)
+					return
 				}
 				floorOf(t, allocated, 1)
 				if allocated > uint64(len(big))+uint64(len(big))/2 {

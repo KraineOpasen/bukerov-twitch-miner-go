@@ -13,6 +13,7 @@ package p4offline
 
 import (
 	"encoding/json"
+	"errors"
 	"math/rand"
 	"reflect"
 	"runtime"
@@ -1202,12 +1203,16 @@ func TestExpressibleClaimIsIdempotentAndRoutesBackToInvalid(t *testing.T) {
 //
 // decodeFault used to judge the fault by `err.Error()`, and rendering an
 // *encoding/json.UnmarshalTypeError CONCATENATES the offending literal into a
-// NEW string — so the refusal it returned was 154 bytes while producing it had
-// already copied the caller's own digits. A Codex review lane reported it on
-// the published head 11a16b87; measured there through VerifyP3bRuleset, a
-// 64 KiB literal cost about 532 KB to refuse against about 8 KB for a 1 KiB
-// one, of which roughly 72 KB was this function rendering what it was about to
-// refuse to carry.
+// NEW string — so the refusal that LEFT VerifyP3bRuleset was 154 bytes, of
+// which this function's own sentence is 75 and the joined sentinel the rest,
+// while producing it had already copied the caller's own digits. A Codex
+// review lane reported it on the published head 11a16b87; measured there
+// through VerifyP3bRuleset, refusing a document whose literal is 64 KiB cost
+// about 540.6 KB against about 8.3 KB for a 1 KiB one — a DIFFERENCE of about
+// 532 KB, which is the figure worth quoting only once it is said which of the
+// two it is. Roughly 72 KB of that difference was this function rendering what
+// it was about to refuse to carry; the rest is the decoder reading a document
+// 64 KiB larger, and it is still there.
 //
 // THAT IS THE ROUND'S OWN RULE FAILING IN THE CODE THAT STATES IT: a
 // materialization must not precede a gate that can refuse without it. This
@@ -1247,5 +1252,95 @@ func TestADecoderFaultIsBoundedBeforeItIsRendered(t *testing.T) {
 		t.Fatalf("bounding a 64 KiB carrier allocates %d bytes more than bounding a 1 KiB one: "+
 			"the fault is being RENDERED before its extent is judged, so the bounded refusal "+
 			"costs a copy of the very text it refuses to carry", grew)
+	}
+}
+
+// TestADecoderFaultReportsTheSentenceAndNotItsCarrier pins the NUMBER a
+// decode-fault refusal reports, which nothing pinned before.
+//
+// THE BOUNDARY TEST CANNOT SEE THIS. It asserts where the ceiling begins, how
+// wide the widest literal carried verbatim is, and that the sentence it holds
+// is 512 bytes -- three true facts, none of which observes the extent printed
+// ABOVE the ceiling. So a change to what that extent MEASURES passes it: an
+// arm reporting the carrier's width rather than the sentence's leaves every
+// row of that test green while every over-ceiling refusal on this branch
+// quietly reports a different number, and reports one that DECREASES as the
+// input grows, because the two quantities cross at the ceiling.
+//
+// WHAT IS PINNED is the identity the repaired arm relies on: the sentence's
+// width is the width of the same sentence with its carrier blanked, plus the
+// carrier's length, so the number reported without rendering is the number
+// rendering would have produced. Monotonicity follows and is asserted too,
+// because a refusal whose extent falls as its input grows is not a measure.
+func TestADecoderFaultReportsTheSentenceAndNotItsCarrier(t *testing.T) {
+	widths := []int{0, 100, 300, 309, 428, 429, 430, 452, 453, 504, 505, 506, 600, 1000, 65536}
+	for _, field := range []string{"", "default.rawMinPercent", "detailed[3].rawAttemptRatePercent"} {
+		last := -1
+		for _, n := range widths {
+			err := &json.UnmarshalTypeError{
+				Value: "number " + strings.Repeat("9", n),
+				Type:  reflect.TypeOf(float64(0)),
+				Field: field,
+			}
+			sentence := len(err.Error())
+			got := decodeFault(err).Error()
+			if sentence <= rulesetDecodeFaultCeiling {
+				if got != err.Error() {
+					t.Fatalf("field=%q n=%d: a fault whose sentence is %d bytes is under the ceiling and must pass through as written, got %q",
+						field, n, sentence, got)
+				}
+				continue
+			}
+			want := "p4offline: the decoder refused the raw document with a fault of " +
+				strconv.Itoa(sentence) + " bytes"
+			if got != want {
+				t.Fatalf("field=%q n=%d: the refusal must report the SENTENCE's width\n got %q\nwant %q",
+					field, n, got, want)
+			}
+			if last >= 0 && sentence < last {
+				t.Fatalf("field=%q n=%d: the fixture itself is not monotonic", field, n)
+			}
+			last = sentence
+		}
+	}
+}
+
+// TestTheRenderedArmsCeilingIsHeldByAFaultThatIsNotTyped pins the FALLBACK,
+// which the typed arm quietly took out of reach.
+//
+// decodeFault has two gates on one ceiling: the typed arm, which computes an
+// UnmarshalTypeError's sentence width without building it, and the rendered
+// arm below it for every other fault. Every over-ceiling fault encoding/json
+// produces on this decode target today is an UnmarshalTypeError -- an
+// adversarial lane fuzzed 1.4 million documents looking for one that is not
+// and found none -- so after the typed arm went in, NOTHING reached the
+// rendered arm with anything long enough to test its ceiling. A mutation
+// campaign found it: raising that ceiling to 1<<30 left the whole suite green.
+//
+// The rendered arm is precisely the part that covers a fault type the library
+// adds tomorrow, so leaving its ceiling unpinned would retire the guard that
+// exists for the unknown case. This drives it with a fault that is not typed
+// at all.
+func TestTheRenderedArmsCeilingIsHeldByAFaultThatIsNotTyped(t *testing.T) {
+	// One byte under, on the ceiling, one byte over: the ceiling cannot be
+	// raised, lowered or moved without a named failure here either.
+	const prefix = "p4offline: the decoder refused the raw document with a fault of "
+	for _, n := range []int{rulesetDecodeFaultCeiling - 1, rulesetDecodeFaultCeiling, rulesetDecodeFaultCeiling + 1} {
+		plain := errors.New(strings.Repeat("z", n))
+		if _, typed := plain.(*json.UnmarshalTypeError); typed {
+			t.Fatalf("the fixture must NOT be the type the arm above handles")
+		}
+		got := decodeFault(plain).Error()
+		if n <= rulesetDecodeFaultCeiling {
+			if got != plain.Error() {
+				t.Fatalf("a %d-byte untyped fault is at or under the ceiling and must pass through as written, got %d bytes",
+					n, len(got))
+			}
+			continue
+		}
+		want := prefix + strconv.Itoa(n) + " bytes"
+		if got != want {
+			t.Fatalf("a %d-byte untyped fault must be reported by extent\n got %q\nwant %q", n, got, want)
+		}
 	}
 }

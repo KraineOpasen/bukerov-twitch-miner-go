@@ -437,13 +437,22 @@ const rulesetDecodeFaultCeiling = 512
 // exists to keep out of the refusal. Recorded because it narrows what a future
 // caller can do, not because anything today depends on it.
 //
-// IT MEASURES THE SENTENCE BY MATERIALIZING IT, which is the rule's own shape
-// read one level down and is why the promise is scoped to the REFUSAL rather
-// than to the work. err.Error() renders the library's sentence -- the caller's
-// literal inside it -- before the ceiling can judge its length, because there
-// is nothing else to judge. What the ceiling bounds is what LEAVES this
-// package: a caller-proportional sentence is built once, here, and never
-// returned, never joined and never stored.
+// IT MEASURES THE SENTENCE WITHOUT MATERIALIZING IT where the library hands
+// over a typed carrier, and by rendering it everywhere else. For an
+// UnmarshalTypeError the offending literal is concatenated WHOLE into the
+// sentence, so the sentence's width is the width of that same sentence with
+// the carrier blanked -- text this package's own type and field names produce
+// -- plus the carrier's length. That is an identity, so the width is
+// arithmetic. For every other fault there is nothing to decompose and
+// err.Error() renders it before the ceiling can judge its length; what the
+// ceiling bounds there is what LEAVES this package, a caller-proportional
+// sentence built once, here, and never returned, never joined and never
+// stored. The residual is therefore a FUTURE error type that renders
+// proportionally to the document and is not an UnmarshalTypeError: this
+// function does not close that, and no present type in encoding/json reaches
+// it on this decode target, because checkRulesetKeys refuses an unknown key
+// first with its own bounded diagnosis and the target carries no map, no
+// ,string tag and no custom UnmarshalJSON.
 //
 // THE CEILING IS PINNED FROM BOTH SIDES by a row of
 // TestADecoderFaultIsReportedByItsExtent, because a ceiling nothing straddles
@@ -466,22 +475,52 @@ const rulesetDecodeFaultCeiling = 512
 // word and may be worded differently tomorrow: what this package can promise is
 // that no refusal it returns is proportional to what a caller supplied. Every
 // diagnosis the walker in this file writes is a constant plus an extent and
-// passes through untouched.
+// passes through untouched. CONSULTING THE TYPE DOES NOT MAKE IT ONE, and the
+// distinction is exact rather than a nicety: the typed arm decides on the same
+// predicate the rendered arm would -- the SENTENCE's width against the same
+// ceiling -- and reports the same number. It changes how the width is
+// obtained and nothing about which faults are refused, so a fault type the
+// library adds tomorrow is judged by the ceiling exactly as before.
 func decodeFault(err error) error {
 	// BOUND BEFORE RENDERING, which is the same rule one level down. Judging
 	// the fault by its RENDERED length pays for the very text the ceiling
 	// exists not to carry: encoding/json keeps the offending literal in
-	// UnmarshalTypeError.Value and Error() concatenates it into a NEW string,
-	// so a 64 KiB literal cost about half a megabyte to decide it was too long
-	// to report. A Codex review lane reported that on the published head, and
-	// it is this function's own rule failing inside the function that states
-	// it. The carrier's length is available WITHOUT formatting anything, and
-	// the rendered message is strictly longer than the carrier it embeds, so a
-	// carrier past the ceiling proves the message is too -- no render needed.
+	// UnmarshalTypeError.Value and Error() concatenates it into a NEW string.
+	// A Codex review lane reported that on the published head, and it is this
+	// function's own rule failing inside the function that states it.
+	//
+	// WHAT THE RENDER COST IS STATED SEPARATELY FROM WHAT REFUSING COSTS,
+	// because the two are an order of magnitude apart and a "so" between them
+	// would credit this repair with the difference. Refusing a document whose
+	// one over-long literal is 64 KiB measured about half a megabyte in total;
+	// about 72 KB of that was this function rendering what it was about to
+	// refuse to carry, and it is that 72 KB the repair removes. The remaining
+	// ~460 KB is encoding/json decoding a document 64 KiB larger -- the
+	// decoder's own cost, proportional to RawBytes, which sha256Hex below
+	// already reads in full, and which this function does not touch.
+	//
+	// THE COST OF ASKING is real and is O(1): errors.As takes the address of
+	// a local, so it escapes, and it runs a reflect assignability walk on
+	// every fault that is NOT an UnmarshalTypeError -- which is every
+	// diagnosis the walker in this file writes. That path measures 8 B/op and
+	// one allocation where it previously measured none. It is a constant, not
+	// a proportion, so it does not touch the promise; it is written down
+	// because a package that offers a 16 B/op reading as evidence should not
+	// leave a categorical 0-to-1 allocation unrecorded.
 	var typed *json.UnmarshalTypeError
-	if errors.As(err, &typed) && len(typed.Value) > rulesetDecodeFaultCeiling {
-		return errors.New("p4offline: the decoder refused the raw document with a fault of " +
-			suppliedTextExtent(typed.Value))
+	if errors.As(err, &typed) {
+		// THE SAME SENTENCE WITH ITS CARRIER BLANKED is built from this
+		// package's own type and field names and never from the caller's
+		// text, so its width is O(1). The carrier is concatenated whole, so
+		// blank + len(carrier) IS the width of the sentence the library would
+		// write -- the same number the gate below judges and the same number
+		// it reports, reached without building it.
+		blank := *typed
+		blank.Value = ""
+		if n := len(blank.Error()) + len(typed.Value); n > rulesetDecodeFaultCeiling {
+			return errors.New("p4offline: the decoder refused the raw document with a fault of " +
+				suppliedExtent(n))
+		}
 	}
 	if msg := err.Error(); len(msg) > rulesetDecodeFaultCeiling {
 		return errors.New("p4offline: the decoder refused the raw document with a fault of " +
@@ -887,12 +926,18 @@ func traceWordCount(rules, outcomes int) (int, error) {
 // reports afterwards is checked.
 func EvaluateP3bWithTrace(fs CommonFactset, rs VerifiedP3bRuleset,
 	coords EntropyCoordinates, trace predictioneval.SuppliedDrawTrace) (P3bCaseResult, error) {
-	if err := rs.check(); err != nil {
+	// THE PROTOCOL'S DOMAIN IS CHECKED FIRST, so an out-of-protocol coordinate
+	// is refused as exactly that on every path -- and refused for the price of
+	// the integer that decides it. rs.check below runs a full native
+	// evaluation over the config to re-derive its digest, which is
+	// proportional to a caller-supplied identifier and is DISCARDED on a path
+	// that refuses; a security review lane measured 2,113,748 B/op here for a
+	// refusal settled by one comparison against TrajectoryCount. The order was
+	// the other way round.
+	if err := checkEntropyCoordinates(coords); err != nil {
 		return P3bCaseResult{}, err
 	}
-	// The protocol's domain is checked before anything is projected, so an
-	// out-of-protocol coordinate is refused as exactly that on every path.
-	if err := checkEntropyCoordinates(coords); err != nil {
+	if err := rs.check(); err != nil {
 		return P3bCaseResult{}, err
 	}
 	proj, err := ProjectP3bSingleCandidate(fs)
@@ -1046,10 +1091,12 @@ func evaluateProjected(fs CommonFactset, proj P3bProjection, rs VerifiedP3bRules
 // one verified candidate can consume — so exhaustion cannot occur by
 // construction and every word is reproducible from the coordinates alone.
 func EvaluateP3bCase(fs CommonFactset, rs VerifiedP3bRuleset, coords EntropyCoordinates) (P3bCaseResult, error) {
-	if err := rs.check(); err != nil {
+	// The coordinate gate above the ruleset probe, for the reason stated at
+	// the sibling above: the probe's product is thrown away on this path.
+	if err := checkEntropyCoordinates(coords); err != nil {
 		return P3bCaseResult{}, err
 	}
-	if err := checkEntropyCoordinates(coords); err != nil {
+	if err := rs.check(); err != nil {
 		return P3bCaseResult{}, err
 	}
 	proj, err := ProjectP3bSingleCandidate(fs)

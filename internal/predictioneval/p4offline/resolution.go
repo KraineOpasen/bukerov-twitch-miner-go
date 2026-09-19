@@ -637,6 +637,28 @@ func VerifyResolutionArtifact(a ResolutionArtifact) error {
 			suppliedTextExtent(a.ResolutionFactsDigest)+" is not this package's "+
 			strconv.Quote(DigestReferencePrefix)+" prefix and 64 lower-case hex digits"))
 	}
+	// TWO ARMS OF THE SWITCH BELOW DECIDE FROM CONSTANT-SIZE FIELDS, and the
+	// scan and the framing under them are thrown away when either fires. An
+	// adversarial review lane measured this: an eleven-byte out-of-vocabulary
+	// Outcome cost 13,436,051 B/op on a 20,000-reference artifact -- 100% of a
+	// FULL honest verification of the same artifact, and 62,204x the flat
+	// ContractVersion gate in this same function. The digest gate above is
+	// O(1) and the two arms below are O(1); nothing between them is. This is
+	// the WORK half of canonical.go's rule, at a site this package had listed
+	// only under the TEXT half.
+	//
+	// THE OUT-OF-VOCABULARY ARM DEFERS TO EXPRESSIBILITY, so an Outcome that
+	// is both unreadable and out of vocabulary is still named as unreadable
+	// and the precedence a caller sees does not move. Validating that ONE
+	// field is proportional to that field, not to the artifact.
+	if a.Outcome != ResolutionWinnerKnown && a.Outcome != ResolutionRefund &&
+		a.Outcome != ResolutionUnknown && utf8.ValidString(string(a.Outcome)) {
+		return errors.Join(ErrResolutionNotDerivable, errors.New("p4offline: outcome of "+
+			suppliedTextExtent(string(a.Outcome))+" is outside the vocabulary"))
+	}
+	if a.Outcome == ResolutionUnknown && (a.WinnerOutcomeID != "" || a.WinnerIndex != -1) {
+		return errors.Join(ErrResolutionNotDerivable, errors.New("p4offline: an UNKNOWN artifact names a winner"))
+	}
 	if err := checkResolutionStringsExpressible(a); err != nil {
 		return err
 	}
@@ -671,10 +693,21 @@ func VerifyResolutionArtifact(a ResolutionArtifact) error {
 					" with refusals "+joinReasons(re.Refusals)))
 		}
 	case ResolutionUnknown:
+		// UNREACHABLE BY CONSTRUCTION, and kept anyway. The gate above this
+		// switch refuses the same shape before the framing, so no input
+		// arrives here: a mutation campaign confirms it, because a mutant
+		// adding observable work inside this arm survives the whole suite,
+		// and a panic installed here leaves it green. It stays because a
+		// switch on a string that falls through its cases returns nil, and a
+		// fail-closed backstop is worth more than a killable mutant.
 		if a.WinnerOutcomeID != "" || a.WinnerIndex != -1 {
 			return errors.Join(ErrResolutionNotDerivable, errors.New("p4offline: an UNKNOWN artifact names a winner"))
 		}
 	default:
+		// UNREACHABLE BY CONSTRUCTION, for the reason stated at the UNKNOWN
+		// arm above: an out-of-vocabulary Outcome is refused by the hoisted
+		// gate when it is expressible and by the expressibility scan when it
+		// is not, so the two together leave this arm nothing to catch.
 		return errors.Join(ErrResolutionNotDerivable, errors.New("p4offline: outcome of "+
 			suppliedTextExtent(string(a.Outcome))+" is outside the vocabulary"))
 	}

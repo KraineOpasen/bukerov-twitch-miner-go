@@ -540,7 +540,11 @@
 //     the identifier and once when the probe frames the config. THE ALLOCATION
 //     COUNT IS FLAT at about 402 across all three widths, so what grows is size
 //     and not the number of operations, which is what makes the growth the
-//     identifier's rather than the config's shape. The lane's own reading
+//     identifier's rather than the config's shape. THE CONFIG IS ONE DETAILED
+//     RULE BESIDE A DEFAULT, which belongs beside the count because the count
+//     is the config's: a lane reconstructing the fixture without the rule read
+//     393 at every width and reproduced the byte figures anyway. The bytes are
+//     the identifier's; the allocation count is not. The lane's own reading
 //     divides to 2,113,586 bytes per check and its extrapolation to about
 //     34.6 GB for one case's 16,384-trajectory schedule follows from this
 //     tree's figure too.
@@ -558,18 +562,47 @@
 //     EvaluateOrderedRules over the same config measures 1,053,193 B/op at a
 //     1 MiB identifier, so sealing the handle removes about two thirds of the
 //     per-evaluation config cost and not all of it.
+//     ONE HALF OF IT IS CLOSED IN THIS ROUND AND THE OTHER IS NOT, and the two
+//     are worth separating because only one needed the redesign. The same
+//     probe was also charged on a REFUSAL decided by one integer:
+//     EvaluateP3bCase ran rs.check above checkEntropyCoordinates, so an
+//     out-of-protocol trajectory paid 2,113,748 B/op and threw the probe away.
+//     That is the WORK half of canonical.go's rule and it needed a swap, not a
+//     seam: the coordinate gate is above the probe at both evaluators now and
+//     that refusal measures 152 B/op flat from a one-byte identifier to a
+//     1 MiB one, pinned by
+//     TestAnOutOfProtocolCoordinateIsRefusedWithoutProbingTheRuleset. What
+//     REMAINS is the cost on the path that does not refuse -- an evaluation
+//     that proceeds still re-verifies -- and that is the part below.
 //     WHAT IT COSTS TO CLOSE IS AN EXPORTED FIELD. The probe runs again on
 //     purpose, for the reason stated at check itself: Config is an exported
 //     field of a value type, so a caller may mutate it between verification and
 //     use, and the probe is what catches that -- INCLUDING a mutation into a
-//     shape the core REFUSES, which reports no digest at all and which a
-//     cheaper digest computed here would not catch, because it would be this
-//     package's digest rather than the core's verdict. So the handle cannot
-//     simply cache its digest and keep the field; it has to hold an unexported
-//     verified copy and evaluate from that, which changes an exported field on
+//     shape the core REFUSES, which reports no digest at all. A CHEAPER DIGEST
+//     WOULD CATCH IT -- a review lane built one and showed that a package-local
+//     content hash distinguishes a config mutated past MaxOrderedRulesRules
+//     from the verified one, so "it would be this package's digest rather than
+//     the core's verdict" is an argument about authority and not about
+//     detection. The reason the handle cannot simply cache a digest and keep
+//     the field is the one that survives that correction: ANY digest compared
+//     on every use is still work proportional to the config, so caching shrinks
+//     the constant and leaves the shape. Closing it means an unexported
+//     verified copy evaluated from directly, which changes an exported field on
 //     an approved seam. As with the per-verdict re-verification above, there is
 //     no non-test caller: the 16,384-run schedule is the protocol's, and this
 //     package deliberately contains no runner to execute it.
+//   - REFUSING A RULESET DOCUMENT STILL COSTS ABOUT SEVEN TIMES THE DOCUMENT,
+//     which the decode-fault repair does not remove and is recorded so the
+//     repair is not read as closing it. Two lanes measured it: refusing a
+//     ~65.6 KB document whose one literal is over-long reads about 467 KB, and
+//     a 512 KiB one about 3.68 MB. That is encoding/json decoding the document
+//     plus the mandatory sha256Hex over RawBytes, both proportional to a
+//     buffer the caller has already materialized and one of which this package
+//     cannot skip, since the raw hash is the ruleset's identity. It is the
+//     nested-hex class rather than the shape-gate class: a constant factor
+//     over input already in hand, not a constant-size field amplified by a
+//     payload. What the repair removed is the two further copies of the
+//     literal that this package itself was making.
 //   - NESTED HEX IN claimKey, reported by a code review lane and reproduced at
 //     19.1x the input: EpisodeIdentity.String() hex-encodes the framed
 //     identity, claimKey frames that and hex-encodes it again, and
@@ -657,9 +690,13 @@
 //     of the five strings at 1 MiB reads 6,889,790 B/op and NINE allocations:
 //     2.19x the 3,145,728 bytes supplied, where five strings read 3.49x. Both
 //     readings are right; what moves between them is the canonical buffer's
-//     growth series, which doubles, so the total allocated over one call is a
-//     step function of the payload rather than a multiple of it -- the two
-//     extra allocations at the wider fixture ARE the two extra doublings. So
+//     growth series. It is Go's slice growth, which doubles only below 256
+//     bytes and grows by about a quarter above it, with need-driven jumps: a
+//     lane walked the capacities for this exact framing and read ratios of
+//     2.450, 1.253, 1.563 and 1.250, not 2. So the total allocated over one
+//     call is a step function of the payload rather than a multiple of it,
+//     and the extra allocations at the wider fixture are extra growth steps
+//     rather than doublings. So
 //     the durable statement is the shape, that a refusal decided in constant
 //     time frames every identity field in full, and not any one ratio.
 //     CLOSING IT IS A CONTRACT CHANGE RATHER THAN A REPAIR. The witness is

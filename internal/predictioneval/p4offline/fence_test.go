@@ -487,8 +487,18 @@ func transitiveClosure(t *testing.T, roots []string) map[string]bool {
 	return seen
 }
 
-// suppliedTextExtentCensus is how many production call sites of
-// suppliedTextExtent sit in each function.
+// extentNames is the family of helpers that write an extent sentence, both of
+// which this census counts.
+//
+// THERE ARE TWO BECAUSE ONE EXTENT CANNOT BE MEASURED off a string in hand:
+// decodeFault must say how wide a decoder's sentence is without building it,
+// so it computes the width and calls suppliedExtent. Counting only the string
+// spelling would leave a second way to write an extent that nothing counts,
+// which is the whole failure mode this census exists to prevent.
+var extentNames = map[string]bool{"suppliedTextExtent": true, "suppliedExtent": true}
+
+// suppliedTextExtentCensus is how many production call sites of the extent
+// helpers sit in each function.
 //
 // It lives here, executable, because a count maintained in prose drifts from
 // the source it describes -- and prose ABOUT that drift drifts just as fast, so
@@ -499,13 +509,19 @@ func transitiveClosure(t *testing.T, roots []string) map[string]bool {
 // sources, because this package's own files cannot: every real call site is a
 // plain direct call in an ordinary func in a file no build tag excludes.
 var suppliedTextExtentCensus = map[string]int{
+	// THE DELEGATION IS COUNTED AND NOT EXEMPTED. suppliedTextExtent's body
+	// calls suppliedExtent, which is a place this package writes an extent
+	// like any other. Exempting the file a mechanism lives in is how the
+	// comment register's first build hid five of its own instances, and that
+	// lesson is cheaper to apply here than to relearn.
+	"canonical.go/suppliedTextExtent":        1, // the string spelling delegating to the computed one
 	"evidence.go/VerifySourceRoundRegistry":  2, // the Version clause and the digest-shape gate
-	"factset.go/VerifyCommonFactset":         3, // contract, protocol, the digest's shape
+	"factset.go/VerifyCommonFactset":         4, // contract, protocol, the digest's shape, the completeness vocabulary
 	"factset.go/checkFactsetConsistency":     2, // the stealth-proof arm and the completeness arm
-	"p3b.go/decodeFault":                     2, // the fault's typed carrier, and its rendered message
+	"p3b.go/decodeFault":                     2, // the computed sentence width, and the rendered message
 	"p3b.go/walkRulesetObject":               1, // the unknown-key gate
 	"placement.go/decisionOf":                1, // the result's own factset digest
-	"resolution.go/VerifyResolutionArtifact": 4, // contract, obligations, the digest's shape, the outcome arm
+	"resolution.go/VerifyResolutionArtifact": 5, // contract, obligations, the digest's shape, the hoisted outcome gate, the outcome arm
 }
 
 // firstGateTableRows is how many rows TestFirstGatesDoNotMaterializeSuppliedText
@@ -599,7 +615,7 @@ func censusOfDir(t *testing.T, dir string) (map[string]int, int) {
 				ast.Inspect(x.Type, count)
 				return false
 			case *ast.Ident:
-				if x.Name == "suppliedTextExtent" {
+				if extentNames[x.Name] {
 					got[where]++
 				}
 			}
@@ -616,7 +632,7 @@ func censusOfDir(t *testing.T, dir string) (map[string]int, int) {
 				if fd.Recv != nil && len(fd.Recv.List) > 0 {
 					where = prefix + "/(" + types.ExprString(fd.Recv.List[0].Type) + ")." + fd.Name.Name
 				}
-				if fd.Name.Name == "suppliedTextExtent" {
+				if extentNames[fd.Name.Name] {
 					// A DECLARATION OF THAT NAME is not a reference to the
 					// helper -- neither the helper's own, nor a METHOD's,
 					// which is a different symbol by the same rule the
