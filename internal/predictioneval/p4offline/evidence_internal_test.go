@@ -1344,3 +1344,85 @@ func TestTheRenderedArmsCeilingIsHeldByAFaultThatIsNotTyped(t *testing.T) {
 		}
 	}
 }
+
+// TestTheLocalOrderFaultAgreesWithTheMaterializer pins the one cost of
+// restating the causal-order contract inside this package.
+//
+// SelectEpisodes must refuse an out-of-order dataset BEFORE the session
+// preflight speaks, and the preflight exists so the materializer is not paid
+// for — so the predicate cannot be reached through the materializer and is
+// restated instead. What that buys is the ordering; what it risks is two
+// statements of one contract drifting apart, silently, in different packages.
+//
+// This is internal because it must drive the unexported predicate directly
+// against the exported seam that owns the original. It compares the two over a
+// fixed table of the shapes that decide the rule's edges and then over a
+// randomized sweep, so a change on either side fails here rather than showing
+// up as a disagreement nobody looked for.
+func TestTheLocalOrderFaultAgreesWithTheMaterializer(t *testing.T) {
+	rec := func(epoch, seq int64) predictioneval.SourceRecord {
+		return predictioneval.SourceRecord{
+			ObservationID:      "o" + strconv.FormatInt(epoch, 10) + "-" + strconv.FormatInt(seq, 10),
+			CollectorSessionID: "s", CollectorEpoch: epoch, CollectorSequence: seq,
+		}
+	}
+	run := func(t *testing.T, name string, recs []predictioneval.SourceRecord) {
+		t.Helper()
+		ds := predictioneval.SourceDataset{
+			Source: predictioneval.SourceProvenance{
+				CollectorEpoch: 1, CollectorSessionID: "s",
+				ProducerRevision: predictioneval.SupportedProducerRevision,
+			},
+			Records: recs,
+		}
+		local := causalOrderFault(ds.Records)
+		_, matErr := predictioneval.MaterializePairedKnowledge(ds)
+		gotLocal := local != nil
+		gotMat := errors.Is(matErr, predictioneval.ErrRecordsOutOfOrder)
+		if gotLocal != gotMat {
+			t.Fatalf("%s: causalOrderFault refused=%v (%v) but the materializer refused=%v (%v); "+
+				"the two statements of the causal-order contract have drifted",
+				name, gotLocal, local, gotMat, matErr)
+		}
+		if local != nil && !errors.Is(local, predictioneval.ErrRecordsOutOfOrder) {
+			t.Fatalf("%s: causalOrderFault answered %v, not the shared sentinel", name, local)
+		}
+	}
+
+	table := []struct {
+		name string
+		recs []predictioneval.SourceRecord
+	}{
+		{"no facts", nil},
+		{"one fact", []predictioneval.SourceRecord{rec(1, 7)}},
+		{"ascending within an epoch", []predictioneval.SourceRecord{rec(1, 1), rec(1, 2), rec(1, 3)}},
+		// Equal positions are not a fault: the rule is strict.
+		{"a repeated position", []predictioneval.SourceRecord{rec(1, 1), rec(1, 1), rec(1, 2)}},
+		{"a sequence that goes backwards", []predictioneval.SourceRecord{rec(1, 1), rec(1, 3), rec(1, 2)}},
+		{"the fault in the first pair", []predictioneval.SourceRecord{rec(1, 9), rec(1, 8), rec(1, 10)}},
+		{"the fault in the last pair", []predictioneval.SourceRecord{rec(1, 1), rec(1, 2), rec(1, 0)}},
+		{"an epoch that goes backwards", []predictioneval.SourceRecord{rec(2, 1), rec(1, 2)}},
+		{"an epoch that advances", []predictioneval.SourceRecord{rec(1, 5), rec(2, 6)}},
+		// A new epoch RESETS the sequence, so a lower sequence across an epoch
+		// boundary is ordered. This is the edge a careless restatement loses.
+		{"a sequence reset by a new epoch", []predictioneval.SourceRecord{rec(1, 900), rec(2, 1), rec(2, 2)}},
+		{"equal epochs after an advance", []predictioneval.SourceRecord{rec(1, 1), rec(2, 1), rec(2, 1)}},
+	}
+	for _, tc := range table {
+		t.Run(tc.name, func(t *testing.T) { run(t, tc.name, tc.recs) })
+	}
+
+	// The sweep: small alphabets on both coordinates, so faults and near-misses
+	// (repeats, epoch resets) are dense rather than incidental.
+	t.Run("a randomized sweep", func(t *testing.T) {
+		rng := rand.New(rand.NewSource(20260919))
+		for i := 0; i < 4000; i++ {
+			n := rng.Intn(6)
+			recs := make([]predictioneval.SourceRecord, n)
+			for j := range recs {
+				recs[j] = rec(int64(rng.Intn(3)), int64(rng.Intn(4)))
+			}
+			run(t, "sweep #"+strconv.Itoa(i), recs)
+		}
+	})
+}

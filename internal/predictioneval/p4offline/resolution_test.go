@@ -1144,7 +1144,7 @@ func TestProjectResolutionNeverMintsAnArtifactItsOwnVerifierRefuses(t *testing.T
 	})
 }
 
-// TestAHoistedArmDefersToTheEncodingFaultOnTheStringItReads pins the
+// TestAHoistedArmDefersToEveryConstantSizeEncodingFault pins the
 // precedence the hoisted gates must not move.
 //
 // A REVIEW LANE FOUND THIS, and the fixture is why nothing else could.
@@ -1160,7 +1160,7 @@ func TestProjectResolutionNeverMintsAnArtifactItsOwnVerifierRefuses(t *testing.T
 // named as UNREADABLE first, because that is the finding a caller can act on:
 // the semantic reading of bytes that do not decode is not a fact about the
 // artifact. Both hoisted arms defer on the string they read; this holds both.
-func TestAHoistedArmDefersToTheEncodingFaultOnTheStringItReads(t *testing.T) {
+func TestAHoistedArmDefersToEveryConstantSizeEncodingFault(t *testing.T) {
 	const invalid = "\xff"
 	unknown := func(t *testing.T) p4offline.ResolutionArtifact {
 		t.Helper()
@@ -1198,6 +1198,30 @@ func TestAHoistedArmDefersToTheEncodingFaultOnTheStringItReads(t *testing.T) {
 		}, "is not valid UTF-8"},
 		{"an UNREADABLE outcome is an encoding fault", func(a *p4offline.ResolutionArtifact) {
 			a.Outcome = p4offline.ResolutionOutcome(invalid)
+		}, "is not valid UTF-8"},
+		// AND THESE ARE THE ROWS THE FIRST REPAIR OF THE HOIST STILL BROKE.
+		// Deferring on the string each arm READS covers that arm's own field
+		// and no other, so an artifact unreadable ANYWHERE ELSE among the
+		// one-per-artifact strings was still told a semantic thing first. A
+		// review lane found it on the published head. The fields below are
+		// every remaining member of the constant-size tier.
+		{"an unreadable round event id beats the winner claim", func(a *p4offline.ResolutionArtifact) {
+			a.WinnerOutcomeID, a.Round.EventID = "o1", invalid
+		}, "is not valid UTF-8"},
+		{"an unreadable round channel id beats the winner claim", func(a *p4offline.ResolutionArtifact) {
+			a.WinnerOutcomeID, a.Round.ChannelID = "o1", invalid
+		}, "is not valid UTF-8"},
+		{"an unreadable availability beats a winner index", func(a *p4offline.ResolutionArtifact) {
+			a.WinnerIndex, a.Availability = 0, p4offline.Availability(invalid)
+		}, "is not valid UTF-8"},
+		{"an unreadable proof basis beats the vocabulary claim", func(a *p4offline.ResolutionArtifact) {
+			a.Outcome, a.ProofBasis = "NOT_AN_OUTCOME", invalid
+		}, "is not valid UTF-8"},
+		{"an unreadable projector revision beats the vocabulary claim", func(a *p4offline.ResolutionArtifact) {
+			a.Outcome, a.ProjectorRevision = "NOT_AN_OUTCOME", invalid
+		}, "is not valid UTF-8"},
+		{"an unreadable proof revision beats the vocabulary claim", func(a *p4offline.ResolutionArtifact) {
+			a.Outcome, a.ProofRevision = "NOT_AN_OUTCOME", invalid
 		}, "is not valid UTF-8"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

@@ -4195,26 +4195,59 @@ func TestAnOutOfProtocolCoordinateIsRefusedWithoutProbingTheRuleset(t *testing.T
 		t.Fatalf("the wide fixture must carry a %d-byte identifier, it carries %d", 1<<20, len(wide.RulesetID))
 	}
 	out := p4offline.EntropyCoordinates{Trajectory: 1 << 30}
-	for _, tc := range []struct {
-		name string
-		rs   p4offline.VerifiedP3bRuleset
-	}{{"a one-byte identifier", narrow}, {"a 1 MiB identifier", wide}} {
-		t.Run(tc.name, func(t *testing.T) {
-			allocated, err := measure(func() error {
-				_, e := p4offline.EvaluateP3bCase(p4offline.CommonFactset{}, tc.rs, out)
-				return e
+	// BOTH EVALUATORS, because the gate was hoisted at both and this pin was
+	// first written at one. Deleting the gate from EvaluateP3bWithTrace alone
+	// changes no ANSWER -- bindEntropyCoordinates below refuses the same
+	// coordinate for the same reason -- so only a cost assertion can see it,
+	// and a cost assertion at the sibling cannot. That is the same shape as
+	// the three repairs this round made at the named site while its neighbour
+	// stayed open; here it was the pin that stopped one short, not the code.
+	for _, ev := range p3bEvaluators() {
+		for _, tc := range []struct {
+			name string
+			rs   p4offline.VerifiedP3bRuleset
+		}{{"a one-byte identifier", narrow}, {"a 1 MiB identifier", wide}} {
+			t.Run(ev.name+"/"+tc.name, func(t *testing.T) {
+				allocated, err := measure(func() error {
+					return ev.call(p4offline.CommonFactset{}, tc.rs, out)
+				})
+				t.Logf("%s/%s: the refusing call allocated %d bytes", ev.name, tc.name, allocated)
+				if !errors.Is(err, p4offline.ErrEntropyCoordinates) {
+					t.Fatalf("an out-of-protocol trajectory must be refused as exactly that, got %v", err)
+				}
+				// The constant is generous against allocator rounding and still
+				// four orders of magnitude below one probe of the wide config.
+				if allocated > 8192 {
+					t.Fatalf("the refusal allocated %d bytes: it is settled by one comparison against TrajectoryCount and must not run the ruleset probe above it",
+						allocated)
+				}
 			})
-			t.Logf("%s: the refusing call allocated %d bytes", tc.name, allocated)
-			if !errors.Is(err, p4offline.ErrEntropyCoordinates) {
-				t.Fatalf("an out-of-protocol trajectory must be refused as exactly that, got %v", err)
-			}
-			// The constant is generous against allocator rounding and still
-			// four orders of magnitude below one probe of the wide config.
-			if allocated > 8192 {
-				t.Fatalf("the refusal allocated %d bytes: it is settled by one comparison against TrajectoryCount and must not run the ruleset probe above it",
-					allocated)
-			}
-		})
+		}
+	}
+}
+
+// p3bEvaluators is the pair of exported P3b entry points that share the two
+// constant-size gates above the ruleset probe. A cost pin written against one
+// of them says nothing about the other, so both hoist tests drive this list
+// rather than naming an evaluator.
+type p3bEvaluator struct {
+	name string
+	call func(p4offline.CommonFactset, p4offline.VerifiedP3bRuleset, p4offline.EntropyCoordinates) error
+}
+
+func p3bEvaluators() []p3bEvaluator {
+	var empty predictioneval.SuppliedDrawTrace
+	return []p3bEvaluator{
+		{"EvaluateP3bCase", func(fs p4offline.CommonFactset, rs p4offline.VerifiedP3bRuleset,
+			c p4offline.EntropyCoordinates) error {
+			_, e := p4offline.EvaluateP3bCase(fs, rs, c)
+			return e
+		}},
+		{"EvaluateP3bWithTrace", func(fs p4offline.CommonFactset, rs p4offline.VerifiedP3bRuleset,
+			c p4offline.EntropyCoordinates) error {
+			_, e := p4offline.EvaluateP3bWithTrace(fs, rs, c, empty)
+			return e
+		}},
 	}
 }
 
@@ -4255,54 +4288,57 @@ func TestAMalformedFactsetIsRefusedWithoutProbingTheRuleset(t *testing.T) {
 		t.Fatalf("the wide fixture must carry a %d-byte identifier, it carries %d", 1<<20, len(wide.RulesetID))
 	}
 	bad := p4offline.CommonFactset{ContractVersion: "X"}
-	for _, tc := range []struct {
-		name string
-		rs   p4offline.VerifiedP3bRuleset
-	}{{"a one-byte identifier", narrow}, {"a 1 MiB identifier", wide}} {
-		t.Run(tc.name, func(t *testing.T) {
-			allocated, err := measure(func() error {
-				_, e := p4offline.EvaluateP3bCase(bad, tc.rs, coords)
-				return e
+	// BOTH EVALUATORS, for the reason given at the sibling above: this gate
+	// was hoisted at both and pinned at one, and an independent lane named
+	// EvaluateP3bWithTrace specifically. Deleting the gate there changes no
+	// answer -- ProjectP3bSingleCandidate below refuses the same factset --
+	// so the cost assertion is the only thing that can see it.
+	for _, ev := range p3bEvaluators() {
+		for _, tc := range []struct {
+			name string
+			rs   p4offline.VerifiedP3bRuleset
+		}{{"a one-byte identifier", narrow}, {"a 1 MiB identifier", wide}} {
+			t.Run(ev.name+"/"+tc.name, func(t *testing.T) {
+				allocated, err := measure(func() error { return ev.call(bad, tc.rs, coords) })
+				t.Logf("%s/%s: refusing a malformed factset allocated %d bytes", ev.name, tc.name, allocated)
+				if !errors.Is(err, p4offline.ErrFactsetDigest) {
+					t.Fatalf("a factset with a foreign contract must be refused as exactly that, got %v", err)
+				}
+				if allocated > 8192 {
+					t.Fatalf("the refusal allocated %d bytes: it is settled by a constant-size field and must not run the ruleset probe above it",
+						allocated)
+				}
 			})
-			t.Logf("%s: refusing a malformed factset allocated %d bytes", tc.name, allocated)
-			if !errors.Is(err, p4offline.ErrFactsetDigest) {
-				t.Fatalf("a factset with a foreign contract must be refused as exactly that, got %v", err)
-			}
-			if allocated > 8192 {
-				t.Fatalf("the refusal allocated %d bytes: it is settled by a constant-size field and must not run the ruleset probe above it",
-					allocated)
-			}
-		})
+		}
 	}
 	// AND THE CONVERSE: a factset the admission accepts still pays the probe,
 	// because the probe is what proves the ruleset. Without this row the gate
 	// could be "hoist everything" and this test would not notice.
-	t.Run("a factset the admission accepts still reaches the probe", func(t *testing.T) {
-		// Well-formed contract, protocol and digest SHAPE -- so
-		// factsetAdmissionFault passes it -- but the digest does not match its
-		// values, so the full projection below refuses it. Reaching that
-		// refusal means the probe above it ran.
-		fs := p4offline.CommonFactset{
-			ContractVersion: p4offline.CommonFactsetDigestVersion,
-			Protocol:        p4offline.ProtocolVersion,
-			Digest:          strings.Repeat("0", 64),
-		}
-		if err := factsetAdmissionIsClean(fs); err != nil {
-			t.Fatalf("this fixture must pass the constant-size admission, or the row proves nothing: %v", err)
-		}
-		allocated, err := measure(func() error {
-			_, e := p4offline.EvaluateP3bCase(fs, wide, coords)
-			return e
+	for _, ev := range p3bEvaluators() {
+		t.Run(ev.name+"/a factset the admission accepts still reaches the probe", func(t *testing.T) {
+			// Well-formed contract, protocol and digest SHAPE -- so
+			// factsetAdmissionFault passes it -- but the digest does not match its
+			// values, so the full projection below refuses it. Reaching that
+			// refusal means the probe above it ran.
+			fs := p4offline.CommonFactset{
+				ContractVersion: p4offline.CommonFactsetDigestVersion,
+				Protocol:        p4offline.ProtocolVersion,
+				Digest:          strings.Repeat("0", 64),
+			}
+			if err := factsetAdmissionIsClean(fs); err != nil {
+				t.Fatalf("this fixture must pass the constant-size admission, or the row proves nothing: %v", err)
+			}
+			allocated, err := measure(func() error { return ev.call(fs, wide, coords) })
+			t.Logf("a 1 MiB identifier, admission clean: %d bytes", allocated)
+			if err == nil {
+				t.Fatal("this fixture is not meant to verify")
+			}
+			if allocated <= 8192 {
+				t.Fatalf("the probe must still run for a factset the admission accepts; allocated only %d bytes, so the hoist took the whole projection with it",
+					allocated)
+			}
 		})
-		t.Logf("a 1 MiB identifier, admission clean: %d bytes", allocated)
-		if err == nil {
-			t.Fatal("this fixture is not meant to verify")
-		}
-		if allocated <= 8192 {
-			t.Fatalf("the probe must still run for a factset the admission accepts; allocated only %d bytes, so the hoist took the whole projection with it",
-				allocated)
-		}
-	})
+	}
 }
 
 // factsetAdmissionIsClean mirrors factsetAdmissionFault through the exported
@@ -4409,4 +4445,106 @@ func TestAnOverCeilingOutcomeVectorIsRefusedBeforeItIsConverted(t *testing.T) {
 			t.Fatalf("the largest legal vector must not be refused by the count gate: %v", err)
 		}
 	})
+}
+
+// nativeOverBoundRefusal asks the native projector what it says about a
+// candidate carrying n outcomes, rather than transcribing its prose here.
+//
+// The minimal source exists only to reach that one arm: the projector checks a
+// candidate's identity, its declared position and its interval before the
+// outcome bound, so those are supplied well-formed and nothing else about this
+// source is load-bearing. Reaching the SAME arm is all that is required,
+// because the sentence that arm writes depends on the candidate's index and
+// its outcome count and on nothing else.
+func nativeOverBoundRefusal(t *testing.T, n int) error {
+	t.Helper()
+	outs := make([]predictioneval.OrderedRulesOutcome, n)
+	for i := range outs {
+		outs[i] = predictioneval.OrderedRulesOutcome{Identity: "o" + strconv.Itoa(i)}
+	}
+	_, err := predictioneval.ProjectOrderedRulesStream(
+		predictioneval.OrderedRulesSource{
+			Scope: predictioneval.OrderedRulesScope{
+				Namespace: "p4offline", EpisodeID: "e", AccountContext: "a",
+				AssociationEvidence:   "v",
+				SourceContractVersion: predictioneval.OrderedRulesStreamContractVersion,
+				Coverage:              predictioneval.CoverageCompleteDeclared,
+				CoverageDetail:        "d",
+				HasInterval:           true,
+			},
+			Candidates: []predictioneval.OrderedRulesCandidate{{
+				Identity: "probe", HasPosition: true,
+				SourceKind:        predictioneval.SourceKindCalculateSnapshot,
+				EpisodeMembership: predictioneval.MembershipProven,
+				OutcomesPresence:  predictioneval.SuppliedKnown,
+				Provenance:        "probe",
+				Outcomes:          outs,
+			}},
+		},
+		predictioneval.CommonAdmission{
+			ManifestID: "m", ViewKind: predictioneval.ViewCalculateOnly,
+			Population: "p", OrderBasis: "o", SourceReferences: []string{"s"},
+		})
+	if err == nil {
+		t.Fatalf("the native projector must refuse %d outcomes, or this oracle proves nothing", n)
+	}
+	if !errors.Is(err, predictioneval.ErrOrderedRulesOverBound) {
+		t.Fatalf("the native refusal must be the over-bound one, got %v", err)
+	}
+	return err
+}
+
+// TestAnOverCeilingRefusalIsTheNativeOneMovedEarlier holds the outcome-ceiling
+// gate to what its own comment promises: that it moves WHEN a refusal is
+// decided and not WHAT a caller is told.
+//
+// The gate was added to stop the projection converting a 100,000-entry vector
+// it was about to refuse. It first answered with a sentinel and a sentence of
+// this package's own, which is two regressions rather than a wording choice. A
+// caller classifying by predictioneval.ErrOrderedRulesOverBound -- the native
+// sentinel the old path carried up through errors.Join -- stopped matching.
+// And ProjectionRefusal is hashed into p3bResultWitness, so the refusal string
+// is not a message but a DIGESTED FIELD: an over-ceiling factset produced a
+// different artifact depending on whether the gate existed. A review lane
+// found both, and the comment asserting otherwise shipped.
+//
+// The expectation is therefore not a transcription. It is composed from what
+// the native projector says about the same count, joined the way the path
+// below the gate joins it -- so if either side's wording moves, this fails
+// rather than the two drifting apart.
+func TestAnOverCeilingRefusalIsTheNativeOneMovedEarlier(t *testing.T) {
+	_, _, valid := selectedCase(t, nil, nil)
+	for _, n := range []int{predictioneval.MaxOrderedRulesOutcomes + 1, 512} {
+		t.Run(strconv.Itoa(n)+" outcomes", func(t *testing.T) {
+			fs := valid
+			fs.Outcomes = append([]predictioneval.OutcomeInput(nil), fs.Outcomes...)
+			for i := len(fs.Outcomes); i < n; i++ {
+				fs.Outcomes = append(fs.Outcomes, predictioneval.OutcomeInput{
+					Slot: i, ID: "o" + strconv.Itoa(i), Present: true, TotalPoints: 1,
+				})
+			}
+			fs.Outcomes = fs.Outcomes[:n]
+			fs.Digest = digestOf(p4offline.SerializeCommonFactset(fs))
+			if err := p4offline.VerifyCommonFactset(fs); err != nil {
+				t.Fatalf("a %d-outcome factset must still VERIFY, or the finding is not what it says: %v", n, err)
+			}
+
+			_, err := p4offline.ProjectP3bSingleCandidate(fs)
+			if err == nil {
+				t.Fatalf("a %d-outcome factset must be refused", n)
+			}
+			if !errors.Is(err, p4offline.ErrP3bProjectionRefused) {
+				t.Fatalf("the refusal must still be the projection's, got %v", err)
+			}
+			// THE SENTINEL A CALLER CLASSIFIES BY, which the shortcut dropped.
+			if !errors.Is(err, predictioneval.ErrOrderedRulesOverBound) {
+				t.Fatalf("the refusal no longer carries the native over-bound sentinel: %v", err)
+			}
+			// AND THE SENTENCE, which is inside the witness.
+			want := errors.Join(p4offline.ErrP3bProjectionRefused, nativeOverBoundRefusal(t, n)).Error()
+			if err.Error() != want {
+				t.Fatalf("the refusal is not the native one moved earlier.\n got: %q\nwant: %q", err.Error(), want)
+			}
+		})
+	}
 }

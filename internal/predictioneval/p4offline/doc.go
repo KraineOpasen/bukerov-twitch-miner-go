@@ -835,6 +835,100 @@
 // property has to say which invariant, out loud, in the commit -- absorbing it
 // silently is how it happened.
 //
+// AND A HOIST CAN MOVE A PRECEDENCE WITHOUT TOUCHING A PREDICATE. The rule
+// this round applied -- a materialization must not precede a gate that can
+// refuse without it -- is about COST. It says nothing about which answer wins
+// when two gates both have something to say, and at SelectEpisodes the answer
+// changed: lifting the session preflight above MaterializePairedKnowledge
+// lifted it above the causal-order check at that function's top, so a dataset
+// with out-of-order facts AND a refusable session answered (selection, nil).
+// The caller's own malformed input came back filed as a completed verdict
+// about somebody's session, against the two-kinds-of-error contract stated in
+// SelectEpisodes' own doc comment, which was not edited and had been true when
+// it was written. A review lane found it on the published head.
+//
+// THE CLASS IS NARROWER THAN "HOISTS ARE RISKY", and the narrow form is what
+// makes it checkable: the damage needs a gate that answers (value, nil) to be
+// hoisted above a gate that answers an error. Two errors reordered change
+// which fault is NAMED, which is a reporting choice; a verdict placed above an
+// error changes whether the caller is told it has a bug at all. Of the five
+// hoists this round made, four were error-above-error -- the coordinate and
+// factset-admission gates above the ruleset probe at both P3b evaluators, the
+// two constant-size arms above the resolution framing, the outcome ceiling
+// above the conversion loop -- and exactly one, the session preflight, had a
+// (value, nil) gate to lift. That one was the defect. The other four were
+// re-checked against this shape after the finding, not before it.
+//
+// THE SAME ROUND'S PINS STOPPED ONE EVALUATOR SHORT, which is the pattern
+// again and this time in the tests rather than the code. The coordinate gate
+// and the factset admission were both hoisted at BOTH P3b evaluators, and the
+// cost assertion that pins each was written against EvaluateP3bCase alone --
+// while the review lane that asked for the factset gate had named
+// EvaluateP3bWithTrace. Nothing failed, because deleting either gate from
+// EvaluateP3bWithTrace changes no ANSWER: bindEntropyCoordinates refuses the
+// same coordinate below it and ProjectP3bSingleCandidate refuses the same
+// factset below that. Only the cost moves, so only a cost assertion at that
+// evaluator can see it, and there was none. Both deletions were survivors
+// until the two tables were driven over both entry points; they are mutants
+// OR8 and OR9 now, and both die.
+//
+// WHAT GENERALISES IS NOT "TEST BOTH SITES" but the reason there were two: a
+// gate hoisted for COST leaves the answers identical by construction, so the
+// suite that proves the answers cannot notice where it went. Every hoist in
+// this round is therefore pinned by an allocation assertion rather than by a
+// verdict, and an allocation assertion is only ever about the call it makes.
+//
+// A COST GATE CHANGED A DIGESTED FIELD, and the comment above it said it had
+// not. The outcome-ceiling gate was added to stop the projection converting a
+// vector it was about to refuse, and it answered with this package's own
+// sentinel and sentence. Two things went with that. A caller classifying on
+// predictioneval.ErrOrderedRulesOverBound -- which the path below the gate
+// carries up through errors.Join -- stopped matching it. And ProjectionRefusal
+// is hashed into p3bResultWitness, so the sentence is not a message but a
+// field: the same over-ceiling factset produced a DIFFERENT ARTIFACT depending
+// on whether the gate existed. The gate now reproduces both, and the
+// agreement test composes its expectation from what the native projector
+// actually says about the same count rather than transcribing it.
+//
+// The lesson is not "preserve error text". It is that a gate justified as
+// moving WHEN a refusal happens has to be checked against everything the
+// refusal is an INPUT to, and a refusal string that reaches a digest is an
+// input to the artifact. The comment asserting sentinel and wording were
+// unchanged was written in the same commit that changed both.
+//
+// AND THE SAME RULE NEEDED THREE ROUNDS AT THE RESOLUTION ARMS. Hoisting two
+// constant-size semantic arms above the framing took away the precedence that
+// every unreadable string in the artifact outranked a semantic claim, because
+// the whole expressibility scan used to run first. Round one gave the
+// out-of-vocabulary arm a deferral. Round two gave the winner arm one, after a
+// lane found the sibling. Round three -- this one, after another lane -- is
+// the first that states the rule instead of patching an arm: no semantic claim
+// may be made until every string the artifact carries ONE of is readable,
+// asked once above both arms as resolutionConstantStringsExpressible. Two
+// rounds of per-arm deferrals restored the precedence for two fields out of
+// eight.
+//
+// WHAT THAT REPAIR DOES NOT RESTORE, recorded rather than absorbed: the three
+// SLICE scans -- ordered outcome ids, evidence references, refusals -- stay
+// below the arms, because walking them is the O(n) work the hoist exists to
+// avoid. An artifact both semantically wrong and unreadable inside one of
+// those slices is now told the semantic thing where before the hoist it was
+// told the encoding one. Closing that residual means paying the scan the hoist
+// removed, so it is a trade and not an oversight -- but it is a precedence
+// this package used to offer and no longer does.
+//
+// THE REPAIR RESTATES A PREDICATE IN A SECOND PACKAGE, which is a cost the
+// scope forced and not a design preference: the order check is unexported in
+// predictioneval, and reaching it means calling the materializer -- which is
+// the thing the preflight exists not to pay for. So causalOrderFault says the
+// contract again, answers predictioneval's own sentinel, and is pinned AS a
+// duplicate: TestTheLocalOrderFaultAgreesWithTheMaterializer drives it and the
+// materializer over one table and one randomized sweep and fails on any
+// disagreement. Three hand-mutations
+// of the local predicate -- the epoch arm dropped, the strict comparison made
+// non-strict, the epoch-equality guard dropped so an epoch's sequence reset
+// reads as a fault -- were each killed by that test before it was trusted.
+//
 // Nothing here was checked against real P1/P1.5 data: no production dataset
 // is proven available, no dataset window (T0/T1) or dataset binding is
 // asserted, the ruleset candidates verified in ruleset_work_test.go bind no

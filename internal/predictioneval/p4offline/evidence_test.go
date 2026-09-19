@@ -4590,3 +4590,100 @@ func TestAForeignPhaseOnTheAutomaticKindCannotEnterTheCohort(t *testing.T) {
 		})
 	}
 }
+
+// TestARecordOrderFaultIsNotMaskedByASessionRefusal pins the PRECEDENCE
+// between a caller contract violation and a verdict about the data.
+//
+// A dataset whose facts are not in causal order is not one this seam read and
+// judged; it is one it could not read at all. That outranks every finding
+// about the session's provenance, because such a finding is drawn from rows
+// whose order was never established -- and a caller handed (selection, nil)
+// stores the refusal as an ordinary completed verdict about a session, when
+// what actually happened is that its own input was malformed.
+//
+// The session preflight lifted the provenance refusal above
+// MaterializePairedKnowledge, which is where the order check lives. So a
+// dataset carrying BOTH faults answered clean, and the order fault was lost.
+// That is the fourth time in this round a hoist closed the entrance it was
+// pointed at and moved something at the entrance beside it. Found by review
+// on the published head, not by this suite.
+func TestARecordOrderFaultIsNotMaskedByASessionRefusal(t *testing.T) {
+	build := func() predictioneval.SourceDataset {
+		s := newSynth()
+		s.placedAttempt("r1", "e1", 1)
+		return s.dataset()
+	}
+	disorder := func(t *testing.T, ds *predictioneval.SourceDataset) {
+		t.Helper()
+		if n := len(ds.Records); n < 2 {
+			t.Fatalf("the fixture carries %d facts; two are needed to disorder it", n)
+		}
+		n := len(ds.Records)
+		ds.Records[n-2], ds.Records[n-1] = ds.Records[n-1], ds.Records[n-2]
+	}
+
+	cases := []struct {
+		name      string
+		mutate    func(*testing.T, *predictioneval.SourceDataset)
+		wantFault bool
+		refusal   string
+	}{
+		{"an order fault alone", disorder, true, ""},
+		{"an order fault under a reading that is refused", func(t *testing.T, ds *predictioneval.SourceDataset) {
+			disorder(t, ds)
+			ds.Source.SessionReading = "UNFINALIZED"
+		}, true, ""},
+		{"an order fault under a close state that is refused", func(t *testing.T, ds *predictioneval.SourceDataset) {
+			disorder(t, ds)
+			ds.Source.CloseState = "INCOMPLETE"
+		}, true, ""},
+		{"an order fault under lost facts", func(t *testing.T, ds *predictioneval.SourceDataset) {
+			disorder(t, ds)
+			ds.Source.DroppedCount = 1
+		}, true, ""},
+		{"an order fault under a foreign producer revision", func(t *testing.T, ds *predictioneval.SourceDataset) {
+			disorder(t, ds)
+			ds.Source.ProducerRevision = "obs-v1"
+		}, true, ""},
+		// The controls: the repair must not turn a provenance refusal into a
+		// caller fault, nor an ordered admissible dataset into either.
+		{"a refused reading on ordered facts", func(_ *testing.T, ds *predictioneval.SourceDataset) {
+			ds.Source.SessionReading = "UNFINALIZED"
+		}, false, "SESSION_READING_NOT_AS_FINALIZED"},
+		{"lost facts on ordered facts", func(_ *testing.T, ds *predictioneval.SourceDataset) {
+			ds.Source.DroppedCount = 1
+		}, false, "SESSION_FACTS_LOST"},
+		{"an ordered admissible dataset", func(*testing.T, *predictioneval.SourceDataset) {}, false, ""},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ds := build()
+			tc.mutate(t, &ds)
+			sel, err := p4offline.SelectEpisodes(ds)
+			if tc.wantFault {
+				if !errors.Is(err, predictioneval.ErrRecordsOutOfOrder) {
+					t.Fatalf("error = %v, want ErrRecordsOutOfOrder; refusals reported instead: %v",
+						err, sel.SessionRefusals)
+				}
+				if !reflect.DeepEqual(sel, p4offline.EvidenceSelection{}) {
+					t.Fatalf("a caller fault must carry no selection, got %+v", sel)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("SelectEpisodes: %v", err)
+			}
+			switch {
+			case tc.refusal != "":
+				if !containsString(sel.SessionRefusals, tc.refusal) {
+					t.Fatalf("refusals %v do not name %s", sel.SessionRefusals, tc.refusal)
+				}
+			default:
+				if !sel.SessionAdmitted {
+					t.Fatalf("the control session must be admitted: %v", sel.SessionRefusals)
+				}
+			}
+		})
+	}
+}

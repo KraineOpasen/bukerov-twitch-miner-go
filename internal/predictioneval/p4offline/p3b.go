@@ -862,14 +862,34 @@ func ProjectP3bSingleCandidate(fs CommonFactset) (P3bProjection, error) {
 	// for a 100,000-outcome artifact. The count is an int and the ceiling is a
 	// constant, so the same refusal is available here for nothing.
 	//
-	// IT REFUSES AS THE PROJECTION, not as a new class. The sentinel and the
-	// wording are what ProjectOrderedRulesStream would have produced, because
-	// this gate exists to move WHEN the refusal is decided and not WHAT a
-	// caller is told.
+	// IT REFUSES AS THE PROJECTION, not as a new class: this gate moves WHEN
+	// the refusal is decided and not WHAT a caller is told. The first version
+	// of it asserted that and did neither.
+	//
+	// BOTH SENTINELS, because a caller classifies on them. The path below
+	// joins ErrP3bProjectionRefused onto whatever the native projector
+	// returned, and the native over-bound arm returns
+	// ErrOrderedRulesOverBound joined with its sentence -- so a caller could
+	// match either, and a shortcut carrying only this package's sentinel
+	// silently stopped answering errors.Is for the native one.
+	//
+	// AND THE NATIVE SENTENCE, because ProjectionRefusal is not a message: it
+	// is hashed into p3bResultWitness, so an over-ceiling factset that read
+	// differently here produced a DIFFERENT ARTIFACT depending on whether this
+	// gate existed. The index is 0 because this projector submits exactly one
+	// candidate, which is the same reason the whole seam is called
+	// ProjectP3bSingleCandidate. The duplication of the native prose is real
+	// and is pinned as duplication: the agreement test composes its
+	// expectation from what the native projector actually says about the same
+	// count, so a change on either side fails rather than drifting.
+	//
+	// Both halves were found by a review lane, on a head where the comment
+	// above already claimed them.
 	if n := len(fs.Outcomes); n > predictioneval.MaxOrderedRulesOutcomes {
 		return P3bProjection{}, errors.Join(ErrP3bProjectionRefused,
-			errors.New("p4offline: the factset carries "+strconv.Itoa(n)+
-				" outcomes, above the native ceiling of "+strconv.Itoa(predictioneval.MaxOrderedRulesOutcomes)))
+			errors.Join(predictioneval.ErrOrderedRulesOverBound,
+				errors.New("predictioneval: candidate 0 carries "+strconv.Itoa(n)+
+					" outcomes, past the bound of "+strconv.Itoa(predictioneval.MaxOrderedRulesOutcomes))))
 	}
 	for _, o := range fs.Outcomes {
 		points := knownAt(int64(o.TotalPoints), provenance, position)

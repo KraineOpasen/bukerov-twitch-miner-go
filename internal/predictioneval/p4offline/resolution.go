@@ -494,11 +494,33 @@ func SerializeResolutionArtifact(a ResolutionArtifact) []byte {
 // constant, and it says nothing about whether a string is the one the platform
 // reported. Every valid UTF-8 string is accepted exactly as before, including
 // one that already contains U+FFFD.
-func checkResolutionStringsExpressible(a ResolutionArtifact) error {
-	lossy := func(what string) error {
-		return errors.Join(ErrResolutionDigest, errors.New("p4offline: "+what+
-			" is not valid UTF-8, so this artifact's own encoding cannot carry it unchanged"))
-	}
+// resolutionConstantStringsExpressible is the ONE-PER-ARTIFACT half of
+// checkResolutionStringsExpressible: the eight strings an artifact carries
+// exactly one of, whatever its size. The rest of that scan walks
+// OrderedOutcomeIDs, EvidenceReferences and Refusals, and grows with the
+// artifact.
+//
+// THE SPLIT EXISTS SO A PRECEDENCE CAN BE STATED ONCE. Two arms of
+// VerifyResolutionArtifact decide from constant-size fields and are hoisted
+// above the framing, and before the hoist every unreadable string in the
+// artifact outranked their semantic claims -- because the whole scan ran
+// first. The hoist took that away, and the first repair gave each arm a
+// deferral on the string IT reads, which restored the precedence for two
+// fields out of eight: an UNKNOWN artifact naming a readable winner beside an
+// unreadable Round.EventID was still told it names a winner. A second review
+// lane found that, which is this seam's third round on one rule.
+//
+// Deferring per-arm was the wrong shape. This is the rule: no semantic claim
+// about an artifact may be made until every string the artifact carries one of
+// is known to be readable. It is stated here and asked once, above both arms.
+//
+// IT IS NOT A CONSTANT-TIME GATE and is not claimed as one -- "constant-size"
+// counts the FIELDS, not their bytes, and a caller may supply a megabyte of
+// ProofBasis. What it preserves is the property the hoist was measured on:
+// utf8.ValidString allocates nothing, so the eight scans add no bytes to a
+// refusal the arms settle, and the O(n) walks over the three slices stay
+// below them.
+func resolutionConstantStringsExpressible(a ResolutionArtifact) error {
 	for _, f := range [...]struct {
 		what string
 		v    string
@@ -513,8 +535,20 @@ func checkResolutionStringsExpressible(a ResolutionArtifact) error {
 		{"proof revision", a.ProofRevision},
 	} {
 		if !utf8.ValidString(f.v) {
-			return lossy(f.what)
+			return errors.Join(ErrResolutionDigest, errors.New("p4offline: "+f.what+
+				" is not valid UTF-8, so this artifact's own encoding cannot carry it unchanged"))
 		}
+	}
+	return nil
+}
+
+func checkResolutionStringsExpressible(a ResolutionArtifact) error {
+	lossy := func(what string) error {
+		return errors.Join(ErrResolutionDigest, errors.New("p4offline: "+what+
+			" is not valid UTF-8, so this artifact's own encoding cannot carry it unchanged"))
+	}
+	if err := resolutionConstantStringsExpressible(a); err != nil {
+		return err
 	}
 	for i, id := range a.OrderedOutcomeIDs {
 		if !utf8.ValidString(id) {
@@ -647,26 +681,28 @@ func VerifyResolutionArtifact(a ResolutionArtifact) error {
 	// the WORK half of canonical.go's rule, at a site this package had listed
 	// only under the TEXT half.
 	//
-	// EACH ARM DEFERS TO EXPRESSIBILITY ON THE STRING IT READS, so a field
-	// that is both unreadable and semantically wrong is still named as
-	// UNREADABLE and the precedence a caller sees does not move. Validating
-	// one field is proportional to that field, not to the artifact.
+	// NEITHER ARM MAY SPEAK UNTIL THE ARTIFACT IS READABLE. This is the whole
+	// deferral, asked once above both of them; see
+	// resolutionConstantStringsExpressible for why it is not asked per-arm and
+	// what the two attempts before it got wrong. It allocates nothing, so the
+	// refusals below still cost what they were measured to cost.
 	//
-	// BOTH ARMS NEED IT AND ONLY THE FIRST HAD IT. A review lane found the
-	// second: an UNKNOWN artifact whose WinnerOutcomeID is invalid UTF-8 was
-	// told it "names a winner" -- a semantic claim about an identity that
-	// cannot be read -- where before the hoist it was told the identity is not
-	// valid UTF-8. The winner arm reads a string too, so it defers on the same
-	// terms. It defers on the STRING being unreadable rather than on which
-	// half of its condition fired, because an unreadable identity is the
-	// finding a caller needs first whichever half is true.
+	// WHAT IT DOES NOT RESTORE is recorded rather than absorbed: the three
+	// SLICE scans -- ordered outcome ids, evidence references, refusals --
+	// remain below these arms, because walking them is the O(n) work the hoist
+	// exists to avoid. So an artifact that is BOTH semantically wrong AND
+	// unreadable inside one of those slices is now told the semantic thing,
+	// where before the hoist it was told the encoding one. That residual is in
+	// the deferred register.
+	if err := resolutionConstantStringsExpressible(a); err != nil {
+		return err
+	}
 	if a.Outcome != ResolutionWinnerKnown && a.Outcome != ResolutionRefund &&
-		a.Outcome != ResolutionUnknown && utf8.ValidString(string(a.Outcome)) {
+		a.Outcome != ResolutionUnknown {
 		return errors.Join(ErrResolutionNotDerivable, errors.New("p4offline: outcome of "+
 			suppliedTextExtent(string(a.Outcome))+" is outside the vocabulary"))
 	}
-	if a.Outcome == ResolutionUnknown && utf8.ValidString(a.WinnerOutcomeID) &&
-		(a.WinnerOutcomeID != "" || a.WinnerIndex != -1) {
+	if a.Outcome == ResolutionUnknown && (a.WinnerOutcomeID != "" || a.WinnerIndex != -1) {
 		return errors.Join(ErrResolutionNotDerivable, errors.New("p4offline: an UNKNOWN artifact names a winner"))
 	}
 	if err := checkResolutionStringsExpressible(a); err != nil {

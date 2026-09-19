@@ -297,6 +297,39 @@ type SourceRoundRegistry struct {
 	Digest  string             `json:"digest"`
 }
 
+// causalOrderFault restates the caller contract MaterializePairedKnowledge
+// checks before anything else: facts in ascending causal order, by collector
+// epoch and then by sequence within an epoch. It answers with that package's
+// own sentinel, so a caller's errors.Is does not care which of the two
+// statements refused.
+//
+// IT IS RESTATED HERE RATHER THAN REACHED THROUGH THE MATERIALIZER, because
+// the materializer is precisely what the session preflight below exists not to
+// pay for -- and the preflight must not be allowed to answer ahead of this.
+// Asking the materializer for the answer would reinstate the cost the
+// preflight removes; asking it afterwards would be asking after the verdict
+// was already given.
+//
+// THE DUPLICATION IS THE COST OF THAT ORDERING, and it is pinned AS
+// duplication rather than left to drift. The agreement test --
+// TestTheLocalOrderFaultAgreesWithTheMaterializer -- drives both this
+// predicate and the materializer over the same datasets, a fixed table and a
+// randomized sweep, and fails on any disagreement, so a change to either
+// statement is a failing test here and not a silent divergence.
+func causalOrderFault(recs []predictioneval.SourceRecord) error {
+	for i := 1; i < len(recs); i++ {
+		prev, cur := &recs[i-1], &recs[i]
+		switch {
+		case cur.CollectorEpoch < prev.CollectorEpoch:
+			return predictioneval.ErrRecordsOutOfOrder
+		case cur.CollectorEpoch == prev.CollectorEpoch &&
+			cur.CollectorSequence < prev.CollectorSequence:
+			return predictioneval.ErrRecordsOutOfOrder
+		}
+	}
+	return nil
+}
+
 // SelectEpisodes is seams 1–3 over one dataset.
 //
 // IT RETURNS AN ERROR FOR TWO DIFFERENT KINDS OF THING, and a caller must be
@@ -322,6 +355,22 @@ type SourceRoundRegistry struct {
 // typed on the result rather than returned.
 func SelectEpisodes(ds predictioneval.SourceDataset) (EvidenceSelection, error) {
 	out := EvidenceSelection{ProtocolVersion: ProtocolVersion, Source: ds.Source}
+	// THE CALLER CONTRACT OUTRANKS EVERY VERDICT ABOUT THE DATA, and this is
+	// the statement that keeps it that way. Facts out of causal order were
+	// never read in order, so nothing drawn from them -- the session preflight
+	// below included -- is a finding this seam may report. Handing back
+	// (selection, nil) would file the caller's own malformed input as a
+	// completed verdict about somebody's session.
+	//
+	// THE PREFLIGHT BELOW TOOK THIS PRECEDENCE AWAY when it was added: the
+	// order check lives at the top of MaterializePairedKnowledge, so lifting
+	// the refusal above the materializer lifted it above the contract too, and
+	// a dataset carrying both faults answered clean -- against the two-kinds-
+	// of-error contract this function's own comment states. Review found it on
+	// the published head.
+	if err := causalOrderFault(ds.Records); err != nil {
+		return EvidenceSelection{}, err
+	}
 	// REFUSE THE SESSION BEFORE MATERIALIZING IT where the refusal does not
 	// need the materialized knowledge. See sessionRefusalsWithoutKnowledge for
 	// what the old order cost and what this preflight gives up in reporting.
