@@ -4443,3 +4443,86 @@ func TestADerivedClaimIsNeverRoutedInvalidForItsText(t *testing.T) {
 		t.Fatalf("the derived claim must reach the canonical position unaltered: %+v", reg.Entries[0])
 	}
 }
+
+// TestASessionRefusedByItsOwnProvenanceIsNotMaterializedFirst pins the
+// preflight at the top of SelectEpisodes.
+//
+// MaterializePairedKnowledge groups every record in the dataset. Nine of the
+// session refusals read only constant-size provenance, and the foreign-facts
+// scan reads two identity fields per record without allocating; none of them
+// needs the materialized knowledge. A security review lane measured the old
+// order: a ONE-BYTE SessionReading that refuses the whole session allocated
+// 22,618,360 B/op on 16,384 attempt rows, against 16 B/op on an empty dataset,
+// and every byte of it was discarded.
+//
+// BOTH DIRECTIONS ARE ASSERTED. A ceiling alone passes if the fixture's
+// records never reach the measured path, so the admitted control must show the
+// records ARE there and DO cost -- otherwise "flat" would mean "empty".
+func TestASessionRefusedByItsOwnProvenanceIsNotMaterializedFirst(t *testing.T) {
+	measure := func(f func()) uint64 {
+		runtime.GC()
+		var before, after runtime.MemStats
+		runtime.ReadMemStats(&before)
+		f()
+		runtime.ReadMemStats(&after)
+		return after.TotalAlloc - before.TotalAlloc
+	}
+	build := func(n int, poke func(*predictioneval.SourceProvenance)) predictioneval.SourceDataset {
+		s := newSynth()
+		for i := 0; i < n; i++ {
+			s.due("r1", "e1", int64(i+1))
+		}
+		ds := s.dataset()
+		poke(&ds.Source)
+		return ds
+	}
+	const rows = 16384
+	refused := func(p *predictioneval.SourceProvenance) { p.SessionReading = "X" }
+	admitted := func(p *predictioneval.SourceProvenance) {}
+
+	var small, large uint64
+	for _, tc := range []struct {
+		name string
+		n    int
+		into *uint64
+	}{{"an empty dataset", 0, &small}, {"16,384 attempt rows", rows, &large}} {
+		ds := build(tc.n, refused)
+		var sel p4offline.EvidenceSelection
+		var err error
+		*tc.into = measure(func() { sel, err = p4offline.SelectEpisodes(ds) })
+		t.Logf("%-22s refused by one byte of provenance: %d bytes", tc.name, *tc.into)
+		if err != nil {
+			t.Fatalf("a refused session is not an error, it is a refusal: %v", err)
+		}
+		if sel.SessionAdmitted {
+			t.Fatalf("this fixture must be refused, or the budget proves nothing")
+		}
+		if !containsString(sel.SessionRefusals, p4offline.RefusalSessionReadingNotAsFinalized) {
+			t.Fatalf("the refusal must name the reading, got %v", sel.SessionRefusals)
+		}
+	}
+	// The refusal must not grow with the dataset. The allowance is generous
+	// against allocator rounding and still three orders below one
+	// materialization of this fixture.
+	if large > small+8192 {
+		t.Fatalf("refusing on constant-size provenance allocated %d bytes on %d rows against %d on none: the dataset is still being materialized first",
+			large, rows, small)
+	}
+	// THE CONTROL: the same records, a session the provenance admits. This
+	// must cost, or the rows above were flat because the fixture was empty.
+	ds := build(rows, admitted)
+	var sel p4offline.EvidenceSelection
+	var err error
+	cost := measure(func() { sel, err = p4offline.SelectEpisodes(ds) })
+	t.Logf("%-22s admitted: %d bytes", "16,384 attempt rows", cost)
+	if err != nil {
+		t.Fatalf("the admitted control must select: %v", err)
+	}
+	if !sel.SessionAdmitted {
+		t.Fatalf("the control must be admitted, got refusals %v", sel.SessionRefusals)
+	}
+	if cost < 1<<20 {
+		t.Fatalf("the admitted control allocated only %d bytes on %d rows: the fixture is not reaching materialization, so the flatness above proves nothing",
+			cost, rows)
+	}
+}

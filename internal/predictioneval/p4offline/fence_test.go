@@ -516,7 +516,8 @@ var suppliedTextExtentCensus = map[string]int{
 	// lesson is cheaper to apply here than to relearn.
 	"canonical.go/suppliedTextExtent":        1, // the string spelling delegating to the computed one
 	"evidence.go/VerifySourceRoundRegistry":  2, // the Version clause and the digest-shape gate
-	"factset.go/VerifyCommonFactset":         4, // contract, protocol, the digest's shape, the completeness vocabulary
+	"factset.go/factsetAdmissionFault":       3, // contract, protocol, the digest's shape
+	"factset.go/VerifyCommonFactset":         1, // the completeness vocabulary; the three above moved to the admission helper the evaluators hoist
 	"factset.go/checkFactsetConsistency":     2, // the stealth-proof arm and the completeness arm
 	"p3b.go/decodeFault":                     2, // the computed sentence width, and the rendered message
 	"p3b.go/walkRulesetObject":               1, // the unknown-key gate

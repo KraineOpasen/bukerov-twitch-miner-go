@@ -322,6 +322,13 @@ type SourceRoundRegistry struct {
 // typed on the result rather than returned.
 func SelectEpisodes(ds predictioneval.SourceDataset) (EvidenceSelection, error) {
 	out := EvidenceSelection{ProtocolVersion: ProtocolVersion, Source: ds.Source}
+	// REFUSE THE SESSION BEFORE MATERIALIZING IT where the refusal does not
+	// need the materialized knowledge. See sessionRefusalsWithoutKnowledge for
+	// what the old order cost and what this preflight gives up in reporting.
+	if pre := sessionRefusalsWithoutKnowledge(ds); len(pre) > 0 {
+		out.SessionRefusals = pre
+		return out, nil
+	}
 	pk, err := predictioneval.MaterializePairedKnowledge(ds)
 	if err != nil {
 		return EvidenceSelection{}, err
@@ -722,7 +729,49 @@ func sessionRefusalKinds(rs []string) []string {
 	return out
 }
 
+// sessionRefusals is sessionRefusalsWithoutKnowledge plus the two arms that
+// need the materialized knowledge, and it stays the whole answer for a session
+// that is otherwise admissible.
 func sessionRefusals(ds predictioneval.SourceDataset, pk predictioneval.PairedKnowledge) []string {
+	out := sessionRefusalsWithoutKnowledge(ds)
+	for _, a := range pk.Anomalies {
+		out = append(out, RefusalSessionAnomalyPrefix+a)
+	}
+	// Session-level P2 refusals (as opposed to per-attempt ones) carry no key
+	// and no observation: they qualify the whole reading.
+	for _, e := range pk.Excluded {
+		if e.Key == nil && e.ObservationID == "" {
+			out = append(out, RefusalSessionP2Exclusion+e.Reason)
+		}
+	}
+	return out
+}
+
+// sessionRefusalsWithoutKnowledge is every session refusal this package can
+// reach WITHOUT materializing the dataset, which is what lets SelectEpisodes
+// refuse a session before it pays for one.
+//
+// THE CUT IS "NEEDS pk", NOT "IS O(1)", and the distinction is deliberate. The
+// nine metadata arms read constant-size provenance fields; the foreign-facts
+// scan walks the records but reads two identity fields per record and
+// allocates nothing, which is orders below materializing them. Everything that
+// can be answered without the materialized knowledge is answered here, and
+// only the two arms that genuinely need it are left to the caller above.
+//
+// A security review lane measured what the old order cost: SelectEpisodes
+// materialized every record BEFORE testing the session, so a ONE-BYTE
+// SessionReading that refuses the whole session allocated 22,618,360 B/op on
+// 16,384 attempt rows, against 16 B/op for an empty dataset. The verdict was
+// the same either way; all of that work was thrown away.
+//
+// WHAT THE PREFLIGHT COSTS IS REPORTING, and it is a real loss rather than a
+// free win. A session refused by its own metadata no longer also carries the
+// anomaly and session-level P2 exclusion reasons that materializing would have
+// found, because it is refused before those exist. Those reasons are derived
+// from records in a session that is not admitted, and the reason a caller acts
+// on -- the session's own provenance -- is still named. The trade is recorded
+// here and in doc.go rather than taken silently.
+func sessionRefusalsWithoutKnowledge(ds predictioneval.SourceDataset) []string {
 	var out []string
 	src := ds.Source
 	if src.SessionReading != AdmittedSessionReading {
@@ -756,16 +805,6 @@ func sessionRefusals(ds predictioneval.SourceDataset, pk predictioneval.PairedKn
 		if r.CollectorEpoch != src.CollectorEpoch || r.CollectorSessionID != src.CollectorSessionID {
 			out = append(out, RefusalSessionForeignFacts)
 			break
-		}
-	}
-	for _, a := range pk.Anomalies {
-		out = append(out, RefusalSessionAnomalyPrefix+a)
-	}
-	// Session-level P2 refusals (as opposed to per-attempt ones) carry no key
-	// and no observation: they qualify the whole reading.
-	for _, e := range pk.Excluded {
-		if e.Key == nil && e.ObservationID == "" {
-			out = append(out, RefusalSessionP2Exclusion+e.Reason)
 		}
 	}
 	return out

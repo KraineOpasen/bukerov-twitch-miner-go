@@ -502,11 +502,23 @@ func commonFactsetDigest(fs CommonFactset) string {
 // shift of its own, recorded at the gate. This sentence says COMPARISON rather
 // than "digest" because the shape gate now sits between the two, and the value
 // gate precedes only the comparison.
-func VerifyCommonFactset(fs CommonFactset) error {
-	// THE FIRST GATE ON EVERY FACTSET PATH IN THIS PACKAGE, and it used to pay
-	// for its own refusal: these three fields are plain exported strings that
-	// nothing here bounds, and the comparison is the first statement of the
-	// function. See suppliedTextExtent for the rule and the measurement.
+// factsetAdmissionFault is the part of VerifyCommonFactset that refuses
+// WITHOUT reading the factset's payload: the contract, the protocol and the
+// digest's shape. It is the whole of that function's constant-size prefix and
+// nothing else.
+//
+// IT EXISTS SO A CALLER CAN ASK THE CHEAP HALF FIRST. The P3b evaluators run a
+// full native config probe before projecting the factset, so a factset
+// refusable on a constant-size field was paying for the probe and throwing it
+// away. They now ask this first. VerifyCommonFactset calls it too, so there is
+// ONE statement of these three gates and a hoisted caller cannot drift from
+// the verifier.
+//
+// THE COMPLETENESS VOCABULARY IS NOT IN HERE, though it is also O(1): it
+// refuses with ErrFactsetInconsistent rather than ErrFactsetDigest, and a
+// caller asking "may I even look at this factset" should not be told a
+// consistency verdict before the artifact's own identity has been checked.
+func factsetAdmissionFault(fs CommonFactset) error {
 	if fs.ContractVersion != CommonFactsetDigestVersion {
 		return errors.Join(ErrFactsetDigest, errors.New("p4offline: factset contract is "+
 			suppliedTextExtent(fs.ContractVersion)+", this package writes only "+strconv.Quote(CommonFactsetDigestVersion)))
@@ -514,6 +526,21 @@ func VerifyCommonFactset(fs CommonFactset) error {
 	if fs.Protocol != ProtocolVersion {
 		return errors.Join(ErrFactsetDigest, errors.New("p4offline: factset protocol is "+
 			suppliedTextExtent(fs.Protocol)+", this package writes only "+strconv.Quote(ProtocolVersion)))
+	}
+	if !isCanonicalHex(fs.Digest, 64) {
+		return errors.Join(ErrFactsetDigest, errors.New("p4offline: factset digest of "+
+			suppliedTextExtent(fs.Digest)+" is not this package's 64 lower-case hex digits"))
+	}
+	return nil
+}
+
+func VerifyCommonFactset(fs CommonFactset) error {
+	// THE FIRST GATE ON EVERY FACTSET PATH IN THIS PACKAGE, and it used to pay
+	// for its own refusal: these three fields are plain exported strings that
+	// nothing here bounds, and the comparison is the first statement of the
+	// function. See suppliedTextExtent for the rule and the measurement.
+	if err := factsetAdmissionFault(fs); err != nil {
+		return err
 	}
 	// AHEAD OF THE DIGEST COMPARISON -- and below the digest's SHAPE gate, which
 	// was inserted between this paragraph and the scan it documents -- but NOT
@@ -553,10 +580,7 @@ func VerifyCommonFactset(fs CommonFactset) error {
 	// that class, which is the same kind of shift p3b.go records for its own
 	// digest-shape gate and the reason both are written down rather than left
 	// to be discovered.
-	if !isCanonicalHex(fs.Digest, 64) {
-		return errors.Join(ErrFactsetDigest, errors.New("p4offline: factset digest of "+
-			suppliedTextExtent(fs.Digest)+" is not this package's 64 lower-case hex digits"))
-	}
+	// The digest's shape is part of that same admission.
 	// THE COMPLETENESS VOCABULARY DECIDES FROM A CONSTANT-SIZE FIELD, and the
 	// scan and the framing under it are thrown away when it fires. The same
 	// lane measured a seventeen-byte out-of-vocabulary Completeness at

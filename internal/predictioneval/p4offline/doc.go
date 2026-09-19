@@ -591,6 +591,23 @@
 //     an approved seam. As with the per-verdict re-verification above, there is
 //     no non-test caller: the 16,384-run schedule is the protocol's, and this
 //     package deliberately contains no runner to execute it.
+//   - A SESSION REFUSED BY ITS OWN PROVENANCE NO LONGER CARRIES ITS ANOMALY
+//     REASONS, which is what the preflight at the top of SelectEpisodes costs
+//     and is recorded because a trade absorbed in silence is the defect behind
+//     the defect. A security review lane measured the order it replaces:
+//     MaterializePairedKnowledge ran before the session was tested, so a
+//     ONE-BYTE SessionReading refusing the whole session allocated 22,618,360
+//     B/op on 16,384 attempt rows against 16 B/op on an empty dataset, and all
+//     of it was discarded. The preflight answers every refusal that does not
+//     need the materialized knowledge -- the nine provenance arms and the
+//     foreign-facts scan -- and returns before materializing.
+//     WHAT IS LOST is the two arms that DO need it: a session refused by its
+//     provenance no longer also reports the producer's anomalies or its
+//     session-level P2 exclusions, because it is refused before those are
+//     derived. Those reasons describe records in a session that is not
+//     admitted, and the reason a caller acts on is still named; the cut is
+//     "needs the materialized knowledge", which is statable, rather than a
+//     threshold someone has to tune. It is a reporting loss all the same.
 //   - REFUSING A RULESET DOCUMENT STILL COSTS ABOUT SEVEN TIMES THE DOCUMENT,
 //     which the decode-fault repair does not remove and is recorded so the
 //     repair is not read as closing it. Two lanes measured it: refusing a

@@ -937,6 +937,19 @@ func EvaluateP3bWithTrace(fs CommonFactset, rs VerifiedP3bRuleset,
 	if err := checkEntropyCoordinates(coords); err != nil {
 		return P3bCaseResult{}, err
 	}
+	// AND THE FACTSET'S CONSTANT-SIZE ADMISSION ABOVE THE PROBE, for the same
+	// reason one line up. ProjectP3bSingleCandidate below verifies the factset
+	// in full, but its O(1) gates -- contract, protocol, the digest's shape --
+	// can refuse without the probe's product, and a security review lane
+	// measured what the old order cost: a factset refused by its
+	// ContractVersion alone allocated 2,113,920 B/op with a 1 MiB config
+	// identifier, against 9,152 with a one-byte one. The full projection stays
+	// BELOW the probe, so a valid factset beside an unverified ruleset does not
+	// pay for a projection either. Neither order alone gets both; this split
+	// does.
+	if err := factsetAdmissionFault(fs); err != nil {
+		return P3bCaseResult{}, err
+	}
 	if err := rs.check(); err != nil {
 		return P3bCaseResult{}, err
 	}
@@ -1094,6 +1107,11 @@ func EvaluateP3bCase(fs CommonFactset, rs VerifiedP3bRuleset, coords EntropyCoor
 	// The coordinate gate above the ruleset probe, for the reason stated at
 	// the sibling above: the probe's product is thrown away on this path.
 	if err := checkEntropyCoordinates(coords); err != nil {
+		return P3bCaseResult{}, err
+	}
+	// The factset's constant-size admission above the probe, for the reason
+	// stated at the sibling above.
+	if err := factsetAdmissionFault(fs); err != nil {
 		return P3bCaseResult{}, err
 	}
 	if err := rs.check(); err != nil {

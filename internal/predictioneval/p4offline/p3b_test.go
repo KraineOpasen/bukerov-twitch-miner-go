@@ -4217,3 +4217,113 @@ func TestAnOutOfProtocolCoordinateIsRefusedWithoutProbingTheRuleset(t *testing.T
 		})
 	}
 }
+
+// TestAMalformedFactsetIsRefusedWithoutProbingTheRuleset pins the second of
+// the two gates the P3b evaluators ask before the ruleset probe.
+//
+// The probe re-derives a verified ruleset's native digest by running the core
+// over the whole config, which is proportional to a caller-supplied ConfigID.
+// A factset refusable on a CONSTANT-SIZE field -- its contract, its protocol,
+// its digest's shape -- does not need that product, and a security review lane
+// measured what it cost when the order was the other way round: 2,113,920
+// B/op on a 1 MiB identifier for a factset refused by its ContractVersion
+// alone.
+//
+// THE SPLIT IS THE POINT, and a test that only measured this direction would
+// not see it. The FULL projection stays BELOW the probe, so a valid factset
+// beside an unverified ruleset still does not pay for a projection. Moving the
+// whole of ProjectP3bSingleCandidate up would fix this row and break that one;
+// only hoisting the constant-size admission fixes both. The second row here is
+// the guard on the half that must NOT move.
+func TestAMalformedFactsetIsRefusedWithoutProbingTheRuleset(t *testing.T) {
+	measure := func(f func() error) (uint64, error) {
+		runtime.GC()
+		var before, after runtime.MemStats
+		runtime.ReadMemStats(&before)
+		err := f()
+		runtime.ReadMemStats(&after)
+		return after.TotalAlloc - before.TotalAlloc, err
+	}
+	coords := p4offline.EntropyCoordinates{
+		DatasetID: "d", DatasetVersion: "v1",
+		CommonFactsetDigest: p4offline.DigestReference(strings.Repeat("0", 64)),
+		PairedOpportunityID: "round",
+	}
+	narrow := mustVerify(t, rulesetFrom(t, cfgWithRule("a", predictioneval.ComparatorGe, 50, 100)))
+	wide := mustVerify(t, rulesetFrom(t, cfgWithRule(strings.Repeat("a", 1<<20), predictioneval.ComparatorGe, 50, 100)))
+	if len(wide.RulesetID) != 1<<20 {
+		t.Fatalf("the wide fixture must carry a %d-byte identifier, it carries %d", 1<<20, len(wide.RulesetID))
+	}
+	bad := p4offline.CommonFactset{ContractVersion: "X"}
+	for _, tc := range []struct {
+		name string
+		rs   p4offline.VerifiedP3bRuleset
+	}{{"a one-byte identifier", narrow}, {"a 1 MiB identifier", wide}} {
+		t.Run(tc.name, func(t *testing.T) {
+			allocated, err := measure(func() error {
+				_, e := p4offline.EvaluateP3bCase(bad, tc.rs, coords)
+				return e
+			})
+			t.Logf("%s: refusing a malformed factset allocated %d bytes", tc.name, allocated)
+			if !errors.Is(err, p4offline.ErrFactsetDigest) {
+				t.Fatalf("a factset with a foreign contract must be refused as exactly that, got %v", err)
+			}
+			if allocated > 8192 {
+				t.Fatalf("the refusal allocated %d bytes: it is settled by a constant-size field and must not run the ruleset probe above it",
+					allocated)
+			}
+		})
+	}
+	// AND THE CONVERSE: a factset the admission accepts still pays the probe,
+	// because the probe is what proves the ruleset. Without this row the gate
+	// could be "hoist everything" and this test would not notice.
+	t.Run("a factset the admission accepts still reaches the probe", func(t *testing.T) {
+		// Well-formed contract, protocol and digest SHAPE -- so
+		// factsetAdmissionFault passes it -- but the digest does not match its
+		// values, so the full projection below refuses it. Reaching that
+		// refusal means the probe above it ran.
+		fs := p4offline.CommonFactset{
+			ContractVersion: p4offline.CommonFactsetDigestVersion,
+			Protocol:        p4offline.ProtocolVersion,
+			Digest:          strings.Repeat("0", 64),
+		}
+		if err := factsetAdmissionIsClean(fs); err != nil {
+			t.Fatalf("this fixture must pass the constant-size admission, or the row proves nothing: %v", err)
+		}
+		allocated, err := measure(func() error {
+			_, e := p4offline.EvaluateP3bCase(fs, wide, coords)
+			return e
+		})
+		t.Logf("a 1 MiB identifier, admission clean: %d bytes", allocated)
+		if err == nil {
+			t.Fatal("this fixture is not meant to verify")
+		}
+		if allocated <= 8192 {
+			t.Fatalf("the probe must still run for a factset the admission accepts; allocated only %d bytes, so the hoist took the whole projection with it",
+				allocated)
+		}
+	})
+}
+
+// factsetAdmissionIsClean mirrors factsetAdmissionFault through the exported
+// verifier: a factset whose contract, protocol and digest SHAPE are all
+// well-formed is one the constant-size admission accepts. It is stated here
+// rather than exported, because the admission is an internal ordering device
+// and not a seam.
+func factsetAdmissionIsClean(fs p4offline.CommonFactset) error {
+	if fs.ContractVersion != p4offline.CommonFactsetDigestVersion {
+		return errors.New("contract version is not this package's")
+	}
+	if fs.Protocol != p4offline.ProtocolVersion {
+		return errors.New("protocol is not this package's")
+	}
+	if len(fs.Digest) != 64 {
+		return errors.New("digest is not 64 characters")
+	}
+	for _, c := range fs.Digest {
+		if !(c >= '0' && c <= '9') && !(c >= 'a' && c <= 'f') {
+			return errors.New("digest is not lower-case hex")
+		}
+	}
+	return nil
+}
