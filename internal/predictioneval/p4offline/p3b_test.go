@@ -4321,9 +4321,92 @@ func factsetAdmissionIsClean(fs p4offline.CommonFactset) error {
 		return errors.New("digest is not 64 characters")
 	}
 	for _, c := range fs.Digest {
-		if !(c >= '0' && c <= '9') && !(c >= 'a' && c <= 'f') {
+		switch {
+		case c >= '0' && c <= '9':
+		case c >= 'a' && c <= 'f':
+		default:
 			return errors.New("digest is not lower-case hex")
 		}
 	}
 	return nil
+}
+
+// TestAnOverCeilingOutcomeVectorIsRefusedBeforeItIsConverted pins the third of
+// these gate orders, and it is the one where the ceiling already existed.
+//
+// ProjectOrderedRulesStream refuses a candidate above MaxOrderedRulesOutcomes.
+// VerifyCommonFactset does not bound fs.Outcomes, so a supplier digests
+// whatever vector it likes and the factset verifies; the projection then
+// converted and appended every entry before the native ceiling rejected the
+// result. A code review lane measured 125,682,736 bytes for a 100,000-outcome
+// artifact, all of it discarded.
+//
+// THE CONTROL IS A VECTOR AT THE CEILING, because a gate written as >= rather
+// than > would refuse the largest legal vector and this test would not notice.
+func TestAnOverCeilingOutcomeVectorIsRefusedBeforeItIsConverted(t *testing.T) {
+	measure := func(f func() error) (uint64, error) {
+		runtime.GC()
+		var before, after runtime.MemStats
+		runtime.ReadMemStats(&before)
+		err := f()
+		runtime.ReadMemStats(&after)
+		return after.TotalAlloc - before.TotalAlloc, err
+	}
+	// A SELF-DIGESTED factset, which is the whole premise: VerifyCommonFactset
+	// does not bound this slice, so a supplier appends what it likes and
+	// re-seals, and the artifact verifies.
+	_, _, valid := selectedCase(t, nil, nil)
+	build := func(n int) p4offline.CommonFactset {
+		fs := valid
+		fs.Outcomes = append([]predictioneval.OutcomeInput(nil), fs.Outcomes...)
+		for i := len(fs.Outcomes); i < n; i++ {
+			fs.Outcomes = append(fs.Outcomes, predictioneval.OutcomeInput{
+				Slot: i, ID: "o" + strconv.Itoa(i), Present: true, TotalPoints: 1,
+			})
+		}
+		fs.Outcomes = fs.Outcomes[:n]
+		fs.Digest = digestOf(p4offline.SerializeCommonFactset(fs))
+		if err := p4offline.VerifyCommonFactset(fs); err != nil {
+			t.Fatalf("a %d-outcome factset must still VERIFY, or the finding is not what it says: %v", n, err)
+		}
+		return fs
+	}
+	for _, tc := range []struct {
+		name string
+		n    int
+	}{{"just over the ceiling", predictioneval.MaxOrderedRulesOutcomes + 1}, {"far over it", 100000}} {
+		t.Run(tc.name, func(t *testing.T) {
+			fs := build(tc.n)
+			// THE BASELINE IS THE VERIFICATION THIS CALL ALREADY DOES, not
+			// zero. ProjectP3bSingleCandidate verifies the factset first, and
+			// that framing is proportional to the outcomes and is NOT
+			// removable -- the artifact must be verified before anything reads
+			// it. What the gate controls is whether the projection then
+			// converts a vector it is about to refuse. So the budget is the
+			// DELTA over the verification, which is the only part in question.
+			verifyCost, _ := measure(func() error { return p4offline.VerifyCommonFactset(fs) })
+			allocated, err := measure(func() error {
+				_, e := p4offline.ProjectP3bSingleCandidate(fs)
+				return e
+			})
+			t.Logf("%d outcomes: verify %d bytes, project-and-refuse %d bytes (delta %d)",
+				tc.n, verifyCost, allocated, int64(allocated)-int64(verifyCost))
+			if !errors.Is(err, p4offline.ErrP3bProjectionRefused) {
+				t.Fatalf("an over-ceiling vector must be refused as a projection refusal, got %v", err)
+			}
+			if allocated > verifyCost+8192 {
+				t.Fatalf("refusing %d outcomes cost %d bytes against %d to verify the same factset: the count is an int and the ceiling a constant, so the vector must not be converted first",
+					tc.n, allocated, verifyCost)
+			}
+		})
+	}
+	// THE CONTROL: a vector AT the ceiling must not be refused by this gate.
+	// It is refused later, for want of the rest of a factset, and that is a
+	// different sentence.
+	t.Run("a vector at the ceiling is not refused by the count", func(t *testing.T) {
+		_, err := p4offline.ProjectP3bSingleCandidate(build(predictioneval.MaxOrderedRulesOutcomes))
+		if err != nil && strings.Contains(err.Error(), "above the native ceiling") {
+			t.Fatalf("the largest legal vector must not be refused by the count gate: %v", err)
+		}
+	})
 }

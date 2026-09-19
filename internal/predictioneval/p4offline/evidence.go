@@ -1810,6 +1810,34 @@ func classifySignals(recs []predictioneval.SourceRecord) []rawSignal {
 			case r.Payload.Phase == predictioneval.PhaseCallStarted,
 				r.Payload.Phase == predictioneval.PhaseCallReturned:
 				sig.unclassified = true
+			case r.Kind == predictioneval.KindAutoDecision &&
+				r.Payload.Phase != predictioneval.PhaseAutoDue &&
+				r.Payload.Phase != predictioneval.PhaseAutoDecided &&
+				r.Payload.Phase != predictioneval.PhaseAutoSkipped:
+				// THE SAME ARGUMENT READ THE OTHER WAY ROUND, and a code
+				// review lane found that only one direction was held. The arm
+				// below refuses an automatic PHASE on a foreign KIND. Nothing
+				// refused a foreign PHASE on the automatic kind, so a row this
+				// package cannot place fell through the whole switch and was
+				// neither undecodable nor unclassified.
+				//
+				// THE MORE OBVIOUS FORGERY PASSED. On one fixture, a row
+				// carrying attempt id 1 beside an otherwise valid attempt 1:
+				// labelled CALL_STARTED -- a phase this package NAMES -- the
+				// episode came back EXCLUDED, BOUNDARY_NOT_PROVEN; labelled
+				// "FORGED", a value it names nowhere, the same episode came
+				// back PRIMARY_SCORABLE. A supplier was rewarded for choosing
+				// a phase the package had never heard of.
+				//
+				// THE ENUMERATION IS THE KIND'S, not a family's: the producer
+				// writes AUTO_DUE, AUTO_DECIDED and AUTO_SKIPPED on an
+				// auto_decision row and nothing else, so any other phase there
+				// is a pairing it cannot have written. That is the same
+				// footing the arm below stands on, and it is why this refusal
+				// does not reach the phase families named at the end of the
+				// paragraph above: those are judged on rows whose kind does
+				// not enumerate them.
+				sig.unclassified = true
 			case r.Kind != predictioneval.KindAutoDecision &&
 				(r.Payload.Phase == predictioneval.PhaseAutoDue ||
 					r.Payload.Phase == predictioneval.PhaseAutoDecided ||

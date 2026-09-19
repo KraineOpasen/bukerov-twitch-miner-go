@@ -4526,3 +4526,67 @@ func TestASessionRefusedByItsOwnProvenanceIsNotMaterializedFirst(t *testing.T) {
 			cost, rows)
 	}
 }
+
+// TestAForeignPhaseOnTheAutomaticKindCannotEnterTheCohort pins the direction
+// of the phase/kind argument that was not held.
+//
+// The coverage proof refuses an automatic PHASE on a foreign KIND, because
+// every site that emits one passes the automatic kind. Nothing refused a
+// foreign PHASE on the automatic KIND, so a row this package cannot place fell
+// through the whole classification switch and was marked neither undecodable
+// nor unclassified.
+//
+// THE TEST IS A COMPARISON, not an assertion about one fixture, because the
+// defect is only visible as a difference. One dataset, one forged row carrying
+// attempt id 1 beside an otherwise valid attempt 1, and only the forged row's
+// PHASE varies:
+//
+//   - CALL_STARTED, a phase this package NAMES, was refused;
+//   - "FORGED", a value it names nowhere, was ADMITTED as PRIMARY_SCORABLE.
+//
+// A supplier was rewarded for choosing a phase the package had never heard of,
+// which is the fail-closed rule inverted. The honest row is the third case and
+// must still be admitted, or this test would pass against a package that
+// refuses everything.
+func TestAForeignPhaseOnTheAutomaticKindCannotEnterTheCohort(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		phase    string
+		admitted bool
+	}{
+		{"a phase the package names, on the wrong kind", predictioneval.PhaseCallStarted, false},
+		{"a phase the package names nowhere", "FORGED", false},
+		{"the producer's own phase for this kind", predictioneval.PhaseAutoDue, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newSynth()
+			forged := s.fact(predictioneval.KindAutoDecision, tc.phase, "r1", "e1", 1)
+			forged.Payload.ReasonCode = "OK"
+			s.add(forged)
+			s.placedAttempt("r1", "e1", 1)
+
+			sel, err := p4offline.SelectEpisodes(s.dataset())
+			if err != nil {
+				t.Fatalf("a refused row is not an error: %v", err)
+			}
+			if len(sel.Episodes) != 1 {
+				t.Fatalf("the fixture must produce exactly one episode, got %d", len(sel.Episodes))
+			}
+			ep := sel.Episodes[0]
+			if got := !ep.Excluded; got != tc.admitted {
+				t.Fatalf("phase %q: admitted=%v, want %v (quality %q, reasons %v)",
+					tc.phase, got, tc.admitted, ep.Quality.Quality, ep.ExclusionReasons)
+			}
+			if tc.admitted {
+				if ep.Quality.Quality != p4offline.QualityPrimaryScorable {
+					t.Fatalf("the honest fixture must stay scorable, got %q", ep.Quality.Quality)
+				}
+				return
+			}
+			if !containsString(ep.ExclusionReasons, p4offline.ExclusionBoundaryNotProven) {
+				t.Fatalf("phase %q: the exclusion must name the unproven boundary, got %v",
+					tc.phase, ep.ExclusionReasons)
+			}
+		})
+	}
+}

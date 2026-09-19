@@ -853,6 +853,24 @@ func ProjectP3bSingleCandidate(fs CommonFactset) (P3bProjection, error) {
 		OutcomesPresence:  predictioneval.SuppliedKnown,
 		Provenance:        provenance,
 	}
+	// THE CEILING THE LOOP FEEDS, ASKED BEFORE THE LOOP RUNS.
+	// ProjectOrderedRulesStream refuses a candidate carrying more than
+	// MaxOrderedRulesOutcomes, and VerifyCommonFactset does not bound this
+	// slice -- a supplier digests whatever vector it likes and the factset
+	// verifies. So every entry was converted and appended, and all of it was
+	// discarded on the refusal: a code review lane measured 125,682,736 bytes
+	// for a 100,000-outcome artifact. The count is an int and the ceiling is a
+	// constant, so the same refusal is available here for nothing.
+	//
+	// IT REFUSES AS THE PROJECTION, not as a new class. The sentinel and the
+	// wording are what ProjectOrderedRulesStream would have produced, because
+	// this gate exists to move WHEN the refusal is decided and not WHAT a
+	// caller is told.
+	if n := len(fs.Outcomes); n > predictioneval.MaxOrderedRulesOutcomes {
+		return P3bProjection{}, errors.Join(ErrP3bProjectionRefused,
+			errors.New("p4offline: the factset carries "+strconv.Itoa(n)+
+				" outcomes, above the native ceiling of "+strconv.Itoa(predictioneval.MaxOrderedRulesOutcomes)))
+	}
 	for _, o := range fs.Outcomes {
 		points := knownAt(int64(o.TotalPoints), provenance, position)
 		if !o.Present {
