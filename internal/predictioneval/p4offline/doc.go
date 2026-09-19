@@ -513,15 +513,63 @@
 //     is why the fixture is named: against this one, a two-byte claim digest is
 //     about 20% cheaper (19% at N = 256), 16-byte session and pool ids 36.5% to
 //     37.7% dearer, and 36-character ones 82% to 107% dearer. The RATIO is what
-//     survives a change of shape. The fix is the one the lane named, and this
-//     package already has
-//     a template for -- verify once and carry an immutable verified handle, as
-//     VerifiedP3bRuleset does -- but it changes the signature of the function
-//     where seam 12 composes with seams 3 and 10, which is an approved seam
-//     rather than an implementation detail, and there is no non-test caller
-//     today because the shape needs a runner this package deliberately does not
-//     contain. Designing that API now would be guessing at a consumer that does
-//     not exist; it belongs with the runner, and with the seam re-approved.
+//     survives a change of shape. The fix is the one the lane named -- verify
+//     once and carry an immutable verified handle -- but it changes the
+//     signature of the function where seam 12 composes with seams 3 and 10,
+//     which is an approved seam rather than an implementation detail, and there
+//     is no non-test caller today because the shape needs a runner this package
+//     deliberately does not contain. Designing that API now would be guessing
+//     at a consumer that does not exist; it belongs with the runner, and with
+//     the seam re-approved. THIS PACKAGE HAS NO WORKING EXAMPLE OF THAT SHAPE
+//     TO COPY: VerifiedP3bRuleset is the nearest thing to one and the entry
+//     below reports that it re-verifies on every use, so whoever builds the
+//     handle is building the first one here rather than following a pattern.
+//   - A VERIFIED RULESET IS RE-VERIFIED ON EVERY USE, SO THE PROTOCOL'S OWN
+//     SCHEDULE PAYS FOR IT 16,384 TIMES. Reported by a security review lane on
+//     the published head, reproduced, and NOT repaired. VerifiedP3bRuleset.check
+//     runs at the top of both EvaluateP3bCase and its sibling, and it does not
+//     merely re-check the witness: it calls nativeConfigDigest, which runs the
+//     native evaluator over the whole config through the fixed probe. The
+//     config's identifier is caller-supplied text bounded only by
+//     MaxOrderedRulesAggregateBytes, which is 128 MiB, so a 1 MiB identifier is
+//     an ordinary supported value and not an extreme one.
+//     MEASURED ON THIS TREE, without the race detector, on check alone: 8,984
+//     B/op for a one-byte identifier, 147,671 B/op at 64 KiB, and 2,113,763
+//     B/op at 1 MiB -- about 235x the one-byte check, and about two allocated
+//     bytes per identifier byte, paid twice over, once when the witness frames
+//     the identifier and once when the probe frames the config. THE ALLOCATION
+//     COUNT IS FLAT at about 402 across all three widths, so what grows is size
+//     and not the number of operations, which is what makes the growth the
+//     identifier's rather than the config's shape. The lane's own reading
+//     divides to 2,113,586 bytes per check and its extrapolation to about
+//     34.6 GB for one case's 16,384-trajectory schedule follows from this
+//     tree's figure too.
+//     ITS READING OF THAT TOTAL NEEDS ONE CORRECTION, because it changes what
+//     the fix buys. Nothing here is RETAINED between calls: the allocations are
+//     transient and the allocation count is flat, so a schedule's 34.6 GB is
+//     cumulative throughput through the allocator and the collector, and the
+//     resident cost stays one call's few megabytes. The exposure is CPU and GC
+//     pressure across a long run, not a peak that exhausts a process. NO
+//     WALL-CLOCK FIGURE IS QUOTED, because two on this branch failed to
+//     reproduce across hosts and were retired; the durable statement is that
+//     each check is one full native evaluation of the config.
+//     AND THE PROBE IS NOT THE ONLY CONFIG-PROPORTIONAL WORK PER EVALUATION,
+//     which a fix sold as removing the cost will be measured against: the real
+//     EvaluateOrderedRules over the same config measures 1,053,193 B/op at a
+//     1 MiB identifier, so sealing the handle removes about two thirds of the
+//     per-evaluation config cost and not all of it.
+//     WHAT IT COSTS TO CLOSE IS AN EXPORTED FIELD. The probe runs again on
+//     purpose, for the reason stated at check itself: Config is an exported
+//     field of a value type, so a caller may mutate it between verification and
+//     use, and the probe is what catches that -- INCLUDING a mutation into a
+//     shape the core REFUSES, which reports no digest at all and which a
+//     cheaper digest computed here would not catch, because it would be this
+//     package's digest rather than the core's verdict. So the handle cannot
+//     simply cache its digest and keep the field; it has to hold an unexported
+//     verified copy and evaluate from that, which changes an exported field on
+//     an approved seam. As with the per-verdict re-verification above, there is
+//     no non-test caller: the 16,384-run schedule is the protocol's, and this
+//     package deliberately contains no runner to execute it.
 //   - NESTED HEX IN claimKey, reported by a code review lane and reproduced at
 //     19.1x the input: EpisodeIdentity.String() hex-encodes the framed
 //     identity, claimKey frames that and hex-encodes it again, and
@@ -578,6 +626,60 @@
 //     SourceRoundRegistryVersion bumped and the independent golden regenerated
 //     -- the same shape of change as the nested hex, and not one to take inside
 //     a repair round.
+//   - THE EVIDENCE WITNESS FRAMES A DECISION THE REFUSAL ABOVE IT HAS ALREADY
+//     REJECTED, reported by a code review lane on the published head and
+//     reproduced -- with the MECHANISM the lane gave one step off, in a way
+//     that moves the fix. The lane named derivePlacement's struct literal,
+//     which copies the caller's strings into PlacementEvidence before
+//     decisionRefusal rejects them. In Go a string field copies a two-word
+//     header and not the bytes, so that literal is O(1), and so is
+//     decisionRefusal: derivePlacement measures 16 B/op and ONE allocation on
+//     a decision whose five caller-controlled strings are 1 MiB each, flat
+//     against the same decision at one byte. What costs is
+//     placementEvidenceWitness, which DerivePlacement calls AFTER
+//     derivePlacement returns -- on every path, the refused one included --
+//     and which frames Policy, the attempt's collector session and pool
+//     instance identifiers, FactsetDigest and EventID into the canonical
+//     buffer and hashes them. The lane's CONCLUSION is right; what does it is
+//     the witness and not the copy, and that is the difference between a fix
+//     inside derivePlacement and a change to what a refusal may name.
+//     MEASURED ON THIS TREE, without the race detector, on a decision refused
+//     by decisionRefusal's FIRST clause so that nothing below that clause
+//     runs: 872 B/op and 8 allocations with all five strings at one byte,
+//     against 18,301,274 B/op and 11 allocations with all five at 1 MiB --
+//     about 21,000x the one-byte refusal, and about 3.49x the 5,242,880 bytes
+//     supplied. DerivePayout is the same shape on the same fixture: 1,576
+//     B/op at one byte against 18,301,246 B/op at 1 MiB. THE SPREAD ACROSS
+//     REPEATS IS UNDER 200 BYTES on 18.3 MB, so the reading is the fixture's
+//     rather than one run's.
+//     THE MULTIPLE OF THE INPUT IS NOT A CONSTANT, and the fixture has to be
+//     named for that reason rather than for tidiness. The same path with THREE
+//     of the five strings at 1 MiB reads 6,889,790 B/op and NINE allocations:
+//     2.19x the 3,145,728 bytes supplied, where five strings read 3.49x. Both
+//     readings are right; what moves between them is the canonical buffer's
+//     growth series, which doubles, so the total allocated over one call is a
+//     step function of the payload rather than a multiple of it -- the two
+//     extra allocations at the wider fixture ARE the two extra doublings. So
+//     the durable statement is the shape, that a refusal decided in constant
+//     time frames every identity field in full, and not any one ratio.
+//     CLOSING IT IS A CONTRACT CHANGE RATHER THAN A REPAIR. The witness is
+//     unexported, is not serialized, and no golden pins it, so its FORMAT is
+//     free -- but it is a hash, and a hash of an artifact is proportional to
+//     the artifact, while the refused artifact carries the caller's identity
+//     fields because a refusal names the case it refused. Making that path
+//     O(1) means a refusal stops naming its case, which is a change at two
+//     approved seams and not an implementation detail.
+//     ONE PART IS WEAKER THAN THE REST, and is named here rather than quietly
+//     repaired: Policy is a two-value enum whose every other value the first
+//     clause refuses in constant time, and it is framed in full anyway --
+//     1,057,073 B/op for a 1 MiB Policy with every other field at one byte,
+//     which is the SAME SHAPE as the three constant-size digest gates this
+//     round closed. Repairing only Policy leaves EventID, FactsetDigest and
+//     the attempt identity behind, so it shrinks the amplification without
+//     closing the finding, and it is not taken piecemeal. What remains after
+//     that is the class the nested-hex entry above describes -- a constant
+//     factor over input the caller has already materialized -- rather than
+//     the class the shape gates closed.
 //   - AND THE FAIL-CLOSED RULE HAS ONE FAIL-OPEN CARVE-OUT, stated here because
 //     this round's own lesson is that a trade absorbed in silence is the defect
 //     behind the defect. A claim whose ROUND NAME is itself unreadable names no

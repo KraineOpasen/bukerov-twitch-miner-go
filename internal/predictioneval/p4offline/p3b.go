@@ -468,6 +468,21 @@ const rulesetDecodeFaultCeiling = 512
 // diagnosis the walker in this file writes is a constant plus an extent and
 // passes through untouched.
 func decodeFault(err error) error {
+	// BOUND BEFORE RENDERING, which is the same rule one level down. Judging
+	// the fault by its RENDERED length pays for the very text the ceiling
+	// exists not to carry: encoding/json keeps the offending literal in
+	// UnmarshalTypeError.Value and Error() concatenates it into a NEW string,
+	// so a 64 KiB literal cost about half a megabyte to decide it was too long
+	// to report. A Codex review lane reported that on the published head, and
+	// it is this function's own rule failing inside the function that states
+	// it. The carrier's length is available WITHOUT formatting anything, and
+	// the rendered message is strictly longer than the carrier it embeds, so a
+	// carrier past the ceiling proves the message is too -- no render needed.
+	var typed *json.UnmarshalTypeError
+	if errors.As(err, &typed) && len(typed.Value) > rulesetDecodeFaultCeiling {
+		return errors.New("p4offline: the decoder refused the raw document with a fault of " +
+			suppliedTextExtent(typed.Value))
+	}
 	if msg := err.Error(); len(msg) > rulesetDecodeFaultCeiling {
 		return errors.New("p4offline: the decoder refused the raw document with a fault of " +
 			suppliedTextExtent(msg))

@@ -12,7 +12,9 @@ package p4offline
 // comparison now lives here and the sentence is true.
 
 import (
+	"encoding/json"
 	"math/rand"
+	"reflect"
 	"runtime"
 	"sort"
 	"strconv"
@@ -1191,5 +1193,59 @@ func TestExpressibleClaimIsIdempotentAndRoutesBackToInvalid(t *testing.T) {
 				t.Fatalf("mask %d: an unrepresentable component at position %d was kept: %q", mask, i, kept.got)
 			}
 		}
+	}
+}
+
+// TestADecoderFaultIsBoundedBeforeItIsRendered holds the half of the rule the
+// extent ceiling does NOT hold: that producing the bounded refusal is itself
+// bounded.
+//
+// decodeFault used to judge the fault by `err.Error()`, and rendering an
+// *encoding/json.UnmarshalTypeError CONCATENATES the offending literal into a
+// NEW string — so the refusal it returned was 154 bytes while producing it had
+// already copied the caller's own digits. A Codex review lane reported it on
+// the published head 11a16b87; measured there through VerifyP3bRuleset, a
+// 64 KiB literal cost about 532 KB to refuse against about 8 KB for a 1 KiB
+// one, of which roughly 72 KB was this function rendering what it was about to
+// refuse to carry.
+//
+// THAT IS THE ROUND'S OWN RULE FAILING IN THE CODE THAT STATES IT: a
+// materialization must not precede a gate that can refuse without it. This
+// gate can refuse without it, because the unbounded carrier is a FIELD of a
+// typed error and its length is available without formatting anything.
+//
+// IT IS MEASURED HERE AND NOT THROUGH THE VERIFIER, because decoding a
+// document 64 KiB larger costs 64 KiB more inside encoding/json whatever this
+// function does; that cost is the decoder's and is not removable. Driving
+// decodeFault directly is the only way to measure what decodeFault adds.
+func TestADecoderFaultIsBoundedBeforeItIsRendered(t *testing.T) {
+	fault := func(digits int) error {
+		return &json.UnmarshalTypeError{
+			Value: "number " + strings.Repeat("9", digits),
+			Type:  reflect.TypeOf(float64(0)),
+			Field: "default.rawMinPercent",
+		}
+	}
+	small, large := fault(1<<10), fault(1<<16)
+	for _, err := range []error{small, large} {
+		if got := decodeFault(err); len(got.Error()) > rulesetDecodeFaultCeiling {
+			t.Fatalf("a fault past the ceiling must be reported by its extent, got %d bytes", len(got.Error()))
+		}
+	}
+	measure := func(err error) uint64 {
+		res := testing.Benchmark(func(b *testing.B) {
+			b.ReportAllocs()
+			for i := 0; i < b.N; i++ {
+				_ = decodeFault(err)
+			}
+		})
+		return uint64(res.AllocedBytesPerOp())
+	}
+	cheap, dear := measure(small), measure(large)
+	t.Logf("bounding a 1 KiB carrier costs %d bytes; a 64 KiB carrier costs %d", cheap, dear)
+	if grew := int64(dear) - int64(cheap); grew > 1<<10 {
+		t.Fatalf("bounding a 64 KiB carrier allocates %d bytes more than bounding a 1 KiB one: "+
+			"the fault is being RENDERED before its extent is judged, so the bounded refusal "+
+			"costs a copy of the very text it refuses to carry", grew)
 	}
 }

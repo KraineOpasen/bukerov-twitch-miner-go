@@ -502,7 +502,7 @@ var suppliedTextExtentCensus = map[string]int{
 	"evidence.go/VerifySourceRoundRegistry":  2, // the Version clause and the digest-shape gate
 	"factset.go/VerifyCommonFactset":         3, // contract, protocol, the digest's shape
 	"factset.go/checkFactsetConsistency":     2, // the stealth-proof arm and the completeness arm
-	"p3b.go/decodeFault":                     1, // a decoder fault that quoted the document
+	"p3b.go/decodeFault":                     2, // the fault's typed carrier, and its rendered message
 	"p3b.go/walkRulesetObject":               1, // the unknown-key gate
 	"placement.go/decisionOf":                1, // the result's own factset digest
 	"resolution.go/VerifyResolutionArtifact": 4, // contract, obligations, the digest's shape, the outcome arm
