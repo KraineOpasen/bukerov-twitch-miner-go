@@ -254,7 +254,8 @@ type P3bCaseResult struct {
 // honest path pays, which is the floor: distinguishing two values of equal
 // width IS the hash's job.
 func (r P3bCaseResult) derived() bool {
-	return r.witness != "" && r.framedLen == p3bResultFramedLen(r) && r.witness == p3bResultWitness(r)
+	return r.witness != "" && r.framedLen > 0 &&
+		r.framedLen == p3bResultFramedLen(r) && r.witness == p3bResultWitness(r)
 }
 
 // p3bResultWitness frames every field a decision is minted from — the

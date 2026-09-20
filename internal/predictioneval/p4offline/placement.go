@@ -203,16 +203,34 @@ type FactualPlacement struct {
 	LocalReasonOK            bool   `json:"localReasonOk"`
 	ErrorClass               string `json:"errorClass,omitempty"`
 	witness                  string
+	// framedLen is the width witness was computed over. Producer-only, like
+	// the witness itself.
+	framedLen int
 }
 
 // derived reports whether the value is exactly what ProjectFactualPlacement
 // produced.
 func (f FactualPlacement) derived() bool {
-	return f.witness != "" && f.witness == factualPlacementWitness(f)
+	return f.witness != "" && f.framedLen > 0 &&
+		f.framedLen == factualPlacementFramedLen(f) && f.witness == factualPlacementWitness(f)
 }
 
 func factualPlacementWitness(f FactualPlacement) string {
 	var c canonical
+	frameFactualPlacement(&c, f)
+	return c.digest()
+}
+
+// factualPlacementFramedLen is the width factualPlacementWitness frames, computed by the SAME pass with
+// bytes switched off. See [P3bCaseResult.derived] for why the width is
+// checked before the witness.
+func factualPlacementFramedLen(f FactualPlacement) int {
+	c := canonical{lenOnly: true}
+	frameFactualPlacement(&c, f)
+	return c.framedLen()
+}
+
+func frameFactualPlacement(c *canonical, f FactualPlacement) {
 	c.str("p4offline-factual-placement-witness")
 	c.i64(f.Attempt.CollectorEpoch)
 	c.str(f.Attempt.CollectorSessionID)
@@ -222,21 +240,20 @@ func factualPlacementWitness(f FactualPlacement) string {
 	c.str(f.EventID)
 	c.i64(f.CutoffPosition)
 	c.str(f.TerminalDecision)
-	serializeOptionalInt(&c, f.RecordedChoiceIndex)
+	serializeOptionalInt(c, f.RecordedChoiceIndex)
 	c.str(f.RecordedChoiceOutcomeID)
-	serializeOptionalInt64(&c, f.RecordedFinalAmount)
-	serializeOptionalInt(&c, f.RecordedTerminalSlot)
+	serializeOptionalInt64(c, f.RecordedFinalAmount)
+	serializeOptionalInt(c, f.RecordedTerminalSlot)
 	c.str(f.Coherence)
 	c.boolean(f.StartedOnly)
 	c.boolean(f.CallPresent)
 	c.str(f.CallStartedObservationID)
 	c.i64(f.CallStartedPosition)
-	serializeOptionalInt64(&c, f.Stake)
-	serializeOptionalInt(&c, f.Slot)
+	serializeOptionalInt64(c, f.Stake)
+	serializeOptionalInt(c, f.Slot)
 	c.boolean(f.Returned)
 	c.boolean(f.LocalReasonOK)
 	c.str(f.ErrorClass)
-	return c.digest()
 }
 
 // PlatformAcceptanceProof is supplied evidence that the platform accepted a
@@ -274,16 +291,34 @@ type PolicyDecision struct {
 	Choice     PolicyChoice  `json:"choice"`
 	Stake      Int64Fact     `json:"stake"`
 	witness    string
+	// framedLen is the width witness was computed over. Producer-only, like
+	// the witness itself.
+	framedLen int
 }
 
 // derived reports whether the value is exactly what a Decision method
 // produced.
 func (p PolicyDecision) derived() bool {
-	return p.witness != "" && p.witness == policyDecisionWitness(p)
+	return p.witness != "" && p.framedLen > 0 &&
+		p.framedLen == policyDecisionFramedLen(p) && p.witness == policyDecisionWitness(p)
 }
 
 func policyDecisionWitness(p PolicyDecision) string {
 	var c canonical
+	framePolicyDecision(&c, p)
+	return c.digest()
+}
+
+// policyDecisionFramedLen is the width policyDecisionWitness frames, computed by the SAME pass with
+// bytes switched off. See [P3bCaseResult.derived] for why the width is
+// checked before the witness.
+func policyDecisionFramedLen(p PolicyDecision) int {
+	c := canonical{lenOnly: true}
+	framePolicyDecision(&c, p)
+	return c.framedLen()
+}
+
+func framePolicyDecision(c *canonical, p PolicyDecision) {
 	c.str("p4offline-policy-decision-witness")
 	c.str(p.Policy)
 	c.i64(p.Attempt.CollectorEpoch)
@@ -298,10 +333,9 @@ func policyDecisionWitness(p PolicyDecision) string {
 	for _, id := range p.OutcomeIDs {
 		c.str(id)
 	}
-	frameAction(&c, p.Action)
-	frameChoice(&c, p.Choice)
-	frameFact(&c, p.Stake)
-	return c.digest()
+	frameAction(c, p.Action)
+	frameChoice(c, p.Choice)
+	frameFact(c, p.Stake)
 }
 
 // frameAction, frameChoice and frameFact frame the three values every
@@ -361,15 +395,33 @@ type PlacementEvidence struct {
 	AttributedCallObservationID string    `json:"attributedCallObservationId,omitempty"`
 	AttributedCallPosition      int64     `json:"attributedCallPosition"`
 	witness                     string
+	// framedLen is the width witness was computed over. Producer-only, like
+	// the witness itself.
+	framedLen int
 }
 
 // derived reports whether the value is exactly what DerivePlacement produced.
 func (p PlacementEvidence) derived() bool {
-	return p.witness != "" && p.witness == placementEvidenceWitness(p)
+	return p.witness != "" && p.framedLen > 0 &&
+		p.framedLen == placementEvidenceFramedLen(p) && p.witness == placementEvidenceWitness(p)
 }
 
 func placementEvidenceWitness(p PlacementEvidence) string {
 	var c canonical
+	framePlacementEvidence(&c, p)
+	return c.digest()
+}
+
+// placementEvidenceFramedLen is the width placementEvidenceWitness frames, computed by the SAME pass with
+// bytes switched off. See [P3bCaseResult.derived] for why the width is
+// checked before the witness.
+func placementEvidenceFramedLen(p PlacementEvidence) int {
+	c := canonical{lenOnly: true}
+	framePlacementEvidence(&c, p)
+	return c.framedLen()
+}
+
+func framePlacementEvidence(c *canonical, p PlacementEvidence) {
 	c.str("p4offline-placement-evidence-witness")
 	c.str(p.ContractVersion)
 	c.str(p.Policy)
@@ -384,11 +436,10 @@ func placementEvidenceWitness(p PlacementEvidence) string {
 	for _, r := range p.Reasons {
 		c.str(r)
 	}
-	frameFact(&c, p.PolicyStake)
+	frameFact(c, p.PolicyStake)
 	c.str(p.AttributedOutcomeID)
 	c.str(p.AttributedCallObservationID)
 	c.i64(p.AttributedCallPosition)
-	return c.digest()
 }
 
 // decisionOf binds a policy result to the factset it was evaluated over.
@@ -474,7 +525,7 @@ func decisionOf(policy string, fs CommonFactset, resultDigest string, action Act
 		Choice:         choice,
 		Stake:          stake,
 	}
-	d.witness = policyDecisionWitness(d)
+	d.witness, d.framedLen = policyDecisionWitness(d), policyDecisionFramedLen(d)
 	return d, nil
 }
 
@@ -645,14 +696,14 @@ func ProjectFactualPlacement(src PreparedDataset, fs CommonFactset) (FactualPlac
 		}
 	}
 	out.StartedOnly = started == 1 && returned == 0
-	out.witness = factualPlacementWitness(out)
+	out.witness, out.framedLen = factualPlacementWitness(out), factualPlacementFramedLen(out)
 	return out, nil
 }
 
 // DerivePlacement is seam 9.
 func DerivePlacement(policy PolicyDecision, factual FactualPlacement, proof *PlatformAcceptanceProof) PlacementEvidence {
 	out := derivePlacement(policy, factual, proof)
-	out.witness = placementEvidenceWitness(out)
+	out.witness, out.framedLen = placementEvidenceWitness(out), placementEvidenceFramedLen(out)
 	return out
 }
 

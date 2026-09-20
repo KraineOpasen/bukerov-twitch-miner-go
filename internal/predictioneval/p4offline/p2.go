@@ -43,7 +43,8 @@ type P2CaseResult struct {
 
 // derived reports whether the value is exactly what EvaluateP2Case produced.
 func (r P2CaseResult) derived() bool {
-	return r.witness != "" && r.framedLen == p2ResultFramedLen(r) && r.witness == p2ResultWitness(r)
+	return r.witness != "" && r.framedLen > 0 &&
+		r.framedLen == p2ResultFramedLen(r) && r.witness == p2ResultWitness(r)
 }
 
 // p2ResultWitness frames every field a decision is minted from — the action,

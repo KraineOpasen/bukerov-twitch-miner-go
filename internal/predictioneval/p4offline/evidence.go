@@ -792,7 +792,12 @@ func SelectEpisodes(ds predictioneval.SourceDataset) (EvidenceSelection, error) 
 // make the refusal message depend on the dataset.
 func sessionRefusalKinds(rs []string) []string {
 	seen := map[string]bool{}
-	out := make([]string, 0, len(rs))
+	// NOT SIZED ON THE CALLER'S LIST. The answer is the DISTINCT members, which
+	// the closed refusal, anomaly and exclusion vocabularies bound at a few
+	// dozen; rs is the caller's dataset. A capacity hint taken from rs made a
+	// bounded answer allocate a caller-sized slice -- the same shape as the
+	// posting-list repair, one function over, and found by the same Q3 brief.
+	var out []string
 	for _, r := range rs {
 		if seen[r] {
 			continue
@@ -1091,9 +1096,14 @@ func appendFirstPositionPerReason(list []int, all []predictioneval.Exclusion, i 
 // WHAT IS KEPT IS THE MINIMUM PER REASON, which is all the answer ever needed:
 // it is the distinct reasons ordered by the smallest hit position each occupies.
 // So the running state is bounded by the vocabulary -- fourteen constants --
-// rather than by the episode, the final ordering sorts at most fourteen entries,
-// and the traversal stays O(one visit per position), which is irreducible
-// because every bucket can contribute.
+// rather than by the episode and the final ordering sorts at most fourteen
+// entries. The traversal itself is one visit per position per NAMED id, and that
+// is not called irreducible: nothing validates that an episode's ids are
+// distinct, so a repeated id re-walks its bucket, and each position costs a scan
+// of the reasons gathered so far. Measured at 2,048 ids: 42 microseconds when
+// every id repeats against 24 when none names a bucket. The ALLOCATION is flat
+// either way -- about 72 bytes a call -- which is what the test pins and what a
+// supplier can no longer grow.
 //
 // AND THE DUPLICATE-ID SET IS GONE WITH IT. The old form needed a seen-set
 // because a repeated id would have appended its bucket's positions twice; that

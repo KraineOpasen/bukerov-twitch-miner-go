@@ -4885,6 +4885,21 @@ func TestASealedRulesetIsNotReprovedOnEveryUse(t *testing.T) {
 	}
 }
 
+// grew is how much more the wide case cost than the narrow one, in multiples of
+// the edit's own width.
+//
+// IT TAKES THE DIFFERENCE IN SIGNED ARITHMETIC, which is not pedantry: the two
+// readings are runtime.MemStats deltas, and a cold first call can read HIGHER
+// than the wide one. An unsigned subtraction then wraps and reports a growth of
+// 1.76e13, which is what a first draft of these tests did -- an instrument
+// failing loudly in the one direction that means "no growth".
+func grew(narrow, huge uint64, width int) float64 {
+	if huge <= narrow {
+		return 0
+	}
+	return float64(huge-narrow) / float64(width)
+}
+
 // TestAnEditedResultIsRefusedWithoutFramingTheEdit is the receipt for the third
 // finding a review lane returned on the published head, and for its sibling one
 // file over.
@@ -4912,6 +4927,11 @@ func TestASealedRulesetIsNotReprovedOnEveryUse(t *testing.T) {
 // the full comparison still decides. TestTheRecordedFramedWidthIsTheWitnessOwn
 // pins the two against each other so the degradation is visible rather than
 // silent.
+//
+// WHAT IT CATCHES IS A CHANGE IN THE TOTAL, not in a field. Moving a megabyte
+// out of one framed field and into another leaves the total untouched and pays
+// the full framing -- correctly: two values of equal total width are exactly the
+// pair a width cannot separate, and separating them IS the hash's job.
 func TestAnEditedResultIsRefusedWithoutFramingTheEdit(t *testing.T) {
 	_, fs, _, p2 := factualCase(t, coherentCall)
 	rs := mustVerify(t, rulesetFrom(t, cfgDefaultOnly("none", 95, 100)))
@@ -4924,6 +4944,9 @@ func TestAnEditedResultIsRefusedWithoutFramingTheEdit(t *testing.T) {
 		t.Helper()
 		edited := p3b
 		edit(&edited)
+		// One untimed call first: a cold path reads high and turns a flat
+		// result into a negative delta.
+		_, _ = edited.Decision(fs)
 		runtime.GC()
 		var a, b runtime.MemStats
 		runtime.ReadMemStats(&a)
@@ -4939,7 +4962,7 @@ func TestAnEditedResultIsRefusedWithoutFramingTheEdit(t *testing.T) {
 	narrow := measure(t, func(r *p4offline.P3bCaseResult) { r.Trace.RunID += "X" })
 	huge := measure(t, func(r *p4offline.P3bCaseResult) { r.Trace.RunID += strings.Repeat("X", wide) })
 	t.Logf("one byte added -> %d B/op; %d bytes added -> %d B/op", narrow, wide, huge)
-	if over := float64(huge-narrow) / float64(wide); over > 0.5 {
+	if over := grew(narrow, huge, wide); over > 0.5 {
 		t.Fatalf("a %d-byte edit cost %.2fx its own width above the one-byte control (%d against %d B/op): the edit is being framed",
 			wide, over, huge, narrow)
 	}
@@ -4951,6 +4974,7 @@ func TestAnEditedResultIsRefusedWithoutFramingTheEdit(t *testing.T) {
 		t.Helper()
 		edited := p2
 		edit(&edited)
+		_, _ = edited.Decision(fs)
 		runtime.GC()
 		var a, b runtime.MemStats
 		runtime.ReadMemStats(&a)
@@ -4964,10 +4988,117 @@ func TestAnEditedResultIsRefusedWithoutFramingTheEdit(t *testing.T) {
 	narrow2 := measureP2(t, func(r *p4offline.P2CaseResult) { r.Binding.Digest += "X" })
 	huge2 := measureP2(t, func(r *p4offline.P2CaseResult) { r.Binding.Digest += strings.Repeat("X", wide) })
 	t.Logf("P2: one byte added -> %d B/op; %d bytes added -> %d B/op", narrow2, wide, huge2)
-	if over := float64(huge2-narrow2) / float64(wide); over > 0.5 {
+	if over := grew(narrow2, huge2, wide); over > 0.5 {
 		t.Fatalf("P2: a %d-byte edit cost %.2fx its own width above the one-byte control (%d against %d B/op)",
 			wide, over, huge2, narrow2)
 	}
+
+	// THE FOUR SIBLING SEAMS HAVE THE SAME SHAPE, and closing only the two a
+	// lane named would have been this branch's recurring failure written as a
+	// design. Two independent Q3 lanes found them before publication and one
+	// measured them: FactualPlacement 1.008x, PolicyDecision 1.007x,
+	// PlacementEvidence 1.007x the edit's own width, each for a refusal decided
+	// by one string comparison. Every one carries a framed width now.
+	t.Run("and the four sibling artifacts refuse an edit without framing it", func(t *testing.T) {
+		ds, fs2, fp, p2b := factualCase(t, coherentCall)
+		_ = ds
+		dec := decisionOf(t, p2b, fs2)
+		pl := p4offline.DerivePlacement(dec, fp, validProof(fp))
+
+		cost := func(t *testing.T, call func()) uint64 {
+			t.Helper()
+			call()
+			runtime.GC()
+			var a, b runtime.MemStats
+			runtime.ReadMemStats(&a)
+			call()
+			runtime.ReadMemStats(&b)
+			return b.TotalAlloc - a.TotalAlloc
+		}
+		flat := func(t *testing.T, name string, narrow, huge uint64) {
+			t.Helper()
+			t.Logf("%s: one byte -> %d B/op; %d bytes -> %d B/op", name, narrow, wide, huge)
+			if over := grew(narrow, huge, wide); over > 0.5 {
+				t.Fatalf("%s: a %d-byte edit cost %.2fx its own width above the one-byte control (%d against %d B/op)",
+					name, wide, over, huge, narrow)
+			}
+		}
+
+		// FactualPlacement, edited on the very field the local-error arm was
+		// shown. A struct copy carries the unexported witness, so the binding
+		// gates are never reached: derived() is the first thing derivePlacement
+		// touches.
+		editedFP := func(extra string) p4offline.FactualPlacement {
+			e := fp
+			e.ErrorClass += extra
+			return e
+		}
+		refusedPlacement := func(e p4offline.FactualPlacement) {
+			if got := p4offline.DerivePlacement(dec, e, nil); !containsString(got.Reasons, "FACTUAL_PLACEMENT_NOT_DERIVED") {
+				t.Fatalf("an edited factual placement must be refused as underived: %v", got.Reasons)
+			}
+		}
+		// THE EDITED VALUES ARE BUILT OUTSIDE THE MEASUREMENT. A first draft
+		// built them inside it and read 2.01x on every seam -- strings.Repeat
+		// and the concatenation, not the framing. An instrument that measures
+		// its own fixture is the same defect as a test that measures its own
+		// input, one level up.
+		narrowFP, hugeFP := editedFP("X"), editedFP(strings.Repeat("X", wide))
+		flat(t, "FactualPlacement",
+			cost(t, func() { refusedPlacement(narrowFP) }),
+			cost(t, func() { refusedPlacement(hugeFP) }))
+
+		// PolicyDecision, edited on Derivation, refused by decisionRefusal.
+		editedDec := func(extra string) p4offline.PolicyDecision {
+			e := dec
+			e.Derivation += extra
+			return e
+		}
+		refusedDecision := func(e p4offline.PolicyDecision) {
+			if got := p4offline.DerivePlacement(e, fp, nil); got.Status != p4offline.PlacementUnknown {
+				t.Fatalf("an edited decision must be refused: %v", got.Status)
+			}
+		}
+		narrowDec, hugeDec := editedDec("X"), editedDec(strings.Repeat("X", wide))
+		flat(t, "PolicyDecision",
+			cost(t, func() { refusedDecision(narrowDec) }),
+			cost(t, func() { refusedDecision(hugeDec) }))
+
+		// PlacementEvidence, edited on AttributedOutcomeID, refused at the
+		// payout seam.
+		editedPL := func(extra string) p4offline.PlacementEvidence {
+			e := pl
+			e.AttributedOutcomeID += extra
+			return e
+		}
+		refusedPayout := func(e p4offline.PlacementEvidence) {
+			if got := p4offline.DerivePayout(dec, e, winnerArtifact("o1"), nil); got.Outcome != p4offline.PayoutUnknown {
+				t.Fatalf("an edited placement must be refused at the payout seam: %v", got.Outcome)
+			}
+		}
+		narrowPL, hugePL := editedPL("X"), editedPL(strings.Repeat("X", wide))
+		flat(t, "PlacementEvidence",
+			cost(t, func() { refusedPayout(narrowPL) }),
+			cost(t, func() { refusedPayout(hugePL) }))
+
+		// PayoutEvidence, edited on Derivation, refused by the membership seam.
+		res := winnerArtifact("o1")
+		po := p4offline.DerivePayout(dec, pl, res, nil)
+		reg := prepared(t, registryOf(ds, fs2))
+		src := preparedDS(ds)
+		editedPO := func(extra string) p4offline.PayoutEvidence {
+			e := po
+			e.Derivation += extra
+			return e
+		}
+		refusedMembership := func(e p4offline.PayoutEvidence) {
+			_ = p4offline.AssessDenominatorMembership(src, reg, fs2, dec, dec, res, e)
+		}
+		narrowPO, hugePO := editedPO("X"), editedPO(strings.Repeat("X", wide))
+		flat(t, "PayoutEvidence",
+			cost(t, func() { refusedMembership(narrowPO) }),
+			cost(t, func() { refusedMembership(hugePO) }))
+	})
 
 	// AND THE GENUINE RESULTS STILL MINT, which is the control that stops the
 	// width check being satisfied by refusing everything.

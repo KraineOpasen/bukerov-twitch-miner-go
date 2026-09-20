@@ -2076,10 +2076,10 @@ func TestAnEpisodesOwnIdentifierCountDoesNotEnterTheAnswersCost(t *testing.T) {
 // framing modes and not about derivation: any P3bCaseResult, however built,
 // must frame to the width the length-only pass reports for it.
 //
-// THE MODE IS WHY THERE IS ONE FUNCTION TO PIN. A hand-written mirror of a
-// thirty-five-field framing would need this test to enumerate the fields too,
-// and an enumeration checked against an enumeration is two places to forget the
-// same field. Here both sides run frameP3bResult.
+// THE MODE IS WHY THERE IS ONE FUNCTION TO PIN. A hand-written mirror of the
+// thirty-one direct part calls and three helper calls would need this test to
+// enumerate the fields too, and an enumeration checked against an enumeration is
+// two places to forget the same field. Here both sides run frameP3bResult.
 func TestTheRecordedFramedWidthIsTheWitnessOwn(t *testing.T) {
 	rng := rand.New(rand.NewSource(20260920))
 	text := func() string {

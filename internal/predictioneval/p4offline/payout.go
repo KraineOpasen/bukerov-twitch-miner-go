@@ -177,15 +177,33 @@ type PayoutEvidence struct {
 	Derivation      string `json:"derivation,omitempty"`
 	decisionWitness string
 	witness         string
+	// framedLen is the width witness was computed over. Producer-only, like
+	// the witness itself.
+	framedLen int
 }
 
 // derived reports whether the value is exactly what DerivePayout produced.
 func (p PayoutEvidence) derived() bool {
-	return p.witness != "" && p.witness == payoutEvidenceWitness(p)
+	return p.witness != "" && p.framedLen > 0 &&
+		p.framedLen == payoutEvidenceFramedLen(p) && p.witness == payoutEvidenceWitness(p)
 }
 
 func payoutEvidenceWitness(p PayoutEvidence) string {
 	var c canonical
+	framePayoutEvidence(&c, p)
+	return c.digest()
+}
+
+// payoutEvidenceFramedLen is the width payoutEvidenceWitness frames, computed by the SAME pass with
+// bytes switched off. See [P3bCaseResult.derived] for why the width is
+// checked before the witness.
+func payoutEvidenceFramedLen(p PayoutEvidence) int {
+	c := canonical{lenOnly: true}
+	framePayoutEvidence(&c, p)
+	return c.framedLen()
+}
+
+func framePayoutEvidence(c *canonical, p PayoutEvidence) {
 	c.str("p4offline-payout-evidence-witness")
 	c.str(p.ContractVersion)
 	c.str(p.Policy)
@@ -199,9 +217,9 @@ func payoutEvidenceWitness(p PayoutEvidence) string {
 	c.str(string(p.ChoiceCorrect))
 	c.boolean(p.PrimaryDenominatorMember)
 	c.boolean(p.PlacedBetDenominatorMember)
-	frameFact(&c, p.Stake)
-	frameFact(&c, p.Payout)
-	frameFact(&c, p.Net)
+	frameFact(c, p.Stake)
+	frameFact(c, p.Payout)
+	frameFact(c, p.Net)
 	c.count(len(p.Reasons))
 	for _, r := range p.Reasons {
 		c.str(r)
@@ -209,13 +227,12 @@ func payoutEvidenceWitness(p PayoutEvidence) string {
 	c.str(p.ResolutionFactsDigest)
 	c.str(p.Derivation)
 	c.str(p.decisionWitness)
-	return c.digest()
 }
 
 // DerivePayout is seam 10.
 func DerivePayout(policy PolicyDecision, placement PlacementEvidence, res ResolutionArtifact, record *PayoutRecord) PayoutEvidence {
 	out := derivePayout(policy, placement, res, record)
-	out.witness = payoutEvidenceWitness(out)
+	out.witness, out.framedLen = payoutEvidenceWitness(out), payoutEvidenceFramedLen(out)
 	return out
 }
 

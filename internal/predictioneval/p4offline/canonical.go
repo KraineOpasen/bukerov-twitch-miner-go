@@ -31,11 +31,12 @@ import (
 // beside the witness turns any length-changing edit into an O(number of fields)
 // refusal.
 //
-// THE MODE IS WHY THAT WIDTH CANNOT DRIFT FROM THE WITNESS. A hand-written
-// mirror of a thirty-five-field framing is a second place a future field can be
-// forgotten, and this package has already paid for one of those. Here the width
-// is computed by running the SAME framing function with bytes switched off, so
-// the two cannot disagree about which fields are framed.
+// THE MODE IS WHY THAT WIDTH CANNOT DRIFT FROM THE WITNESS. The widest of these
+// framings makes thirty-one direct part calls and three helper calls, and a
+// hand-written mirror of it is a second place a future field can be forgotten;
+// this package has already paid for one such mirror. Here the width is computed
+// by running the SAME framing function with bytes switched off, so the two
+// cannot disagree about which fields are framed.
 type canonical struct {
 	buf []byte
 	// lenOnly switches every writer from appending bytes to accumulating the

@@ -1000,9 +1000,11 @@
 //     episode and the final ordering sorts at most fourteen entries. The
 //     duplicate-id set went with it -- merging by minimum is idempotent, so a
 //     repeated id costs one extra bucket traversal and the per-call state no
-//     longer grows with the caller at all. 50 calls now read 3,600 B at 2,048
-//     ids and 3,616 at 4,096: FLAT, where the previous test could only assert
-//     linear. TestAnEpisodesOwnIdentifierCountDoesNotEnterTheAnswersCost.
+//     longer grows with the caller at all. 50 calls now read about 3,600 B at
+//     BOTH 2,048 and 4,096 ids -- the sixteen bytes separating two given runs
+//     are run-to-run jitter and not a size effect, confirmed across three runs,
+//     so the figure is quoted as flat rather than as a contrast.
+//     TestAnEpisodesOwnIdentifierCountDoesNotEnterTheAnswersCost.
 //     AND THE ORACLE WAS WIDENED RATHER THAN LEFT COMPARING THE NEW CODE TO
 //     ITSELF: TestTheReducedPostingListsAnswerAsTheFullOnesDid now runs the
 //     ORIGINAL implementation on the UNREDUCED index against the current one on
@@ -1045,9 +1047,11 @@
 //     lane named -- the derivable run identity, the fixed-shape digests --
 //     closes the entrances named and leaves every other framed field open. What
 //     is checked instead is the TOTAL FRAMED WIDTH, recorded beside the witness
-//     at mint: any length-changing edit is refused in O(number of fields), and
-//     an edit preserving every length pays exactly the honest cost, which is the
-//     floor -- telling two values of equal width apart IS the hash's job.
+//     at mint: an edit that changes the TOTAL width is refused in O(number of
+//     fields), and an edit preserving that total -- including one that moves
+//     bytes from one framed field into another -- pays exactly the honest cost,
+//     which is the floor, because telling two values of equal total width apart
+//     IS the hash's job.
 //     THE WIDTH CANNOT DRIFT FROM THE WITNESS because it is not a mirror: the
 //     canonical framer has a LENGTH-ONLY mode and the width is the same framing
 //     function run with bytes switched off. A hand-written mirror of a
@@ -1057,6 +1061,46 @@
 //     randomized results at both types and over strHexOf, which no result
 //     framing exercises. MEASURED AFTER: 4,048 B/op at one byte and 4,048 at
 //     1 MiB, at BOTH seams -- identical to the byte.
+//     AND THE REPAIR WAS NARROWER THAN ITS OWN SENTENCE SAID, which two
+//     independent Q3 lanes found before publication -- the THIRTEENTH
+//     occurrence, and the third in a row caught by a lane rather than by a
+//     reviewer. The width was given to the two RESULT types the report named.
+//     Five sibling seams carry a witness and re-frame it to answer a question
+//     decided by one string comparison, and four of them take a caller-sized
+//     value: FactualPlacement, PolicyDecision, PlacementEvidence and
+//     PayoutEvidence. A lane measured them at 1.008x, 1.007x and 1.007x the
+//     edit's own width; the concrete path is a struct COPY, which carries the
+//     unexported witness, widened on ErrorClass -- the very field the
+//     local-error repair above was shown -- and handed to DerivePlacement,
+//     where derived() is the first thing touched and every binding gate is
+//     skipped. All four carry a framed width now. MEASURED AFTER, one byte
+//     against 1 MiB: 2,480 / 2,480, 1,728 / 1,728, 4,688 / 4,688 and 25,856 /
+//     25,856 -- each identical to the byte, as the two result types already
+//     were at 4,048.
+//     THE SENTENCE THAT HID IT IS RETRACTED. This entry, and the test beside
+//     it, said the framing of a wide error class "cannot be removed without
+//     weakening the witness". True of a GENUINE placement, whose class is an
+//     artifact the dataset carries; false of an EDITED one, where the value is
+//     not the dataset's and the removal is exactly the preflight this same
+//     round had just added two files over. The claim now names which case it
+//     is about.
+//     TWO SMALLER THINGS THE SAME LANES FOUND. A width computed WITHOUT the
+//     length-only mode returns zero, and zero equals the zero a mint would then
+//     have recorded, so dropping the mode made the preflight VACUOUS rather
+//     than failing: every derived() now requires the width to be positive, so
+//     the same slip refuses genuine values loudly instead. And
+//     sessionRefusalKinds sized a bounded answer -- the distinct members of a
+//     closed vocabulary -- with a capacity hint taken from the caller's list,
+//     which is the posting-list defect one function over; the hint is gone.
+//     THE TEST'S OWN INSTRUMENT WAS WRONG TWICE, and both are recorded because
+//     a measurement this round rests on is worth no more than the way it was
+//     taken. The first build constructed the 1 MiB edits INSIDE the measured
+//     closure and read 2.01x on every seam -- strings.Repeat and the
+//     concatenation, not the framing. The second subtracted two MemStats deltas
+//     in UNSIGNED arithmetic, so a cold first reading higher than the second
+//     wrapped and reported a growth of 1.76e13: an instrument failing loudly in
+//     the one direction that means "no growth". Both fixed, and the helper that
+//     replaces them says why in its own comment.
 //
 // A SECOND CLASS WAS HERE FOR ONE ROUND AND IS NOW REPAIRED, and the way it
 // was repaired is worth recording rather than quietly deleting, because the

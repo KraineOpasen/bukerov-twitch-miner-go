@@ -926,15 +926,22 @@ func TestALocalErrorClassIsNamedByItsExtentAndNotEchoed(t *testing.T) {
 	t.Logf("one byte -> %d B/op; %d bytes -> %d B/op", narrowCost, wide, hugeCost)
 
 	// THE ASSERTION IS ONE FRAMING, NOT A CONSTANT, and the difference is the
-	// whole of what this seam can honestly promise. The class is a field of a
-	// GENUINE FactualPlacement, so factualPlacementWitness frames it to answer
-	// whether that placement is derived -- work proportional to an artifact the
-	// dataset really carries, which is not amplification and cannot be removed
-	// without weakening the witness. What the repair removes is every FURTHER
-	// framing: the concatenation into Reasons and placementEvidenceWitness
-	// framing that copy. Measured on this tree: 3,174,320 B/op before, which is
-	// 3.03x the supplied class, against 1,061,552 after, which is 1.012x.
-	if over := float64(hugeCost-narrowCost) / float64(wide); over > 1.5 {
+	// whole of what this seam can honestly promise. The class here is a field of
+	// a GENUINE FactualPlacement -- one this package projected from the dataset
+	// -- so factualPlacementWitness frames it to answer whether that placement
+	// is derived. That is work proportional to an artifact the dataset really
+	// carries, and removing it would mean a witness that does not cover the
+	// field. What the repair removes is every FURTHER framing: the
+	// concatenation into Reasons and placementEvidenceWitness framing that
+	// copy. Measured on this tree: 3,174,320 B/op before, which is 3.03x the
+	// supplied class, against 1,061,552 after, which is 1.012x.
+	//
+	// AN EDITED PLACEMENT IS A DIFFERENT QUESTION AND IS NOT THIS TEST'S. A Q3
+	// lane pointed out that a copied-and-widened placement is NOT an artifact
+	// the dataset carries, so the framing there is removable and was removed:
+	// FactualPlacement carries a framed width now, like the two result types.
+	// TestAnEditedResultIsRefusedWithoutFramingTheEdit covers that seam.
+	if over := grew(narrowCost, hugeCost, wide); over > 1.5 {
 		t.Fatalf("a %d-byte error class cost %.2fx its own width above the one-byte control (%d against %d B/op): it is framed more than once",
 			wide, over, hugeCost, narrowCost)
 	}
