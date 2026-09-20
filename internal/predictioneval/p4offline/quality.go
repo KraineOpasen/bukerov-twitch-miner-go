@@ -2,8 +2,6 @@ package p4offline
 
 import (
 	"errors"
-
-	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/predictioneval"
 )
 
 // SEAM 12: typed quality, presence and exclusion handling.
@@ -334,9 +332,9 @@ func determinate(c ActionClass) bool {
 // publishes over them must stop and report the incomplete dataset, not drop it
 // and present the remainder's numbers as the run's. Skipping it silently
 // produces a completed-looking metric over a cohort nobody chose.
-func AssessCaseQuality(ds predictioneval.SourceDataset, fs CommonFactset, p2, p3b PolicyDecision, res ResolutionArtifact) QualityRecord {
+func AssessCaseQuality(src PreparedDataset, fs CommonFactset, p2, p3b PolicyDecision, res ResolutionArtifact) QualityRecord {
 	episode := NewQualityRecord()
-	ep, found, err := lookupEpisode(ds, fs.Episode)
+	ep, found, err := lookupEpisode(src, fs.Episode)
 	if found {
 		episode = episode.Merge(ep.Quality)
 	}
@@ -598,9 +596,9 @@ const (
 // more for the source-round claim (seams 1–3 run for each) — and at that
 // gate re-reconciles the registry from its own entries; that is the trusted
 // path's cost, paid per verdict.
-func AssessDenominatorMembership(ds predictioneval.SourceDataset, reg SourceRoundRegistry, fs CommonFactset, p2, p3b PolicyDecision,
+func AssessDenominatorMembership(src PreparedDataset, reg PreparedSourceRounds, fs CommonFactset, p2, p3b PolicyDecision,
 	res ResolutionArtifact, pe PayoutEvidence) DenominatorMembership {
-	q := AssessCaseQuality(ds, fs, p2, p3b, res)
+	q := AssessCaseQuality(src, fs, p2, p3b, res)
 	out := DenominatorMembership{Quality: q.Quality, ProcessingComplete: q.ProcessingComplete, Reasons: cloneStrings(q.Reasons)}
 	reason := func(r string) { out.Reasons = appendOnce(out.Reasons, r) }
 	if !pe.derived() {
@@ -659,38 +657,36 @@ func AssessDenominatorMembership(ds predictioneval.SourceDataset, reg SourceRoun
 	// reached this gate is PRIMARY_SCORABLE, so its claim derives; the error
 	// arm is defence in depth).
 	//
-	// THIS VERIFICATION IS PER-VERDICT, AND THAT IS QUADRATIC OVER A RUN.
-	// Reported by a security review lane, reproduced here, and NOT repaired --
-	// see doc.go's WHAT REMAINS for why. A run that judges N cases against an
-	// N-claim registry re-verifies the whole registry N times, and a
-	// verification hashes every claim, flattens the entries and reconciles them
-	// again. Doubling N multiplies the run's total by about 3.8. THE ABSOLUTES
-	// ARE NOT REPEATED HERE: doc.go's WHAT REMAINS owns them, because a figure
-	// maintained by hand in two places is a figure that will disagree with
-	// itself.
+	// THE VERIFICATION USED TO BE PER-VERDICT, AND THAT WAS QUADRATIC OVER A
+	// RUN. Reported by a security review lane, reproduced here, and closed by
+	// [PrepareSourceRounds]: a run that judged N cases against an N-claim
+	// registry re-verified the whole registry N times -- hashing every claim,
+	// flattening the entries and reconciling them again -- and then scanned
+	// the entries linearly for one canonical claim. Doubling N multiplied the
+	// run's total by about 3.8. THE ABSOLUTES ARE NOT REPEATED HERE: doc.go's
+	// WHAT REMAINS owns them, because a figure maintained by hand in two
+	// places is a figure that will disagree with itself.
 	//
-	// The fix is the one the lane named: verify once per run and carry an
-	// immutable verified handle, exactly as VerifiedP3bRuleset does since its
-	// config was sealed. WHAT THAT PRECEDENT TEACHES IS THE ACCOUNTING, not the
-	// seal: sealing one field there removed one of four per-use passes over the
-	// same caller-supplied identifier and left the other three, so a handle
-	// built here must be measured for what it leaves rather than credited for
-	// what it removes. doc.go's entry carries that split. The change also
-	// changes THIS function's signature, and this function is where seam 12
-	// composes with seams 3 and 10 -- an approved seam, not an implementation
-	// detail. There is also no non-test caller today: the shape needs a runner,
-	// which this package deliberately does not contain. So the change belongs
-	// to whoever builds that runner, with the seam re-approved, rather than to
-	// a bounded repair round guessing at an API for a consumer that does not
-	// exist yet.
-	if err := VerifySourceRoundRegistry(reg); err != nil {
+	// IT WAS NOT THE ONLY PER-CASE PASS OVER THE RUN, and the other two are
+	// this function's as well: AssessCaseQuality above and ClaimSourceRound
+	// below each re-ran seams 1-3 over the whole dataset, so one verdict
+	// selected the dataset twice. [PrepareDataset] closes those, and closing
+	// only this one would have left the run quadratic all the same.
+	//
+	// WHAT IS LEFT HERE IS O(1) IN THE REGISTRY: a flag and one map lookup.
+	// The handle's construction ran the same VerifySourceRoundRegistry any
+	// caller could run, once, so nothing about WHAT is proved has moved --
+	// only how often. A zero handle -- which is what a registry this package
+	// will not verify reduces to, since no other kind exists outside the
+	// package -- is refused here, exactly as an unverifiable registry was.
+	if !reg.derived() {
 		reason(MembershipReasonRegistryNotDerived)
 		return out
 	}
-	// The registry re-derived and is read: the verdict names it from here
+	// The registry is verified and is read: the verdict names it from here
 	// on, counted or refused alike.
-	out.RegistryDigest = reg.Digest
-	if claim, err := ClaimSourceRound(ds, fs); err != nil || !reg.isCanonical(claim) {
+	out.RegistryDigest = reg.Digest()
+	if claim, err := ClaimSourceRound(src, fs); err != nil || !reg.isCanonical(claim) {
 		reason(MembershipReasonCaseNotCanonical)
 		return out
 	}

@@ -557,8 +557,8 @@ func namedAttempt(k predictioneval.AttemptKey) predictioneval.AttemptKey {
 // ProjectFactualPlacement reads the selected attempt's recorded decision and
 // its post-decision placement facts through the P2 projections. The factset
 // must be exactly what the dataset derives for its episode.
-func ProjectFactualPlacement(ds predictioneval.SourceDataset, fs CommonFactset) (FactualPlacement, error) {
-	ep, err := derivedOpportunity(ds, fs)
+func ProjectFactualPlacement(src PreparedDataset, fs CommonFactset) (FactualPlacement, error) {
+	ep, err := derivedOpportunity(src, fs)
 	if err != nil {
 		return FactualPlacement{}, err
 	}

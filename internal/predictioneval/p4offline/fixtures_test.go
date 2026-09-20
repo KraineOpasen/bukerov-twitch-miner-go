@@ -184,11 +184,36 @@ func (s *synth) dataset() predictioneval.SourceDataset {
 // the dataset does not derive yields an empty registry, so the verdict names
 // the case as non-canonical rather than the fixture failing first.
 func registryOf(ds predictioneval.SourceDataset, fs p4offline.CommonFactset) p4offline.SourceRoundRegistry {
-	claim, err := p4offline.ClaimSourceRound(ds, fs)
+	claim, err := p4offline.ClaimSourceRound(preparedDS(ds), fs)
 	if err != nil {
 		return p4offline.ReconcileSourceRounds(nil)
 	}
 	return p4offline.ReconcileSourceRounds([]p4offline.SourceRoundClaim{claim})
+}
+
+// preparedDS is PrepareDataset under a short name, because the fixtures reach
+// for it at every seam that used to take the dataset itself.
+//
+// A TEST THAT PREPARES PER CALL IS NOT MEASURING THE HANDLE, and that is fine
+// everywhere but one place: the cost test prepares ONCE and says so, because
+// preparing per call is exactly the per-case selection the handle removes.
+func preparedDS(ds predictioneval.SourceDataset) p4offline.PreparedDataset {
+	return p4offline.PrepareDataset(ds)
+}
+
+// prepared verifies a registry once and returns the handle that owns it.
+//
+// A test that MEANS to supply a registry this package will not verify does not
+// come through here: it calls PrepareSourceRounds itself and asserts the error,
+// or hands AssessDenominatorMembership a zero handle, which is what an
+// unverifiable registry now reduces to at that seam.
+func prepared(t *testing.T, reg p4offline.SourceRoundRegistry) p4offline.PreparedSourceRounds {
+	t.Helper()
+	p, err := p4offline.PrepareSourceRounds(reg)
+	if err != nil {
+		t.Fatalf("PrepareSourceRounds: %v", err)
+	}
+	return p
 }
 
 func ptrI64(v int64) *int64     { return &v }
@@ -323,7 +348,7 @@ func selectedCase(t *testing.T, mutate func(*predictioneval.SourceDecisionEnvelo
 	if ep.Excluded {
 		t.Fatalf("fixture episode excluded: %v", ep.ExclusionReasons)
 	}
-	fs, err := p4offline.BuildCommonFactset(ds, ep.Episode)
+	fs, err := p4offline.BuildCommonFactset(preparedDS(ds), ep.Episode)
 	if err != nil {
 		t.Fatalf("BuildCommonFactset: %v", err)
 	}

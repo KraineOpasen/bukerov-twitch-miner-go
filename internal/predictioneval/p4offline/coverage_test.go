@@ -62,7 +62,7 @@ func TestPreDecisionExitIsCoverageOnly(t *testing.T) {
 	if ep.Excluded {
 		t.Fatalf("%v", ep.ExclusionReasons)
 	}
-	fs, err := p4offline.BuildCommonFactset(ds, ep.Episode)
+	fs, err := p4offline.BuildCommonFactset(preparedDS(ds), ep.Episode)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -87,7 +87,7 @@ func TestPreDecisionExitIsCoverageOnly(t *testing.T) {
 	}
 	// Neither policy can produce a decision for a factset that is not
 	// COMPLETE, so the case is assessed with none: coverage only.
-	q := p4offline.AssessCaseQuality(ds, fs, p4offline.PolicyDecision{}, p4offline.PolicyDecision{}, winnerArtifact("o1"))
+	q := p4offline.AssessCaseQuality(preparedDS(ds), fs, p4offline.PolicyDecision{}, p4offline.PolicyDecision{}, winnerArtifact("o1"))
 	if q.Quality != p4offline.QualityDescriptiveOnly || !containsString(q.Reasons, "FACTSET_PRE_DECISION_EXIT") ||
 		containsString(q.Reasons, "POLICY_DECISION_ON_NON_EVALUABLE_FACTSET") {
 		t.Fatalf("%+v", q)
@@ -95,7 +95,7 @@ func TestPreDecisionExitIsCoverageOnly(t *testing.T) {
 	// A decision handed in anyway for such a factset is named, not read.
 	fabricated := p4offline.PolicyDecision{Policy: p4offline.PolicyP2, Attempt: fs.Attempt, FactsetDigest: fs.Digest, EventID: "e1",
 		CutoffPosition: fs.CutoffPosition, Action: m, Stake: p4offline.KnownInt64(4242)}
-	if q := p4offline.AssessCaseQuality(ds, fs, fabricated, p4offline.PolicyDecision{}, winnerArtifact("o1")); q.Quality != p4offline.QualityDescriptiveOnly ||
+	if q := p4offline.AssessCaseQuality(preparedDS(ds), fs, fabricated, p4offline.PolicyDecision{}, winnerArtifact("o1")); q.Quality != p4offline.QualityDescriptiveOnly ||
 		!containsString(q.Reasons, "POLICY_DECISION_ON_NON_EVALUABLE_FACTSET") {
 		t.Fatalf("%+v", q)
 	}

@@ -500,41 +500,80 @@
 //     for no round.) The alternative, blanking only the offending string, moves
 //     that aliasing into the CANONICAL position, which is the one place this
 //     package cannot afford it.
-//   - SOURCE-ROUND VERIFICATION IS PER-VERDICT, SO A RUN IS QUADRATIC IN ITS
-//     OWN SIZE. Reported by a security review lane, reproduced, and NOT
-//     repaired. AssessDenominatorMembership re-verifies the whole registry for
-//     every case it judges, and a verification hashes every claim, flattens the
-//     entries and reconciles them again. The DURABLE part is the shape: one
-//     verification grows linearly in N and the run of N grows quadratically, so
-//     doubling N from 64 to 128 to 256 multiplies the run's total by about 3.8
-//     each time. On a registry of N single-attempt claims over distinct rounds
-//     that is 0.542 / 1.044 / 1.987 MiB per verification and 34.71 / 133.63 /
-//     508.71 MiB for the run -- 0.57 / 1.09 / 2.08 MB and 36.4 / 140.1 /
-//     533.4 MB in units of 10^6, which the nested-hex note below uses. EVERY
-//     FIGURE IN THIS BLOCK WAS MEASURED WITHOUT THE RACE DETECTOR; under -race
-//     the same run reads about 0.4% higher, which is the detector's bookkeeping
-//     and not the amplification.
+//   - SOURCE-ROUND VERIFICATION WAS PER-VERDICT, SO A RUN WAS QUADRATIC IN ITS
+//     OWN SIZE. Reported by a security review lane, reproduced, and CLOSED IN
+//     THIS ROUND under owner authorization to change the seams it sat on.
+//     WHAT THE DEFECT WAS, and it was WIDER THAN THE REPORT. The lane named
+//     AssessDenominatorMembership re-verifying the whole registry for every
+//     case it judged -- hashing every claim, flattening the entries and
+//     reconciling them again -- and that was real. It was not the whole of it:
+//     every seam that took a SourceDataset re-ran seams 1-3 over the WHOLE
+//     dataset and then scanned the result linearly for one episode, so one
+//     verdict selected the dataset TWICE, once inside the quality assessment
+//     and once inside the canonical-claim binding, and then scanned the
+//     registry's entries linearly for one canonical claim. FIVE PASSES OVER
+//     THE RUN PER CASE, not one. Removing the verification alone would have
+//     left the run quadratic and the entry would have read as closed.
+//     THE DURABLE PART IS THE SHAPE: one verification grew linearly in N and
+//     the run of N grew quadratically, so doubling N from 64 to 128 to 256
+//     multiplied the run's total by about 3.8 each time. On a registry of N
+//     single-attempt claims over distinct rounds that was 0.542 / 1.044 /
+//     1.987 MiB per verification and 34.71 / 133.63 / 508.71 MiB for the run
+//     -- 0.57 / 1.09 / 2.08 MB and 36.4 / 140.1 / 533.4 MB in units of 10^6,
+//     which the nested-hex note below uses. EVERY FIGURE IN THIS BLOCK WAS
+//     MEASURED WITHOUT THE RACE DETECTOR; under -race the same run reads about
+//     0.4% higher, which is the detector's bookkeeping and not the
+//     amplification.
 //     THE UNIT IS SPELLED OUT because the same run reads 4.9% apart in MiB and
 //     in MB -- 2^20/10^6 -- which is a gap large enough to pass for a fixture
 //     effect and is not one. The absolutes DO move with the claim shape, which
-//     is why the fixture is named: against this one, a two-byte claim digest is
-//     about 20% cheaper (19% at N = 256), 16-byte session and pool ids 36.5% to
-//     37.7% dearer, and 36-character ones 82% to 107% dearer. The RATIO is what
-//     survives a change of shape. The fix is the one the lane named -- verify
-//     once and carry an immutable verified handle -- but it changes the
-//     signature of the function where seam 12 composes with seams 3 and 10,
-//     which is an approved seam rather than an implementation detail, and there
-//     is no non-test caller today because the shape needs a runner this package
-//     deliberately does not contain. Designing that API now would be guessing
-//     at a consumer that does not exist; it belongs with the runner, and with
-//     the seam re-approved. THIS PACKAGE NOW HAS ONE WORKING EXAMPLE OF THE
-//     SHAPE: VerifiedP3bRuleset seals its config in an unexported field as of
-//     this round, and the entry below records both what that bought and the
-//     three-quarters it did not. Whoever builds the source-round handle should
-//     read that entry first, because its instructive half is the accounting and
-//     not the seal -- sealing one field left two framings of the same
-//     caller-supplied identifier untouched, and a handle claimed to make
-//     verification free will be measured the same way.
+//     is why the fixture is named: against that one, a two-byte claim digest
+//     was about 20% cheaper (19% at N = 256), 16-byte session and pool ids
+//     36.5% to 37.7% dearer, and 36-character ones 82% to 107% dearer. The
+//     RATIO is what survives a change of shape.
+//     WHAT CLOSED IT IS TWO HANDLES AND A SIGNATURE CHANGE AT FIVE SEAMS.
+//     [PrepareSourceRounds] runs the same [VerifySourceRoundRegistry] any
+//     caller could run, ONCE, and owns an index from round to canonical claim;
+//     [PrepareDataset] runs [SelectEpisodes] ONCE and owns an index from
+//     episode identity to selection. [BuildCommonFactset],
+//     [ProjectFactualPlacement], [ClaimSourceRound], [AssessCaseQuality] and
+//     [AssessDenominatorMembership] take those handles instead of the dataset
+//     and the registry, so there is exactly one production call of
+//     SelectEpisodes and one of VerifySourceRoundRegistry left in this
+//     package, both inside a Prepare. A consumer cannot mix a verified
+//     registry with a different one or a factset with another dataset's
+//     selection, because it no longer passes either artifact: THE HANDLE IS
+//     THE BINDING. Neither handle is a cache, a store or a second validator --
+//     each is a value the caller holds, built by the verifier that already
+//     existed.
+//     MEASURED ON THIS TREE, one verdict over a run of n cases: 38,336 B/op at
+//     n = 32 and 38,336 B/op at n = 256. Flat, to the byte, over eight times
+//     the run. A run of N is therefore one prepare plus N of those, which is
+//     linear -- TestAPreparedRunIsLinearInTheCasesItJudges.
+//     WHAT IT DID NOT BUY, in two parts. FIRST, the indexes are argued and
+//     only the re-derivations are measured: that test counts ALLOCATION, and
+//     replacing either index with the linear scan it stands in for allocates
+//     nothing, so the run would go back to O(N^2) comparisons with the test
+//     green. A wall-clock assertion would catch it and this branch has retired
+//     two of those for failing to reproduce across hosts, so the honest record
+//     is the split rather than a figure. SECOND, a prepared dataset is a
+//     SELECTION and not a factset cache: each verdict still rebuilds its own
+//     episode's factset twice, once in the quality assessment and once in the
+//     canonical-claim binding. That is O(the episode) and flat in the run,
+//     which is why it does not appear above, and it is the next thing a reader
+//     measuring this path will find.
+//     THE SELECTION'S OWN FAILURE IS OWNED, NOT RESOLVED, which is the one
+//     design decision here that could have lost a case. PrepareDataset returns
+//     no error: a dataset whose selection cannot run still becomes a handle
+//     carrying that error, and every seam reads it exactly as it read
+//     SelectEpisodes' own return, so a case judged EXCLUDED with
+//     SELECTION_UNAVAILABLE before is judged the same way now. A handle that
+//     REFUSED such a dataset would have turned a case this package used to
+//     judge into a case nobody can judge. The zero handle is separate and is
+//     refused as [ErrSelectionNotPrepared] -- deliberately not
+//     ErrEpisodeNotSelected, so selectionRan answers false and the verdict is
+//     incomplete as well as fail-closed, which is what "no selection ran"
+//     means.
 //   - A VERIFIED RULESET WAS RE-VERIFIED ON EVERY USE, SO THE PROTOCOL'S OWN
 //     SCHEDULE PAID FOR IT 16,384 TIMES. Reported by a security review lane on
 //     the published head, reproduced, and CLOSED IN THIS ROUND under owner

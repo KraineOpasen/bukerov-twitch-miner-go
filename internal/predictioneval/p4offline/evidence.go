@@ -2054,8 +2054,8 @@ func ProveCommonCutoff(cutoff int64, cutoffObservationID string, calls []CallSig
 // derived claim from a fabricated one, so a fabricated claim can ADD an
 // entry to a registry but can never displace a derived one — two different
 // claims on one round are a CONFLICT with no canonical claim.
-func ClaimSourceRound(ds predictioneval.SourceDataset, fs CommonFactset) (SourceRoundClaim, error) {
-	ep, err := derivedOpportunity(ds, fs)
+func ClaimSourceRound(src PreparedDataset, fs CommonFactset) (SourceRoundClaim, error) {
+	ep, err := derivedOpportunity(src, fs)
 	if err != nil {
 		return SourceRoundClaim{}, err
 	}
@@ -2645,20 +2645,101 @@ func sameEntries(a, b []SourceRoundEntry) bool {
 	return true
 }
 
+// PreparedSourceRounds is a source-round registry this package has VERIFIED
+// ONCE and now owns: an immutable, unreachable copy of exactly the canonical
+// claims the supplied registry carried, prepared so that asking whether a case
+// is a round's canonical claim costs the same whether the registry holds one
+// round or a million.
+//
+// IT EXISTS BECAUSE THE VERIFICATION WAS PER-VERDICT, AND THAT WAS QUADRATIC.
+// AssessDenominatorMembership re-verified the whole registry for every case it
+// judged -- hashing every claim, flattening the entries and reconciling them
+// again -- and then scanned the entries linearly to answer one canonical
+// question. A run of N cases over an N-claim registry paid both N times, so
+// doubling N multiplied the run's total by about 3.8. doc.go's WHAT REMAINS
+// owns the absolutes.
+//
+// THE HANDLE IS THE BINDING, NOT A CACHE. There is no global, no store and no
+// second validator: [PrepareSourceRounds] calls the same
+// [VerifySourceRoundRegistry] every caller could call, once, and what it
+// returns is a value the caller holds and passes. A consumer cannot mix a
+// verified registry with a different one, because it no longer passes a
+// registry at all.
+//
+// THE MAP IS WRITTEN ONLY WHILE IT IS BEING BUILT and is reachable from
+// nothing afterwards: it is unexported, no method returns it or a view of it,
+// and copying the handle copies a reference to a map that nothing mutates.
+//
+// A ZERO HANDLE IS THE ONLY UNPREPARED ONE A CALLER CAN PRODUCE, and a flag is
+// therefore the whole of what this type needs to refuse it -- not a witness.
+// The distinction is this round's own lesson from VerifiedP3bRuleset read
+// exactly: a witness earns its per-use cost when it binds fields a caller can
+// CHANGE after verification, and that type's identity fields are exported
+// because its artifacts carry them. Every field here is unexported, so there
+// is no expression outside this package that sets one: a forged value cannot
+// be built, a deserialized one gets nothing, and the zero value is refused by
+// the flag. Hashing a digest on every use to learn what a bool already says
+// would be the cost that finding removed, reinstated under a better name.
+type PreparedSourceRounds struct {
+	prepared  bool
+	digest    string
+	canonical map[string]SourceRoundClaim
+}
+
+// PrepareSourceRounds verifies a registry and returns the handle that owns it.
+//
+// THE CANONICAL INDEX IS KEYED BY ROUND AND CANNOT COLLIDE, which is a
+// property of the reconciler rather than an assumption: entries that carry a
+// canonical claim come from groups keyed by EventID, and any round an
+// unreconcilable claim also names is CONFLICT and carries none. An INVALID
+// entry may share a round name with another INVALID entry, and neither carries
+// a canonical claim, so neither reaches this index.
+func PrepareSourceRounds(reg SourceRoundRegistry) (PreparedSourceRounds, error) {
+	if err := VerifySourceRoundRegistry(reg); err != nil {
+		return PreparedSourceRounds{}, err
+	}
+	// THE STATUS CLAUSE IS DEFENCE IN DEPTH AND IS NOT DISCRIMINABLE, stated
+	// here rather than left as an unexplained mutation survivor: dropping it
+	// leaves the whole suite green. The verification above proved these
+	// entries to be reconciliation's own -- sameEntries compares Status and
+	// whether a canonical exists -- and ReconcileSourceRounds attaches a
+	// canonical claim to UNIQUE and DEDUPLICATED_IDENTICAL entries and to no
+	// others, so a verified entry with a canonical claim already has one of
+	// those two statuses. The clause is what makes that an ASSERTION here
+	// rather than a fact a reader has to go and check in another function,
+	// and it is the same clause the linear scan it replaces carried.
+	canonical := make(map[string]SourceRoundClaim, len(reg.Entries))
+	for _, e := range reg.Entries {
+		if e.Canonical == nil || (e.Status != SourceRoundUnique && e.Status != SourceRoundDeduplicatedIdentical) {
+			continue
+		}
+		canonical[e.EventID] = *e.Canonical
+	}
+	return PreparedSourceRounds{prepared: true, digest: reg.Digest, canonical: canonical}, nil
+}
+
+// Digest is the verified registry's own digest, so a verdict can name the
+// registry it was judged against.
+func (p PreparedSourceRounds) Digest() string { return p.digest }
+
+// Rounds is how many rounds the prepared registry carries a canonical claim
+// for. It is a count, not a view: nothing here hands out the claims.
+func (p PreparedSourceRounds) Rounds() int { return len(p.canonical) }
+
+// derived reports whether the value came from PrepareSourceRounds. It is O(1)
+// in the registry, and that is the whole point of the handle: a check
+// proportional to what it checks is the cost this type exists to remove.
+func (p PreparedSourceRounds) derived() bool { return p.prepared }
+
 // isCanonical reports whether claim is the registry's one canonical claim
 // for its public round: an entry for the round that is UNIQUE or
 // DEDUPLICATED_IDENTICAL and whose canonical claim is this claim. It is
-// read only behind [VerifySourceRoundRegistry], which has already proved
+// read only behind a prepared handle, whose construction has already proved
 // the entry to be reconciliation's own, so the canonical claim agrees with
 // every claim of its entry by construction.
-func (reg SourceRoundRegistry) isCanonical(claim SourceRoundClaim) bool {
-	for _, e := range reg.Entries {
-		if e.EventID == claim.Episode.EventID && e.Canonical != nil && *e.Canonical == claim &&
-			(e.Status == SourceRoundUnique || e.Status == SourceRoundDeduplicatedIdentical) {
-			return true
-		}
-	}
-	return false
+func (p PreparedSourceRounds) isCanonical(claim SourceRoundClaim) bool {
+	got, ok := p.canonical[claim.Episode.EventID]
+	return ok && got == claim
 }
 
 // claimKey renders a claim canonically for ordering and digesting.

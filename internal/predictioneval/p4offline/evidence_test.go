@@ -384,7 +384,7 @@ func TestMissingEarliestCallRequiresACompleteNoCallCoverageProof(t *testing.T) {
 // sessions' claims on one public round reconcile as a conflict.
 func TestSourceRoundClaimsAreDerivedFromTheDataset(t *testing.T) {
 	ds, ep, fs := selectedCase(t, nil, nil)
-	claim, err := p4offline.ClaimSourceRound(ds, fs)
+	claim, err := p4offline.ClaimSourceRound(preparedDS(ds), fs)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -392,10 +392,10 @@ func TestSourceRoundClaimsAreDerivedFromTheDataset(t *testing.T) {
 		t.Fatalf("%+v", claim)
 	}
 	_, _, other := selectedCase(t, func(e *predictioneval.SourceDecisionEnvelope) { e.Balance = ptrI64(2000) }, nil)
-	if _, err := p4offline.ClaimSourceRound(ds, other); !errors.Is(err, p4offline.ErrFactsetNotDerived) {
+	if _, err := p4offline.ClaimSourceRound(preparedDS(ds), other); !errors.Is(err, p4offline.ErrFactsetNotDerived) {
 		t.Fatalf("a factset the dataset does not derive claims nothing: %v", err)
 	}
-	if _, err := p4offline.ClaimSourceRound(predictioneval.SourceDataset{}, fs); !errors.Is(err, p4offline.ErrEpisodeNotSelected) {
+	if _, err := p4offline.ClaimSourceRound(preparedDS(predictioneval.SourceDataset{}), fs); !errors.Is(err, p4offline.ErrEpisodeNotSelected) {
 		t.Fatalf("got %v", err)
 	}
 	s := newSynth()
@@ -403,11 +403,11 @@ func TestSourceRoundClaimsAreDerivedFromTheDataset(t *testing.T) {
 	s.source.CollectorSessionID = s.session
 	s.placedAttempt("r1", "e1", 1)
 	dsB := s.dataset()
-	fsB, err := p4offline.BuildCommonFactset(dsB, singleEpisode(t, mustSelect(t, dsB)).Episode)
+	fsB, err := p4offline.BuildCommonFactset(preparedDS(dsB), singleEpisode(t, mustSelect(t, dsB)).Episode)
 	if err != nil {
 		t.Fatal(err)
 	}
-	claimB, err := p4offline.ClaimSourceRound(dsB, fsB)
+	claimB, err := p4offline.ClaimSourceRound(preparedDS(dsB), fsB)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1978,7 +1978,7 @@ func TestSelectionRefusalIsDistinctFromEpisodeExclusion(t *testing.T) {
 	}
 
 	_, fs := selectedFactset(t, nil, nil)
-	q := p4offline.AssessCaseQuality(refused, fs, p4offline.PolicyDecision{}, p4offline.PolicyDecision{},
+	q := p4offline.AssessCaseQuality(preparedDS(refused), fs, p4offline.PolicyDecision{}, p4offline.PolicyDecision{},
 		p4offline.ResolutionNotRecorded(p4offline.PublicRoundIdentity{EventID: "e1"}, []string{"o1", "o2"}, nil, "p"))
 	if q.Quality != p4offline.QualityExcluded {
 		t.Fatalf("a selection that could not run must still be fail-closed: %+v", q)
@@ -2034,7 +2034,7 @@ func TestSelectionRefusalIsDistinctFromEpisodeExclusion(t *testing.T) {
 			errors.Is(err, p4offline.ErrEvidenceRetention) {
 			t.Fatalf("the fixture must be refused on the ORDERING contract: %v", err)
 		}
-		q := p4offline.AssessCaseQuality(ds, fs, p4offline.PolicyDecision{}, p4offline.PolicyDecision{},
+		q := p4offline.AssessCaseQuality(preparedDS(ds), fs, p4offline.PolicyDecision{}, p4offline.PolicyDecision{},
 			p4offline.ResolutionNotRecorded(p4offline.PublicRoundIdentity{EventID: "e1"}, []string{"o1", "o2"}, nil, "p"))
 		if q.ProcessingComplete {
 			t.Fatal("a dataset that was never read must not report complete processing")
@@ -2053,7 +2053,7 @@ func TestSelectionRefusalIsDistinctFromEpisodeExclusion(t *testing.T) {
 		// status -- which is the entire reason the second axis exists.
 		other := newSynth()
 		other.placedAttempt("r9", "e9", 9)
-		q := p4offline.AssessCaseQuality(other.dataset(), fs, p4offline.PolicyDecision{}, p4offline.PolicyDecision{},
+		q := p4offline.AssessCaseQuality(preparedDS(other.dataset()), fs, p4offline.PolicyDecision{}, p4offline.PolicyDecision{},
 			p4offline.ResolutionNotRecorded(p4offline.PublicRoundIdentity{EventID: "e1"}, []string{"o1", "o2"}, nil, "p"))
 		if q.Quality != p4offline.QualityExcluded {
 			t.Fatalf("the control must be excluded, or it discriminates nothing: %+v", q)
@@ -2623,7 +2623,7 @@ func TestSessionRefusalsAreNamedByKindNotOncePerRecord(t *testing.T) {
 		return ds
 	}
 	errOf := func(n int) error {
-		_, err := p4offline.BuildCommonFactset(build(n), p4offline.EpisodeIdentity{})
+		_, err := p4offline.BuildCommonFactset(preparedDS(build(n)), p4offline.EpisodeIdentity{})
 		return err
 	}
 	e1, e2 := errOf(64), errOf(4096)
@@ -4427,11 +4427,11 @@ func TestADerivedClaimIsNeverRoutedInvalidForItsText(t *testing.T) {
 	s := newSynth()
 	s.placedAttempt("r1", "e1", 1)
 	ds := s.dataset()
-	fs, err := p4offline.BuildCommonFactset(ds, singleEpisode(t, mustSelect(t, ds)).Episode)
+	fs, err := p4offline.BuildCommonFactset(preparedDS(ds), singleEpisode(t, mustSelect(t, ds)).Episode)
 	if err != nil {
 		t.Fatal(err)
 	}
-	claim, err := p4offline.ClaimSourceRound(ds, fs)
+	claim, err := p4offline.ClaimSourceRound(preparedDS(ds), fs)
 	if err != nil {
 		t.Fatal(err)
 	}

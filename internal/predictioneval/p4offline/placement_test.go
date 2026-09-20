@@ -34,11 +34,11 @@ func factualCase(t *testing.T, shape func(*synth, *predictioneval.SourceDecision
 	if ep.Excluded {
 		t.Fatalf("%v", ep.ExclusionReasons)
 	}
-	fs, err := p4offline.BuildCommonFactset(ds, ep.Episode)
+	fs, err := p4offline.BuildCommonFactset(preparedDS(ds), ep.Episode)
 	if err != nil {
 		t.Fatal(err)
 	}
-	fp, err := p4offline.ProjectFactualPlacement(ds, fs)
+	fp, err := p4offline.ProjectFactualPlacement(preparedDS(ds), fs)
 	if err != nil {
 		t.Fatalf("ProjectFactualPlacement: %v", err)
 	}
@@ -171,7 +171,7 @@ func TestLocalReturnDoesNotProvePlatformAcceptance(t *testing.T) {
 		// The factset seam is the one that refuses today, because an excluded
 		// episode is not a selected opportunity. If that ever stops being
 		// true, this fails and names it rather than skipping on.
-		fs, err := p4offline.BuildCommonFactset(ds, ep.Episode)
+		fs, err := p4offline.BuildCommonFactset(preparedDS(ds), ep.Episode)
 		if err != nil {
 			if !errors.Is(err, p4offline.ErrEpisodeNotSelected) {
 				t.Fatalf("the factset seam must refuse an excluded episode as unselected, got %v", err)
@@ -335,11 +335,11 @@ func TestCounterfactualDecisionsCannotInheritTheFactualPlacement(t *testing.T) {
 		s.source.CollectorSessionID = s.session
 		s.placedAttempt("r1", "e1", 1)
 		dsB := s.dataset()
-		fsB, err := p4offline.BuildCommonFactset(dsB, singleEpisode(t, mustSelect(t, dsB)).Episode)
+		fsB, err := p4offline.BuildCommonFactset(preparedDS(dsB), singleEpisode(t, mustSelect(t, dsB)).Episode)
 		if err != nil {
 			t.Fatal(err)
 		}
-		fpB, err := p4offline.ProjectFactualPlacement(dsB, fsB)
+		fpB, err := p4offline.ProjectFactualPlacement(preparedDS(dsB), fsB)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -465,7 +465,7 @@ func TestPolicySkipAndNoAttemptPrefixPlacementsAreDistinct(t *testing.T) {
 	}
 	// A genuine PARTICIPATION_ADMITTED_STAKE_UNKNOWN: a balance past u32.
 	dsU, _, fsU := selectedCase(t, func(e *predictioneval.SourceDecisionEnvelope) { e.Balance = ptrI64(math.MaxUint32 + 1) }, nil)
-	fpU, err := p4offline.ProjectFactualPlacement(dsU, fsU)
+	fpU, err := p4offline.ProjectFactualPlacement(preparedDS(dsU), fsU)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -483,7 +483,7 @@ func TestPolicySkipAndNoAttemptPrefixPlacementsAreDistinct(t *testing.T) {
 		!containsString(pl.Reasons, string(p4offline.ActionParticipationAdmittedStakeUnknown)) {
 		t.Fatalf("%+v", pl)
 	}
-	if _, err := p4offline.ProjectFactualPlacement(predictioneval.SourceDataset{}, fs); !errors.Is(err, p4offline.ErrEpisodeNotSelected) {
+	if _, err := p4offline.ProjectFactualPlacement(preparedDS(predictioneval.SourceDataset{}), fs); !errors.Is(err, p4offline.ErrEpisodeNotSelected) {
 		t.Fatalf("got %v", err)
 	}
 }
@@ -496,11 +496,11 @@ func skippedCase(t *testing.T) (predictioneval.SourceDataset, p4offline.CommonFa
 	s := newSynth()
 	s.skippedAttempt("r1", "e1", 1)
 	ds := s.dataset()
-	fs, err := p4offline.BuildCommonFactset(ds, singleEpisode(t, mustSelect(t, ds)).Episode)
+	fs, err := p4offline.BuildCommonFactset(preparedDS(ds), singleEpisode(t, mustSelect(t, ds)).Episode)
 	if err != nil {
 		t.Fatal(err)
 	}
-	fp, err := p4offline.ProjectFactualPlacement(ds, fs)
+	fp, err := p4offline.ProjectFactualPlacement(preparedDS(ds), fs)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -531,11 +531,11 @@ func TestRecordedChoiceIdentityMustMatchBeforeInheritance(t *testing.T) {
 		if ep.Excluded {
 			t.Fatalf("%v", ep.ExclusionReasons)
 		}
-		fs, err := p4offline.BuildCommonFactset(ds, ep.Episode)
+		fs, err := p4offline.BuildCommonFactset(preparedDS(ds), ep.Episode)
 		if err != nil {
 			t.Fatal(err)
 		}
-		fp, err := p4offline.ProjectFactualPlacement(ds, fs)
+		fp, err := p4offline.ProjectFactualPlacement(preparedDS(ds), fs)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -593,11 +593,11 @@ func TestTerminalSlotMustMatchBeforeInheritance(t *testing.T) {
 		if ep.Excluded {
 			t.Fatalf("%v", ep.ExclusionReasons)
 		}
-		fs, err := p4offline.BuildCommonFactset(ds, ep.Episode)
+		fs, err := p4offline.BuildCommonFactset(preparedDS(ds), ep.Episode)
 		if err != nil {
 			t.Fatal(err)
 		}
-		fp, err := p4offline.ProjectFactualPlacement(ds, fs)
+		fp, err := p4offline.ProjectFactualPlacement(preparedDS(ds), fs)
 		if err != nil {
 			t.Fatal(err)
 		}

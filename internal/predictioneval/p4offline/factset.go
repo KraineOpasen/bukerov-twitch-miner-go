@@ -170,8 +170,87 @@ type P2ConfigBinding struct {
 	Digest              string                          `json:"digest"`
 }
 
-// lookupEpisode re-runs seams 1–3 over the dataset and returns the named
-// episode's selection. found reports whether the episode exists in an
+// PreparedDataset is seams 1-3 run ONCE over one dataset and owned: the
+// selection this package derived, indexed by episode, so that judging a case
+// against the dataset costs the episode and not the dataset.
+//
+// IT EXISTS FOR THE SAME REASON [PreparedSourceRounds] DOES, on the other half
+// of the same finding. Every seam that took a SourceDataset re-ran
+// SelectEpisodes over the whole of it and then scanned the result linearly for
+// one episode, so a single denominator verdict selected the dataset TWICE --
+// once inside the quality assessment and once inside the canonical-claim
+// binding -- and a run of N cases over an N-episode dataset paid that N times.
+// Removing the registry's per-verdict verification alone would have left this
+// one behind and the run quadratic all the same.
+//
+// THE SELECTION'S OWN VERDICT IS OWNED, NOT RESOLVED. PrepareDataset does not
+// refuse a dataset whose selection could not run: it keeps the error and every
+// seam reads it exactly as it read SelectEpisodes' own return, so a case that
+// was judged EXCLUDED with SELECTION_UNAVAILABLE before is judged the same way
+// now. A handle that refused such a dataset would turn a case this package
+// used to judge into a case nobody can judge, which is a case lost rather than
+// a case refused.
+//
+// A ZERO HANDLE IS REFUSED, and it is refused as a selection that did not run:
+// [ErrSelectionNotPrepared] is not [ErrEpisodeNotSelected], so selectionRan
+// answers false for it and the verdict is fail-closed and marked incomplete,
+// exactly as an aborted selection is. Nothing about a zero handle establishes
+// anything about any episode, which is what that verdict means.
+type PreparedDataset struct {
+	prepared bool
+	sel      EvidenceSelection
+	selErr   error
+	// byEpisode indexes sel.Episodes. It is written only while it is being
+	// built and no method returns it or a view of it.
+	//
+	// A DUPLICATE EPISODE IDENTITY KEEPS THE FIRST INDEX, and that rule is
+	// UNREACHABLE TODAY -- stated here rather than left as an unexplained
+	// mutation survivor, because removing it leaves the whole suite green.
+	// SelectEpisodes loops over its distinct (pool, round) group keys and an
+	// episode's identity is (epoch, session, pool, round, event) over the
+	// session's own epoch and id, so two entries cannot share one identity
+	// while the grouping is what it is. The rule is kept because the linear
+	// scan this index replaces returned the FIRST match, and an index that is
+	// equivalent BY CONSTRUCTION is worth more than one that is equivalent
+	// given a property of a function two files away.
+	byEpisode map[EpisodeIdentity]int
+}
+
+// ErrSelectionNotPrepared is a seam reached with a [PreparedDataset] that
+// [PrepareDataset] did not produce. No selection ran, so nothing is
+// established about any episode -- which is why it is deliberately NOT
+// [ErrEpisodeNotSelected], the verdict of a selection that DID run.
+var ErrSelectionNotPrepared = errors.New("p4offline: no selection was prepared for this dataset")
+
+// PrepareDataset runs seams 1-3 once and returns the handle that owns the
+// result.
+//
+// IT RETURNS NO ERROR ON PURPOSE. The selection's own failure is a verdict
+// about the dataset that every seam already knows how to read, and it is
+// carried rather than raised for the reason stated on the type.
+func PrepareDataset(ds predictioneval.SourceDataset) PreparedDataset {
+	sel, err := SelectEpisodes(ds)
+	out := PreparedDataset{prepared: true, sel: sel, selErr: err}
+	if err != nil {
+		return out
+	}
+	out.byEpisode = make(map[EpisodeIdentity]int, len(sel.Episodes))
+	for i := range sel.Episodes {
+		if _, seen := out.byEpisode[sel.Episodes[i].Episode]; seen {
+			continue
+		}
+		out.byEpisode[sel.Episodes[i].Episode] = i
+	}
+	return out
+}
+
+// Episodes is how many episodes the prepared selection carries. It is a
+// count, not a view: an EvidenceSelection carries slices, so handing one back
+// would hand back an alias of what this handle owns. A caller that wants the
+// selection itself calls [SelectEpisodes].
+func (p PreparedDataset) Episodes() int { return len(p.sel.Episodes) }
+
+// lookupEpisode returns the named episode's selection from a prepared dataset. found reports whether the episode exists in an
 // admitted session at all; err is non-nil whenever the episode is not a
 // selected opportunity (absent, session refused, excluded, unusable or
 // unproven). The error is a caller-contract error for an unordered dataset, and
@@ -186,37 +265,38 @@ type P2ConfigBinding struct {
 // selectionRan turns into [QualityRecord.ProcessingComplete]. Errors from
 // SelectEpisodes are returned VERBATIM so errors.Is reaches their sentinels
 // through this seam.
-func lookupEpisode(ds predictioneval.SourceDataset, episode EpisodeIdentity) (EpisodeSelection, bool, error) {
-	sel, err := SelectEpisodes(ds)
-	if err != nil {
-		return EpisodeSelection{}, false, err
+func lookupEpisode(src PreparedDataset, episode EpisodeIdentity) (EpisodeSelection, bool, error) {
+	if !src.prepared {
+		return EpisodeSelection{}, false, ErrSelectionNotPrepared
 	}
+	if src.selErr != nil {
+		return EpisodeSelection{}, false, src.selErr
+	}
+	sel := src.sel
 	if !sel.SessionAdmitted {
 		return EpisodeSelection{}, false, errors.Join(ErrEpisodeNotSelected,
 			errors.New("p4offline: session refused: "+reasonListExtent(sel.SessionRefusals)+
 				": "+joinReasons(sessionRefusalKinds(sel.SessionRefusals))))
 	}
-	for i := range sel.Episodes {
-		ep := sel.Episodes[i]
-		if ep.Episode != episode {
-			continue
-		}
-		if ep.Excluded || ep.Attempt == nil || !ep.FirstOpportunityUsable || !ep.Boundary.Proven {
-			detail := "episode excluded"
-			if len(ep.ExclusionReasons) > 0 {
-				detail = joinReasons(ep.ExclusionReasons)
-			}
-			return ep, true, errors.Join(ErrEpisodeNotSelected, errors.New("p4offline: "+detail))
-		}
-		return ep, true, nil
+	i, found := src.byEpisode[episode]
+	if !found {
+		return EpisodeSelection{}, false, errors.Join(ErrEpisodeNotSelected, errors.New("p4offline: episode is not in the dataset"))
 	}
-	return EpisodeSelection{}, false, errors.Join(ErrEpisodeNotSelected, errors.New("p4offline: episode is not in the dataset"))
+	ep := sel.Episodes[i]
+	if ep.Excluded || ep.Attempt == nil || !ep.FirstOpportunityUsable || !ep.Boundary.Proven {
+		detail := "episode excluded"
+		if len(ep.ExclusionReasons) > 0 {
+			detail = joinReasons(ep.ExclusionReasons)
+		}
+		return ep, true, errors.Join(ErrEpisodeNotSelected, errors.New("p4offline: "+detail))
+	}
+	return ep, true, nil
 }
 
 // selectedOpportunity is lookupEpisode for callers that need the selected
 // opportunity and nothing else.
-func selectedOpportunity(ds predictioneval.SourceDataset, episode EpisodeIdentity) (EpisodeSelection, error) {
-	ep, _, err := lookupEpisode(ds, episode)
+func selectedOpportunity(src PreparedDataset, episode EpisodeIdentity) (EpisodeSelection, error) {
+	ep, _, err := lookupEpisode(src, episode)
 	if err != nil {
 		return EpisodeSelection{}, err
 	}
@@ -225,11 +305,11 @@ func selectedOpportunity(ds predictioneval.SourceDataset, episode EpisodeIdentit
 
 // derivedOpportunity re-derives the factset's episode from the dataset and
 // requires the factset to be exactly what the dataset derives for it.
-func derivedOpportunity(ds predictioneval.SourceDataset, fs CommonFactset) (EpisodeSelection, error) {
+func derivedOpportunity(src PreparedDataset, fs CommonFactset) (EpisodeSelection, error) {
 	if err := VerifyCommonFactset(fs); err != nil {
 		return EpisodeSelection{}, err
 	}
-	ep, err := selectedOpportunity(ds, fs.Episode)
+	ep, err := selectedOpportunity(src, fs.Episode)
 	if err != nil {
 		return EpisodeSelection{}, err
 	}
@@ -305,8 +385,8 @@ func (c causeText) Unwrap() error {
 // in this package has been checked against real P1/P1.5 data. That is fail-closed and deliberate —
 // a label derived from a value the artifact cannot carry would be a label
 // about nothing — but it is a case lost, not merely a field refused.
-func BuildCommonFactset(ds predictioneval.SourceDataset, episode EpisodeIdentity) (CommonFactset, error) {
-	ep, err := selectedOpportunity(ds, episode)
+func BuildCommonFactset(src PreparedDataset, episode EpisodeIdentity) (CommonFactset, error) {
+	ep, err := selectedOpportunity(src, episode)
 	if err != nil {
 		return CommonFactset{}, err
 	}

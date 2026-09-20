@@ -100,7 +100,7 @@ func TestCommonFactsetIsOutcomeFreeAndStableAgainstLaterFacts(t *testing.T) {
 			}
 		}
 		ep2 := singleEpisode(t, mustSelect(t, ds))
-		fs2, err := p4offline.BuildCommonFactset(ds, ep2.Episode)
+		fs2, err := p4offline.BuildCommonFactset(preparedDS(ds), ep2.Episode)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -149,7 +149,7 @@ func TestCommonFactsetIsOutcomeFreeAndStableAgainstLaterFacts(t *testing.T) {
 		s.terminal("r1", "e1", 1, predictioneval.PhaseAutoSkipped, "BELOW_MINIMUM_POINTS", nil)
 		ds := s.dataset()
 		ep := singleEpisode(t, mustSelect(t, ds))
-		if _, err := p4offline.BuildCommonFactset(ds, ep.Episode); !errors.Is(err, p4offline.ErrEpisodeNotSelected) {
+		if _, err := p4offline.BuildCommonFactset(preparedDS(ds), ep.Episode); !errors.Is(err, p4offline.ErrEpisodeNotSelected) {
 			t.Fatalf("got %v", err)
 		}
 	})
@@ -157,10 +157,10 @@ func TestCommonFactsetIsOutcomeFreeAndStableAgainstLaterFacts(t *testing.T) {
 		ds, ep, _ := selectedCase(t, nil, nil)
 		other := ep.Episode
 		other.RoundIncarnationID = "r-not-there"
-		if _, err := p4offline.BuildCommonFactset(ds, other); !errors.Is(err, p4offline.ErrEpisodeNotSelected) {
+		if _, err := p4offline.BuildCommonFactset(preparedDS(ds), other); !errors.Is(err, p4offline.ErrEpisodeNotSelected) {
 			t.Fatalf("got %v", err)
 		}
-		if _, err := p4offline.BuildCommonFactset(predictioneval.SourceDataset{}, ep.Episode); !errors.Is(err, p4offline.ErrEpisodeNotSelected) {
+		if _, err := p4offline.BuildCommonFactset(preparedDS(predictioneval.SourceDataset{}), ep.Episode); !errors.Is(err, p4offline.ErrEpisodeNotSelected) {
 			t.Fatalf("an empty dataset selects nothing: %v", err)
 		}
 	})
@@ -251,7 +251,7 @@ func TestFactsetLabelsAreRederivedNotTrusted(t *testing.T) {
 			if _, err := p4offline.ProjectP3bSingleCandidate(hostile); !errors.Is(err, p4offline.ErrFactsetInconsistent) {
 				t.Fatalf("P3b projected a relabelled factset: %v", err)
 			}
-			if _, err := p4offline.ProjectFactualPlacement(ds, hostile); !errors.Is(err, p4offline.ErrFactsetInconsistent) {
+			if _, err := p4offline.ProjectFactualPlacement(preparedDS(ds), hostile); !errors.Is(err, p4offline.ErrFactsetInconsistent) {
 				t.Fatalf("placement read a relabelled factset: %v", err)
 			}
 		})
@@ -261,7 +261,7 @@ func TestFactsetLabelsAreRederivedNotTrusted(t *testing.T) {
 		if err := p4offline.VerifyCommonFactset(other); err != nil {
 			t.Fatalf("control: %v", err)
 		}
-		if _, err := p4offline.ProjectFactualPlacement(ds, other); !errors.Is(err, p4offline.ErrFactsetNotDerived) {
+		if _, err := p4offline.ProjectFactualPlacement(preparedDS(ds), other); !errors.Is(err, p4offline.ErrFactsetNotDerived) {
 			t.Fatalf("got %v", err)
 		}
 	})
@@ -1198,7 +1198,7 @@ func TestNonFiniteFactsetValuesAreRefusedBeforeTheyAreDigested(t *testing.T) {
 				s.call("r1", "e1", 1, 50, 0)
 				ds := s.dataset()
 				ep := singleEpisode(t, mustSelect(t, ds))
-				if _, err := p4offline.BuildCommonFactset(ds, ep.Episode); !errors.Is(err, p4offline.ErrFactsetInconsistent) {
+				if _, err := p4offline.BuildCommonFactset(preparedDS(ds), ep.Episode); !errors.Is(err, p4offline.ErrFactsetInconsistent) {
 					t.Fatalf("BuildCommonFactset = %v, want ErrFactsetInconsistent", err)
 				}
 
@@ -1401,11 +1401,11 @@ func TestADatasetThatDerivesNothingStillSaysSoAsNotDerived(t *testing.T) {
 				run  func() error
 			}{
 				{"ProjectFactualPlacement", func() error {
-					_, err := p4offline.ProjectFactualPlacement(bad, good)
+					_, err := p4offline.ProjectFactualPlacement(preparedDS(bad), good)
 					return err
 				}},
 				{"ClaimSourceRound", func() error {
-					_, err := p4offline.ClaimSourceRound(bad, good)
+					_, err := p4offline.ClaimSourceRound(preparedDS(bad), good)
 					return err
 				}},
 			} {
@@ -1436,7 +1436,7 @@ func TestADatasetThatDerivesNothingStillSaysSoAsNotDerived(t *testing.T) {
 	// factset, the same seam still reports ErrFactsetNotDerived — so the
 	// assertions above are not satisfied by every dataset whatsoever.
 	other := datasetWithEnvelope(t, func(e *predictioneval.SourceDecisionEnvelope) { e.Outcomes[0].Odds = 9.5 })
-	if _, err := p4offline.ProjectFactualPlacement(other, good); !errors.Is(err, p4offline.ErrFactsetNotDerived) {
+	if _, err := p4offline.ProjectFactualPlacement(preparedDS(other), good); !errors.Is(err, p4offline.ErrFactsetNotDerived) {
 		t.Fatalf("a merely different finite dataset = %v, want ErrFactsetNotDerived", err)
 	}
 }
@@ -1654,7 +1654,7 @@ func TestEveryReachableFactsetStringRefusesInvalidUTF8(t *testing.T) {
 			e.Outcomes[0].ID = invalid
 		})
 		ep := singleEpisode(t, mustSelect(t, ds))
-		_, err := p4offline.BuildCommonFactset(ds, ep.Episode)
+		_, err := p4offline.BuildCommonFactset(preparedDS(ds), ep.Episode)
 		if err == nil || !strings.Contains(err.Error(), utf8Fault) {
 			t.Fatalf("BuildCommonFactset = %v, want a %q refusal", err, utf8Fault)
 		}
@@ -1730,4 +1730,65 @@ func TestAConstantSizePositionIsRefusedBeforeACallerSizedSlice(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestAnUnpreparedDatasetEstablishesNothing pins the zero [p4offline.PreparedDataset]
+// at every seam that used to take the dataset itself.
+//
+// WHY IT IS NOT ErrEpisodeNotSelected, which is the whole of the distinction:
+// that sentinel is the verdict of a selection that RAN and refused this
+// episode, and selectionRan turns it into a COMPLETE quality record. A handle
+// nobody prepared ran no selection, so nothing was established about any
+// episode -- the same footing as a selection that aborted -- and the record
+// must say so by being INCOMPLETE. A caller that sums membership over a set of
+// verdicts has to stop on that, not publish the remainder.
+func TestAnUnpreparedDatasetEstablishesNothing(t *testing.T) {
+	ds, _, fs := selectedCase(t, nil, nil)
+	src := p4offline.PrepareDataset(ds)
+	p2, err := p4offline.EvaluateP2Case(fs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p2dec := decisionOf(t, p2, fs)
+	claim, err := p4offline.ClaimSourceRound(src, fs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reg := prepared(t, p4offline.ReconcileSourceRounds([]p4offline.SourceRoundClaim{claim}))
+
+	var none p4offline.PreparedDataset
+	t.Run("every seam refuses it, and none of them as a selected-episode verdict", func(t *testing.T) {
+		for name, call := range map[string]func() error{
+			"BuildCommonFactset":      func() error { _, err := p4offline.BuildCommonFactset(none, fs.Episode); return err },
+			"ClaimSourceRound":        func() error { _, err := p4offline.ClaimSourceRound(none, fs); return err },
+			"ProjectFactualPlacement": func() error { _, err := p4offline.ProjectFactualPlacement(none, fs); return err },
+		} {
+			err := call()
+			if !errors.Is(err, p4offline.ErrSelectionNotPrepared) {
+				t.Fatalf("%s: want ErrSelectionNotPrepared, got %v", name, err)
+			}
+			if errors.Is(err, p4offline.ErrEpisodeNotSelected) {
+				t.Fatalf("%s: an unprepared handle is not the verdict of a selection that ran: %v", name, err)
+			}
+		}
+	})
+	t.Run("the quality record is incomplete, not merely excluded", func(t *testing.T) {
+		q := p4offline.AssessCaseQuality(none, fs, p2dec, p4offline.PolicyDecision{}, p4offline.ResolutionArtifact{})
+		if q.Quality != p4offline.QualityExcluded || q.ProcessingComplete ||
+			!containsString(q.Reasons, p4offline.QualityReasonSelectionUnavailable) {
+			t.Fatalf("%+v", q)
+		}
+	})
+	t.Run("no verdict counts under it", func(t *testing.T) {
+		m := p4offline.AssessDenominatorMembership(none, reg, fs, p2dec, p4offline.PolicyDecision{},
+			p4offline.ResolutionArtifact{}, p4offline.PayoutEvidence{})
+		if m.Primary || m.PlacedBet || m.ProcessingComplete {
+			t.Fatalf("%+v", m)
+		}
+	})
+	t.Run("a prepared handle over the same dataset still judges the case", func(t *testing.T) {
+		if _, err := p4offline.BuildCommonFactset(src, fs.Episode); err != nil {
+			t.Fatalf("the control must still derive: %v", err)
+		}
+	})
 }

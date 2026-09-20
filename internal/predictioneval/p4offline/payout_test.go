@@ -240,7 +240,7 @@ func TestHandwrittenWinLoseRefundScoring(t *testing.T) {
 		s.terminal("r1", "e1", 1, predictioneval.PhaseAutoDecided, "OK", synthPlacedEnvelope())
 		dsB := s.dataset()
 		epB := singleEpisode(t, mustSelect(t, dsB))
-		fsB, err := p4offline.BuildCommonFactset(dsB, epB.Episode)
+		fsB, err := p4offline.BuildCommonFactset(preparedDS(dsB), epB.Episode)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -342,11 +342,11 @@ func TestKnownZeroP3bStakeIsScoredOnChoiceOnly(t *testing.T) {
 	s.terminal("r1", "e1", 1, predictioneval.PhaseAutoSkipped, "BELOW_MINIMUM_POINTS", env)
 	ds := s.dataset()
 	ep := singleEpisode(t, mustSelect(t, ds))
-	fs, err := p4offline.BuildCommonFactset(ds, ep.Episode)
+	fs, err := p4offline.BuildCommonFactset(preparedDS(ds), ep.Episode)
 	if err != nil {
 		t.Fatal(err)
 	}
-	fp, err := p4offline.ProjectFactualPlacement(ds, fs)
+	fp, err := p4offline.ProjectFactualPlacement(preparedDS(ds), fs)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -539,16 +539,16 @@ func TestAssessCaseQualityIsTheMinimumOverEverySeam(t *testing.T) {
 		t.Fatal(err)
 	}
 	p3bdec := decisionOf(t, p3b, fs)
-	primary := p4offline.AssessCaseQuality(ds, fs, p2dec, p3bdec, winnerArtifact("o1"))
+	primary := p4offline.AssessCaseQuality(preparedDS(ds), fs, p2dec, p3bdec, winnerArtifact("o1"))
 	if primary.Quality != p4offline.QualityPrimaryScorable || len(primary.Reasons) != 0 {
 		t.Fatalf("a complete, legal, resolved case with two choices is PRIMARY_SCORABLE: %+v", primary)
 	}
-	unresolved := p4offline.AssessCaseQuality(ds, fs, p2dec, p3bdec,
+	unresolved := p4offline.AssessCaseQuality(preparedDS(ds), fs, p2dec, p3bdec,
 		p4offline.ResolutionNotRecorded(p4offline.PublicRoundIdentity{EventID: "e1"}, []string{"o1", "o2"}, nil, "p"))
 	if unresolved.Quality != p4offline.QualityDescriptiveOnly || !containsString(unresolved.Reasons, "RESOLUTION_UNKNOWN") {
 		t.Fatalf("%+v", unresolved)
 	}
-	if q := p4offline.AssessCaseQuality(ds, fs, p2dec, p3bdec, refundArtifact()); q.Quality != p4offline.QualityDescriptiveOnly {
+	if q := p4offline.AssessCaseQuality(preparedDS(ds), fs, p2dec, p3bdec, refundArtifact()); q.Quality != p4offline.QualityDescriptiveOnly {
 		t.Fatalf("a refund names no winner for the primary metric: %+v", q)
 	}
 
@@ -557,7 +557,7 @@ func TestAssessCaseQualityIsTheMinimumOverEverySeam(t *testing.T) {
 	dsMissing, _, missing := selectedCase(t, func(e *predictioneval.SourceDecisionEnvelope) { e.Balance = nil }, nil)
 	missingDec := p2dec
 	missingDec.FactsetDigest = missing.Digest
-	if q := p4offline.AssessCaseQuality(dsMissing, missing, missingDec, asP3bAttempt(missingDec), winnerArtifact("o1")); q.Quality != p4offline.QualityDescriptiveOnly ||
+	if q := p4offline.AssessCaseQuality(preparedDS(dsMissing), missing, missingDec, asP3bAttempt(missingDec), winnerArtifact("o1")); q.Quality != p4offline.QualityDescriptiveOnly ||
 		!containsString(q.Reasons, "FACTSET_INCOMPLETE") {
 		t.Fatalf("%+v", q)
 	}
@@ -566,7 +566,7 @@ func TestAssessCaseQualityIsTheMinimumOverEverySeam(t *testing.T) {
 		illegal := p3bdec
 		illegal.Action.Legal = false
 		illegal.Action.Class = p4offline.ActionUnsupportedShape
-		if q := p4offline.AssessCaseQuality(ds, fs, p2dec, illegal, winnerArtifact("o1")); q.Quality != p4offline.QualityExcluded ||
+		if q := p4offline.AssessCaseQuality(preparedDS(ds), fs, p2dec, illegal, winnerArtifact("o1")); q.Quality != p4offline.QualityExcluded ||
 			!containsString(q.Reasons, "P3B_ILLEGAL_NATIVE_SHAPE") {
 			t.Fatalf("no genuine result maps to an illegal shape; an illegal decision is an edited one and is not evidence: %+v", q)
 		}
@@ -586,7 +586,7 @@ func TestAssessCaseQualityIsTheMinimumOverEverySeam(t *testing.T) {
 		} {
 			edited := p2dec
 			edit(&edited)
-			if q := p4offline.AssessCaseQuality(ds, fs, edited, p3bdec, winnerArtifact("o1")); q.Quality != p4offline.QualityExcluded ||
+			if q := p4offline.AssessCaseQuality(preparedDS(ds), fs, edited, p3bdec, winnerArtifact("o1")); q.Quality != p4offline.QualityExcluded ||
 				!containsString(q.Reasons, "POLICY_DECISION_NOT_DERIVED") {
 				t.Fatalf("edited P2 %s: %+v", name, q)
 			}
@@ -605,7 +605,7 @@ func TestAssessCaseQualityIsTheMinimumOverEverySeam(t *testing.T) {
 		if p3bN.Action.Class != p4offline.ActionUnknownInput {
 			t.Fatalf("fixture: %+v", p3bN.Action)
 		}
-		if q := p4offline.AssessCaseQuality(dsN, fsN, decisionOf(t, p2N, fsN), decisionOf(t, p3bN, fsN), winnerArtifact("o1")); q.Quality != p4offline.QualityDescriptiveOnly ||
+		if q := p4offline.AssessCaseQuality(preparedDS(dsN), fsN, decisionOf(t, p2N, fsN), decisionOf(t, p3bN, fsN), winnerArtifact("o1")); q.Quality != p4offline.QualityDescriptiveOnly ||
 			!containsString(q.Reasons, "P3B_NOT_DETERMINATE:UNKNOWN_INPUT") {
 			t.Fatalf("an UNKNOWN_INPUT on either side is not scorable: %+v", q)
 		}
@@ -614,7 +614,7 @@ func TestAssessCaseQualityIsTheMinimumOverEverySeam(t *testing.T) {
 		sk := newSynth()
 		sk.skippedAttempt("r1", "e1", 1)
 		dsSkip := sk.dataset()
-		fsSkip, err := p4offline.BuildCommonFactset(dsSkip, singleEpisode(t, mustSelect(t, dsSkip)).Episode)
+		fsSkip, err := p4offline.BuildCommonFactset(preparedDS(dsSkip), singleEpisode(t, mustSelect(t, dsSkip)).Episode)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -630,7 +630,7 @@ func TestAssessCaseQualityIsTheMinimumOverEverySeam(t *testing.T) {
 		if skipDec.Action.Class != p4offline.ActionPolicySkip || !skipDec.Choice.Present {
 			t.Fatalf("fixture: a skip with a computed choice, got %+v", skipDec)
 		}
-		if q := p4offline.AssessCaseQuality(dsSkip, fsSkip, skipDec, decisionOf(t, p3bSkipCase, fsSkip), winnerArtifact("o1")); q.Quality != p4offline.QualityPrimaryScorable ||
+		if q := p4offline.AssessCaseQuality(preparedDS(dsSkip), fsSkip, skipDec, decisionOf(t, p3bSkipCase, fsSkip), winnerArtifact("o1")); q.Quality != p4offline.QualityPrimaryScorable ||
 			len(q.Reasons) != 0 {
 			t.Fatalf("a skip is a per-policy non-member of the primary denominator, not a case downgrade: %+v", q)
 		}
@@ -640,7 +640,7 @@ func TestAssessCaseQualityIsTheMinimumOverEverySeam(t *testing.T) {
 			t.Fatal(err)
 		}
 		none := decisionOf(t, p3bNone, fs)
-		if q := p4offline.AssessCaseQuality(ds, fs, p2dec, none, winnerArtifact("o1")); q.Quality != p4offline.QualityPrimaryScorable ||
+		if q := p4offline.AssessCaseQuality(preparedDS(ds), fs, p2dec, none, winnerArtifact("o1")); q.Quality != p4offline.QualityPrimaryScorable ||
 			len(q.Reasons) != 0 {
 			t.Fatalf("a no-attempt prefix is a per-policy non-member of the primary denominator, not a case downgrade: %+v", q)
 		}
@@ -651,23 +651,23 @@ func TestAssessCaseQualityIsTheMinimumOverEverySeam(t *testing.T) {
 			Action: p4offline.ActionMapping{MapVersion: p4offline.NativeActionMapVersion, Policy: p4offline.PolicyP3b,
 				NativeAction: "ORDERED_RULES_ATTEMPT", Class: p4offline.ActionWouldAttempt, Legal: true},
 			Choice: p2dec.Choice, Stake: p2dec.Stake}
-		if q := p4offline.AssessCaseQuality(ds, fs, p2dec, forged, winnerArtifact("o1")); q.Quality != p4offline.QualityExcluded ||
+		if q := p4offline.AssessCaseQuality(preparedDS(ds), fs, p2dec, forged, winnerArtifact("o1")); q.Quality != p4offline.QualityExcluded ||
 			!containsString(q.Reasons, "P3B_DECISION_NOT_DERIVED") {
 			t.Fatalf("%+v", q)
 		}
 		unbound := p3bdec
 		unbound.FactsetDigest = "other"
-		if q := p4offline.AssessCaseQuality(ds, fs, p2dec, unbound, winnerArtifact("o1")); q.Quality != p4offline.QualityExcluded ||
+		if q := p4offline.AssessCaseQuality(preparedDS(ds), fs, p2dec, unbound, winnerArtifact("o1")); q.Quality != p4offline.QualityExcluded ||
 			!containsString(q.Reasons, "POLICY_BINDING_MISMATCH") {
 			t.Fatalf("a decision bound to another factset is not this case's evidence: %+v", q)
 		}
-		swapped := p4offline.AssessCaseQuality(ds, fs, p3bdec, p2dec, winnerArtifact("o1"))
+		swapped := p4offline.AssessCaseQuality(preparedDS(ds), fs, p3bdec, p2dec, winnerArtifact("o1"))
 		if swapped.Quality != p4offline.QualityExcluded {
 			t.Fatalf("the two policies are positional: %+v", swapped)
 		}
 		mismatched := p2dec
 		mismatched.Choice.OutcomeID = "o2"
-		if q := p4offline.AssessCaseQuality(ds, fs, mismatched, p3bdec, winnerArtifact("o1")); q.Quality != p4offline.QualityExcluded {
+		if q := p4offline.AssessCaseQuality(preparedDS(ds), fs, mismatched, p3bdec, winnerArtifact("o1")); q.Quality != p4offline.QualityExcluded {
 			t.Fatalf("an index/identity disagreement is not a usable decision: %+v", q)
 		}
 	})
@@ -679,23 +679,23 @@ func TestAssessCaseQualityIsTheMinimumOverEverySeam(t *testing.T) {
 		s.placedAttempt("r1", "e1", 1)
 		s.manualCall("r1", "e1", 30, 1)
 		dsManual := s.dataset()
-		q := p4offline.AssessCaseQuality(dsManual, fs, p2dec, p3bdec, winnerArtifact("o1"))
+		q := p4offline.AssessCaseQuality(preparedDS(dsManual), fs, p2dec, p3bdec, winnerArtifact("o1"))
 		if q.Quality != p4offline.QualityExcluded || !containsString(q.Reasons, "EPISODE_EXCLUDED") || !containsString(q.Reasons, "MANUAL_INTERVENTION") {
 			t.Fatalf("%+v", q)
 		}
-		if q := p4offline.AssessCaseQuality(predictioneval.SourceDataset{}, fs, p2dec, p3bdec, winnerArtifact("o1")); q.Quality != p4offline.QualityExcluded {
+		if q := p4offline.AssessCaseQuality(preparedDS(predictioneval.SourceDataset{}), fs, p2dec, p3bdec, winnerArtifact("o1")); q.Quality != p4offline.QualityExcluded {
 			t.Fatalf("no dataset, no episode: %+v", q)
 		}
 		_, _, other := selectedCase(t, func(e *predictioneval.SourceDecisionEnvelope) { e.Balance = ptrI64(2000) }, nil)
 		otherDec := p2dec
 		otherDec.FactsetDigest = other.Digest
-		if q := p4offline.AssessCaseQuality(ds, other, otherDec, asP3bAttempt(otherDec), winnerArtifact("o1")); q.Quality != p4offline.QualityExcluded ||
+		if q := p4offline.AssessCaseQuality(preparedDS(ds), other, otherDec, asP3bAttempt(otherDec), winnerArtifact("o1")); q.Quality != p4offline.QualityExcluded ||
 			!containsString(q.Reasons, "FACTSET_BINDING_MISMATCH") {
 			t.Fatalf("a factset the dataset does not derive is not this dataset's evidence: %+v", q)
 		}
 		tamperedFs := fs
 		tamperedFs.Balance++
-		if q := p4offline.AssessCaseQuality(ds, tamperedFs, p2dec, p3bdec, winnerArtifact("o1")); q.Quality != p4offline.QualityExcluded ||
+		if q := p4offline.AssessCaseQuality(preparedDS(ds), tamperedFs, p2dec, p3bdec, winnerArtifact("o1")); q.Quality != p4offline.QualityExcluded ||
 			!containsString(q.Reasons, "FACTSET_DIGEST_MISMATCH") {
 			t.Fatalf("%+v", q)
 		}
@@ -703,7 +703,7 @@ func TestAssessCaseQualityIsTheMinimumOverEverySeam(t *testing.T) {
 		// it is never echoed into the reasons.
 		relabelled := fs
 		relabelled.Completeness = "GARBAGE"
-		qr := p4offline.AssessCaseQuality(ds, relabelled, p2dec, p3bdec, winnerArtifact("o1"))
+		qr := p4offline.AssessCaseQuality(preparedDS(ds), relabelled, p2dec, p3bdec, winnerArtifact("o1"))
 		if qr.Quality != p4offline.QualityExcluded || !containsString(qr.Reasons, "FACTSET_DIGEST_MISMATCH") {
 			t.Fatalf("%+v", qr)
 		}
@@ -716,23 +716,23 @@ func TestAssessCaseQualityIsTheMinimumOverEverySeam(t *testing.T) {
 	t.Run("resolution verdicts", func(t *testing.T) {
 		tampered := winnerArtifact("o1")
 		tampered.WinnerOutcomeID = "o2"
-		if q := p4offline.AssessCaseQuality(ds, fs, p2dec, p3bdec, tampered); q.Quality != p4offline.QualityExcluded ||
+		if q := p4offline.AssessCaseQuality(preparedDS(ds), fs, p2dec, p3bdec, tampered); q.Quality != p4offline.QualityExcluded ||
 			!containsString(q.Reasons, "RESOLUTION_DIGEST_MISMATCH") {
 			t.Fatalf("a tampered artifact is not evidence: %+v", q)
 		}
-		if q := p4offline.AssessCaseQuality(ds, fs, p2dec, p3bdec, forgedWinnerArtifact("o1")); q.Quality != p4offline.QualityExcluded ||
+		if q := p4offline.AssessCaseQuality(preparedDS(ds), fs, p2dec, p3bdec, forgedWinnerArtifact("o1")); q.Quality != p4offline.QualityExcluded ||
 			!containsString(q.Reasons, "RESOLUTION_NOT_DERIVABLE") {
 			t.Fatalf("a consistently digested but unproven winner is not evidence: %+v", q)
 		}
 		wrongRound := goodWinnerEvidence()
 		wrongRound.Round.EventID = "e2"
 		wrongRound.EvidenceReferences[0].EventID = "e2"
-		if q := p4offline.AssessCaseQuality(ds, fs, p2dec, p3bdec, p4offline.ProjectResolution(wrongRound)); q.Quality != p4offline.QualityExcluded {
+		if q := p4offline.AssessCaseQuality(preparedDS(ds), fs, p2dec, p3bdec, p4offline.ProjectResolution(wrongRound)); q.Quality != p4offline.QualityExcluded {
 			t.Fatalf("%+v", q)
 		}
 		wrongSet := goodWinnerEvidence()
 		wrongSet.OrderedOutcomeIDs = []string{"o1", "o2", "o3"}
-		if q := p4offline.AssessCaseQuality(ds, fs, p2dec, p3bdec, p4offline.ProjectResolution(wrongSet)); q.Quality != p4offline.QualityExcluded ||
+		if q := p4offline.AssessCaseQuality(preparedDS(ds), fs, p2dec, p3bdec, p4offline.ProjectResolution(wrongSet)); q.Quality != p4offline.QualityExcluded ||
 			!containsString(q.Reasons, "RESOLUTION_OUTCOME_SET_MISMATCH") {
 			t.Fatalf("a resolution over another outcome set is not this round's: %+v", q)
 		}
