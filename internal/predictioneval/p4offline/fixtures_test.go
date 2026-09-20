@@ -198,7 +198,16 @@ func registryOf(ds predictioneval.SourceDataset, fs p4offline.CommonFactset) p4o
 // everywhere but one place: the cost test prepares ONCE and says so, because
 // preparing per call is exactly the per-case selection the handle removes.
 func preparedDS(ds predictioneval.SourceDataset) p4offline.PreparedDataset {
-	return p4offline.PrepareDataset(ds)
+	// THE ERROR IS DROPPED HERE ON PURPOSE, and only here. PrepareDataset
+	// returns a USABLE handle alongside it: a dataset whose selection aborted
+	// still becomes a handle carrying that abort, and the seams under test are
+	// exactly the ones that must read it and answer SELECTION_UNAVAILABLE. A
+	// fixture that failed the test on the error could not drive those rows at
+	// all. That the error IS returned -- which is what makes an aborted
+	// selection visible to a caller holding no case -- is pinned separately by
+	// TestPrepareDatasetReturnsTheSelectionsOwnFailure.
+	src, _ := p4offline.PrepareDataset(ds)
+	return src
 }
 
 // prepared verifies a registry once and returns the handle that owns it.

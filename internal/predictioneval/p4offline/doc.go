@@ -562,9 +562,9 @@
 //     canonical-claim binding. That is O(the episode) and flat in the run,
 //     which is why it does not appear above, and it is the next thing a reader
 //     measuring this path will find.
-//     THE SELECTION'S OWN FAILURE IS OWNED, NOT RESOLVED, which is the one
-//     design decision here that could have lost a case. PrepareDataset returns
-//     no error: a dataset whose selection cannot run still becomes a handle
+//     THE SELECTION'S OWN FAILURE IS OWNED AND RETURNED, and getting only the
+//     first half of that right is the one design decision here that could have
+//     lost a case. A dataset whose selection cannot run still becomes a handle
 //     carrying that error, and every seam reads it exactly as it read
 //     SelectEpisodes' own return, so a case judged EXCLUDED with
 //     SELECTION_UNAVAILABLE before is judged the same way now. A handle that
@@ -574,6 +574,17 @@
 //     ErrEpisodeNotSelected, so selectionRan answers false and the verdict is
 //     incomplete as well as fail-closed, which is what "no selection ran"
 //     means.
+//     PrepareDataset FIRST SHIPPED RETURNING NO ERROR AT ALL, and a Codex
+//     review named what that cost: through the handle alone an aborted
+//     selection was indistinguishable from a dataset with no episodes, because
+//     Episodes answers 0 for both, so a runner scheduling case seams from that
+//     count would call no seam, read no carried error, and drop the failed
+//     dataset in silence -- the exact fail-stop this package requires on
+//     incomplete processing, defeated by an unexported field. It returns the
+//     error beside the usable handle now, which keeps both halves:
+//     TestPrepareDatasetReturnsTheSelectionsOwnFailure asserts the caller
+//     cannot hold the failure without seeing it AND that the handle it holds
+//     still judges the case the way it did.
 //   - A VERIFIED RULESET WAS RE-VERIFIED ON EVERY USE, SO THE PROTOCOL'S OWN
 //     SCHEDULE PAID FOR IT 16,384 TIMES. Reported by a security review lane on
 //     the published head, reproduced, and CLOSED IN THIS ROUND under owner
@@ -848,7 +859,14 @@
 //     AND THE WITHHOLDING CLOSED ITS OWN NEIGHBOUR ONE SEAM DOWNSTREAM, which
 //     two independent Q3 lanes found before this head was published -- the
 //     first time this branch's recurring failure was caught by a review rather
-//     than by a mutant, and its EIGHTH occurrence. A refused payout names no
+//     than by a mutant, and its EIGHTH occurrence. THE REPAIR FOR IT THEN DID
+//     THE SAME THING ONE GATE EARLIER, which a Codex review caught on the
+//     published head and which makes NINE: the new gate was placed BELOW the
+//     policy switch, so it answered for a refused decision whose policy this
+//     package recognizes and missed the one whose policy it does not --
+//     namedPolicy withholds an unrecognized name, so the switch's default arm
+//     fired first and returned the very string the gate exists to replace. It
+//     is above the switch now, and the test carries the row that was missing. A refused payout names no
 //     case, so AssessDenominatorMembership's case-binding gate fired for every
 //     one of them and reported PAYOUT_BINDING_MISMATCH -- true, and the same
 //     string a genuine cross-case splice earns, and the same string the

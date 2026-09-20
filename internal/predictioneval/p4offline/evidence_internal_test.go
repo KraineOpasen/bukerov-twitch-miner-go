@@ -14,6 +14,7 @@ package p4offline
 import (
 	"encoding/json"
 	"errors"
+	"math"
 	"math/rand"
 	"reflect"
 	"runtime"
@@ -1649,4 +1650,60 @@ func compareFramingBytes(a, b []byte) int {
 		}
 	}
 	return len(a) - len(b)
+}
+
+// TestTheClaimComparatorAllocatesNothing pins a claim that was FALSE when it
+// was written, and that nothing in this package noticed.
+//
+// `sortClaimsByKey`'s comment said the comparator allocates nothing. It
+// formatted three integers per comparison with strconv.FormatInt/FormatUint,
+// and `framedLen` formatted a fourth just to take its length. strconv returns
+// a cached string only for values below 100, so a nine-digit collector epoch
+// allocated 8 bytes per operand — 16 bytes per comparison from framedLen
+// alone, over the O(N log N) comparisons of a sort. A Codex review caught the
+// claim; a measurement confirmed it at 16 B/call.
+//
+// The replacement appends into stack buffers, which measures 0. What makes
+// that safe is the part worth stating: the framing compares the LENGTH of a
+// decimal rendering first, so a hand-rolled digit count would have had to get
+// MinInt64 and the minus sign right to reproduce the ORDER the registry digest
+// is pinned to. AppendInt is the same formatting family at the same base, so
+// it reproduces the rendering by construction — and the first row below holds
+// framedLen to FormatInt's own answer across the values a digit count gets
+// wrong.
+func TestTheClaimComparatorAllocatesNothing(t *testing.T) {
+	for _, v := range []int64{0, 1, -1, 9, -9, 10, -10, 99, -99, 100, -100,
+		20260901, -20260901, 1 << 62, math.MaxInt64, math.MinInt64} {
+		e := EpisodeIdentity{CollectorEpoch: v}
+		if got, want := e.framedLen(), 5*8+len(strconv.FormatInt(v, 10)); got != want {
+			t.Fatalf("framedLen(%d) reports %d, the framing writes %d", v, got, want)
+		}
+	}
+	// The comparator over a pair that ties until its last part, so every
+	// numeric comparison is reached.
+	a := SourceRoundClaim{
+		Episode: EpisodeIdentity{CollectorEpoch: 20260901, CollectorSessionID: "session",
+			PoolInstanceID: "pool", RoundIncarnationID: "round", EventID: "event"},
+		Attempt: predictioneval.AttemptKey{CollectorEpoch: 20260901, CollectorSessionID: "session",
+			PoolInstanceID: "pool", AttemptID: 123456},
+		FactsetDigest: "digest",
+	}
+	b := a
+	b.FactsetDigest = "digesu"
+	runtime.GC()
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	const reps = 200000
+	sink := 0
+	for i := 0; i < reps; i++ {
+		sink += compareClaimKeys(a, b)
+	}
+	runtime.ReadMemStats(&after)
+	if sink == 0 {
+		t.Fatal("the fixture must not compare equal, or the numeric parts are never reached")
+	}
+	if grew := after.TotalAlloc - before.TotalAlloc; grew > 0 {
+		t.Fatalf("the comparator allocated %d bytes over %d comparisons; the sort calls it O(N log N) times",
+			grew, reps)
+	}
 }

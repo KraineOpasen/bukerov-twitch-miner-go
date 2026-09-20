@@ -1744,7 +1744,10 @@ func TestAConstantSizePositionIsRefusedBeforeACallerSizedSlice(t *testing.T) {
 // verdicts has to stop on that, not publish the remainder.
 func TestAnUnpreparedDatasetEstablishesNothing(t *testing.T) {
 	ds, _, fs := selectedCase(t, nil, nil)
-	src := p4offline.PrepareDataset(ds)
+	src, prepErr := p4offline.PrepareDataset(ds)
+	if prepErr != nil {
+		t.Fatalf("the fixture's selection must run: %v", prepErr)
+	}
 	p2, err := p4offline.EvaluateP2Case(fs)
 	if err != nil {
 		t.Fatal(err)
@@ -1791,4 +1794,74 @@ func TestAnUnpreparedDatasetEstablishesNothing(t *testing.T) {
 			t.Fatalf("the control must still derive: %v", err)
 		}
 	})
+}
+
+// TestPrepareDatasetReturnsTheSelectionsOwnFailure pins the half of the
+// handle's contract that an unexported field defeated.
+//
+// A dataset whose selection ABORTS still becomes a usable handle, so its cases
+// are judged EXCLUDED with SELECTION_UNAVAILABLE rather than becoming
+// unjudgeable — that was the design and it is unchanged. What the design got
+// wrong, and a Codex review named, is that through the handle ALONE the abort
+// was indistinguishable from a dataset that simply has no episodes: `Episodes()`
+// answers 0 for both. A runner scheduling case seams from that count would call
+// no seam, read no carried error, and drop the failed dataset in silence — the
+// exact fail-stop this package requires on incomplete processing, defeated by a
+// field nobody outside can read.
+//
+// So the error is RETURNED as well as carried, and both halves are asserted
+// here: the caller cannot hold the failure without seeing it, and the handle it
+// holds still judges the case the way it did before.
+func TestPrepareDatasetReturnsTheSelectionsOwnFailure(t *testing.T) {
+	// Records out of causal order are a CALLER CONTRACT violation, which
+	// SelectEpisodes refuses before it reads anything.
+	s := newSynth()
+	s.due("r1", "e1", 1)
+	env := synthPlacedEnvelope()
+	s.terminal("r1", "e1", 1, predictioneval.PhaseAutoDecided, "OK", env)
+	ds := s.dataset()
+	ds.Records[0], ds.Records[1] = ds.Records[1], ds.Records[0]
+
+	direct, derr := p4offline.SelectEpisodes(ds)
+	if derr == nil {
+		t.Fatalf("fixture: this dataset's selection must abort, got %d episodes", len(direct.Episodes))
+	}
+
+	src, err := p4offline.PrepareDataset(ds)
+	if err == nil {
+		t.Fatal("the abort must reach the caller, not only the handle")
+	}
+	if !errors.Is(err, predictioneval.ErrRecordsOutOfOrder) {
+		t.Fatalf("the selection's own error must arrive verbatim, got %v", err)
+	}
+	// AND THE HANDLE IS STILL USABLE, which is why the error is returned
+	// BESIDE it rather than instead of it.
+	if src.Episodes() != 0 {
+		t.Fatalf("an aborted selection carries no episodes, got %d", src.Episodes())
+	}
+	if _, err := p4offline.BuildCommonFactset(src, p4offline.EpisodeIdentity{EventID: "e1"}); !errors.Is(err, predictioneval.ErrRecordsOutOfOrder) {
+		t.Fatalf("a seam must still read the carried error verbatim: %v", err)
+	}
+	q := p4offline.AssessCaseQuality(src, p4offline.CommonFactset{}, p4offline.PolicyDecision{},
+		p4offline.PolicyDecision{}, p4offline.ResolutionArtifact{})
+	if q.Quality != p4offline.QualityExcluded || q.ProcessingComplete ||
+		!containsString(q.Reasons, p4offline.QualityReasonSelectionUnavailable) {
+		t.Fatalf("an aborted selection is EXCLUDED and INCOMPLETE, not merely excluded: %+v", q)
+	}
+	// The control: a dataset whose selection runs returns no error, and a
+	// handle over it is not confusable with the one above by its count alone.
+	good, gerr := p4offline.PrepareDataset(selectedDataset(t))
+	if gerr != nil {
+		t.Fatalf("a dataset whose selection runs returns no error: %v", gerr)
+	}
+	if good.Episodes() == 0 {
+		t.Fatal("fixture: the control must carry an episode")
+	}
+}
+
+// selectedDataset is the recurring one-episode dataset, as a dataset.
+func selectedDataset(t *testing.T) predictioneval.SourceDataset {
+	t.Helper()
+	ds, _, _ := selectedCase(t, nil, nil)
+	return ds
 }

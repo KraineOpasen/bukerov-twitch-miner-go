@@ -130,8 +130,20 @@ func (e EpisodeIdentity) String() string { return hexEncode(e.framed()) }
 // string and copying it again. String's own bytes are unchanged.
 // framedLen is len(framed()) computed without building it: five parts, each an
 // eight-byte length prefix plus its bytes.
+// framedLen is how many bytes framed() writes, computed without writing them.
+//
+// THE EPOCH'S WIDTH IS APPENDED INTO A STACK BUFFER rather than formatted into
+// a string, for the reason given at lpCompareInt64: compareClaimKeys calls
+// this on BOTH operands of every comparison, and strconv.FormatInt returns a
+// cached string only below 100, so a nine-digit collector epoch allocated
+// 8 bytes per operand -- 16 per comparison, O(N log N) over a sort. Appending
+// into a buffer whose address never leaves this function measures 0, and it is
+// the same strconv formatting family at the same base, so the width it reports
+// is the width framed() writes by construction rather than by arithmetic this
+// function would have to get right for MinInt64.
 func (e EpisodeIdentity) framedLen() int {
-	return 5*8 + len(strconv.FormatInt(e.CollectorEpoch, 10)) +
+	var buf [24]byte
+	return 5*8 + len(strconv.AppendInt(buf[:0], e.CollectorEpoch, 10)) +
 		len(e.CollectorSessionID) + len(e.PoolInstanceID) +
 		len(e.RoundIncarnationID) + len(e.EventID)
 }
@@ -2776,9 +2788,21 @@ func sortClaimsByKey(cs []SourceRoundClaim) {
 	// The key is a concatenation of length-prefixed parts, so comparing two
 	// keys byte for byte compares those parts in order, and within a part
 	// compares the eight-byte length before the bytes. compareClaimKeys does
-	// exactly that comparison against the claims themselves, allocating
-	// nothing -- and TestTheAllocationFreeClaimOrderIsTheFramingsOwnOrder pins
-	// it against the framing over random claims, so the two cannot drift.
+	// exactly that comparison against the claims themselves, and
+	// TestTheAllocationFreeClaimOrderIsTheFramingsOwnOrder pins it against the
+	// framing over random claims, so the two cannot drift.
+	//
+	// "ALLOCATING NOTHING" WAS WRITTEN HERE BEFORE IT WAS TRUE, which a Codex
+	// review caught on a published head. The comparator formatted three
+	// integers per comparison and framedLen formatted a fourth just to take
+	// its length; strconv returns a cached string only below 100, so a
+	// nine-digit collector epoch cost 8 bytes per operand -- 16 per comparison
+	// from framedLen alone, over the O(N log N) comparisons of a sort. Far
+	// under the 16.80 MB of hex keys it replaced, and not what this comment
+	// said. It appends into stack buffers now and measures 0 over 200,000
+	// comparisons, which TestTheClaimComparatorAllocatesNothing pins -- a
+	// claim about cost needs a test for the same reason a claim about an
+	// answer does.
 	//
 	// MATERIALIZING THE KEYS WAS THE OLD COST, and it was the larger half:
 	// over 8,192 claims, 16.80 MB as hex strings, 6.44 MB as framings, and
@@ -2817,7 +2841,7 @@ func compareClaimKeys(a, b SourceRoundClaim) int {
 	if c := compareEpisodeFraming(a.Episode, b.Episode); c != 0 {
 		return c
 	}
-	if c := lpCompare(strconv.FormatInt(a.Attempt.CollectorEpoch, 10), strconv.FormatInt(b.Attempt.CollectorEpoch, 10)); c != 0 {
+	if c := lpCompareInt64(a.Attempt.CollectorEpoch, b.Attempt.CollectorEpoch); c != 0 {
 		return c
 	}
 	if c := lpCompare(a.Attempt.CollectorSessionID, b.Attempt.CollectorSessionID); c != 0 {
@@ -2826,7 +2850,7 @@ func compareClaimKeys(a, b SourceRoundClaim) int {
 	if c := lpCompare(a.Attempt.PoolInstanceID, b.Attempt.PoolInstanceID); c != 0 {
 		return c
 	}
-	if c := lpCompare(strconv.FormatUint(a.Attempt.AttemptID, 10), strconv.FormatUint(b.Attempt.AttemptID, 10)); c != 0 {
+	if c := lpCompareUint64(a.Attempt.AttemptID, b.Attempt.AttemptID); c != 0 {
 		return c
 	}
 	return lpCompare(a.FactsetDigest, b.FactsetDigest)
@@ -2835,7 +2859,7 @@ func compareClaimKeys(a, b SourceRoundClaim) int {
 // compareEpisodeFraming compares two episode framings of EQUAL total length,
 // part by part, in the order EpisodeIdentity.framed writes them.
 func compareEpisodeFraming(a, b EpisodeIdentity) int {
-	if c := lpCompare(strconv.FormatInt(a.CollectorEpoch, 10), strconv.FormatInt(b.CollectorEpoch, 10)); c != 0 {
+	if c := lpCompareInt64(a.CollectorEpoch, b.CollectorEpoch); c != 0 {
 		return c
 	}
 	if c := lpCompare(a.CollectorSessionID, b.CollectorSessionID); c != 0 {
@@ -2858,6 +2882,47 @@ func lpCompare(a, b string) int {
 	}
 	// Compared by hand rather than with strings.Compare: the package's
 	// dependency fence admits no such import, and the loop allocates nothing.
+	for i := 0; i < len(a); i++ {
+		if a[i] != b[i] {
+			return cmpInt(int(a[i]), int(b[i]))
+		}
+	}
+	return 0
+}
+
+// lpCompareInt64 and lpCompareUint64 compare two integers exactly as
+// canonical.str frames their DECIMAL renderings -- the eight-byte length
+// first, the digits only when the lengths are equal -- without allocating
+// either rendering.
+//
+// THEY EXIST BECAUSE THE COMPARATOR'S "ALLOCATES NOTHING" WAS FALSE, which a
+// Codex review caught and a measurement confirmed: strconv.FormatInt returns a
+// cached string only for values below 100, and a real collector epoch is nine
+// digits, so each comparison allocated 8 bytes per operand. sort.Slice calls
+// the comparator O(N log N) times, so the allocation-free replacement for a
+// once-per-claim decoration had introduced an O(N log N) trickle -- smaller
+// than the 16.80 MB of hex keys it replaced, and still not what the comment
+// said. strconv.AppendInt into a stack array measures 0.
+//
+// COMPARING THE INTEGERS NUMERICALLY WOULD NOT DO, and that is the trap: the
+// framing compares the LENGTH first, so "-1" (two bytes) sorts after "9" (one)
+// while -1 is less than 9. The order these must reproduce is the framing's,
+// not arithmetic's, because it is the order the registry digest is pinned to.
+func lpCompareInt64(a, b int64) int {
+	var ab, bb [24]byte
+	return lpCompareBytes(strconv.AppendInt(ab[:0], a, 10), strconv.AppendInt(bb[:0], b, 10))
+}
+
+func lpCompareUint64(a, b uint64) int {
+	var ab, bb [24]byte
+	return lpCompareBytes(strconv.AppendUint(ab[:0], a, 10), strconv.AppendUint(bb[:0], b, 10))
+}
+
+// lpCompareBytes is lpCompare over bytes, with the identical rule.
+func lpCompareBytes(a, b []byte) int {
+	if c := cmpInt(len(a), len(b)); c != 0 {
+		return c
+	}
 	for i := 0; i < len(a); i++ {
 		if a[i] != b[i] {
 			return cmpInt(int(a[i]), int(b[i]))

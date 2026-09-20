@@ -618,6 +618,42 @@ func AssessDenominatorMembership(src PreparedDataset, reg PreparedSourceRounds, 
 		reason(MembershipReasonPayoutNotDerived)
 		return out
 	}
+	// A PAYOUT THAT REFUSED ITS DECISION SAYS SO HERE, ABOVE THE POLICY SWITCH
+	// AND ABOVE THE CASE BINDING. DerivePayout withholds a refused decision's
+	// identity deliberately -- the text was never verified and framing it cost
+	// what the caller supplied -- so such an artifact carries no factset digest
+	// at all, and the gates below would report it as evidence about ANOTHER
+	// CASE. That is true and it is the wrong diagnosis: it is the same string a
+	// genuine cross-case splice earns, and the one the witness gate earns for a
+	// spliced decision, so three distinguishable faults would arrive as one.
+	//
+	// ABOVE THE SWITCH, AND THAT POSITION IS THE SECOND HALF OF THE REPAIR.
+	// Placed below it, this gate answered for a refused decision whose policy
+	// this package RECOGNIZES and missed the one whose policy it does not:
+	// namedPolicy withholds an unrecognized name, so the switch's default arm
+	// fired first and returned the very string this gate exists to replace.
+	// A Codex review caught that on the published head -- the same failure the
+	// gate itself was repairing, one gate earlier, which is why the position
+	// is argued here rather than left to look arbitrary.
+	//
+	// THE DISCRIMINATOR IS EXACT AND NOT A HEURISTIC. decisionRefusal refuses
+	// a decision whose FactsetDigest is empty, so every payout that got past
+	// it carries a non-empty one; a DERIVED payout with none is therefore
+	// exactly a payout this package refused. WHY the decision was refused is
+	// on the artifact's own Reasons, in the refusal's own category -- which is
+	// finer than the verdicts this gate replaces, not coarser. The policy is
+	// named when the artifact carries one, because namedPolicy admits only
+	// this package's own constants; nothing else of the case is.
+	//
+	// IT IS THE SAME REPAIR selectionRan IS, one seam over: a collapse that
+	// makes a refusal of one thing indistinguishable from a verdict about
+	// another is a lost signal even when no count moves. Neither Primary nor
+	// PlacedBet moves on any of these paths.
+	if pe.FactsetDigest == "" {
+		out.Policy = namedPolicy(pe.Policy)
+		reason(MembershipReasonPayoutRefusedDecision)
+		return out
+	}
 	var decision, counterpart PolicyDecision
 	switch pe.Policy {
 	case PolicyP2:
@@ -629,31 +665,6 @@ func AssessDenominatorMembership(src PreparedDataset, reg PreparedSourceRounds, 
 		return out
 	}
 	out.Policy = pe.Policy
-	// A PAYOUT THAT REFUSED ITS DECISION SAYS SO HERE, above the case binding
-	// and not through it. DerivePayout withholds a refused decision's identity
-	// deliberately -- the text was never verified and framing it cost what the
-	// caller supplied -- so such an artifact carries no factset digest at all,
-	// and the binding gate below would report it as evidence about ANOTHER
-	// CASE. That is true and it is the wrong diagnosis: it is the same string
-	// a genuine cross-case splice earns, and the one the witness gate below
-	// earns for a spliced decision, so three distinguishable faults would
-	// arrive as one.
-	//
-	// THE DISCRIMINATOR IS EXACT AND NOT A HEURISTIC. decisionRefusal refuses
-	// a decision whose FactsetDigest is empty, so every payout that got past
-	// it carries a non-empty one; a DERIVED payout with none is therefore
-	// exactly a payout this package refused. WHY the decision was refused is
-	// on the artifact's own Reasons, in the refusal's own category -- which is
-	// finer than the two verdicts this gate replaces, not coarser.
-	//
-	// IT IS THE SAME REPAIR selectionRan IS, one seam over: a collapse that
-	// makes a refusal of one thing indistinguishable from a verdict about
-	// another is a lost signal even when no count moves. Neither Primary nor
-	// PlacedBet moves on any of these paths.
-	if pe.FactsetDigest == "" {
-		reason(MembershipReasonPayoutRefusedDecision)
-		return out
-	}
 	if pe.ContractVersion != PayoutEvidenceVersion || pe.Attempt != fs.Attempt || pe.FactsetDigest != fs.Digest ||
 		pe.EventID != fs.Episode.EventID || decision.Policy != pe.Policy || decision.Attempt != pe.Attempt ||
 		decision.FactsetDigest != pe.FactsetDigest || decision.EventID != pe.EventID {

@@ -191,6 +191,9 @@ type P2ConfigBinding struct {
 // used to judge into a case nobody can judge, which is a case lost rather than
 // a case refused.
 //
+// AND IT RETURNS THAT ERROR AS WELL AS CARRYING IT, because carrying it alone
+// made the failure invisible to a caller holding no case: see PrepareDataset.
+//
 // A ZERO HANDLE IS REFUSED, and it is refused as a selection that did not run:
 // [ErrSelectionNotPrepared] is not [ErrEpisodeNotSelected], so selectionRan
 // answers false for it and the verdict is fail-closed and marked incomplete,
@@ -223,16 +226,29 @@ type PreparedDataset struct {
 var ErrSelectionNotPrepared = errors.New("p4offline: no selection was prepared for this dataset")
 
 // PrepareDataset runs seams 1-3 once and returns the handle that owns the
-// result.
+// result, TOGETHER WITH the selection's own error.
 //
-// IT RETURNS NO ERROR ON PURPOSE. The selection's own failure is a verdict
-// about the dataset that every seam already knows how to read, and it is
-// carried rather than raised for the reason stated on the type.
-func PrepareDataset(ds predictioneval.SourceDataset) PreparedDataset {
+// IT RETURNS BOTH, and that pair is the whole point. An earlier form returned
+// the handle alone and kept the error unexported, on the reasoning that a
+// dataset whose selection cannot run must still become a handle so its cases
+// are judged EXCLUDED with SELECTION_UNAVAILABLE rather than becoming
+// unjudgeable. That half is right and is unchanged: the handle returned below
+// is usable whatever err says, and every seam reads the carried error exactly
+// as it read SelectEpisodes' own return.
+//
+// THE OTHER HALF WAS WRONG, and a Codex review named it. Through the handle
+// alone, an aborted selection was INDISTINGUISHABLE from a dataset that simply
+// has no episodes -- Episodes() answers 0 for both -- so a runner scheduling
+// case seams from that count would call no seam, read no carried error, and
+// drop the failed dataset in silence. That is exactly the fail-stop this
+// package requires on incomplete processing, defeated by an unexported field.
+// Returning the error makes the failure impossible to hold without seeing, and
+// costs the usable handle nothing.
+func PrepareDataset(ds predictioneval.SourceDataset) (PreparedDataset, error) {
 	sel, err := SelectEpisodes(ds)
 	out := PreparedDataset{prepared: true, sel: sel, selErr: err}
 	if err != nil {
-		return out
+		return out, err
 	}
 	out.byEpisode = make(map[EpisodeIdentity]int, len(sel.Episodes))
 	for i := range sel.Episodes {
@@ -241,7 +257,7 @@ func PrepareDataset(ds predictioneval.SourceDataset) PreparedDataset {
 		}
 		out.byEpisode[sel.Episodes[i].Episode] = i
 	}
-	return out
+	return out, nil
 }
 
 // Episodes is how many episodes the prepared selection carries. It is a

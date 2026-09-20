@@ -915,7 +915,10 @@ func TestAPreparedRunIsLinearInTheCasesItJudges(t *testing.T) {
 			s.call(round, event, id, *env.FinalAmount, *env.ChoiceIndex)
 		}
 		ds := s.dataset()
-		src := p4offline.PrepareDataset(ds)
+		src, prepErr := p4offline.PrepareDataset(ds)
+		if prepErr != nil {
+			t.Fatalf("the fixture's selection must run: %v", prepErr)
+		}
 		sel := mustSelect(t, ds)
 		if len(sel.Episodes) != n {
 			t.Fatalf("fixture: %d episodes, want %d", len(sel.Episodes), n)
@@ -1036,12 +1039,21 @@ func TestARefusedDecisionsPayoutIsNamedAsThatAndNotAsAnotherCase(t *testing.T) {
 	negative := p2dec
 	negative.Stake = p4offline.KnownInt64(-1) // refused one clause earlier: STAKE_NEGATIVE
 
+	// AND A DECISION WHOSE POLICY THIS PACKAGE DOES NOT RECOGNIZE, which is
+	// the row a Codex review had to add for me. The first form of this repair
+	// put its gate BELOW the policy switch, so a refused payout whose policy
+	// namedPolicy withholds hit the switch's default arm and came back with
+	// the very string the gate exists to replace -- the same failure the gate
+	// was repairing, one gate earlier. Without this row nothing would say so.
+	unnamed := p2dec
+	unnamed.Policy = "P9" // decisionRefusal's FIRST clause
 	for _, tc := range []struct {
-		name, category string
-		decision       p4offline.PolicyDecision
+		name, category, wantPolicy string
+		decision                   p4offline.PolicyDecision
 	}{
-		{"a decision whose witness was broken", "DECISION_NOT_DERIVED", spliced},
-		{"a decision refused before the witness clause", "STAKE_NEGATIVE", negative},
+		{"a decision whose witness was broken", "DECISION_NOT_DERIVED", p4offline.PolicyP2, spliced},
+		{"a decision refused before the witness clause", "STAKE_NEGATIVE", p4offline.PolicyP2, negative},
+		{"a decision whose policy is not recognized", "POLICY_BINDING_MISMATCH", "", unnamed},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			pe := p4offline.DerivePayout(tc.decision, proven, res, nil)
@@ -1063,6 +1075,12 @@ func TestARefusedDecisionsPayoutIsNamedAsThatAndNotAsAnotherCase(t *testing.T) {
 			}
 			if m.Derivation != "" {
 				t.Fatalf("a refused decision's derivation is not published: %q", m.Derivation)
+			}
+			// The policy is named when the artifact carries one, because
+			// namedPolicy admits only this package's own constants — and is
+			// absent when it does not, rather than guessed.
+			if m.Policy != tc.wantPolicy {
+				t.Fatalf("the verdict names policy %q, want %q", m.Policy, tc.wantPolicy)
 			}
 		})
 	}
