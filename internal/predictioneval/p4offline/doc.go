@@ -188,7 +188,12 @@
 // first-party import is the predictioneval package itself, whose own fence
 // already excludes every capability package. TestP4OfflineDependencyFence
 // enforces the first five clauses over this package's whole transitive import
-// graph, and the sixth over its syntax: a goroutine needs no import, so that
+// graph -- not by that graph being free of os, syscall and time, which it is
+// not, but by pinning what they reach through: the closure is 99 packages with
+// a residue of internal/poll, io/fs, os, reflect, syscall and time, and
+// TestTheDocumentedResidueIsAttributableToItsRoots holds every one of them to
+// crypto/sha256 and encoding/json. The capability is in the closure and no
+// line of this package calls it. The sixth clause is enforced over syntax: a goroutine needs no import, so that
 // clause used to be a convention this sentence presented as a machine check.
 // It is now Rule E, and Rule E has its own control.
 //
@@ -546,8 +551,8 @@
 //     THE BINDING. Neither handle is a cache, a store or a second validator --
 //     each is a value the caller holds, built by the verifier that already
 //     existed.
-//     MEASURED ON THIS TREE, one verdict over a run of n cases: 38,336 B/op at
-//     n = 32 and 38,336 B/op at n = 256. Flat, to the byte, over eight times
+//     MEASURED ON THIS TREE, one verdict over a run of n cases: 38,392 B/op at
+//     n = 32 and 38,392 B/op at n = 256. Flat, to the byte, over eight times
 //     the run. A run of N is therefore one prepare plus N of those, which is
 //     linear -- TestAPreparedRunIsLinearInTheCasesItJudges.
 //     WHAT IT DID NOT BUY, in two parts. FIRST, the indexes are argued and
@@ -721,13 +726,17 @@
 //     measured it and a third reproduced both RATIOS through VerifyP3bRuleset:
 //     a ~65.6 KB document whose one literal is over-long reads 6.98x, a
 //     512 KiB one 7.00x.
-//     THE RATIOS ARE QUOTED AND THE BYTE COUNTS ARE NOT, deliberately. The only
-//     instrument in this package is a runtime.MemStats.TotalAlloc delta, and
-//     the suite carries no benchmark and no averaging harness, so a single
-//     reading here is always a multiple of eight and is machine-specific. The
-//     multiple is what three independent measurements agreed on to two
-//     decimals; an exact integer would be one machine's reading dressed as a
-//     constant.
+//     THE RATIOS ARE QUOTED AND THE BYTE COUNTS ARE NOT, deliberately. A single
+//     runtime.MemStats.TotalAlloc delta is always a multiple of eight, so a
+//     figure that is not one is not a single delta. It may still be a reading:
+//     this suite averages in three ways -- one testing.Benchmark read through
+//     AllocedBytesPerOp, five testing.AllocsPerRun sites, and three
+//     measurements divided by a rep count -- which is why 1,055,076 and
+//     3,183,766 elsewhere in this register are not multiples of eight and are
+//     nonetheless real. What is not quoted in these two records is a figure
+//     whose averaging basis was never recorded, because nothing can say which
+//     of the two it is. The ratios hold because three independent measurements
+//     agreed on them to two decimals and they do not depend on the machine.
 //     WHERE THE COST IS, PER STAGE at 512 KiB: sha256Hex is 128 B and FLAT at
 //     both sizes, so it is not a contributor; json.Decode NEVER RUNS, because
 //     checkRulesetKeys refuses first; checkRulesetKeys is 99.99% of it;
@@ -738,13 +747,20 @@
 //     END, and the two bases coincide only for this document, where the key
 //     walk is 99.99% of the cost. At checkRulesetKeys alone, 512 KiB: a giant
 //     number literal 7.00x, a giant string literal 5.00x, many small tokens
-//     about 14x. END TO END through VerifyP3bRuleset: 7.00x, 10.00x and about
-//     19.9x, because the decode and the config comparison then run. So on the
+//     about 14x -- that last one on a fixture this register does not name,
+//     which is the one place its own name-the-fixture rule is unmet, and a
+//     lane reading 12.85x on a fixture of its own. END TO END through
+//     VerifyP3bRuleset: 7.00x, 13.04x and about 19.9x, because the decode and
+//     the config comparison then run. So on the
 //     like-for-like end-to-end basis THIS refusal is the CHEAPEST of the three
 //     shapes, and the two dearer ones are not hypothetical: a document whose
 //     bulk is one giant string literal in ConfigID VERIFIES -- ConfigID carries
 //     no per-string length bound, which rulesetRawCeiling's own note records --
-//     so 10.00x is the price of honest input, paid on the accepting path. The
+//     so 13.04x is the price of honest input, paid on the accepting path:
+//     measured through VerifyP3bRuleset on a document that VERIFIES, 13.97x /
+//     13.34x / 13.08x / 13.04x for a 16 KiB / 64 KiB / 256 KiB / 512 KiB
+//     ConfigID -- falling with width, so the figure is a constant factor and
+//     not an amplification. The
 //     many-token shape is refused, by the core rather than here, and only after
 //     the whole walk has been paid: MaxOrderedRulesRules caps an accepted
 //     ruleset at 128 rules. dec.UseNumber() in
@@ -768,8 +784,9 @@
 //     load-bearing -- the registry digest is computed over those exact bytes
 //     and an INDEPENDENT golden generated by
 //     testdata/synthetic/gen_golden_digests.py pins it -- so removing the
-//     nesting would mean bumping SourceRoundRegistryVersion and regenerating
-//     that golden. What was avoidable was never the nesting but the
+//     nesting would mean regenerating that golden; a SourceRoundRegistryVersion
+//     bump is the compatibility choice beside it and not a mechanical
+//     requirement, for the reason measured further down. What was avoidable was never the nesting but the
 //     INTERMEDIATE STRINGS: EpisodeIdentity.framed exposes the framing,
 //     canonical.strHexOf writes its hex rendering straight into the
 //     destination, and compareClaimKeys orders claims without building a key
@@ -829,17 +846,16 @@
 //     THE OBVIOUS REPAIR IS WRONG, and the lane built it to find out:
 //     gating the VERIFIER alone breaks the fixed point, because the producer
 //     would still route such a claim to its round, and this package's own tests
-//     catch it -- a 64-hex gate over the claims fails eight of them, among them
+//     catch it -- a 64-hex gate over the claims fails ten of them, among them
 //     TestReconcileSourceRoundsNeverMintsARegistryItsOwnVerifierRefuses,
 //     because the suite's own fixtures carry two-byte digests. An exact-length
-//     gate (len != 64) fails the same eight; a length CEILING (len > 64),
-//     which is the minimal shape that closes the amplification, leaves the
-//     whole suite green AT THE VERIFIER. It does not at the producer: routing
-//     a digest past that ceiling to INVALID in ReconcileSourceRounds fails
-//     TestTheExpressibilityRoutingAllocatesNothing, whose 250-claim fixture
-//     carries a 4,096-byte FactsetDigest and asserts a canonical claim for
-//     every entry. The figures are quoted per SIDE because they differ by
-//     side, which is the part a reader planning the repair needs.
+//     gate (len != 64) fails the same ten; a length CEILING (len > 64), which
+//     is the minimal shape that closes the amplification, fails exactly one --
+//     TestTheExpressibilityRoutingAllocatesNothing -- and fails it on EITHER
+//     side. That test's 250-claim fixture carries a 4,096-byte FactsetDigest
+//     and asserts a canonical claim for every entry; ReconcileSourceRounds
+//     mints it and the verifier is handed it, so a ceiling in either place
+//     refuses the same fixture. The cost does NOT divide by side.
 //     Closing it means routing a non-64-hex digest
 //     to INVALID in ReconcileSourceRounds AND gating it in the verifier,
 //     together -- so it costs that fixture as well, and the independent golden
@@ -911,12 +927,12 @@
 //     was and not one byte of it. Nothing is invented, no refusal becomes a
 //     verdict, and no consumer can bind to an artifact that names no case,
 //     because every consumer compares the identity in WHOLE. MEASURED ON THIS
-//     TREE: DerivePlacement 1,712 B/op at one byte against 1,792 at 1 MiB,
-//     DerivePayout 1,840 against 1,952 --
+//     TREE: DerivePlacement 1,728 B/op at one byte against 1,792 at 1 MiB,
+//     DerivePayout 1,856 against 1,968 --
 //     TestARefusedDecisionNamesItsExtentAndNotItsText, which drives both seams
 //     and the six mutants that reinstate each withheld field in turn.
-//     THE ONE-BYTE REFUSAL GOT DEARER, about 840 bytes at the placement seam
-//     and 260 at the payout seam, and it is recorded rather than absorbed: the
+//     THE ONE-BYTE REFUSAL GOT DEARER, 856 bytes at the placement seam and 280
+//     at the payout seam, against the 872 and 1,576 recorded below, and it is recorded rather than absorbed: the
 //     extent sentence is work a refusal naming its case in full never did.
 //     AND THE WITHHOLDING CLOSED ITS OWN NEIGHBOUR ONE SEAM DOWNSTREAM, which
 //     two independent Q3 lanes found before this head was published -- the
@@ -1192,7 +1208,12 @@
 //     requires a width field and a witness comparison, not that the width is
 //     ever compared. It reads one flat directory. It recognises a recomputation
 //     by the called function's name ending in Witness, and only where the
-//     comparison sits in a return, an if or a switch. And it asks that SOME
+//     comparison sits in a return, an if or a switch. A callee wearing that
+//     name is struck off if its body reads a stored witness or never reads
+//     what it is handed, since neither recomputes anything; names are not
+//     qualified by receiver, so a collision strikes off an honest namesake
+//     too, and that direction reports a MISSING comparison rather than
+//     accepting a forged one. And it asks that SOME
 //     method compares the witness, not that every entry point reaches one --
 //     Rules answers on an unverified handle by design, and the census is
 //     content with that. It is a tripwire against the way this class has

@@ -2875,8 +2875,10 @@ func PrepareSourceRounds(reg SourceRoundRegistry) (PreparedSourceRounds, error) 
 	// THE STATUS CLAUSE IS DEFENCE IN DEPTH AND IS NOT DISCRIMINABLE, stated
 	// here rather than left as an unexplained mutation survivor: dropping it
 	// leaves the whole suite green. The verification above proved these
-	// entries to be reconciliation's own -- sameEntries compares Status and
-	// whether a canonical exists -- and ReconcileSourceRounds attaches a
+	// entries to be reconciliation's own -- sameEntries compares EventID, the
+	// claims element-wise, Status, and the canonical claim BY VALUE, which is
+	// the only place the canonical's CONTENT is bound at all, since
+	// registryDigest frames nothing but whether one exists -- and ReconcileSourceRounds attaches a
 	// canonical claim to UNIQUE and DEDUPLICATED_IDENTICAL entries and to no
 	// others, so a verified entry with a canonical claim already has one of
 	// those two statuses. The clause is what makes that an ASSERTION here

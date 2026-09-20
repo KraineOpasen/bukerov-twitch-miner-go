@@ -2453,6 +2453,66 @@ func TestARecordedWidthIsRequiredAndNotJustRecorded(t *testing.T) {
 			t.Fatalf("check accepted a handle with a wrong witness: %v", err)
 		}
 	})
+
+	// AND SO DO THE OTHER SIX, which rested on an allocation ratio alone. A
+	// lane removed the width clause from all six derived() methods at once:
+	// 211 top-level tests passed and the ONLY failure was a B/op comparison in
+	// TestAnEditedResultIsRefusedWithoutFramingTheEdit. Removing it from one
+	// type, with that ratio test excluded, survived outright. A ratio is a soft
+	// instrument to rest a gate on -- it reports how much a refusal cost, not
+	// whether it happened -- so every type is held here to an ANSWER instead:
+	// a CORRECT witness beside a wrong width must still be refused.
+	for _, tc := range []struct {
+		name    string
+		good    int
+		atWidth func(int) bool
+	}{
+		{"P2CaseResult", p2ResultFramedLen(P2CaseResult{}), func(w int) bool {
+			v := P2CaseResult{}
+			v.witness, v.framedLen = p2ResultWitness(P2CaseResult{}), w
+			return v.derived()
+		}},
+		{"P3bCaseResult", p3bResultFramedLen(P3bCaseResult{}), func(w int) bool {
+			v := P3bCaseResult{}
+			v.witness, v.framedLen = p3bResultWitness(P3bCaseResult{}), w
+			return v.derived()
+		}},
+		{"PayoutEvidence", payoutEvidenceFramedLen(PayoutEvidence{}), func(w int) bool {
+			v := PayoutEvidence{}
+			v.witness, v.framedLen = payoutEvidenceWitness(PayoutEvidence{}), w
+			return v.derived()
+		}},
+		{"FactualPlacement", factualPlacementFramedLen(FactualPlacement{}), func(w int) bool {
+			v := FactualPlacement{}
+			v.witness, v.framedLen = factualPlacementWitness(FactualPlacement{}), w
+			return v.derived()
+		}},
+		{"PolicyDecision", policyDecisionFramedLen(PolicyDecision{}), func(w int) bool {
+			v := PolicyDecision{}
+			v.witness, v.framedLen = policyDecisionWitness(PolicyDecision{}), w
+			return v.derived()
+		}},
+		{"PlacementEvidence", placementEvidenceFramedLen(PlacementEvidence{}), func(w int) bool {
+			v := PlacementEvidence{}
+			v.witness, v.framedLen = placementEvidenceWitness(PlacementEvidence{}), w
+			return v.derived()
+		}},
+	} {
+		t.Run(tc.name+" requires its recorded width, not just a witness", func(t *testing.T) {
+			if tc.good <= 0 {
+				t.Fatalf("the fixture frames %d bytes: a width test needs a positive width", tc.good)
+			}
+			if !tc.atWidth(tc.good) {
+				t.Fatalf("a correctly built %s must be derived at its own width %d", tc.name, tc.good)
+			}
+			for _, w := range []int{0, -1, tc.good - 1, tc.good + 1} {
+				if tc.atWidth(w) {
+					t.Errorf("%s accepted a recorded width of %d against a framing of %d, although the witness is CORRECT: the width clause is not load-bearing",
+						tc.name, w, tc.good)
+				}
+			}
+		})
+	}
 }
 
 // framedByAnIndependentOracle builds the documented framing from the contract
@@ -2628,6 +2688,48 @@ func witnessComparedIn(t *testing.T, dir string) map[string]bool {
 	// one. The residual in the accepting direction is a callee declared
 	// OUTSIDE these files, whose body this walk cannot see; all seven of this
 	// package's are package-level functions in this directory.
+	// AND A CALLEE THAT NEVER READS WHAT IT IS HANDED recomputes nothing
+	// either. `witness != emptyWitness(v)` passes every other clause -- the
+	// name ends in Witness, the receiver is handed in, no stored witness is
+	// read -- and returns a constant, which is the `witness != hexEncode(nil)`
+	// defeat respelled with the suffix the recognizer looks for. A
+	// recomputation must at minimum READ its own input, so one that mentions
+	// neither a parameter nor its receiver anywhere in its body is struck off.
+	ignoresItsInput := map[string]bool{}
+	for _, f := range files {
+		for _, d := range f.Decls {
+			fd, ok := d.(*ast.FuncDecl)
+			if !ok || fd.Body == nil || !strings.HasSuffix(fd.Name.Name, "Witness") {
+				continue
+			}
+			given := map[string]bool{}
+			lists := []*ast.FieldList{fd.Type.Params}
+			if fd.Recv != nil {
+				lists = append(lists, fd.Recv)
+			}
+			for _, fl := range lists {
+				if fl == nil {
+					continue
+				}
+				for _, field := range fl.List {
+					for _, n := range field.Names {
+						given[n.Name] = true
+					}
+				}
+			}
+			used := false
+			ast.Inspect(fd.Body, func(n ast.Node) bool {
+				if id, ok := n.(*ast.Ident); ok && given[id.Name] {
+					used = true
+				}
+				return true
+			})
+			if !used {
+				ignoresItsInput[fd.Name.Name] = true
+			}
+		}
+	}
+
 	readsStoredWitness := map[string]bool{}
 	for _, f := range files {
 		for _, d := range f.Decls {
@@ -2724,7 +2826,7 @@ func witnessComparedIn(t *testing.T, dir string) map[string]bool {
 							name = fn.Sel.Name
 						}
 						if strings.HasSuffix(name, "Witness") && mentionsRecv(call) &&
-							!readsStoredWitness[name] {
+							!readsStoredWitness[name] && !ignoresItsInput[name] {
 							out[id.Name] = true
 						}
 					}
@@ -2779,13 +2881,22 @@ func witnessComparedIn(t *testing.T, dir string) map[string]bool {
 					if x.Cond == nil {
 						return true
 					}
-					elseConsumes := false
-					if bs, ok := x.Else.(*ast.BlockStmt); ok {
-						elseConsumes = consumes(bs)
-					} else if x.Else != nil {
-						elseConsumes = true
+					// AN `else if` IS NOT A CONSUMER BY ITSELF. Counting any
+					// non-block else as one accepted a gate every branch of
+					// which discards -- the disabled-gate shape exactly one
+					// `else if` away from the one already covered here.
+					var elseConsumes func(ast.Stmt) bool
+					elseConsumes = func(e ast.Stmt) bool {
+						switch y := e.(type) {
+						case *ast.BlockStmt:
+							return consumes(y)
+						case *ast.IfStmt:
+							return consumes(y.Body) || elseConsumes(y.Else)
+						default:
+							return false
+						}
 					}
-					if consumes(x.Body) || elseConsumes {
+					if consumes(x.Body) || elseConsumes(x.Else) {
 						decide(x.Cond)
 					}
 				case *ast.SwitchStmt:
@@ -3160,6 +3271,80 @@ func (v comparesAgainstItsOwnStoredWitness) derived() bool {
 	return v.witness == v.recordedWitness() && v.framedLen > 0
 }
 
+type comparesAgainstAConstantWitness struct {
+	A         string
+	witness   string
+	framedLen int
+}
+
+// It is handed the receiver and never looks at it: the empty string spelled as
+// a call, wearing the suffix the recognizer looks for.
+func emptyWitness(v comparesAgainstAConstantWitness) string { return "" }
+
+func (v comparesAgainstAConstantWitness) derived() bool {
+	return v.witness != emptyWitness(v) && v.framedLen > 0
+}
+
+type gateDisabledViaElseIf struct {
+	A         string
+	witness   string
+	framedLen int
+}
+
+// comparesInAnIfWithADeadBody plus one else if: every branch discards, so the
+// gate decides nothing at all.
+func (v gateDisabledViaElseIf) derived() bool {
+	if v.witness == comparesAgainstACallWitness(comparesAgainstACall{A: v.A}) {
+		_ = v.witness
+	} else if v.framedLen > 0 {
+		_ = v.framedLen
+	}
+	return true
+}
+
+type comparesInASwitchCaseWithAnEmptyBody struct {
+	A         string
+	witness   string
+	framedLen int
+}
+
+// The switch HAS a case clause, unlike comparesAsAnEmptySwitchTag; the clause
+// has no body, which is what the live-clause requirement is actually for.
+func (v comparesInASwitchCaseWithAnEmptyBody) derived() bool {
+	switch v.witness == comparesAgainstACallWitness(comparesAgainstACall{A: v.A}) {
+	case true:
+	}
+	return v.framedLen > 0
+}
+
+type comparesWithOnlyAClosureInTheBody struct {
+	A         string
+	witness   string
+	framedLen int
+}
+
+// The if body holds nothing but a discarded closure whose return is its own.
+func (v comparesWithOnlyAClosureInTheBody) derived() bool {
+	if v.witness == comparesAgainstACallWitness(comparesAgainstACall{A: v.A}) {
+		_ = func() bool { return true }
+	}
+	return v.framedLen > 0
+}
+
+type comparesInsideAClosureCalledInline struct {
+	A         string
+	witness   string
+	framedLen int
+}
+
+// Behind an always-true operand AND inside a closure, so the || residual this
+// walk accepts cannot be what carries it.
+func (v comparesInsideAClosureCalledInline) derived() bool {
+	return v.framedLen >= 0 || func() bool {
+		return v.witness == comparesAgainstACallWitness(comparesAgainstACall{A: v.A})
+	}()
+}
+
 func (v comparesAgainstAnotherNonWitnessCall) derived() bool {
 	// It is not hexEncode, so a recognizer that special-cases that one name
 	// fails here; and it DOES mention the receiver, so the receiver rule
@@ -3198,12 +3383,16 @@ func (v comparesAgainstANonWitnessCall) derived() bool {
 }
 
 type comparesButDiscardsTheAnswer struct {
+	A         string
 	witness   string
 	framedLen int
 }
 
 func (v comparesButDiscardsTheAnswer) derived() bool {
-	content := v.witness == comparesAgainstACallWitness(comparesAgainstACall{})
+	// THE RECEIVER IS MENTIONED, deliberately: without it mentionsRecv already
+	// rejected this row and the statement-kind restriction it exists for had
+	// no control at all.
+	content := v.witness == comparesAgainstACallWitness(comparesAgainstACall{A: v.A})
 	_ = content
 	return v.framedLen > 0
 }
@@ -3247,13 +3436,13 @@ func (v comparesButDiscardsTheAnswer) derived() bool {
 	if anon != 1 {
 		t.Errorf("the walk saw %d anonymous witness-bearing structs, want 1 (the one inside `nested`)", anon)
 	}
-	if len(withWitness) != 22 {
+	if len(withWitness) != 27 {
 		names := make([]string, 0, len(withWitness))
 		for _, s := range withWitness {
 			names = append(names, s.name)
 		}
 		sort.Strings(names)
-		t.Errorf("the walk saw %d witness-bearing structs, want 22: %v", len(withWitness), names)
+		t.Errorf("the walk saw %d witness-bearing structs, want 27: %v", len(withWitness), names)
 	}
 
 	// AND THE COMPARISON RECOGNIZER NEEDS ITS OWN CONTROL, by the same rule:
@@ -3286,6 +3475,14 @@ func (v comparesButDiscardsTheAnswer) derived() bool {
 		"comparesButDiscardsTheAnswer", "comparesAgainstAZeroValueWitness",
 		"comparesInsideADiscardedClosure", "comparesInAnIfWithADeadBody",
 		"comparesAsAnEmptySwitchTag", "comparesAgainstItsOwnStoredWitness",
+		// And five more a sixth lane drove through or found uncontrolled: a
+		// callee that ignores what it is handed; a gate whose every branch
+		// discards, one else if past the covered shape; a switch whose case
+		// clause has no body; an if body holding nothing but a discarded
+		// closure; and a comparison inside a closure called inline.
+		"comparesAgainstAConstantWitness", "gateDisabledViaElseIf",
+		"comparesInASwitchCaseWithAnEmptyBody", "comparesWithOnlyAClosureInTheBody",
+		"comparesInsideAClosureCalledInline",
 	} {
 		if compared[notWant] {
 			t.Errorf("the comparison recognizer counted %s, whose witness is never compared against a recomputation", notWant)
@@ -3363,7 +3560,7 @@ func splitFramedParts(t *testing.T, b []byte) []string {
 // field the TYPE has and the framer never writes: the list mirrors the framer,
 // not the struct, and TestAWitnessTypeCannotGrowAFieldQuietly is the tripwire
 // for that.
-func framingPartsRound(t *testing.T, rng *rand.Rand, round int) map[string]bool {
+func framingPartsRound(t *testing.T, rng *rand.Rand, round int) (map[string]bool, map[string][]string) {
 	t.Helper()
 	text := func() string {
 		n := rng.Intn(40) + 1
@@ -3382,7 +3579,13 @@ func framingPartsRound(t *testing.T, rng *rand.Rand, round int) map[string]bool 
 	}
 	num := int64(100)
 	rb := func() bool { return rng.Intn(2) == 0 }
-	nz := func() int64 { num += 7; return num }
+	// DRAWN, NOT STEPPED. A fixed step from a fixed start gives every round the
+	// same 107, 114, 121 ..., so a framer writing one of those literals in place
+	// of the field agreed with the table in all 64 rounds. Seven production
+	// mutants survived the whole suite on that, and one of them was shown to
+	// accept a forged FactualPlacement whose Attempt.CollectorEpoch had been
+	// edited after minting. The step is drawn so a literal cannot agree twice.
+	nz := func() int64 { num += 7 + int64(rng.Intn(1<<20)); return num }
 	// EVERY FRAMED FIELD GETS A NON-ZERO, DISTINCT VALUE. A field left at its
 	// zero makes the mutant that replaces it with that zero EQUIVALENT for this
 	// fixture, which is how a first build of this table could not see a blanked
@@ -3508,6 +3711,7 @@ func framingPartsRound(t *testing.T, rng *rand.Rand, round int) map[string]bool 
 	}
 
 	checked := map[string]bool{}
+	byRow := map[string][]string{}
 	// framing is the TYPE whose framing a row drives; name distinguishes rows
 	// that drive the same framing with different shapes. The set compared
 	// against the width drive is the framing set, not the row set.
@@ -3601,6 +3805,7 @@ func framingPartsRound(t *testing.T, rng *rand.Rand, round int) map[string]bool 
 			func(c *canonical) { frameRuleset(c, rid, rsha, rnat) }},
 	} {
 		checked[tc.framing] = true
+		byRow[tc.name] = tc.want
 		// THE COUNT IS DECLARED TWICE, from the field list and as the length of
 		// the value list. A want derived from the framer cannot satisfy both.
 		if len(tc.want) != tc.parts {
@@ -3609,6 +3814,19 @@ func framingPartsRound(t *testing.T, rng *rand.Rand, round int) map[string]bool 
 		}
 		var c canonical
 		tc.frame(&c)
+		// AND THE WIDTH IS CHECKED HERE, where every field of the fixture is
+		// drawn and asserted part by part. checkEveryFramingWidth drives the
+		// two modes too, but its fixtures are only held to carrying one
+		// sentinel string, so replacing them with zero values leaves it
+		// satisfied -- and a genuine length-only accounting fault in
+		// canonical.boolean then goes undetected. This row cannot be neutered
+		// that way without failing the value assertions below it first.
+		lo := canonical{lenOnly: true}
+		tc.frame(&lo)
+		if lo.framedLen() != len(c.bytes()) {
+			t.Fatalf("round %d, %s: length-only reports %d, the framing writes %d bytes",
+				round, tc.name, lo.framedLen(), len(c.bytes()))
+		}
 		got := splitFramedParts(t, c.bytes())
 		if len(got) == 0 || got[0] != tc.want[0] {
 			first := ""
@@ -3629,7 +3847,7 @@ func framingPartsRound(t *testing.T, rng *rand.Rand, round int) map[string]bool 
 			}
 		}
 	}
-	return checked
+	return checked, byRow
 }
 
 // TestEveryWitnessFramingHasItsOwnTagAndItsOwnParts is the structural and
@@ -3663,8 +3881,37 @@ func framingPartsRound(t *testing.T, rng *rand.Rand, round int) map[string]bool 
 func TestEveryWitnessFramingHasItsOwnTagAndItsOwnParts(t *testing.T) {
 	rng := rand.New(rand.NewSource(20260922))
 	var checked map[string]bool
+	// AND THE DRAW ITSELF IS HELD, part by part. Replacing the boolean draw
+	// with a constant left the whole suite green, and a framer then writing
+	// that same constant in place of the field survived too -- the fixture and
+	// the mutant agreed because neither ever moved. Every part that carries one
+	// value in all 64 rounds is reported here, so a draw that stops drawing
+	// fails rather than quietly weakening every row beneath it.
+	seen := map[string][]map[string]bool{}
 	for round := 0; round < 64; round++ {
-		checked = framingPartsRound(t, rng, round)
+		var byRow map[string][]string
+		checked, byRow = framingPartsRound(t, rng, round)
+		for name, want := range byRow {
+			for len(seen[name]) < len(want) {
+				seen[name] = append(seen[name], map[string]bool{})
+			}
+			for k, v := range want {
+				seen[name][k][v] = true
+			}
+		}
+	}
+	for name, parts := range seen {
+		for k, vals := range parts {
+			if k == 0 || len(vals) > 1 || constantPartsByDesign[name+"/"+strconv.Itoa(k)] {
+				continue
+			}
+			only := ""
+			for v := range vals {
+				only = v
+			}
+			t.Errorf("%s part %d carries %q in all 64 rounds: a part pinned to one value makes the mutant that writes THAT value equivalent, which is the defect this table's draw exists to stop",
+				name, k, only)
+		}
 	}
 
 	// AND THE TABLE IS HELD TO THE SAME BINDING AS THE WIDTH DRIVE. A lane
@@ -3726,6 +3973,32 @@ func TestAWitnessTypeCannotGrowAFieldQuietly(t *testing.T) {
 		}
 	}
 
+	// AND THE REACHED-THROUGH TYPES ARE COUNTED TRANSITIVELY, not listed. The
+	// four rows above are a hand-written enumeration with nothing binding it,
+	// and the framings reach through more than four: a lane grew a field on
+	// EntropyCoordinates (exported and unexported), EntropyTraceBinding,
+	// P3bProjection and P2ConfigBinding, and every one survived the whole
+	// suite. A transitive count trips on ANY nested growth and needs no second
+	// list to keep in step with the first.
+	for _, tc := range []struct {
+		name  string
+		total int
+		v     any
+	}{
+		{"P2CaseResult", 95, P2CaseResult{}},
+		{"VerifiedP3bRuleset", 19, VerifiedP3bRuleset{}},
+		{"P3bCaseResult", 146, P3bCaseResult{}},
+		{"PayoutEvidence", 25, PayoutEvidence{}},
+		{"FactualPlacement", 25, FactualPlacement{}},
+		{"PolicyDecision", 29, PolicyDecision{}},
+		{"PlacementEvidence", 20, PlacementEvidence{}},
+	} {
+		if got := transitiveFieldCount(reflect.TypeOf(tc.v), map[reflect.Type]bool{}); got != tc.total {
+			t.Errorf("%s reaches %d fields transitively, this table says %d: a field added ANYWHERE under a witness type is a field the witness can stop covering, so decide whether it is framed and then update this number",
+				tc.name, got, tc.total)
+		}
+	}
+
 	// AND THE SET OF TYPES IS THE CENSUS'S, so a new witness-bearing type
 	// cannot skip this table either.
 	withWitness, _ := witnessCensusOfDir(t, ".")
@@ -3748,5 +4021,141 @@ func TestAWitnessTypeCannotGrowAFieldQuietly(t *testing.T) {
 			continue
 		}
 		t.Errorf("%s carries a witness and is not pinned here: a witness type that can grow a field quietly is a field the witness can stop covering quietly", left)
+	}
+}
+
+// transitiveFieldCount counts every struct field reachable from t, through
+// pointers, slices and arrays, counting each struct type once per walk so the
+// number is stable under a type appearing twice.
+func transitiveFieldCount(t reflect.Type, seen map[reflect.Type]bool) int {
+	for t.Kind() == reflect.Pointer || t.Kind() == reflect.Slice || t.Kind() == reflect.Array {
+		t = t.Elem()
+	}
+	if t.Kind() != reflect.Struct || seen[t] {
+		return 0
+	}
+	seen[t] = true
+	n := t.NumField()
+	for i := 0; i < t.NumField(); i++ {
+		n += transitiveFieldCount(t.Field(i).Type, seen)
+	}
+	return n
+}
+
+// constantPartsByDesign names the parts that carry one value in every round
+// BECAUSE THE FIXTURE MEANS THEM TO. Each is a field the row fixes on purpose;
+// anything else constant is a draw that stopped drawing.
+var constantPartsByDesign = map[string]bool{
+	// The "optionals absent" FactualPlacement row exists to frame the absent
+	// arm, so every presence flag in it is false by design. Its sibling row
+	// carries the same parts drawn, and both run in every round.
+	"FactualPlacement, optionals absent/9":  true,
+	"FactualPlacement, optionals absent/11": true,
+	"FactualPlacement, optionals absent/12": true,
+	"FactualPlacement, optionals absent/14": true,
+	"FactualPlacement, optionals absent/15": true,
+	"FactualPlacement, optionals absent/18": true,
+	"FactualPlacement, optionals absent/19": true,
+	"FactualPlacement, optionals absent/20": true,
+	"FactualPlacement, optionals absent/21": true,
+	// And the sibling row carries the same flags TRUE, for the same reason.
+	// The pair is what covers both polarities: a framer writing a constant
+	// true fails the absent row and a constant false fails this one, so
+	// neither is the equivalent-mutant hazard this check exists for.
+	"FactualPlacement/9":  true,
+	"FactualPlacement/12": true,
+	"FactualPlacement/14": true,
+	"FactualPlacement/21": true,
+	"FactualPlacement/23": true,
+}
+
+// TestTheWidthAndPartsOraclesCannotBeSpelledFromTheFramer holds the two
+// oracles to their own shape, in the same idiom witnessComparedIn uses on
+// production.
+//
+// BOTH CAN BE NEUTERED FROM THEIR CALL SITE WITHOUT TOUCHING THEIR BODY, which
+// is the failure this package keeps meeting: the gate is locked and the key is
+// left beside it. A lane passed checkWidth an inline closure returning
+// len(bytes) instead of the production ...FramedLen helper -- the assertion
+// becomes len == len, a tautology, and an off-by-one in the real helper then
+// survives. And a lane replaced one parts row's value list with
+// splitFramedParts over the framing it is meant to hold -- the values then
+// agree by construction, and a swapped pair and a borrowed domain tag both
+// survive, because only a change in the part COUNT still disagrees.
+//
+// Neither is visible to any value assertion, so both are checked structurally.
+func TestTheWidthAndPartsOraclesCannotBeSpelledFromTheFramer(t *testing.T) {
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, "evidence_internal_test.go", nil, parser.SkipObjectResolution)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+
+	widths := 0
+	ast.Inspect(f, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		id, ok := call.Fun.(*ast.Ident)
+		if !ok || id.Name != "checkWidth" || len(call.Args) < 2 {
+			return true
+		}
+		widths++
+		inner, ok := call.Args[1].(*ast.CallExpr)
+		if !ok {
+			t.Errorf("checkWidth at %s: the width argument is not a call at all, so nothing says it came from the production width helper",
+				fset.Position(call.Pos()))
+			return true
+		}
+		fn, ok := inner.Fun.(*ast.Ident)
+		if !ok || !strings.HasSuffix(fn.Name, "FramedLen") {
+			t.Errorf("checkWidth at %s: the width argument is not a ...FramedLen helper, so the assertion can be a tautology over the framing's own bytes",
+				fset.Position(call.Pos()))
+		}
+		return true
+	})
+	if widths != 7 {
+		t.Errorf("%d checkWidth calls, want 7 -- one per witness framing: a drive that left is a width nothing holds", widths)
+	}
+
+	rows := 0
+	for _, d := range f.Decls {
+		fd, ok := d.(*ast.FuncDecl)
+		if !ok || fd.Name.Name != "framingPartsRound" || fd.Body == nil {
+			continue
+		}
+		ast.Inspect(fd.Body, func(n ast.Node) bool {
+			rng, ok := n.(*ast.RangeStmt)
+			if !ok {
+				return true
+			}
+			table, ok := rng.X.(*ast.CompositeLit)
+			if !ok {
+				return true
+			}
+			for _, elt := range table.Elts {
+				row, ok := elt.(*ast.CompositeLit)
+				if !ok || len(row.Elts) < 4 {
+					continue
+				}
+				rows++
+				ast.Inspect(row.Elts[3], func(n ast.Node) bool {
+					id, ok := n.(*ast.Ident)
+					if !ok {
+						return true
+					}
+					if id.Name == "canonical" || id.Name == "splitFramedParts" || strings.HasPrefix(id.Name, "frame") {
+						t.Errorf("parts row %d at %s: its value list mentions %q, so it is read back out of the framing it is meant to hold",
+							rows, fset.Position(row.Pos()), id.Name)
+					}
+					return true
+				})
+			}
+			return false
+		})
+	}
+	if rows != 8 {
+		t.Errorf("%d parts rows, want 8: a row that left is a framing whose values nothing checks", rows)
 	}
 }

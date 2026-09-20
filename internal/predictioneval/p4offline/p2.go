@@ -41,7 +41,15 @@ type P2CaseResult struct {
 	framedLen int
 }
 
-// derived reports whether the value is exactly what EvaluateP2Case produced.
+// derived reports whether the value is what EvaluateP2Case produced OVER THE
+// FIELDS p2ResultWitness FRAMES. That is not the whole value, and the
+// difference is load-bearing: the witness leaves Binding.Model, Binding.Settings,
+// the Risk fields, MinimumStake and all of Evaluation but CommonInputDigest,
+// Action and ActionReason unframed, so an edit to any of those is ACCEPTED
+// here. No such edit can move a verdict, because Decision reads framed fields
+// only -- that is why the gap is tolerable, not why it is absent.
+// p2ResultWitness enumerates what is not framed and why; read it before
+// trusting this answer about a field added later.
 func (r P2CaseResult) derived() bool {
 	return r.witness != "" && r.framedLen > 0 &&
 		r.framedLen == p2ResultFramedLen(r) && r.witness == p2ResultWitness(r)
