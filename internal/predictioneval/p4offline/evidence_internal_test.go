@@ -12,18 +12,24 @@ package p4offline
 // comparison now lives here and the sentence is true.
 
 import (
+	"bytes"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/predictioneval"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"math"
 	"math/rand"
+	"os"
+	"path/filepath"
 	"reflect"
 	"runtime"
 	"sort"
 	"strconv"
 	"strings"
 	"testing"
-
-	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/predictioneval"
 )
 
 // matchingBeforeTheMerge is the implementation eachMatching replaced, copied
@@ -2080,8 +2086,18 @@ func TestAnEpisodesOwnIdentifierCountDoesNotEnterTheAnswersCost(t *testing.T) {
 // thirty-one direct part calls and three helper calls would need this test to
 // enumerate the fields too, and an enumeration checked against an enumeration is
 // two places to forget the same field. Here both sides run frameP3bResult.
-func TestTheRecordedFramedWidthIsTheWitnessOwn(t *testing.T) {
-	rng := rand.New(rand.NewSource(20260920))
+// checkEveryFramingWidth drives every witness framing this package has for one
+// randomized round and returns the names of the types it checked.
+//
+// IT RETURNS THE NAMES SO THE CENSUS CAN BIND TO THEM. The census in
+// fence_test.go finds the witness-bearing types from the source; this returns
+// the ones actually DRIVEN here. A Q3 lane showed the two could drift: an
+// eighth witness-bearing type with both fields, whose framing nothing pinned,
+// passed the census and this test together. Comparing the two sets is what
+// makes "every framing is covered" a checked statement rather than a second
+// hand-written enumeration replacing the one in doc.go.
+func checkEveryFramingWidth(t *testing.T, rng *rand.Rand, round int) map[string]bool {
+	t.Helper()
 	text := func() string {
 		n := rng.Intn(40)
 		b := make([]byte, n)
@@ -2092,148 +2108,162 @@ func TestTheRecordedFramedWidthIsTheWitnessOwn(t *testing.T) {
 		}
 		return string(b)
 	}
+	p3b := P3bCaseResult{
+		Policy: text(), FactsetDigest: text(), RulesetID: text(),
+		RulesetRawSHA256: text(), NativeConfigDigest: text(), ProjectionRefusal: text(),
+		Trace: EntropyTraceBinding{
+			Coordinates: EntropyCoordinates{
+				DatasetID: text(), DatasetVersion: text(),
+				CommonFactsetDigest: text(), PairedOpportunityID: text(),
+				Trajectory: uint32(rng.Intn(1 << 20)),
+			},
+			RunID: text(), WordsSupplied: rng.Intn(1 << 20),
+			WordsConsumed: rng.Intn(1 << 20), EntropyDigest: text(),
+		},
+		Projection: P3bProjection{
+			Mode: text(), FactsetDigest: text(), EventID: text(),
+			CutoffPosition: int64(rng.Intn(1 << 30)), CandidateIdentity: text(),
+			OutcomeCount: rng.Intn(1000),
+		},
+		Choice: PolicyChoice{Present: rng.Intn(2) == 0, Index: rng.Intn(8), OutcomeID: text()},
+		Stake:  Int64Fact{Presence: PresenceKnown, Value: int64(rng.Intn(1 << 30)), Reason: text()},
+	}
+	p3b.Projection.Stream.SelectionDigest = text()
+	// Status is framed and was the ONE field this fixture always left
+	// empty, so a mode-forgetting writer on it agreed in both modes at
+	// length zero and survived the whole suite.
+	p3b.Evaluation.Status = predictioneval.OrderedRulesStatus(text())
+	p3b.Evaluation.Reason = text()
+	p3b.Evaluation.StreamDigest = text()
+	p3b.Evaluation.ConfigDigest = text()
+	p3b.Evaluation.EntropyDigest = text()
+	p3b.Evaluation.ConsumedInputDigest = text()
+	p3b.Action = ActionMapping{MapVersion: text(), Policy: text(), NativeAction: text(),
+		Class: ActionClass(text()), SkipReason: text()}
+
+	var c canonical
+	frameP3bResult(&c, p3b)
+	if got, want := p3bResultFramedLen(p3b), len(c.bytes()); got != want {
+		t.Fatalf("round %d: P3b width %d, framing %d bytes", round, got, want)
+	}
+
+	p2 := P2CaseResult{
+		Policy: text(), FactsetDigest: text(),
+		Action: ActionMapping{MapVersion: text(), Policy: text(), NativeAction: text(),
+			Class: ActionClass(text()), SkipReason: text()},
+		Choice: PolicyChoice{Present: rng.Intn(2) == 0, Index: rng.Intn(8), OutcomeID: text()},
+		Stake:  Int64Fact{Presence: PresenceKnown, Value: int64(rng.Intn(1 << 30)), Reason: text()},
+	}
+	p2.Binding.Digest = text()
+	p2.Binding.ContractVersion = text()
+	p2.Evaluation.CommonInputDigest = text()
+	p2.Evaluation.Action = text()
+	p2.Evaluation.ActionReason = text()
+
+	var c2 canonical
+	frameP2Result(&c2, p2)
+	if got, want := p2ResultFramedLen(p2), len(c2.bytes()); got != want {
+		t.Fatalf("round %d: P2 width %d, framing %d bytes", round, got, want)
+	}
+
+	// AND THE OTHER FIVE FRAMINGS, for the reason the two above were not
+	// enough. A Q3 mutant that made framePayoutEvidence's
+	// ResolutionFactsDigest writer forget the length-only mode left the
+	// whole suite green while the recorded width under-counted: two of the
+	// seven framings were pinned and five were not, so the preflight could
+	// go silently vacuous on any of them. Every framing this package has is
+	// driven here, against the bytes its own writer produces.
+	attempt := predictioneval.AttemptKey{
+		CollectorEpoch: int64(rng.Intn(1 << 30)), CollectorSessionID: text(),
+		PoolInstanceID: text(), AttemptID: uint64(rng.Intn(1 << 30)),
+	}
+	action := ActionMapping{MapVersion: text(), Policy: text(), NativeAction: text(),
+		Class: ActionClass(text()), Legal: rng.Intn(2) == 0,
+		Illegality: strs(rng, text), SkipReason: text()}
+	choice := PolicyChoice{Present: rng.Intn(2) == 0, Index: rng.Intn(8), OutcomeID: text()}
+	fact := func() Int64Fact {
+		return Int64Fact{Presence: PresenceKnown, Value: int64(rng.Intn(1 << 30)), Reason: text()}
+	}
+	oi, of := rng.Intn(1<<20), int64(rng.Intn(1<<30))
+
+	fp := FactualPlacement{
+		Attempt: attempt, FactsetDigest: text(), EventID: text(),
+		CutoffPosition: int64(rng.Intn(1 << 30)), TerminalDecision: text(),
+		RecordedChoiceIndex: &oi, RecordedChoiceOutcomeID: text(),
+		RecordedFinalAmount: &of, RecordedTerminalSlot: &oi,
+		Coherence: text(), StartedOnly: rng.Intn(2) == 0, CallPresent: rng.Intn(2) == 0,
+		CallStartedObservationID: text(), CallStartedPosition: int64(rng.Intn(1 << 30)),
+		Stake: &of, Slot: &oi, Returned: rng.Intn(2) == 0,
+		LocalReasonOK: rng.Intn(2) == 0, ErrorClass: text(),
+	}
+	var c3 canonical
+	frameFactualPlacement(&c3, fp)
+	if got, want := factualPlacementFramedLen(fp), len(c3.bytes()); got != want {
+		t.Fatalf("round %d: FactualPlacement width %d, framing %d bytes", round, got, want)
+	}
+
+	dec := PolicyDecision{
+		Policy: text(), Attempt: attempt, FactsetDigest: text(), EventID: text(),
+		CutoffPosition: int64(rng.Intn(1 << 30)), Derivation: text(),
+		OutcomeIDs: strs(rng, text), Action: action, Choice: choice, Stake: fact(),
+	}
+	var c4 canonical
+	framePolicyDecision(&c4, dec)
+	if got, want := policyDecisionFramedLen(dec), len(c4.bytes()); got != want {
+		t.Fatalf("round %d: PolicyDecision width %d, framing %d bytes", round, got, want)
+	}
+
+	pl := PlacementEvidence{
+		ContractVersion: text(), Policy: text(), Attempt: attempt,
+		FactsetDigest: text(), EventID: text(), Status: PlacementStatus(text()),
+		Reasons: strs(rng, text), PolicyStake: fact(), AttributedOutcomeID: text(),
+		AttributedCallObservationID: text(),
+		AttributedCallPosition:      int64(rng.Intn(1 << 30)),
+	}
+	var c5 canonical
+	framePlacementEvidence(&c5, pl)
+	if got, want := placementEvidenceFramedLen(pl), len(c5.bytes()); got != want {
+		t.Fatalf("round %d: PlacementEvidence width %d, framing %d bytes", round, got, want)
+	}
+
+	po := PayoutEvidence{
+		ContractVersion: text(), Policy: text(), Attempt: attempt,
+		FactsetDigest: text(), EventID: text(), Outcome: PayoutOutcome(text()),
+		ChoiceCorrect:            ChoiceVerdict(text()),
+		PrimaryDenominatorMember: rng.Intn(2) == 0, PlacedBetDenominatorMember: rng.Intn(2) == 0,
+		Stake: fact(), Payout: fact(), Net: fact(), Reasons: strs(rng, text),
+		ResolutionFactsDigest: text(), Derivation: text(),
+	}
+	// decisionWitness is framed and is unexported, so only an internal test
+	// can vary it -- and it must be varied, or the last writer in the
+	// framing is pinned against a constant.
+	po.decisionWitness = text()
+	var c6 canonical
+	framePayoutEvidence(&c6, po)
+	if got, want := payoutEvidenceFramedLen(po), len(c6.bytes()); got != want {
+		t.Fatalf("round %d: PayoutEvidence width %d, framing %d bytes", round, got, want)
+	}
+
+	// THE RULESET FRAMING IS THE SEVENTH, and it is the one successive
+	// hand-written enumerations of these seams kept leaving out. It carries
+	// a width now like the other six.
+	rid, rsha, rnat := text(), text(), text()
+	var c7 canonical
+	frameRuleset(&c7, rid, rsha, rnat)
+	if got, want := rulesetFramedLen(rid, rsha, rnat), len(c7.bytes()); got != want {
+		t.Fatalf("round %d: ruleset width %d, framing %d bytes", round, got, want)
+	}
+	return map[string]bool{
+		"P2CaseResult": true, "P3bCaseResult": true, "FactualPlacement": true,
+		"PolicyDecision": true, "PlacementEvidence": true, "PayoutEvidence": true,
+		"VerifiedP3bRuleset": true,
+	}
+}
+
+func TestTheRecordedFramedWidthIsTheWitnessOwn(t *testing.T) {
+	rng := rand.New(rand.NewSource(20260920))
 	for round := 0; round < 400; round++ {
-		p3b := P3bCaseResult{
-			Policy: text(), FactsetDigest: text(), RulesetID: text(),
-			RulesetRawSHA256: text(), NativeConfigDigest: text(), ProjectionRefusal: text(),
-			Trace: EntropyTraceBinding{
-				Coordinates: EntropyCoordinates{
-					DatasetID: text(), DatasetVersion: text(),
-					CommonFactsetDigest: text(), PairedOpportunityID: text(),
-					Trajectory: uint32(rng.Intn(1 << 20)),
-				},
-				RunID: text(), WordsSupplied: rng.Intn(1 << 20),
-				WordsConsumed: rng.Intn(1 << 20), EntropyDigest: text(),
-			},
-			Projection: P3bProjection{
-				Mode: text(), FactsetDigest: text(), EventID: text(),
-				CutoffPosition: int64(rng.Intn(1 << 30)), CandidateIdentity: text(),
-				OutcomeCount: rng.Intn(1000),
-			},
-			Choice: PolicyChoice{Present: rng.Intn(2) == 0, Index: rng.Intn(8), OutcomeID: text()},
-			Stake:  Int64Fact{Presence: PresenceKnown, Value: int64(rng.Intn(1 << 30)), Reason: text()},
-		}
-		p3b.Projection.Stream.SelectionDigest = text()
-		p3b.Evaluation.Reason = text()
-		p3b.Evaluation.StreamDigest = text()
-		p3b.Evaluation.ConfigDigest = text()
-		p3b.Evaluation.EntropyDigest = text()
-		p3b.Evaluation.ConsumedInputDigest = text()
-		p3b.Action = ActionMapping{MapVersion: text(), Policy: text(), NativeAction: text(),
-			Class: ActionClass(text()), SkipReason: text()}
-
-		var c canonical
-		frameP3bResult(&c, p3b)
-		if got, want := p3bResultFramedLen(p3b), len(c.bytes()); got != want {
-			t.Fatalf("round %d: P3b width %d, framing %d bytes", round, got, want)
-		}
-
-		p2 := P2CaseResult{
-			Policy: text(), FactsetDigest: text(),
-			Action: ActionMapping{MapVersion: text(), Policy: text(), NativeAction: text(),
-				Class: ActionClass(text()), SkipReason: text()},
-			Choice: PolicyChoice{Present: rng.Intn(2) == 0, Index: rng.Intn(8), OutcomeID: text()},
-			Stake:  Int64Fact{Presence: PresenceKnown, Value: int64(rng.Intn(1 << 30)), Reason: text()},
-		}
-		p2.Binding.Digest = text()
-		p2.Binding.ContractVersion = text()
-		p2.Evaluation.CommonInputDigest = text()
-		p2.Evaluation.Action = text()
-		p2.Evaluation.ActionReason = text()
-
-		var c2 canonical
-		frameP2Result(&c2, p2)
-		if got, want := p2ResultFramedLen(p2), len(c2.bytes()); got != want {
-			t.Fatalf("round %d: P2 width %d, framing %d bytes", round, got, want)
-		}
-
-		// AND THE OTHER FIVE FRAMINGS, for the reason the two above were not
-		// enough. A Q3 mutant that made framePayoutEvidence's
-		// ResolutionFactsDigest writer forget the length-only mode left the
-		// whole suite green while the recorded width under-counted: two of the
-		// seven framings were pinned and five were not, so the preflight could
-		// go silently vacuous on any of them. Every framing this package has is
-		// driven here, against the bytes its own writer produces.
-		attempt := predictioneval.AttemptKey{
-			CollectorEpoch: int64(rng.Intn(1 << 30)), CollectorSessionID: text(),
-			PoolInstanceID: text(), AttemptID: uint64(rng.Intn(1 << 30)),
-		}
-		action := ActionMapping{MapVersion: text(), Policy: text(), NativeAction: text(),
-			Class: ActionClass(text()), Legal: rng.Intn(2) == 0,
-			Illegality: strs(rng, text), SkipReason: text()}
-		choice := PolicyChoice{Present: rng.Intn(2) == 0, Index: rng.Intn(8), OutcomeID: text()}
-		fact := func() Int64Fact {
-			return Int64Fact{Presence: PresenceKnown, Value: int64(rng.Intn(1 << 30)), Reason: text()}
-		}
-		oi, of := rng.Intn(1<<20), int64(rng.Intn(1<<30))
-
-		fp := FactualPlacement{
-			Attempt: attempt, FactsetDigest: text(), EventID: text(),
-			CutoffPosition: int64(rng.Intn(1 << 30)), TerminalDecision: text(),
-			RecordedChoiceIndex: &oi, RecordedChoiceOutcomeID: text(),
-			RecordedFinalAmount: &of, RecordedTerminalSlot: &oi,
-			Coherence: text(), StartedOnly: rng.Intn(2) == 0, CallPresent: rng.Intn(2) == 0,
-			CallStartedObservationID: text(), CallStartedPosition: int64(rng.Intn(1 << 30)),
-			Stake: &of, Slot: &oi, Returned: rng.Intn(2) == 0,
-			LocalReasonOK: rng.Intn(2) == 0, ErrorClass: text(),
-		}
-		var c3 canonical
-		frameFactualPlacement(&c3, fp)
-		if got, want := factualPlacementFramedLen(fp), len(c3.bytes()); got != want {
-			t.Fatalf("round %d: FactualPlacement width %d, framing %d bytes", round, got, want)
-		}
-
-		dec := PolicyDecision{
-			Policy: text(), Attempt: attempt, FactsetDigest: text(), EventID: text(),
-			CutoffPosition: int64(rng.Intn(1 << 30)), Derivation: text(),
-			OutcomeIDs: strs(rng, text), Action: action, Choice: choice, Stake: fact(),
-		}
-		var c4 canonical
-		framePolicyDecision(&c4, dec)
-		if got, want := policyDecisionFramedLen(dec), len(c4.bytes()); got != want {
-			t.Fatalf("round %d: PolicyDecision width %d, framing %d bytes", round, got, want)
-		}
-
-		pl := PlacementEvidence{
-			ContractVersion: text(), Policy: text(), Attempt: attempt,
-			FactsetDigest: text(), EventID: text(), Status: PlacementStatus(text()),
-			Reasons: strs(rng, text), PolicyStake: fact(), AttributedOutcomeID: text(),
-			AttributedCallObservationID: text(),
-			AttributedCallPosition:      int64(rng.Intn(1 << 30)),
-		}
-		var c5 canonical
-		framePlacementEvidence(&c5, pl)
-		if got, want := placementEvidenceFramedLen(pl), len(c5.bytes()); got != want {
-			t.Fatalf("round %d: PlacementEvidence width %d, framing %d bytes", round, got, want)
-		}
-
-		po := PayoutEvidence{
-			ContractVersion: text(), Policy: text(), Attempt: attempt,
-			FactsetDigest: text(), EventID: text(), Outcome: PayoutOutcome(text()),
-			ChoiceCorrect:            ChoiceVerdict(text()),
-			PrimaryDenominatorMember: rng.Intn(2) == 0, PlacedBetDenominatorMember: rng.Intn(2) == 0,
-			Stake: fact(), Payout: fact(), Net: fact(), Reasons: strs(rng, text),
-			ResolutionFactsDigest: text(), Derivation: text(),
-		}
-		// decisionWitness is framed and is unexported, so only an internal test
-		// can vary it -- and it must be varied, or the last writer in the
-		// framing is pinned against a constant.
-		po.decisionWitness = text()
-		var c6 canonical
-		framePayoutEvidence(&c6, po)
-		if got, want := payoutEvidenceFramedLen(po), len(c6.bytes()); got != want {
-			t.Fatalf("round %d: PayoutEvidence width %d, framing %d bytes", round, got, want)
-		}
-
-		// THE RULESET FRAMING IS THE SEVENTH, and it is the one successive
-		// hand-written enumerations of these seams kept leaving out. It carries
-		// a width now like the other six.
-		rid, rsha, rnat := text(), text(), text()
-		var c7 canonical
-		frameRuleset(&c7, rid, rsha, rnat)
-		if got, want := rulesetFramedLen(rid, rsha, rnat), len(c7.bytes()); got != want {
-			t.Fatalf("round %d: ruleset width %d, framing %d bytes", round, got, want)
-		}
+		checkEveryFramingWidth(t, rng, round)
 	}
 
 	// AND THE LENGTH-ONLY MODE MUST COUNT THE HEX WRITER TOO, which no result
@@ -2381,4 +2411,486 @@ func TestARecordedWidthIsRequiredAndNotJustRecorded(t *testing.T) {
 			t.Fatalf("check accepted a handle with a wrong witness: %v", err)
 		}
 	})
+}
+
+// framedByAnIndependentOracle builds the documented framing from the contract
+// rather than from canonical: each part is an eight-byte big-endian length
+// followed by the part's bytes.
+//
+// IT EXISTS BECAUSE THE OTHER WIDTH TEST IS A DIFFERENTIAL, NOT AN ORACLE.
+// TestTheRecordedFramedWidthIsTheWitnessOwn compares one framer run with bytes
+// on against the same framer run with bytes off, so it is sensitive to exactly
+// one thing: the two modes disagreeing. It is blind by construction to WHICH
+// fields a framer enumerates and to HOW it delimits them, because both sides
+// lose a field, or a boundary, together. A Q3 lane demonstrated both: dropping
+// a field from frameRuleset, and replacing its three length-prefixed parts with
+// one prefix over their concatenation, each left the whole suite green.
+func framedByAnIndependentOracle(parts ...string) []byte {
+	var out []byte
+	for _, p := range parts {
+		var n [8]byte
+		binary.BigEndian.PutUint64(n[:], uint64(len(p)))
+		out = append(out, n[:]...)
+		out = append(out, p...)
+	}
+	return out
+}
+
+// TestTheRulesetFramingIsTheOneTheContractDescribes holds frameRuleset to an
+// independently constructed framing: the domain tag and the three identity
+// fields, each length-prefixed, in that order.
+//
+// THIS IS THE FIELD SET AND THE BOUNDARIES, which the differential cannot see.
+// check's own doc says "changing an identity field after verification also
+// fails, because the witness covers all three"; that sentence is a claim about
+// the field set, and this is what makes it a receipt.
+func TestTheRulesetFramingIsTheOneTheContractDescribes(t *testing.T) {
+	rng := rand.New(rand.NewSource(20260921))
+	text := func() string {
+		n := rng.Intn(40)
+		b := make([]byte, n)
+		for i := range b {
+			b[i] = byte("ab\xc3\xa9\x00 z"[rng.Intn(7)])
+		}
+		return string(b)
+	}
+	const tag = "p4offline-verified-ruleset-witness"
+	for round := 0; round < 200; round++ {
+		id, raw, nat := text(), text(), text()
+		want := framedByAnIndependentOracle(tag, id, raw, nat)
+
+		var c canonical
+		frameRuleset(&c, id, raw, nat)
+		if got := c.bytes(); !bytes.Equal(got, want) {
+			t.Fatalf("round %d: frameRuleset wrote %d bytes, the contract's framing is %d",
+				round, len(got), len(want))
+		}
+		if got := rulesetFramedLen(id, raw, nat); got != len(want) {
+			t.Fatalf("round %d: the recorded width is %d, the contract's framing is %d bytes",
+				round, got, len(want))
+		}
+
+		// AND EACH FIELD MUST MOVE THE FRAMING ON ITS OWN. A framer that
+		// dropped one field would still agree with a three-field oracle for
+		// every value of the field it dropped, so the oracle above is paired
+		// with a per-field sensitivity check.
+		for i, alt := range [][3]string{
+			{id + "z", raw, nat},
+			{id, raw + "z", nat},
+			{id, raw, nat + "z"},
+		} {
+			var d canonical
+			frameRuleset(&d, alt[0], alt[1], alt[2])
+			if bytes.Equal(d.bytes(), c.bytes()) {
+				t.Fatalf("round %d: changing identity field %d did not change the framing: the witness does not cover it",
+					round, i)
+			}
+		}
+	}
+}
+
+// TestTheWidthIsHonestOnValuesTheFixturesNeverBuild covers the shapes the
+// randomized width fixtures cannot reach, which a Q3 lane censused: every
+// framed integer they draw is NON-NEGATIVE, every framed collection they build
+// has fewer than ten elements, and every optional pointer they set is
+// NON-NIL. A writer that mishandled the length-only mode on any of those three
+// agreed with itself everywhere the fixtures looked.
+func TestTheWidthIsHonestOnValuesTheFixturesNeverBuild(t *testing.T) {
+	t.Run("a negative framed integer", func(t *testing.T) {
+		// Reachable in production: a losing payout sets Net to the negated
+		// stake, and frameFact frames it through i64.
+		po := PayoutEvidence{
+			ContractVersion: "v", Policy: "p", FactsetDigest: "d", EventID: "e",
+			Net: Int64Fact{Presence: PresenceKnown, Value: -12345, Reason: "loss"},
+		}
+		var c canonical
+		framePayoutEvidence(&c, po)
+		if got, want := payoutEvidenceFramedLen(po), len(c.bytes()); got != want {
+			t.Fatalf("width %d, framing %d bytes: the minus sign is not counted", got, want)
+		}
+	})
+
+	t.Run("a collection past one digit", func(t *testing.T) {
+		// The count itself is framed as a decimal string, so its OWN width
+		// grows at ten. The fixtures never build more than three elements.
+		po := PayoutEvidence{ContractVersion: "v", Reasons: make([]string, 12)}
+		var c canonical
+		framePayoutEvidence(&c, po)
+		if got, want := payoutEvidenceFramedLen(po), len(c.bytes()); got != want {
+			t.Fatalf("width %d, framing %d bytes: the count's own width is wrong past one digit", got, want)
+		}
+	})
+
+	t.Run("an absent optional", func(t *testing.T) {
+		// Every optional pointer the placement fixture sets is non-nil, so the
+		// absent arm of serializeOptionalInt/Int64 is never framed either way.
+		var fp FactualPlacement
+		var c canonical
+		frameFactualPlacement(&c, fp)
+		if got, want := factualPlacementFramedLen(fp), len(c.bytes()); got != want {
+			t.Fatalf("width %d, framing %d bytes: the absent arm is counted differently in the two modes", got, want)
+		}
+	})
+}
+
+// witnessSite is one struct that carries a producer-only witness.
+type witnessSite struct{ name, pos string }
+
+// witnessComparedIn reports every type whose methods compare a `.witness`
+// selector against a RECOMPUTATION -- a call expression, which is what
+// re-framing the value looks like.
+//
+// THE "AGAINST A CALL" PART IS THE WHOLE PREDICATE, and a first draft that
+// accepted any comparison was vacuous: `f.witness != ""` is a comparison, it
+// appears in every one of these methods, and a type whose check is
+// `witness != "" && framedLen == …FramedLen(f)` satisfied it while accepting
+// every equal-width forgery. That is exactly the mutant this predicate exists
+// to catch, so a non-empty test does not count and a literal on the other side
+// does not count.
+func witnessComparedIn(t *testing.T, dir string) map[string]bool {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("read %s: %v", dir, err)
+	}
+	out := map[string]bool{}
+	fset := token.NewFileSet()
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		f, err := parser.ParseFile(fset, filepath.Join(dir, name), nil, parser.SkipObjectResolution)
+		if err != nil {
+			t.Fatalf("parse %s: %v", name, err)
+		}
+		for _, d := range f.Decls {
+			fd, ok := d.(*ast.FuncDecl)
+			if !ok || fd.Recv == nil || len(fd.Recv.List) != 1 || fd.Body == nil {
+				continue
+			}
+			recv := fd.Recv.List[0].Type
+			if star, ok := recv.(*ast.StarExpr); ok {
+				recv = star.X
+			}
+			id, ok := recv.(*ast.Ident)
+			if !ok {
+				continue
+			}
+			ast.Inspect(fd.Body, func(n ast.Node) bool {
+				be, ok := n.(*ast.BinaryExpr)
+				if !ok || (be.Op != token.EQL && be.Op != token.NEQ) {
+					return true
+				}
+				for i, side := range []ast.Expr{be.X, be.Y} {
+					sel, ok := side.(*ast.SelectorExpr)
+					if !ok || sel.Sel.Name != "witness" {
+						continue
+					}
+					other := be.Y
+					if i == 1 {
+						other = be.X
+					}
+					if _, ok := other.(*ast.CallExpr); ok {
+						out[id.Name] = true
+					}
+				}
+				return true
+			})
+		}
+	}
+	return out
+}
+
+// witnessCensusOfDir walks the production files of dir and reports every struct
+// carrying an unexported `witness` field, and which of those carry no
+// `framedLen int` beside it.
+//
+// IT IS A FUNCTION SO THAT ITS CONTROL CAN DRIVE THE SAME WALK. The sibling
+// census twenty lines up factors censusOfDir out for exactly that reason, and
+// the rule it states applies here word for word: a machine check whose own
+// mechanisms nothing asserts is a convention again. A control that
+// re-implemented this walk would pass unchanged while this one went blind --
+// which a Q3 lane demonstrated against the first draft of this census, by
+// deleting its reporting arm and watching both tests stay green.
+//
+// THE TWO MATCHES ARE DELIBERATELY ASYMMETRIC, and the asymmetry is the whole
+// safety argument. What TRIGGERS the requirement is matched WIDELY: any field
+// named `witness`, whatever its type is spelled as. What SATISFIES it is
+// matched NARROWLY: a field named `framedLen` whose type is the identifier
+// `int`. Both directions therefore fail towards reporting. A first draft
+// required the witness to be spelled `string`, and a lane put
+// `type q3Digest string` -- this package's own idiom, the one ActionClass,
+// PayoutOutcome, ChoiceVerdict and PlacementStatus already use -- into
+// production with the whole suite green.
+//
+// IT WALKS EVERY STRUCT TYPE, not only the named ones, so a witness moved
+// inside an anonymous `seal struct{...}` is still seen. Anonymous structs are
+// named by their position, which is what a reader needs to find them.
+func witnessCensusOfDir(t *testing.T, dir string) (withWitness, missing []witnessSite) {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("read %s: %v", dir, err)
+	}
+	fset := token.NewFileSet()
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		f, err := parser.ParseFile(fset, filepath.Join(dir, name), nil, parser.SkipObjectResolution)
+		if err != nil {
+			t.Fatalf("parse %s: %v", name, err)
+		}
+		// Named structs are labelled by their type name; every other struct
+		// literal type is labelled by where it is.
+		named := map[*ast.StructType]string{}
+		ast.Inspect(f, func(n ast.Node) bool {
+			if ts, ok := n.(*ast.TypeSpec); ok {
+				if st, ok := ts.Type.(*ast.StructType); ok {
+					named[st] = ts.Name.Name
+				}
+			}
+			return true
+		})
+		ast.Inspect(f, func(n ast.Node) bool {
+			st, ok := n.(*ast.StructType)
+			if !ok || st.Fields == nil {
+				return true
+			}
+			var witness, width bool
+			for _, fld := range st.Fields.List {
+				for _, id := range fld.Names {
+					switch id.Name {
+					case "witness":
+						// ANY type. See the asymmetry note above.
+						witness = true
+					case "framedLen":
+						if x, ok := fld.Type.(*ast.Ident); ok && x.Name == "int" {
+							width = true
+						}
+					}
+				}
+			}
+			if !witness {
+				return true
+			}
+			label, ok := named[st]
+			if !ok {
+				label = "anonymous struct"
+			}
+			s := witnessSite{label, fset.Position(st.Pos()).String()}
+			withWitness = append(withWitness, s)
+			if !width {
+				missing = append(missing, s)
+			}
+			return true
+		})
+	}
+	return withWitness, missing
+}
+
+// TestEveryWitnessBearingTypeCarriesAFramedWidth is the mechanical answer to
+// the way the framed-width preflight was rolled out: by enumeration.
+//
+// ENUMERATING THEM IN PROSE KEPT FAILING. Three successive hand-written
+// enumerations of these seams were short, each missing a neighbour that took a
+// caller-sized value -- most recently VerifiedP3bRuleset, measured at 1.0073x
+// the caller's edit on every use. A sentence cannot stop that recurring; a
+// walk over the source can.
+//
+// THE RULE. A type that carries an unexported `witness` answers a question by
+// re-framing its own fields, so it must also carry `framedLen int` and compare
+// it first -- a rejection test that refuses a width-changing edit before any
+// byte is materialized. A NEW witness type is therefore a failing test, not a
+// prose omission.
+//
+// IT DOES NOT CHECK THAT THE WIDTH IS USED WELL. That is
+// TestTheRecordedFramedWidthIsTheWitnessOwn's job, and the two are deliberately
+// separate: this one answers "is there one", that one answers "is it right".
+func TestEveryWitnessBearingTypeCarriesAFramedWidth(t *testing.T) {
+	withWitness, missing := witnessCensusOfDir(t, ".")
+
+	if len(missing) > 0 {
+		for _, m := range missing {
+			t.Errorf("%s (%s) carries a witness with no framedLen: it re-frames its own fields to answer a question, so a caller-sized edit is paid for before it is refused",
+				m.name, m.pos)
+		}
+		t.Fatalf("%d of %d witness-bearing types carry no framed width", len(missing), len(withWitness))
+	}
+
+	// THE COUNT IS PINNED SO THE WALK CANNOT GO QUIETLY BLIND. A census that
+	// stopped finding types would pass this test by finding nothing, which is
+	// exactly the failure mode the prose enumeration had. It catches a type the
+	// walk RECOGNISES; the control below is what holds the recognizer itself.
+	// AND A WIDTH IS NOT A VERIFICATION. The field census alone enforces
+	// "declares a width", which a Q3 lane showed is the wrong lesson to teach:
+	// it added an eighth type whose check compared the WIDTH ONLY, bumped the
+	// count this test prints, and the suite went green while an equal-width
+	// forgery was accepted. The width refuses a width-changing edit cheaply;
+	// only the witness verifies CONTENT. So a witness-bearing type must also
+	// COMPARE its witness somewhere in its own methods.
+	compared := witnessComparedIn(t, ".")
+	for _, s := range withWitness {
+		if s.name == "anonymous struct" {
+			t.Errorf("a witness lives in an anonymous struct at %s: give it a named type so its comparison can be checked", s.pos)
+			continue
+		}
+		if !compared[s.name] {
+			t.Errorf("%s (%s) carries a witness that none of its methods compares: a width refuses a width-changing edit, but only the witness verifies content, so this type accepts any equal-width forgery",
+				s.name, s.pos)
+		}
+	}
+
+	// AND EVERY ONE MUST BE DRIVEN BY THE WIDTH TEST. Replacing doc.go's prose
+	// enumeration with this census would be no gain if the width test kept a
+	// second hand-written enumeration of its own -- and a Q3 lane showed it
+	// did: an eighth witness-bearing type, carrying both fields but framed by
+	// nothing the width test drives, passed this census and that test
+	// together. The two sets are compared instead of counted.
+	driven := checkEveryFramingWidth(t, rand.New(rand.NewSource(1)), 0)
+	found := map[string]bool{}
+	for _, s := range withWitness {
+		found[s.name] = true
+	}
+	for name := range found {
+		if !driven[name] {
+			t.Errorf("%s carries a witness but TestTheRecordedFramedWidthIsTheWitnessOwn does not drive its framing: a width nothing checks is a width that can go vacuous",
+				name)
+		}
+	}
+	for name := range driven {
+		if !found[name] {
+			t.Errorf("the width test drives %s, which the census does not find as witness-bearing: one of the two is stale", name)
+		}
+	}
+}
+
+// TestTheWitnessCensusSeesWhatItClaimsTo holds the census's own walk to
+// synthetic sources, by calling THE SAME FUNCTION over a temporary directory.
+//
+// EVERY EVASION BELOW WAS FOUND IN PRODUCTION BY A Q3 LANE, against a first
+// draft that matched the witness only when its type was spelled `string` and
+// only on named struct types. Each row is that lane's construct, kept as a
+// regression: a future narrowing of the recognizer fails here rather than in a
+// release.
+func TestTheWitnessCensusSeesWhatItClaimsTo(t *testing.T) {
+	dir := t.TempDir()
+	const src = `package p
+
+type q3Digest string
+type aliasString = string
+
+type plain struct {
+	A         string
+	witness   string
+	framedLen int
+}
+
+type widthless struct {
+	B       string
+	witness string
+}
+
+type namedStringWitness struct {
+	witness q3Digest
+}
+
+type aliasWitness struct {
+	witness aliasString
+}
+
+type pointerWitness struct {
+	witness *string
+}
+
+type parenthesizedWitness struct {
+	witness (string)
+}
+
+type nested struct {
+	seal struct {
+		witness string
+	}
+}
+
+type wrongWidthType struct {
+	witness   string
+	framedLen int64
+}
+
+type unrelated struct {
+	C string
+}
+`
+	// A _test.go file must be SKIPPED by the walk, so one is written too.
+	if err := os.WriteFile(filepath.Join(dir, "a.go"), []byte(src), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	decoy := "package p\n\ntype inATestFile struct{ witness string }\n"
+	if err := os.WriteFile(filepath.Join(dir, "a_test.go"), []byte(decoy), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	withWitness, missing := witnessCensusOfDir(t, dir)
+	seen := map[string]bool{}
+	for _, s := range withWitness {
+		seen[s.name] = true
+	}
+	for _, want := range []string{
+		"plain", "widthless", "namedStringWitness", "aliasWitness",
+		"pointerWitness", "parenthesizedWitness", "wrongWidthType",
+	} {
+		if !seen[want] {
+			t.Errorf("the walk did not see %s as witness-bearing", want)
+		}
+	}
+	if seen["unrelated"] {
+		t.Error("the walk saw a struct with no witness as witness-bearing")
+	}
+	if seen["inATestFile"] {
+		t.Error("the walk read a _test.go file; it must read production files only")
+	}
+	// The nested anonymous struct is reported at its position, not by the name
+	// of the type that encloses it, so it is matched on count rather than name.
+	anon := 0
+	for _, s := range withWitness {
+		if s.name == "anonymous struct" {
+			anon++
+		}
+	}
+	if anon != 1 {
+		t.Errorf("the walk saw %d anonymous witness-bearing structs, want 1 (the one inside `nested`)", anon)
+	}
+	if len(withWitness) != 8 {
+		names := make([]string, 0, len(withWitness))
+		for _, s := range withWitness {
+			names = append(names, s.name)
+		}
+		sort.Strings(names)
+		t.Errorf("the walk saw %d witness-bearing structs, want 8: %v", len(withWitness), names)
+	}
+
+	// AND IT MUST REPORT EXACTLY THE ONES WITH NO USABLE WIDTH -- everything
+	// above except `plain`, including `wrongWidthType`, whose framedLen is not
+	// an int and therefore does not satisfy the rule.
+	got := map[string]bool{}
+	for _, m := range missing {
+		got[m.name] = true
+	}
+	if got["plain"] {
+		t.Error("the walk reported a struct that DOES carry framedLen int as missing a width")
+	}
+	for _, want := range []string{
+		"widthless", "namedStringWitness", "aliasWitness", "pointerWitness",
+		"parenthesizedWitness", "wrongWidthType",
+	} {
+		if !got[want] {
+			t.Errorf("the walk did not report %s as missing a width", want)
+		}
+	}
+	if len(missing) != 7 {
+		t.Errorf("the walk reported %d missing widths, want 7 (six named plus the nested anonymous one)", len(missing))
+	}
 }

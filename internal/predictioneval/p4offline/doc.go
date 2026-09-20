@@ -1160,10 +1160,19 @@
 //     walks the production files, reports any witness-bearing struct with no
 //     framedLen, reports any that never COMPARES its witness against a
 //     recomputation -- a width-only check accepts every equal-width forgery --
-//     and pins the type count. Its control drives THE SAME WALK over synthetic
-//     sources, including a witness spelled as a named string type, an aliased
-//     one, a pointer one and one inside an anonymous struct: each of those
-//     evaded a first draft of the walk.
+//     and compares the set it finds against the set the width test actually
+//     drives, so neither a new type nor an undriven framing passes quietly.
+//     Its control drives THE SAME WALK over synthetic sources, including a
+//     witness spelled as a named string type, an aliased one, a pointer one
+//     and one inside an anonymous struct: each of those evaded a first draft.
+//     AND THE WIDTH IS CHECKED AGAINST A CONSTRUCTION, NOT AGAINST ITSELF.
+//     Running one framer with bytes on against the same framer with bytes off
+//     is a two-mode differential: it sees the modes disagree and is blind to
+//     WHICH fields a framer enumerates and HOW it delimits them, because both
+//     sides lose a field, or a boundary, together.
+//     TestTheRulesetFramingIsTheOneTheContractDescribes builds the framing
+//     independently -- an eight-byte big-endian length before each part -- and
+//     asserts both the bytes and the recorded width against it.
 //     WHAT A WIDTH IS AND IS NOT. It is a cheap REJECTION TEST: it refuses a
 //     width-changing edit in O(fields) before a byte is materialized. It is not
 //     proof of identity -- two different values can frame to one width -- so an

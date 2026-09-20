@@ -5197,6 +5197,41 @@ func TestAnEditedRulesetIdentityIsRefusedWithoutFramingTheEdit(t *testing.T) {
 			t.Fatalf("an equal-width alteration must still be refused, got %v", err)
 		}
 
+		// AND ON EVERY IDENTITY FIELD, NOT ONLY THE ONE THE REPORT NAMED.
+		// check's doc says the witness covers all three; an earlier form of
+		// this subtest altered RulesetID only, and a Q3 lane showed that
+		// dropping NativeConfigDigest from the framing then left the whole
+		// suite green while an equal-width alteration of that field was
+		// ACCEPTED. Each row overwrites one field with an equal-width value.
+		for _, tc := range []struct {
+			name string
+			edit func(*p4offline.VerifiedP3bRuleset)
+		}{
+			{"RulesetID", func(e *p4offline.VerifiedP3bRuleset) {
+				e.RulesetID = strings.Repeat("q", len(rs.RulesetID))
+			}},
+			{"RawSHA256", func(e *p4offline.VerifiedP3bRuleset) {
+				e.RawSHA256 = strings.Repeat("0", len(rs.RawSHA256))
+			}},
+			{"NativeConfigDigest", func(e *p4offline.VerifiedP3bRuleset) {
+				e.NativeConfigDigest = strings.Repeat("0", len(rs.NativeConfigDigest))
+			}},
+		} {
+			e := rs
+			tc.edit(&e)
+			if e.RulesetID == rs.RulesetID && e.RawSHA256 == rs.RawSHA256 &&
+				e.NativeConfigDigest == rs.NativeConfigDigest {
+				t.Fatalf("%s: the row must actually alter the handle", tc.name)
+			}
+			if len(e.RulesetID)+len(e.RawSHA256)+len(e.NativeConfigDigest) !=
+				len(rs.RulesetID)+len(rs.RawSHA256)+len(rs.NativeConfigDigest) {
+				t.Fatalf("%s: the row must preserve the total width", tc.name)
+			}
+			if _, err := e.ConfigCopy(); !errors.Is(err, p4offline.ErrRulesetNotVerified) {
+				t.Fatalf("an equal-width alteration of %s must be refused, got %v", tc.name, err)
+			}
+		}
+
 		// AND THE SAME FOR A TRANSFER BETWEEN FIELDS, which keeps the total
 		// width identical while moving bytes across a framing boundary -- the
 		// one shape a sum-of-lengths check would admit.
