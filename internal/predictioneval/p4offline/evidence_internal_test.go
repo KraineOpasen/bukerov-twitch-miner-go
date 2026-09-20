@@ -29,6 +29,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"unsafe"
 
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/predictioneval"
 )
@@ -1780,7 +1781,9 @@ func (ix *p2ExclusionIndex) exclusionsForBeforeTheMerge(key predictioneval.Attem
 // alphabets are deliberately tiny -- three observation ids, three attempt keys,
 // four reasons -- so collisions are the common case rather than a rare draw.
 //
-// THE THREE CONTROLS matter as much as the comparison. Without them an oracle
+// THE FOUR CONTROLS matter as much as the comparison -- the two reduction
+// counters are asserted APART, because one combined counter once stayed above
+// zero while half the reduction was reverted. Without them an oracle
 // that never reached a reduced bucket, or never produced a non-empty answer,
 // would pass while proving nothing: the test therefore requires that the
 // reduction actually FIRED, that the answers actually had content, and that a
@@ -3617,7 +3620,7 @@ func splitFramedParts(t *testing.T, b []byte) []string {
 // field the TYPE has and the framer never writes: the list mirrors the framer,
 // not the struct, and TestAWitnessTypeCannotGrowAFieldQuietly is the tripwire
 // for that.
-func framingPartsRound(t *testing.T, rng *rand.Rand, round int) (map[string]bool, map[string][]string) {
+func framingPartsRound(t *testing.T, rng *rand.Rand, round int) (map[string]bool, map[string][]string, [3]int) {
 	t.Helper()
 	text := func() string {
 		n := rng.Intn(40) + 1
@@ -3912,7 +3915,7 @@ func framingPartsRound(t *testing.T, rng *rand.Rand, round int) (map[string]bool
 			}
 		}
 	}
-	return checked, byRow
+	return checked, byRow, [3]int{len(illeg), len(outcomes), len(reasons)}
 }
 
 // TestEveryWitnessFramingHasItsOwnTagAndItsOwnParts is the structural and
@@ -3953,11 +3956,23 @@ func TestEveryWitnessFramingHasItsOwnTagAndItsOwnParts(t *testing.T) {
 	// value in all 64 rounds is reported here, so a draw that stops drawing
 	// fails rather than quietly weakening every row beneath it.
 	const rounds = 64
+	// AND THE RUNS MUST ACTUALLY REACH EMPTY. The draw's ranges start at zero
+	// so the count's own framed width is exercised at one digit and at none;
+	// raising the minimums keeps every part varying, raises the judged total
+	// and passes the floor, so neither the floor nor the per-slot pin sees it.
+	// This does.
+	minRun := [3]int{1 << 30, 1 << 30, 1 << 30}
 	seen := map[string][]map[string]bool{}
 	occ := map[string][]int{}
 	for round := 0; round < rounds; round++ {
 		var byRow map[string][]string
-		checked, byRow = framingPartsRound(t, rng, round)
+		var runs [3]int
+		checked, byRow, runs = framingPartsRound(t, rng, round)
+		for i, n := range runs {
+			if n < minRun[i] {
+				minRun[i] = n
+			}
+		}
 		for name, want := range byRow {
 			for len(seen[name]) < len(want) {
 				seen[name] = append(seen[name], map[string]bool{})
@@ -3984,9 +3999,10 @@ func TestEveryWitnessFramingHasItsOwnTagAndItsOwnParts(t *testing.T) {
 	//
 	// AND THE FLOOR IS ONE-SIDED. It fires when the judged region SHRINKS,
 	// which is where a neutered fixture moves it; a fixture that RAISES the
-	// run minimums raises the count and passes, while dropping the empty-run
-	// coverage the draw below is written for. The per-slot pin catches that,
-	// not this number.
+	// run minimums raises the count and passes it. The per-slot pin catches
+	// such a raise only where it stops the parts VARYING -- a raise that keeps
+	// them varying passes both. What catches that is the empty-run assertion
+	// above, and neither of these two numbers.
 	held := 0
 	for name, parts := range seen {
 		for k, vals := range parts {
@@ -4006,6 +4022,12 @@ func TestEveryWitnessFramingHasItsOwnTagAndItsOwnParts(t *testing.T) {
 			}
 			t.Errorf("%s part %d carries %q in every one of the %d rounds: a part pinned to one value makes the mutant that writes THAT value equivalent, which is the defect this table's draw exists to stop",
 				name, k, only, rounds)
+		}
+	}
+	for i, n := range minRun {
+		if n != 0 {
+			t.Errorf("run %d is never empty over the %d rounds (shortest %d): the draw reaches zero so the count's own width is framed at no digits as well as one, and a raised minimum removes that silently",
+				i, rounds, n)
 		}
 	}
 	if held < heldSlotFloor {
@@ -4598,6 +4620,7 @@ func TestTheTransitiveCountWalksWhatItClaimsTo(t *testing.T) {
 		{"an opaque field under a map value is reported", struct {
 			M map[string]struct{ F func() }
 		}{}, true},
+		{"an unsafe.Pointer field is opaque", struct{ P unsafe.Pointer }{}, true},
 		{"a plain struct is not opaque", struct{ A string }{}, false},
 		{"a struct of structs is not opaque", struct{ L leaf }{}, false},
 	} {

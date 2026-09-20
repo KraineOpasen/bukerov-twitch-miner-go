@@ -194,7 +194,9 @@
 // TestTheDocumentedResidueIsAttributableToItsRoots attributes every one of
 // them to TWO roots: five to crypto/sha256 and reflect to encoding/json.
 // crypto/hmac is exempted from the sweep beside them, and attributes nothing:
-// it reaches the same five the hash does, so its reach is a subset. The capability is in the closure and no
+// it reaches the same five the hash does and not reflect, so its reach INTO
+// THE RESIDUE is a subset -- its closure is not, being 89 packages against the
+// hash's 87. The five are machine-checked beside the attributions. The capability is in the closure and no
 // line of this package calls it. The sixth clause is enforced over syntax: a goroutine needs no import, so that
 // clause used to be a convention this sentence presented as a machine check.
 // It is now Rule E, and Rule E has its own control.
@@ -735,9 +737,9 @@
 //     AllocedBytesPerOp, five testing.AllocsPerRun sites, and three
 //     measurements divided by a rep count -- which is why 1,055,076,
 //     2,113,586, 3,183,766 and 4,240,782 elsewhere in this register are not
-//     multiples of eight and are nonetheless real; the first and third are
-//     divided by a rep count, the second says it divides, and the fourth says
-//     it is per evaluation over sixteen. What is not quoted in these two records is a figure
+//     multiples of eight and are nonetheless real: the second says it divides,
+//     and the other three are divided by a rep count -- the third and fourth by
+//     the same sixteen, in the same sentence. What is not quoted in these two records is a figure
 //     whose averaging basis was never recorded, because nothing can say which
 //     of the two it is. THAT RULE IS NOT APPLIED THROUGHOUT: seven figures
 //     taken on OTHER heads and quoted elsewhere here -- 147,671 and 2,113,763,
