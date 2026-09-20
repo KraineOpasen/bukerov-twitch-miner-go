@@ -1208,14 +1208,22 @@
 //     them, because both sides lose a field, or a boundary, together. Lanes
 //     demonstrated all three of dropped field, collapsed delimiter and
 //     borrowed domain tag against six of the seven framings with the suite
-//     green. TestEveryWitnessFramingHasItsOwnTagAndItsOwnParts parses each
-//     framing back into length-prefixed parts with an independent reader and
-//     holds it to a part count DECLARED from the field list and to its own
-//     domain tag; TestTheRulesetFramingIsTheOneTheContractDescribes goes
-//     further for frameRuleset alone, asserting the parts themselves and each
-//     field's effect on them. Swapping two same-shaped fields inside one
-//     framing moves neither the tag nor the count and is caught only for that
-//     one framing.
+//     green, and a later census showed the same of a field written as a
+//     CONSTANT: 42 of 111 write sites could be replaced by their zero with the
+//     suite green, three of them admitting an end-to-end forgery.
+//     TestEveryWitnessFramingHasItsOwnTagAndItsOwnParts parses each framing
+//     back into length-prefixed parts with an independent reader and compares
+//     them against an ordered list of VALUES declared from the framer's field
+//     list, over randomized rounds -- a fixture that pinned a field to one
+//     value is what made three constant substitutions invisible, so every
+//     value is drawn per round, booleans included and independently of each
+//     other. TestTheRulesetFramingIsTheOneTheContractDescribes adds per-field
+//     sensitivity for frameRuleset.
+//     WHAT NEITHER SEES is a field the TYPE has and the framer never writes:
+//     both are mirrors of the framer, not of the struct.
+//     TestAWitnessTypeCannotGrowAFieldQuietly pins each witness type's field
+//     count so adding one is a decision somebody records rather than a
+//     silence.
 //     WHAT A WIDTH IS AND IS NOT. It is a cheap REJECTION TEST: it refuses a
 //     width-changing edit in O(fields) before a byte is materialized. It is not
 //     proof of identity -- two different values can frame to one width -- so an
