@@ -2146,8 +2146,8 @@ func checkEveryFramingWidth(t *testing.T, rng *rand.Rand, round int) map[string]
 			t.Fatalf("round %d: %s length-only reports %d, the framing writes %d bytes",
 				round, name, l.framedLen(), len(b.bytes()))
 		}
-		if width != len(b.bytes()) {
-			t.Fatalf("round %d: %s width %d, framing %d bytes", round, name, width, len(b.bytes()))
+		if fault := framingWidthFault(name, width, len(b.bytes())); fault != "" {
+			t.Fatalf("round %d: %s", round, fault)
 		}
 	}
 	// A presence that varies, for the two result fixtures. UNKNOWN is a live
@@ -2733,21 +2733,30 @@ func witnessComparedIn(t *testing.T, dir string) map[string]bool {
 					}
 				}
 			}
-			frames, reads := false, false
+			// THE FRAMING MUST BE REACHED *FROM* THE INPUT, not merely beside
+			// it. Two independent mentions are satisfied by
+			// `_ = v.A; return frameSynthetic("")`, which is the previous
+			// defeat plus one line.
+			used := false
 			ast.Inspect(fd.Body, func(n ast.Node) bool {
-				id, ok := n.(*ast.Ident)
+				call, ok := n.(*ast.CallExpr)
 				if !ok {
 					return true
 				}
-				if strings.HasPrefix(id.Name, "frame") || id.Name == "canonical" {
-					frames = true
+				fn, ok := call.Fun.(*ast.Ident)
+				if !ok || (!strings.HasPrefix(fn.Name, "frame") && fn.Name != "canonical") {
+					return true
 				}
-				if given[id.Name] {
-					reads = true
+				for _, arg := range call.Args {
+					ast.Inspect(arg, func(n ast.Node) bool {
+						if id, ok := n.(*ast.Ident); ok && given[id.Name] {
+							used = true
+						}
+						return true
+					})
 				}
 				return true
 			})
-			used := frames && reads
 			if !used {
 				doesNotFrame[fd.Name.Name] = true
 			}
@@ -3330,6 +3339,24 @@ func (v comparesAgainstAFramedConstantWitness) derived() bool {
 	return v.witness != framedConstantWitness(v) && v.framedLen > 0
 }
 
+type comparesFramesAndReadsSeparately struct {
+	A         string
+	witness   string
+	framedLen int
+}
+
+// It FRAMES and it READS -- just not the one from the other. Two independent
+// mention-predicates AND-ed accept it; requiring the framing call to be handed
+// the input does not.
+func framedConstantThatAlsoReadsWitness(v comparesFramesAndReadsSeparately) string {
+	_ = v.A
+	return frameSynthetic("")
+}
+
+func (v comparesFramesAndReadsSeparately) derived() bool {
+	return v.witness != framedConstantThatAlsoReadsWitness(v) && v.framedLen > 0
+}
+
 type comparesAgainstAConstantWitness struct {
 	A         string
 	witness   string
@@ -3495,13 +3522,13 @@ func (v comparesButDiscardsTheAnswer) derived() bool {
 	if anon != 1 {
 		t.Errorf("the walk saw %d anonymous witness-bearing structs, want 1 (the one inside `nested`)", anon)
 	}
-	if len(withWitness) != 29 {
+	if len(withWitness) != 30 {
 		names := make([]string, 0, len(withWitness))
 		for _, s := range withWitness {
 			names = append(names, s.name)
 		}
 		sort.Strings(names)
-		t.Errorf("the walk saw %d witness-bearing structs, want 29: %v", len(withWitness), names)
+		t.Errorf("the walk saw %d witness-bearing structs, want 30: %v", len(withWitness), names)
 	}
 
 	// AND THE COMPARISON RECOGNIZER NEEDS ITS OWN CONTROL, by the same rule:
@@ -3542,7 +3569,7 @@ func (v comparesButDiscardsTheAnswer) derived() bool {
 		"comparesAgainstAConstantWitness", "gateDisabledViaElseIf",
 		"comparesInASwitchCaseWithAnEmptyBody", "comparesWithOnlyAClosureInTheBody",
 		"comparesInsideAClosureCalledInline", "comparesAgainstAReadAndDiscardWitness",
-		"comparesAgainstAFramedConstantWitness",
+		"comparesAgainstAFramedConstantWitness", "comparesFramesAndReadsSeparately",
 	} {
 		if compared[notWant] {
 			t.Errorf("the comparison recognizer counted %s, whose witness is never compared against a recomputation", notWant)
@@ -4355,6 +4382,39 @@ func TestTheWidthAndPartsOraclesCannotBeSpelledFromTheFramer(t *testing.T) {
 		t.Errorf("%d checkWidth calls, want 7 -- one per witness framing: a drive that left is a width nothing holds", widths)
 	}
 
+	// AND checkWidth MUST ACTUALLY COMPARE. Pinning which helper is passed in
+	// says nothing about the callee using it: a lane replaced the comparison
+	// with `_ = width` and the whole suite stayed green, which made this pin
+	// decorative. The comparison lives in framingWidthFault, TestTheWidth-
+	// ComparisonReports drives it, and this requires checkWidth to call it.
+	compares := 0
+	for _, f := range files {
+		ast.Inspect(f, func(n ast.Node) bool {
+			as, ok := n.(*ast.AssignStmt)
+			if !ok {
+				return true
+			}
+			for _, lhs := range as.Lhs {
+				if id, ok := lhs.(*ast.Ident); !ok || id.Name != "checkWidth" {
+					return true
+				}
+			}
+			ast.Inspect(as, func(n ast.Node) bool {
+				if call, ok := n.(*ast.CallExpr); ok {
+					if fn, ok := call.Fun.(*ast.Ident); ok && fn.Name == "framingWidthFault" {
+						compares++
+					}
+				}
+				return true
+			})
+			return true
+		})
+	}
+	if compares != 1 {
+		t.Errorf("checkWidth calls framingWidthFault %d times, want 1: the width it is handed must be COMPARED, not merely passed",
+			compares)
+	}
+
 	// AN ALLOW-LIST, NOT A DENY-LIST. A three-name deny-list is defeated by a
 	// helper named none of the three: a lane declared a closure above the table
 	// that framed the value and split it back into parts, and three real faults
@@ -4382,7 +4442,28 @@ func TestTheWidthAndPartsOraclesCannotBeSpelledFromTheFramer(t *testing.T) {
 			// identifier this function binds from an expression mentioning
 			// canonical, frame* or splitFramedParts is tainted, and a row's
 			// count or value list may not mention one.
+			// EVERY FUNCTION IN THE PACKAGE THAT REACHES THE FRAMING is
+			// tainted first, so a plain helper called from the table is not a
+			// laundering route: a lane wrote placementFieldList(t, pl) with an
+			// ordinary := and the intra-procedural walk saw only three
+			// innocent names.
 			tainted := map[string]bool{}
+			for _, ff := range files {
+				for _, dd := range ff.Decls {
+					fn, ok := dd.(*ast.FuncDecl)
+					if !ok || fn.Body == nil {
+						continue
+					}
+					ast.Inspect(fn.Body, func(n ast.Node) bool {
+						if id, ok := n.(*ast.Ident); ok &&
+							(id.Name == "canonical" || id.Name == "splitFramedParts" ||
+								strings.HasPrefix(id.Name, "frame")) {
+							tainted[fn.Name.Name] = true
+						}
+						return true
+					})
+				}
+			}
 			reachesFramer := func(e ast.Expr) bool {
 				bad := false
 				ast.Inspect(e, func(n ast.Node) bool {
@@ -4398,18 +4479,46 @@ func TestTheWidthAndPartsOraclesCannotBeSpelledFromTheFramer(t *testing.T) {
 				})
 				return bad
 			}
-			ast.Inspect(fd.Body, func(n ast.Node) bool {
-				as, ok := n.(*ast.AssignStmt)
-				if !ok {
-					return true
-				}
-				for i, lhs := range as.Lhs {
-					id, ok := lhs.(*ast.Ident)
-					if !ok || i >= len(as.Rhs) {
+			// AND THE BINDING FORMS ARE NOT JUST `=`. A `var` is a ValueSpec,
+			// a range binds without one, and `a, b := f()` has ONE right-hand
+			// side for two names -- a lane used all three, the last of which
+			// was an index bug in this loop.
+			taintNames := func(lhs []ast.Expr, rhs []ast.Expr) {
+				for i, e := range lhs {
+					id, ok := e.(*ast.Ident)
+					if !ok || id.Name == "_" {
 						continue
 					}
-					if reachesFramer(as.Rhs[i]) {
-						tainted[id.Name] = true
+					switch {
+					case len(rhs) == 1:
+						if reachesFramer(rhs[0]) {
+							tainted[id.Name] = true
+						}
+					case i < len(rhs):
+						if reachesFramer(rhs[i]) {
+							tainted[id.Name] = true
+						}
+					}
+				}
+			}
+			ast.Inspect(fd.Body, func(n ast.Node) bool {
+				switch x := n.(type) {
+				case *ast.AssignStmt:
+					taintNames(x.Lhs, x.Rhs)
+				case *ast.ValueSpec:
+					vals := x.Values
+					names := make([]ast.Expr, 0, len(x.Names))
+					for _, nm := range x.Names {
+						names = append(names, nm)
+					}
+					taintNames(names, vals)
+				case *ast.RangeStmt:
+					if x.X != nil && reachesFramer(x.X) {
+						for _, e := range []ast.Expr{x.Key, x.Value} {
+							if id, ok := e.(*ast.Ident); ok && id.Name != "_" {
+								tainted[id.Name] = true
+							}
+						}
 					}
 				}
 				return true
@@ -4429,9 +4538,10 @@ func TestTheWidthAndPartsOraclesCannotBeSpelledFromTheFramer(t *testing.T) {
 						continue
 					}
 					rows++
-					// RESOLVED BY FIELD, NOT BY INDEX. A keyed literal moves
-					// what sits at elements 2 and 3, and a lane used one to
-					// put the value list somewhere the walk never looked.
+					// RESOLVED BY FIELD IN BOTH BRANCHES. A keyed literal moves
+					// what sits at elements 2 and 3, and so does adding a
+					// field to the row struct -- a lane used each in turn, the
+					// second against a guard that had just fixed the first.
 					checkMe := []ast.Expr{}
 					keyed := false
 					for _, e := range row.Elts {
@@ -4445,9 +4555,18 @@ func TestTheWidthAndPartsOraclesCannotBeSpelledFromTheFramer(t *testing.T) {
 						}
 					}
 					if !keyed {
-						checkMe = append(checkMe, row.Elts[2], row.Elts[3])
-					} else if len(checkMe) != 2 {
-						t.Errorf("parts row %d at %s is keyed and does not set both parts and want: the guard cannot find what to hold",
+						for _, want := range []string{"parts", "want"} {
+							at := fieldIndexOf(table.Type, want)
+							if at < 0 || at >= len(row.Elts) {
+								t.Errorf("parts row %d at %s: the row struct has no %q the guard can reach",
+									rows, fset.Position(row.Pos()), want)
+								continue
+							}
+							checkMe = append(checkMe, row.Elts[at])
+						}
+					}
+					if len(checkMe) != 2 {
+						t.Errorf("parts row %d at %s does not present both parts and want: the guard cannot find what to hold",
 							rows, fset.Position(row.Pos()))
 					}
 					for _, expr := range checkMe {
@@ -4526,6 +4645,7 @@ func TestEverySharedFramingHelperIsSensitiveToEveryFieldItFrames(t *testing.T) {
 	dec := func(d PolicyDecision) func(*canonical) {
 		return func(c *canonical) { framePolicyDecision(c, d) }
 	}
+	rows := 0
 	for _, tc := range []struct {
 		field string
 		a, b  func(*canonical)
@@ -4570,6 +4690,46 @@ func TestEverySharedFramingHelperIsSensitiveToEveryFieldItFrames(t *testing.T) {
 		if bytesOf(tc.a) == bytesOf(tc.b) {
 			t.Errorf("%s: two values differing only in this field frame to the SAME bytes, so the witness does not cover it",
 				tc.field)
+		}
+		rows++
+	}
+	// AND THE ROW COUNT IS PINNED, like every other enumeration in this file.
+	// This was the one without a pin, and it is the SOLE non-fixture holder of
+	// the three list contents: deleting six rows let all three framings go
+	// blind to their lists with the suite green.
+	if rows != sensitivityRows {
+		t.Errorf("the sensitivity table drives %d rows, want %d: a row that left is a field nothing else holds",
+			rows, sensitivityRows)
+	}
+}
+
+// sensitivityRows is how many fields TestEverySharedFramingHelper... drives.
+// IT IS A PIN AND NOT A TARGET: raise it with a row, and treat a fall as the
+// finding it is.
+const sensitivityRows = 26
+
+// framingWidthFault reports why a recorded width disagrees with the bytes its
+// framing wrote, or "" when they agree.
+//
+// IT IS A NAMED FUNCTION SO THAT SOMETHING CAN DRIVE IT. Inside checkWidth the
+// comparison was a bare if, and replacing it with `_ = width` left the whole
+// suite green -- which made the helper-name pin decorative, since the pin says
+// which width is PASSED IN and said nothing about it being compared.
+func framingWidthFault(name string, width, framed int) string {
+	if width == framed {
+		return ""
+	}
+	return name + " width " + strconv.Itoa(width) + ", framing " + strconv.Itoa(framed) + " bytes"
+}
+
+// TestTheWidthComparisonReports drives the comparison checkWidth rests on.
+func TestTheWidthComparisonReports(t *testing.T) {
+	if got := framingWidthFault("X", 10, 10); got != "" {
+		t.Errorf("equal widths reported %q, want silence", got)
+	}
+	for _, w := range []int{9, 11, 0, -1} {
+		if framingWidthFault("X", w, 10) == "" {
+			t.Errorf("a recorded width of %d against a framing of 10 reported nothing", w)
 		}
 	}
 }
@@ -4621,6 +4781,11 @@ func TestTheTransitiveCountWalksWhatItClaimsTo(t *testing.T) {
 			M map[string]struct{ F func() }
 		}{}, true},
 		{"an unsafe.Pointer field is opaque", struct{ P unsafe.Pointer }{}, true},
+		{"an opaque field under a pointer is reported", struct{ P *struct{ I any } }{}, true},
+		{"an opaque field under an array is reported", struct{ A [2]struct{ F func() } }{}, true},
+		{"an opaque map KEY is reported", struct {
+			M map[any]string
+		}{}, true},
 		{"a plain struct is not opaque", struct{ A string }{}, false},
 		{"a struct of structs is not opaque", struct{ L leaf }{}, false},
 	} {
@@ -4641,4 +4806,28 @@ var widthHelperFor = map[string]string{
 	"PlacementEvidence":  "placementEvidenceFramedLen",
 	"PayoutEvidence":     "payoutEvidenceFramedLen",
 	"VerifiedP3bRuleset": "rulesetFramedLen",
+}
+
+// fieldIndexOf reports the position of a named field in a composite literal's
+// struct type, so an unkeyed row is read BY FIELD and not by a number that
+// moves the moment the struct gains one.
+func fieldIndexOf(typ ast.Expr, name string) int {
+	at, ok := typ.(*ast.ArrayType)
+	if !ok {
+		return -1
+	}
+	st, ok := at.Elt.(*ast.StructType)
+	if !ok || st.Fields == nil {
+		return -1
+	}
+	i := 0
+	for _, f := range st.Fields.List {
+		for _, n := range f.Names {
+			if n.Name == name {
+				return i
+			}
+			i++
+		}
+	}
+	return -1
 }
