@@ -520,8 +520,37 @@ func SerializeResolutionArtifact(a ResolutionArtifact) []byte {
 // utf8.ValidString allocates nothing, so the eight scans add no bytes to a
 // refusal the arms settle, and the O(n) walks over the three slices stay
 // below them.
-func resolutionConstantStringsExpressible(a ResolutionArtifact) error {
-	for _, f := range [...]struct {
+// resolutionPrecedenceBudget bounds how much CALLER TEXT may be read above the
+// two hoisted semantic arms, per field.
+//
+// IT IS A PRECEDENCE BUDGET AND NOT A VALIDITY BOUND, and the distinction is
+// the whole design. A validity bound would refuse an artifact this package
+// currently certifies, which breaks the producer/verifier fixed point and needs
+// a producer change, a version bump and an independently regenerated golden --
+// the same reason the outcome vector is still unbounded in the verifier. This
+// budget refuses nothing. Every field over it is still read, by the complete
+// scan below the arms; what it loses is only its PLACE IN THE ORDER.
+//
+// WHY IT EXISTS: the preflight was added so that no semantic claim is made
+// about an artifact until every string it carries one of is readable. A review
+// lane then showed the cost of that: the arms refuse in constant time, while
+// the preflight above them walked every byte of fields the refusal does not
+// depend on -- so a supplier could attach a multi-megabyte valid ProofBasis and
+// buy proportional CPU on every verification. The answer the writer had given
+// for that gate, that utf8.ValidString allocates nothing, was not an answer:
+// allocation is not the only cost, and the lane said so in those terms.
+//
+// 4096 is the native identifier bound this package already defers to at the
+// P3b scope. No claim is made that it is optimal; what is claimed is that the
+// work above the arms is now bounded by 8 x this constant rather than by what a
+// supplier chooses to send.
+const resolutionPrecedenceBudget = 4096
+
+func resolutionConstantStrings(a ResolutionArtifact) [8]struct {
+	what string
+	v    string
+} {
+	return [8]struct {
 		what string
 		v    string
 	}{
@@ -533,7 +562,18 @@ func resolutionConstantStringsExpressible(a ResolutionArtifact) error {
 		{"availability", string(a.Availability)},
 		{"projector revision", a.ProjectorRevision},
 		{"proof revision", a.ProofRevision},
-	} {
+	}
+}
+
+func resolutionConstantStringsExpressible(a ResolutionArtifact) error {
+	for _, f := range resolutionConstantStrings(a) {
+		// OVER-BUDGET FIELDS ARE NOT SKIPPED, THEY ARE DEFERRED. Every one of
+		// them is read by checkResolutionStringsExpressible below the arms, so
+		// no artifact's VERDICT depends on this budget -- only which fault a
+		// caller is told about first.
+		if len(f.v) > resolutionPrecedenceBudget {
+			continue
+		}
 		if !utf8.ValidString(f.v) {
 			return errors.Join(ErrResolutionDigest, errors.New("p4offline: "+f.what+
 				" is not valid UTF-8, so this artifact's own encoding cannot carry it unchanged"))
@@ -547,8 +587,10 @@ func checkResolutionStringsExpressible(a ResolutionArtifact) error {
 		return errors.Join(ErrResolutionDigest, errors.New("p4offline: "+what+
 			" is not valid UTF-8, so this artifact's own encoding cannot carry it unchanged"))
 	}
-	if err := resolutionConstantStringsExpressible(a); err != nil {
-		return err
+	for _, f := range resolutionConstantStrings(a) {
+		if !utf8.ValidString(f.v) {
+			return lossy(f.what)
+		}
 	}
 	for i, id := range a.OrderedOutcomeIDs {
 		if !utf8.ValidString(id) {

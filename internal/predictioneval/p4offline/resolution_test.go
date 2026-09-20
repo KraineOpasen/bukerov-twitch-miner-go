@@ -1238,3 +1238,69 @@ func TestAHoistedArmDefersToEveryConstantSizeEncodingFault(t *testing.T) {
 		})
 	}
 }
+
+// TestThePrecedenceBudgetDefersAFieldWithoutExcusingIt pins the one thing that
+// makes the budget above the hoisted arms legitimate: it changes which fault a
+// caller hears FIRST and never which artifacts verify.
+//
+// The preflight exists so no semantic claim is made about an artifact until
+// every string it carries one of is readable. A review lane then showed what
+// that cost: the arms refuse in constant time while the preflight walked every
+// byte of fields the refusal does not depend on, so a supplier could attach a
+// multi-megabyte valid string and buy proportional CPU on every verification.
+// A byte CEILING would have answered it and would also have refused artifacts
+// this package certifies today — breaking the producer/verifier fixed point,
+// which is why the outcome vector is still unbounded in the verifier. So the
+// bound is a budget instead, and these rows are what "budget, not ceiling"
+// means in observable terms.
+func TestThePrecedenceBudgetDefersAFieldWithoutExcusingIt(t *testing.T) {
+	const invalid = "\xff"
+	overBudget := strings.Repeat("p", 4096) + invalid // 4097 bytes, unreadable
+	unknown := func(t *testing.T) p4offline.ResolutionArtifact {
+		t.Helper()
+		a := p4offline.ProjectResolution(p4offline.ResolutionEvidence{
+			Round: p4offline.PublicRoundIdentity{EventID: "e1"}, OrderedOutcomeIDs: []string{"o1", "o2"},
+			Claim: p4offline.ResolutionUnknown, Availability: p4offline.AvailabilityNotRecorded,
+			ProjectorRevision: "rev", ProofRevision: "x"})
+		if err := p4offline.VerifyResolutionArtifact(a); err != nil {
+			t.Fatalf("the unpoked control must verify: %v", err)
+		}
+		return a
+	}
+	for _, tc := range []struct {
+		name string
+		poke func(*p4offline.ResolutionArtifact)
+		says string
+	}{
+		// WITHIN the budget the precedence the lane asked for still holds.
+		{"an unreadable field within budget still beats a semantic claim", func(a *p4offline.ResolutionArtifact) {
+			a.Outcome, a.ProofBasis = "NOT_AN_OUTCOME", invalid
+		}, "is not valid UTF-8"},
+		// OVER the budget the arm answers first. This is the residual, and it
+		// is pinned so that it is a decision rather than a discovery.
+		{"an unreadable field over budget yields the order to the arm", func(a *p4offline.ResolutionArtifact) {
+			a.Outcome, a.ProofBasis = "NOT_AN_OUTCOME", overBudget
+		}, "is outside the vocabulary"},
+		// AND IT IS DEFERRED, NOT EXCUSED: with no arm to answer, the complete
+		// scan below still refuses it, so no artifact's VERDICT moved.
+		{"an unreadable field over budget is still refused when no arm fires", func(a *p4offline.ResolutionArtifact) {
+			a.ProofBasis = overBudget
+		}, "is not valid UTF-8"},
+		{"an unreadable field over budget is refused on every constant-size field", func(a *p4offline.ResolutionArtifact) {
+			a.ProjectorRevision = overBudget
+		}, "is not valid UTF-8"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a := unknown(t)
+			tc.poke(&a)
+			a.ResolutionFactsDigest = p4offline.DigestReference(digestOf(p4offline.SerializeResolutionArtifact(a)))
+			err := p4offline.VerifyResolutionArtifact(a)
+			if err == nil {
+				t.Fatalf("this poke must be refused")
+			}
+			if !strings.Contains(err.Error(), tc.says) {
+				t.Fatalf("the refusal must say %q, got: %s", tc.says, strings.ReplaceAll(err.Error(), "\n", " | "))
+			}
+		})
+	}
+}

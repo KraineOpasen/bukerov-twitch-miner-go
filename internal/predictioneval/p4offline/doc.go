@@ -917,6 +917,42 @@
 // removed, so it is a trade and not an oversight -- but it is a precedence
 // this package used to offer and no longer does.
 //
+// AND BOTH OF THOSE REPAIRS WERE THEMSELVES DEFECTIVE, found by the next lane
+// on the next head. The pattern did not stop when it was named; it recurred
+// inside the answers to it.
+//
+// THE CEILING SHORTCUT DISPLACED A GATE ITS AUTHOR HAD ENUMERATED WRONGLY.
+// ProjectOrderedRulesStream checks the SCOPE before it walks candidates, and
+// the scope this projector builds carries three caller-derived strings bounded
+// at MaxOrderedRulesIdentifierBytes. A factset with both an over-long episode
+// identity and an over-ceiling vector was told the candidate-count sentence
+// where the native path says the scope one -- a different witness, since
+// ProjectionRefusal is digested. The claim that no earlier gate could fire was
+// written on the review thread that asked for the gate, and it enumerated the
+// PER-CANDIDATE checks only. The shortcut now answers only when the scope is
+// within bound and steps aside otherwise.
+//
+// THE EXPRESSIBILITY PREFLIGHT BOUGHT PRECEDENCE WITH UNBOUNDED CPU. Reading
+// all eight one-per-artifact strings above two constant-time arms let a
+// supplier attach a multi-megabyte readable ProofBasis and charge proportional
+// work to every verification. The writer's defence -- that utf8.ValidString
+// allocates nothing -- treated allocation as the only cost there is, which is
+// the same narrowing that produced the original amplification class this
+// package spent a round closing.
+//
+// WHAT MAKES THAT ONE HARD IS THAT TWO FINDINGS PULL OPPOSITE WAYS. One lane
+// required every constant-size string to be proven readable before any semantic
+// claim; the next required the work above those claims to be bounded. A byte
+// CEILING satisfies both and refuses artifacts this package certifies today,
+// which breaks the producer/verifier fixed point -- the same wall the outcome
+// vector's verifier-side bound is still behind. The resolution is to bound the
+// ORDER rather than the VALUE: a field over resolutionPrecedenceBudget is read
+// by the complete scan below the arms instead of above them, so the work above
+// them is bounded by eight times a constant while no artifact's verdict moves.
+// The residual -- an over-budget unreadable field yields precedence to an arm
+// -- is the same kind as the slice residual beside it, and is pinned by a test
+// rather than left to be rediscovered.
+//
 // THE REPAIR RESTATES A PREDICATE IN A SECOND PACKAGE, which is a cost the
 // scope forced and not a design preference: the order check is unexported in
 // predictioneval, and reaching it means calling the materializer -- which is

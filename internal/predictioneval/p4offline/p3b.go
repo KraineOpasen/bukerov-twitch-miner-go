@@ -832,6 +832,22 @@ func p3bProbeStream() (predictioneval.OrderedRulesStream, error) {
 	return stream, nil
 }
 
+// scopeWithinNativeIdentifierBounds reports whether every CALLER-DERIVED string
+// in the scope ProjectP3bSingleCandidate builds is inside the native bound that
+// ProjectOrderedRulesStream applies before it walks any candidate.
+//
+// The other scope fields are this package's own constants, so a bound on one of
+// them would fail every call rather than only a caller's, and no test could
+// pass without noticing. These three are the ones a supplier controls.
+//
+// It answers a PRECONDITION, not a refusal: an over-bound scope is refused by
+// the native path in the native words, never here.
+func scopeWithinNativeIdentifierBounds(scope predictioneval.OrderedRulesScope) bool {
+	return len(scope.EpisodeID) <= predictioneval.MaxOrderedRulesIdentifierBytes &&
+		len(scope.AccountContext) <= predictioneval.MaxOrderedRulesIdentifierBytes &&
+		len(scope.AssociationEvidence) <= predictioneval.MaxOrderedRulesIdentifierBytes
+}
+
 // ProjectP3bSingleCandidate is seam 6: the one-candidate common-data
 // projection of a COMPLETE factset.
 func ProjectP3bSingleCandidate(fs CommonFactset) (P3bProjection, error) {
@@ -853,6 +869,21 @@ func ProjectP3bSingleCandidate(fs CommonFactset) (P3bProjection, error) {
 		OutcomesPresence:  predictioneval.SuppliedKnown,
 		Provenance:        provenance,
 	}
+	scope := predictioneval.OrderedRulesScope{
+		Namespace: "p4offline",
+		// The framed identity: a component containing a delimiter cannot
+		// alias another episode.
+		EpisodeID:             fs.Episode.String(),
+		AccountContext:        "collector-session:" + fs.Episode.CollectorSessionID,
+		AssociationEvidence:   "terminal-decision-envelope:" + fs.TerminalObservationID,
+		SourceContractVersion: predictioneval.OrderedRulesStreamContractVersion,
+		Coverage:              predictioneval.CoverageCompleteDeclared,
+		CoverageDetail:        "COMMON_CUTOFF boundary C<F proven by p4offline.SelectEpisodes over a COMPLETE AS_FINALIZED session",
+		IntervalFromPosition:  predictioneval.OrderedRulesInt64(position),
+		IntervalToPosition:    predictioneval.OrderedRulesInt64(position),
+		HasInterval:           true,
+	}
+
 	// THE CEILING THE LOOP FEEDS, ASKED BEFORE THE LOOP RUNS.
 	// ProjectOrderedRulesStream refuses a candidate carrying more than
 	// MaxOrderedRulesOutcomes, and VerifyCommonFactset does not bound this
@@ -885,7 +916,25 @@ func ProjectP3bSingleCandidate(fs CommonFactset) (P3bProjection, error) {
 	//
 	// Both halves were found by a review lane, on a head where the comment
 	// above already claimed them.
-	if n := len(fs.Outcomes); n > predictioneval.MaxOrderedRulesOutcomes {
+	//
+	// AND ONLY WHEN THE COUNT IS THE GATE THE NATIVE PATH WOULD REACH.
+	// ProjectOrderedRulesStream checks the SCOPE before it walks candidates,
+	// and the scope above carries three caller-derived strings, each bounded at
+	// MaxOrderedRulesIdentifierBytes. A factset with both an over-long identity
+	// and an over-ceiling vector must be told the SCOPE sentence, because that
+	// is what the native path says -- and ProjectionRefusal is hashed into the
+	// result witness, so answering with the count sentence there produces a
+	// different artifact. When the scope is out of bound this shortcut steps
+	// aside and the call below answers, at the cost the shortcut exists to
+	// avoid; that cost is paid only by a factset already being refused for a
+	// second reason, and it is in the deferred register rather than absorbed.
+	//
+	// The claim this replaces was that the gates above the outcome bound could
+	// never fire first for a factset built here. It enumerated the
+	// PER-CANDIDATE gates and missed the scope tier -- written, as it happens,
+	// in a reply to the review that asked for this gate.
+	if n := len(fs.Outcomes); n > predictioneval.MaxOrderedRulesOutcomes &&
+		scopeWithinNativeIdentifierBounds(scope) {
 		return P3bProjection{}, errors.Join(ErrP3bProjectionRefused,
 			errors.Join(predictioneval.ErrOrderedRulesOverBound,
 				errors.New("predictioneval: candidate 0 carries "+strconv.Itoa(n)+
@@ -906,20 +955,6 @@ func ProjectP3bSingleCandidate(fs CommonFactset) (P3bProjection, error) {
 		cand.Balance = knownAt(fs.Balance, provenance, position)
 	} else {
 		cand.Balance = predictioneval.SuppliedInt64{Presence: predictioneval.SuppliedMissing, Reason: predictioneval.IneligibleMissingBalance}
-	}
-	scope := predictioneval.OrderedRulesScope{
-		Namespace: "p4offline",
-		// The framed identity: a component containing a delimiter cannot
-		// alias another episode.
-		EpisodeID:             fs.Episode.String(),
-		AccountContext:        "collector-session:" + fs.Episode.CollectorSessionID,
-		AssociationEvidence:   "terminal-decision-envelope:" + fs.TerminalObservationID,
-		SourceContractVersion: predictioneval.OrderedRulesStreamContractVersion,
-		Coverage:              predictioneval.CoverageCompleteDeclared,
-		CoverageDetail:        "COMMON_CUTOFF boundary C<F proven by p4offline.SelectEpisodes over a COMPLETE AS_FINALIZED session",
-		IntervalFromPosition:  predictioneval.OrderedRulesInt64(position),
-		IntervalToPosition:    predictioneval.OrderedRulesInt64(position),
-		HasInterval:           true,
 	}
 	admission := predictioneval.CommonAdmission{
 		ManifestID:       P3bProjectionManifestID,

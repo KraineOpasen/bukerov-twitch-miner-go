@@ -4457,6 +4457,13 @@ func TestAnOverCeilingOutcomeVectorIsRefusedBeforeItIsConverted(t *testing.T) {
 // because the sentence that arm writes depends on the candidate's index and
 // its outcome count and on nothing else.
 func nativeOverBoundRefusal(t *testing.T, n int) error {
+	return nativeRefusalFor(t, "e", n)
+}
+
+// nativeRefusalFor is the same oracle with the scope identity the caller names,
+// so a test can ask what the native projector says when a gate ABOVE the
+// per-candidate outcome count is the one that fires.
+func nativeRefusalFor(t *testing.T, episodeID string, n int) error {
 	t.Helper()
 	outs := make([]predictioneval.OrderedRulesOutcome, n)
 	for i := range outs {
@@ -4465,7 +4472,7 @@ func nativeOverBoundRefusal(t *testing.T, n int) error {
 	_, err := predictioneval.ProjectOrderedRulesStream(
 		predictioneval.OrderedRulesSource{
 			Scope: predictioneval.OrderedRulesScope{
-				Namespace: "p4offline", EpisodeID: "e", AccountContext: "a",
+				Namespace: "p4offline", EpisodeID: episodeID, AccountContext: "a",
 				AssociationEvidence:   "v",
 				SourceContractVersion: predictioneval.OrderedRulesStreamContractVersion,
 				Coverage:              predictioneval.CoverageCompleteDeclared,
@@ -4547,4 +4554,113 @@ func TestAnOverCeilingRefusalIsTheNativeOneMovedEarlier(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestAnOverCeilingRefusalDoesNotDisplaceAnEarlierNativeGate holds the
+// outcome-ceiling shortcut to the other half of "move WHEN, not WHAT": it may
+// only answer when the count is the gate the native projector would actually
+// have reached.
+//
+// ProjectOrderedRulesStream checks the SCOPE before it walks candidates, and
+// the scope this projector builds carries three caller-derived strings — the
+// framed episode identity, the collector session and the terminal observation
+// id — each bounded at MaxOrderedRulesIdentifierBytes. A factset with both an
+// over-long identity and an over-ceiling outcome vector was therefore told the
+// candidate-count sentence where the native path would have said the scope
+// one. ProjectionRefusal is hashed into p3bResultWitness, so that is a
+// different artifact, not a different message.
+//
+// The claim this refutes was mine, written on the review thread that asked for
+// the ceiling: that the gates above the outcome bound "can never fire first for
+// a factset built here". I enumerated the PER-CANDIDATE gates and missed the
+// scope tier entirely — the same enumeration failure this round has now made
+// five times, made while answering a finding about it.
+func TestAnOverCeilingRefusalDoesNotDisplaceAnEarlierNativeGate(t *testing.T) {
+	_, _, valid := selectedCase(t, nil, nil)
+	n := predictioneval.MaxOrderedRulesOutcomes + 1
+	build := func(eventID string) p4offline.CommonFactset {
+		fs := valid
+		fs.Episode.EventID = eventID
+		fs.Outcomes = append([]predictioneval.OutcomeInput(nil), fs.Outcomes...)
+		for i := len(fs.Outcomes); i < n; i++ {
+			fs.Outcomes = append(fs.Outcomes, predictioneval.OutcomeInput{
+				Slot: i, ID: "o" + strconv.Itoa(i), Present: true, TotalPoints: 1,
+			})
+		}
+		fs.Outcomes = fs.Outcomes[:n]
+		fs.Digest = digestOf(p4offline.SerializeCommonFactset(fs))
+		if err := p4offline.VerifyCommonFactset(fs); err != nil {
+			t.Fatalf("the fixture must VERIFY, or the row proves nothing: %v", err)
+		}
+		return fs
+	}
+
+	// The control: a short identity, so the count IS the gate the native path
+	// reaches, and the shortcut is entitled to answer.
+	t.Run("a scope within bound still gets the count sentence", func(t *testing.T) {
+		fs := build("e1")
+		_, err := p4offline.ProjectP3bSingleCandidate(fs)
+		if err == nil {
+			t.Fatal("an over-ceiling factset must be refused")
+		}
+		want := errors.Join(p4offline.ErrP3bProjectionRefused,
+			nativeRefusalFor(t, fs.Episode.String(), n)).Error()
+		if err.Error() != want {
+			t.Fatalf("not the native refusal.\n got: %q\nwant: %q", err.Error(), want)
+		}
+	})
+
+	// THE OTHER CALLER-DERIVED SCOPE STRING. AssociationEvidence is built from
+	// the factset's terminal observation id, which is NOT part of the framed
+	// episode identity -- so it can exceed the bound while the identity stays
+	// inside it, and a precondition that checked only the identity would miss
+	// it. A mutant doing exactly that survived until this row existed.
+	//
+	// AccountContext has no such row and cannot: it is built from the collector
+	// session id, which the framed identity hashes, so any session id long
+	// enough to push AccountContext over the bound pushes EpisodeID over it
+	// first. Its clause is kept as a fail-closed backstop and named here as
+	// unreachable by construction rather than left as an unexplained survivor.
+	t.Run("an over-long association evidence gets its own scope sentence", func(t *testing.T) {
+		fs := build("e1")
+		fs.TerminalObservationID = strings.Repeat("T", predictioneval.MaxOrderedRulesIdentifierBytes)
+		fs.Digest = digestOf(p4offline.SerializeCommonFactset(fs))
+		if err := p4offline.VerifyCommonFactset(fs); err != nil {
+			t.Fatalf("the fixture must VERIFY, or the row proves nothing: %v", err)
+		}
+		if got := len(fs.Episode.String()); got > predictioneval.MaxOrderedRulesIdentifierBytes {
+			t.Fatalf("the framed identity is %d bytes; it must stay INSIDE %d or this row proves nothing about the sibling clause",
+				got, predictioneval.MaxOrderedRulesIdentifierBytes)
+		}
+		_, err := p4offline.ProjectP3bSingleCandidate(fs)
+		if err == nil {
+			t.Fatal("an over-ceiling factset must be refused")
+		}
+		if strings.Contains(err.Error(), "outcomes, past the bound of") {
+			t.Fatalf("the shortcut answered although an earlier native gate applies: %s",
+				strings.ReplaceAll(err.Error(), "\n", " | "))
+		}
+		if !strings.Contains(err.Error(), "association evidence") {
+			t.Fatalf("expected the native association-evidence refusal, got: %s",
+				strings.ReplaceAll(err.Error(), "\n", " | "))
+		}
+	})
+
+	// And the row the shortcut broke.
+	t.Run("a scope past the bound gets the scope sentence", func(t *testing.T) {
+		fs := build(strings.Repeat("E", predictioneval.MaxOrderedRulesIdentifierBytes))
+		if got := len(fs.Episode.String()); got <= predictioneval.MaxOrderedRulesIdentifierBytes {
+			t.Fatalf("the fixture's framed identity is %d bytes; it must exceed %d or the row proves nothing",
+				got, predictioneval.MaxOrderedRulesIdentifierBytes)
+		}
+		_, err := p4offline.ProjectP3bSingleCandidate(fs)
+		if err == nil {
+			t.Fatal("an over-ceiling factset must be refused")
+		}
+		want := errors.Join(p4offline.ErrP3bProjectionRefused,
+			nativeRefusalFor(t, fs.Episode.String(), n)).Error()
+		if err.Error() != want {
+			t.Fatalf("the shortcut displaced an earlier native gate.\n got: %q\nwant: %q", err.Error(), want)
+		}
+	})
 }
