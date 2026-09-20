@@ -2462,6 +2462,15 @@ func TestARecordedWidthIsRequiredAndNotJustRecorded(t *testing.T) {
 	// instrument to rest a gate on -- it reports how much a refusal cost, not
 	// whether it happened -- so every type is held here to an ANSWER instead:
 	// a CORRECT witness beside a wrong width must still be refused.
+	//
+	// WHAT THESE ROWS DO NOT PROVE, stated so the scope is not read wider than
+	// it is: each computes its expected width with the very ...FramedLen helper
+	// it then drives, so an off-by-one in the helper moves both sides together
+	// and passes here. What holds the helper against the framed bytes is
+	// checkWidth, and what holds checkWidth against a namesake is
+	// TestTheWidthAndPartsOraclesCannotBeSpelledFromTheFramer. These rows hold
+	// the CLAUSE in derived(), not the helper. The fixtures are zero values, so
+	// they are also blind to a width fault that depends on a field's value.
 	for _, tc := range []struct {
 		name    string
 		good    int
@@ -2695,7 +2704,7 @@ func witnessComparedIn(t *testing.T, dir string) map[string]bool {
 	// defeat respelled with the suffix the recognizer looks for. A
 	// recomputation must at minimum READ its own input, so one that mentions
 	// neither a parameter nor its receiver anywhere in its body is struck off.
-	ignoresItsInput := map[string]bool{}
+	doesNotFrame := map[string]bool{}
 	for _, f := range files {
 		for _, d := range f.Decls {
 			fd, ok := d.(*ast.FuncDecl)
@@ -2717,15 +2726,23 @@ func witnessComparedIn(t *testing.T, dir string) map[string]bool {
 					}
 				}
 			}
+			// AND IT MUST REACH THE FRAMING. Reading the input is not
+			// enough: `_ = v.A; return ""` reads it and returns a constant.
+			// Every recomputation in this package builds a canonical and
+			// digests it, so a callee that mentions neither is not one.
 			used := false
 			ast.Inspect(fd.Body, func(n ast.Node) bool {
-				if id, ok := n.(*ast.Ident); ok && given[id.Name] {
+				id, ok := n.(*ast.Ident)
+				if !ok {
+					return true
+				}
+				if strings.HasPrefix(id.Name, "frame") || id.Name == "canonical" {
 					used = true
 				}
 				return true
 			})
 			if !used {
-				ignoresItsInput[fd.Name.Name] = true
+				doesNotFrame[fd.Name.Name] = true
 			}
 		}
 	}
@@ -2826,7 +2843,7 @@ func witnessComparedIn(t *testing.T, dir string) map[string]bool {
 							name = fn.Sel.Name
 						}
 						if strings.HasSuffix(name, "Witness") && mentionsRecv(call) &&
-							!readsStoredWitness[name] && !ignoresItsInput[name] {
+							!readsStoredWitness[name] && !doesNotFrame[name] {
 							out[id.Name] = true
 						}
 					}
@@ -3159,7 +3176,9 @@ type comparesAgainstACall struct {
 	framedLen int
 }
 
-func comparesAgainstACallWitness(v comparesAgainstACall) string { return v.A + "w" }
+func frameSynthetic(s string) string { return s + "w" }
+
+func comparesAgainstACallWitness(v comparesAgainstACall) string { return frameSynthetic(v.A) }
 
 func (v comparesAgainstACall) derived() bool {
 	return v.witness != "" && v.witness == comparesAgainstACallWitness(v)
@@ -3171,7 +3190,7 @@ type comparesInAPointerMethod struct {
 	framedLen int
 }
 
-func comparesInAPointerMethodWitness(v *comparesInAPointerMethod) string { return v.A + "w" }
+func comparesInAPointerMethodWitness(v *comparesInAPointerMethod) string { return frameSynthetic(v.A) }
 
 func (v *comparesInAPointerMethod) check() bool {
 	return v.witness != comparesInAPointerMethodWitness(v)
@@ -3247,7 +3266,7 @@ type comparesViaAZeroArgReceiverMethod struct {
 	framedLen int
 }
 
-func (v comparesViaAZeroArgReceiverMethod) recomputedWitness() string { return v.A + "w" }
+func (v comparesViaAZeroArgReceiverMethod) recomputedWitness() string { return frameSynthetic(v.A) }
 
 func (v comparesViaAZeroArgReceiverMethod) derived() bool {
 	// The most natural spelling of "recompute my own witness"; an arity clause
@@ -3269,6 +3288,23 @@ func (v comparesAgainstItsOwnStoredWitness) recordedWitness() string { return v.
 func (v comparesAgainstItsOwnStoredWitness) derived() bool {
 	// w == w. True for a forgery, true for a zero value, true for anything.
 	return v.witness == v.recordedWitness() && v.framedLen > 0
+}
+
+type comparesAgainstAReadAndDiscardWitness struct {
+	A         string
+	witness   string
+	framedLen int
+}
+
+// It READS its input and throws it away, so a rule asking only that the input
+// be mentioned accepts it. Nothing is framed, so nothing is recomputed.
+func readAndDiscardWitness(v comparesAgainstAReadAndDiscardWitness) string {
+	_ = v.A
+	return ""
+}
+
+func (v comparesAgainstAReadAndDiscardWitness) derived() bool {
+	return v.witness != readAndDiscardWitness(v) && v.framedLen > 0
 }
 
 type comparesAgainstAConstantWitness struct {
@@ -3436,13 +3472,13 @@ func (v comparesButDiscardsTheAnswer) derived() bool {
 	if anon != 1 {
 		t.Errorf("the walk saw %d anonymous witness-bearing structs, want 1 (the one inside `nested`)", anon)
 	}
-	if len(withWitness) != 27 {
+	if len(withWitness) != 28 {
 		names := make([]string, 0, len(withWitness))
 		for _, s := range withWitness {
 			names = append(names, s.name)
 		}
 		sort.Strings(names)
-		t.Errorf("the walk saw %d witness-bearing structs, want 27: %v", len(withWitness), names)
+		t.Errorf("the walk saw %d witness-bearing structs, want 28: %v", len(withWitness), names)
 	}
 
 	// AND THE COMPARISON RECOGNIZER NEEDS ITS OWN CONTROL, by the same rule:
@@ -3482,7 +3518,7 @@ func (v comparesButDiscardsTheAnswer) derived() bool {
 		// closure; and a comparison inside a closure called inline.
 		"comparesAgainstAConstantWitness", "gateDisabledViaElseIf",
 		"comparesInASwitchCaseWithAnEmptyBody", "comparesWithOnlyAClosureInTheBody",
-		"comparesInsideAClosureCalledInline",
+		"comparesInsideAClosureCalledInline", "comparesAgainstAReadAndDiscardWitness",
 	} {
 		if compared[notWant] {
 			t.Errorf("the comparison recognizer counted %s, whose witness is never compared against a recomputation", notWant)
@@ -3814,7 +3850,15 @@ func framingPartsRound(t *testing.T, rng *rand.Rand, round int) (map[string]bool
 		}
 		var c canonical
 		tc.frame(&c)
-		// AND THE WIDTH IS CHECKED HERE, where every field of the fixture is
+		// AND THE WIDTH IS CHECKED HERE -- a SECOND barrier, currently masked.
+		// Deleting these five lines leaves the whole suite green, because
+		// checkEveryFramingWidth drives the same two modes over the same seven
+		// framings. It is kept because that drive's fixtures are held only to
+		// carrying one sentinel string, so they can be neutered without failing
+		// it, and this row cannot be neutered without failing the value
+		// assertions below. Masked is not dead: nothing protects it today.
+		//
+		// The width is checked here, where every field of the fixture is
 		// drawn and asserted part by part. checkEveryFramingWidth drives the
 		// two modes too, but its fixtures are only held to carrying one
 		// sentinel string, so replacing them with zero values leaves it
@@ -3887,31 +3931,59 @@ func TestEveryWitnessFramingHasItsOwnTagAndItsOwnParts(t *testing.T) {
 	// the mutant agreed because neither ever moved. Every part that carries one
 	// value in all 64 rounds is reported here, so a draw that stops drawing
 	// fails rather than quietly weakening every row beneath it.
+	const rounds = 64
 	seen := map[string][]map[string]bool{}
-	for round := 0; round < 64; round++ {
+	occ := map[string][]int{}
+	for round := 0; round < rounds; round++ {
 		var byRow map[string][]string
 		checked, byRow = framingPartsRound(t, rng, round)
 		for name, want := range byRow {
 			for len(seen[name]) < len(want) {
 				seen[name] = append(seen[name], map[string]bool{})
+				occ[name] = append(occ[name], 0)
 			}
 			for k, v := range want {
 				seen[name][k][v] = true
+				occ[name][k]++
 			}
 		}
 	}
+	// ONLY WHERE A SLOT IS THE SAME FIELD IN EVERY ROUND. Rows carry
+	// variable-length runs, so a slot past the first of them holds different
+	// fields in different rounds, and a slot reached in ONE round would be
+	// reported as carrying one value "in all 64 rounds" -- which is what
+	// happened: at seed 1 this test failed on a PolicyDecision slot reached
+	// three times at the seed below and once at that one. So the slot must be
+	// occupied in every round to be judged, and the number of slots that
+	// clears that bar is pinned, or the held region could shrink in silence.
+	// What the bar leaves out -- every slot past a row's first variable-length
+	// run -- is held instead by
+	// TestEverySharedFramingHelperIsSensitiveToEveryFieldItFrames, which does
+	// not depend on a slot at all.
+	held := 0
 	for name, parts := range seen {
 		for k, vals := range parts {
-			if k == 0 || len(vals) > 1 || constantPartsByDesign[name+"/"+strconv.Itoa(k)] {
+			if k == 0 || occ[name][k] != rounds {
+				continue
+			}
+			if constantPartsByDesign[name+"/"+strconv.Itoa(k)] {
+				continue
+			}
+			held++
+			if len(vals) > 1 {
 				continue
 			}
 			only := ""
 			for v := range vals {
 				only = v
 			}
-			t.Errorf("%s part %d carries %q in all 64 rounds: a part pinned to one value makes the mutant that writes THAT value equivalent, which is the defect this table's draw exists to stop",
-				name, k, only)
+			t.Errorf("%s part %d carries %q in every one of the %d rounds: a part pinned to one value makes the mutant that writes THAT value equivalent, which is the defect this table's draw exists to stop",
+				name, k, only, rounds)
 		}
+	}
+	if held < heldSlotFloor {
+		t.Errorf("the distinctness ratchet judges %d slots, the floor is %d: a row that grew a variable-length run earlier, or a fixture that stopped reaching a slot, silently narrows what this test holds",
+			held, heldSlotFloor)
 	}
 
 	// AND THE TABLE IS HELD TO THE SAME BINDING AS THE WIDTH DRIVE. A lane
@@ -3993,6 +4065,10 @@ func TestAWitnessTypeCannotGrowAFieldQuietly(t *testing.T) {
 		{"PolicyDecision", 29, PolicyDecision{}},
 		{"PlacementEvidence", 20, PlacementEvidence{}},
 	} {
+		if w := opaqueFieldUnder(reflect.TypeOf(tc.v), map[reflect.Type]bool{}); w != "" {
+			t.Errorf("%s reaches %s, whose contents this count cannot walk: the message below would be false, so decide how that field is covered before pinning a number",
+				tc.name, w)
+		}
 		if got := transitiveFieldCount(reflect.TypeOf(tc.v), map[reflect.Type]bool{}); got != tc.total {
 			t.Errorf("%s reaches %d fields transitively, this table says %d: a field added ANYWHERE under a witness type is a field the witness can stop covering, so decide whether it is framed and then update this number",
 				tc.name, got, tc.total)
@@ -4031,6 +4107,12 @@ func transitiveFieldCount(t reflect.Type, seen map[reflect.Type]bool) int {
 	for t.Kind() == reflect.Pointer || t.Kind() == reflect.Slice || t.Kind() == reflect.Array {
 		t = t.Elem()
 	}
+	// A MAP IS WALKED THROUGH, both halves. Stopping at one made five fields
+	// under a map value cost the total exactly one, and they were then
+	// invisible for good.
+	if t.Kind() == reflect.Map {
+		return transitiveFieldCount(t.Key(), seen) + transitiveFieldCount(t.Elem(), seen)
+	}
 	if t.Kind() != reflect.Struct || seen[t] {
 		return 0
 	}
@@ -4040,6 +4122,35 @@ func transitiveFieldCount(t reflect.Type, seen map[reflect.Type]bool) int {
 		n += transitiveFieldCount(t.Field(i).Type, seen)
 	}
 	return n
+}
+
+// opaqueFieldUnder reports a field whose contents this count cannot see at all.
+// An interface, a func or a channel has no field list to walk, so a witness
+// type reaching one would make the ratchet's message false.
+func opaqueFieldUnder(t reflect.Type, seen map[reflect.Type]bool) string {
+	for t.Kind() == reflect.Pointer || t.Kind() == reflect.Slice || t.Kind() == reflect.Array {
+		t = t.Elem()
+	}
+	switch t.Kind() {
+	case reflect.Interface, reflect.Func, reflect.Chan:
+		return t.Kind().String()
+	case reflect.Map:
+		if w := opaqueFieldUnder(t.Key(), seen); w != "" {
+			return w
+		}
+		return opaqueFieldUnder(t.Elem(), seen)
+	case reflect.Struct:
+		if seen[t] {
+			return ""
+		}
+		seen[t] = true
+		for i := 0; i < t.NumField(); i++ {
+			if w := opaqueFieldUnder(t.Field(i).Type, seen); w != "" {
+				return t.Field(i).Name + " (" + w + ")"
+			}
+		}
+	}
+	return ""
 }
 
 // constantPartsByDesign names the parts that carry one value in every round
@@ -4086,76 +4197,217 @@ var constantPartsByDesign = map[string]bool{
 // Neither is visible to any value assertion, so both are checked structurally.
 func TestTheWidthAndPartsOraclesCannotBeSpelledFromTheFramer(t *testing.T) {
 	fset := token.NewFileSet()
-	f, err := parser.ParseFile(fset, "evidence_internal_test.go", nil, parser.SkipObjectResolution)
+	entries, err := os.ReadDir(".")
 	if err != nil {
-		t.Fatalf("parse: %v", err)
+		t.Fatalf("read package dir: %v", err)
+	}
+	var files []*ast.File
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || !strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		f, err := parser.ParseFile(fset, name, nil, parser.SkipObjectResolution)
+		if err != nil {
+			t.Fatalf("parse %s: %v", name, err)
+		}
+		// INTERNAL TEST FILES ONLY, and EVERY one of them -- a second file in
+		// this package would host a namesake or a helper with nothing looking
+		// at it, which is how both defeats below were built.
+		if f.Name.Name == "p4offline" {
+			files = append(files, f)
+		}
 	}
 
 	widths := 0
-	ast.Inspect(f, func(n ast.Node) bool {
-		call, ok := n.(*ast.CallExpr)
-		if !ok {
+	for _, f := range files {
+		ast.Inspect(f, func(n ast.Node) bool {
+			// A ...FramedLen NAMESAKE DECLARED HERE defeats the suffix rule
+			// below: `bytesFramedLen(func(*canonical))` returning len(bytes)
+			// satisfies it and makes the assertion len == len, after which an
+			// off-by-one in the production helper survives. The seven real
+			// helpers are declared in production, never here.
+			var declared []*ast.Ident
+			switch x := n.(type) {
+			case *ast.FuncDecl:
+				declared = append(declared, x.Name)
+			case *ast.ValueSpec:
+				declared = append(declared, x.Names...)
+			case *ast.AssignStmt:
+				for _, lhs := range x.Lhs {
+					if id, ok := lhs.(*ast.Ident); ok {
+						declared = append(declared, id)
+					}
+				}
+			}
+			for _, id := range declared {
+				if strings.HasSuffix(id.Name, "FramedLen") {
+					t.Errorf("%s at %s is declared in a test file: the width oracle resolves its argument by NAME, so a namesake makes it a tautology",
+						id.Name, fset.Position(id.Pos()))
+				}
+			}
+
+			call, ok := n.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			id, ok := call.Fun.(*ast.Ident)
+			if !ok || id.Name != "checkWidth" || len(call.Args) < 2 {
+				return true
+			}
+			widths++
+			inner, ok := call.Args[1].(*ast.CallExpr)
+			if !ok {
+				t.Errorf("checkWidth at %s: the width argument is not a call at all, so nothing says it came from the production width helper",
+					fset.Position(call.Pos()))
+				return true
+			}
+			fn, ok := inner.Fun.(*ast.Ident)
+			if !ok || !strings.HasSuffix(fn.Name, "FramedLen") {
+				t.Errorf("checkWidth at %s: the width argument is not a ...FramedLen helper, so the assertion can be a tautology over the framing's own bytes",
+					fset.Position(call.Pos()))
+			}
 			return true
-		}
-		id, ok := call.Fun.(*ast.Ident)
-		if !ok || id.Name != "checkWidth" || len(call.Args) < 2 {
-			return true
-		}
-		widths++
-		inner, ok := call.Args[1].(*ast.CallExpr)
-		if !ok {
-			t.Errorf("checkWidth at %s: the width argument is not a call at all, so nothing says it came from the production width helper",
-				fset.Position(call.Pos()))
-			return true
-		}
-		fn, ok := inner.Fun.(*ast.Ident)
-		if !ok || !strings.HasSuffix(fn.Name, "FramedLen") {
-			t.Errorf("checkWidth at %s: the width argument is not a ...FramedLen helper, so the assertion can be a tautology over the framing's own bytes",
-				fset.Position(call.Pos()))
-		}
-		return true
-	})
+		})
+	}
 	if widths != 7 {
 		t.Errorf("%d checkWidth calls, want 7 -- one per witness framing: a drive that left is a width nothing holds", widths)
 	}
 
+	// AN ALLOW-LIST, NOT A DENY-LIST. A three-name deny-list is defeated by a
+	// helper named none of the three: a lane declared a closure above the table
+	// that framed the value and split it back into parts, and three real faults
+	// in framePlacementEvidence -- a swapped pair, a borrowed domain tag and a
+	// dropped field -- then left the whole suite green. The part COUNT is
+	// checked too, because the same closure can spell it.
+	allowed := map[string]bool{
+		"join": true, "actionOf": true, "choiceOf": true, "factOf": true,
+		"attemptOf": true, "optI": true, "optI64": true, "i": true, "u": true,
+		"bl": true, "cnt": true, "len": true, "string": true, "int64": true,
+		"uint64": true,
+	}
 	rows := 0
-	for _, d := range f.Decls {
-		fd, ok := d.(*ast.FuncDecl)
-		if !ok || fd.Name.Name != "framingPartsRound" || fd.Body == nil {
-			continue
-		}
-		ast.Inspect(fd.Body, func(n ast.Node) bool {
-			rng, ok := n.(*ast.RangeStmt)
-			if !ok {
-				return true
+	for _, f := range files {
+		for _, d := range f.Decls {
+			fd, ok := d.(*ast.FuncDecl)
+			if !ok || fd.Name.Name != "framingPartsRound" || fd.Body == nil {
+				continue
 			}
-			table, ok := rng.X.(*ast.CompositeLit)
-			if !ok {
-				return true
-			}
-			for _, elt := range table.Elts {
-				row, ok := elt.(*ast.CompositeLit)
-				if !ok || len(row.Elts) < 4 {
-					continue
-				}
-				rows++
-				ast.Inspect(row.Elts[3], func(n ast.Node) bool {
-					id, ok := n.(*ast.Ident)
-					if !ok {
-						return true
-					}
-					if id.Name == "canonical" || id.Name == "splitFramedParts" || strings.HasPrefix(id.Name, "frame") {
-						t.Errorf("parts row %d at %s: its value list mentions %q, so it is read back out of the framing it is meant to hold",
-							rows, fset.Position(row.Pos()), id.Name)
-					}
+			ast.Inspect(fd.Body, func(n ast.Node) bool {
+				rng, ok := n.(*ast.RangeStmt)
+				if !ok {
 					return true
-				})
-			}
-			return false
-		})
+				}
+				table, ok := rng.X.(*ast.CompositeLit)
+				if !ok {
+					return true
+				}
+				for _, elt := range table.Elts {
+					row, ok := elt.(*ast.CompositeLit)
+					if !ok || len(row.Elts) < 4 {
+						continue
+					}
+					rows++
+					for _, idx := range []int{2, 3} {
+						ast.Inspect(row.Elts[idx], func(n ast.Node) bool {
+							call, ok := n.(*ast.CallExpr)
+							if !ok {
+								return true
+							}
+							name := "a method or conversion"
+							if id, ok := call.Fun.(*ast.Ident); ok {
+								name = id.Name
+								if allowed[name] {
+									return true
+								}
+							}
+							t.Errorf("parts row %d at %s calls %q: its count and value list may only be built from the declared field helpers, never from anything that can reach the framing it is meant to hold",
+								rows, fset.Position(row.Pos()), name)
+							return true
+						})
+					}
+				}
+				return false
+			})
+		}
 	}
 	if rows != 8 {
 		t.Errorf("%d parts rows, want 8: a row that left is a framing whose values nothing checks", rows)
+	}
+}
+
+// heldSlotFloor is how many parts the distinctness ratchet judges: the slots
+// occupied in EVERY round, minus the ones constant by design. IT IS A FLOOR AND
+// NOT A TARGET -- raise it when a row gains a fixed-position field, and treat a
+// fall as the finding it is.
+const heldSlotFloor = 165
+
+// TestEverySharedFramingHelperIsSensitiveToEveryFieldItFrames holds the fields
+// the parts table cannot hold at a fixed slot.
+//
+// A SLOT IS NOT A FIELD PAST A VARIABLE-LENGTH RUN. Three of the framings reach
+// through shared helpers that sit after one, so frameAction, frameChoice and
+// frameFact as PolicyDecision sees them -- and PlacementEvidence's three
+// attribution fields and PayoutEvidence's three tail fields -- land at a
+// different slot in every round and cannot be ratcheted by position. A lane
+// pinned choice.OutcomeID in the fixture, wrote that same literal into
+// frameChoice, and the whole suite stayed green.
+//
+// This asks the question directly instead: two values differing in ONE field
+// must frame to different bytes. It needs no fixture, no slot and no round.
+func TestEverySharedFramingHelperIsSensitiveToEveryFieldItFrames(t *testing.T) {
+	bytesOf := func(f func(*canonical)) string {
+		var c canonical
+		f(&c)
+		return string(c.bytes())
+	}
+	action := func(m ActionMapping) func(*canonical) {
+		return func(c *canonical) { frameAction(c, m) }
+	}
+	choice := func(ch PolicyChoice) func(*canonical) {
+		return func(c *canonical) { frameChoice(c, ch) }
+	}
+	f64 := func(f Int64Fact) func(*canonical) {
+		return func(c *canonical) { frameFact(c, f) }
+	}
+	pl := func(p PlacementEvidence) func(*canonical) {
+		return func(c *canonical) { framePlacementEvidence(c, p) }
+	}
+	po := func(p PayoutEvidence) func(*canonical) {
+		return func(c *canonical) { framePayoutEvidence(c, p) }
+	}
+	for _, tc := range []struct {
+		field string
+		a, b  func(*canonical)
+	}{
+		{"ActionMapping.MapVersion", action(ActionMapping{MapVersion: "a"}), action(ActionMapping{MapVersion: "b"})},
+		{"ActionMapping.Policy", action(ActionMapping{Policy: "a"}), action(ActionMapping{Policy: "b"})},
+		{"ActionMapping.NativeAction", action(ActionMapping{NativeAction: "a"}), action(ActionMapping{NativeAction: "b"})},
+		{"ActionMapping.Class", action(ActionMapping{Class: "a"}), action(ActionMapping{Class: "b"})},
+		{"ActionMapping.Legal", action(ActionMapping{Legal: false}), action(ActionMapping{Legal: true})},
+		{"ActionMapping.Illegality length", action(ActionMapping{Illegality: []string{"x"}}), action(ActionMapping{Illegality: []string{"x", "y"}})},
+		{"ActionMapping.Illegality content", action(ActionMapping{Illegality: []string{"x"}}), action(ActionMapping{Illegality: []string{"y"}})},
+		{"ActionMapping.SkipReason", action(ActionMapping{SkipReason: "a"}), action(ActionMapping{SkipReason: "b"})},
+
+		{"PolicyChoice.Present", choice(PolicyChoice{Present: false}), choice(PolicyChoice{Present: true})},
+		{"PolicyChoice.Index", choice(PolicyChoice{Index: 1}), choice(PolicyChoice{Index: 2})},
+		{"PolicyChoice.OutcomeID", choice(PolicyChoice{OutcomeID: "a"}), choice(PolicyChoice{OutcomeID: "b"})},
+
+		{"Int64Fact.Presence", f64(Int64Fact{Presence: "a"}), f64(Int64Fact{Presence: "b"})},
+		{"Int64Fact.Value", f64(Int64Fact{Value: 1}), f64(Int64Fact{Value: 2})},
+		{"Int64Fact.Reason", f64(Int64Fact{Reason: "a"}), f64(Int64Fact{Reason: "b"})},
+
+		{"PlacementEvidence.AttributedOutcomeID", pl(PlacementEvidence{AttributedOutcomeID: "a"}), pl(PlacementEvidence{AttributedOutcomeID: "b"})},
+		{"PlacementEvidence.AttributedCallObservationID", pl(PlacementEvidence{AttributedCallObservationID: "a"}), pl(PlacementEvidence{AttributedCallObservationID: "b"})},
+		{"PlacementEvidence.AttributedCallPosition", pl(PlacementEvidence{AttributedCallPosition: 1}), pl(PlacementEvidence{AttributedCallPosition: 2})},
+
+		{"PayoutEvidence.ResolutionFactsDigest", po(PayoutEvidence{ResolutionFactsDigest: "a"}), po(PayoutEvidence{ResolutionFactsDigest: "b"})},
+		{"PayoutEvidence.Derivation", po(PayoutEvidence{Derivation: "a"}), po(PayoutEvidence{Derivation: "b"})},
+		{"PayoutEvidence.decisionWitness", po(PayoutEvidence{decisionWitness: "a"}), po(PayoutEvidence{decisionWitness: "b"})},
+	} {
+		if bytesOf(tc.a) == bytesOf(tc.b) {
+			t.Errorf("%s: two values differing only in this field frame to the SAME bytes, so the witness does not cover it",
+				tc.field)
+		}
 	}
 }
