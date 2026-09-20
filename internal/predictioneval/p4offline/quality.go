@@ -305,10 +305,14 @@ func determinate(c ActionClass) bool {
 // AssessCaseQuality is seam 12: the case's quality as the MINIMUM over every
 // seam's verdict. It only ever lowers.
 //
-// It takes the DATASET, not a selection: the episode's admission and its
-// boundary are re-derived from the raw evidence here, and the factset must be
-// exactly what the dataset derives for its episode. A selection is an
-// exported value anyone can build; its flags are never trusted.
+// It takes a PREPARED dataset, not a selection a caller built: the episode's
+// admission and its boundary were re-derived from the raw evidence by
+// [PrepareDataset], and the factset must still be exactly what that dataset
+// derives for its episode, which is re-checked here. An EvidenceSelection is
+// an exported value anyone can build, and that is why no seam accepts one --
+// the handle owns a selection this package produced and hands out no view of
+// it. An unprepared handle is refused as [ErrSelectionNotPrepared], which
+// selectionRan reads as a selection that did not run.
 //
 // The approved denominator semantics are per policy: the primary
 // POLICY_CHOICE_ACCURACY denominator is the resolved WOULD_ATTEMPT decisions
@@ -551,7 +555,14 @@ type DenominatorMembership struct {
 
 // Membership reasons. Closed vocabulary; the quality reasons are carried too.
 const (
-	MembershipReasonPayoutNotDerived        = "PAYOUT_NOT_DERIVED"
+	MembershipReasonPayoutNotDerived = "PAYOUT_NOT_DERIVED"
+	// MembershipReasonPayoutRefusedDecision names a payout this package
+	// produced for a decision it REFUSED. Such an artifact withholds its
+	// case identity deliberately, so without this value it reads here as a
+	// payout about some other case -- the same string a genuine cross-case
+	// splice earns, and the same string a decision whose witness does not
+	// match earns. Three faults, one diagnosis.
+	MembershipReasonPayoutRefusedDecision   = "PAYOUT_REFUSED_ITS_DECISION"
 	MembershipReasonPayoutBindingMismatch   = "PAYOUT_BINDING_MISMATCH"
 	MembershipReasonPayoutDecisionMismatch  = "PAYOUT_DECISION_MISMATCH"
 	MembershipReasonPayoutResolutionUnbound = "PAYOUT_RESOLUTION_UNBOUND"
@@ -591,11 +602,13 @@ const (
 // policy is never counted beside a counterpart that is not derived or not
 // determinate.
 //
-// Each call re-derives the case from the whole dataset at most twice —
-// once for the quality and, once the case has reached the final gate, once
-// more for the source-round claim (seams 1–3 run for each) — and at that
-// gate re-reconciles the registry from its own entries; that is the trusted
-// path's cost, paid per verdict.
+// Each call reads the case from a PREPARED dataset and a PREPARED registry:
+// seams 1–3 ran once, when the handle was built, and the registry was
+// re-reconciled from its own entries once, when ITS handle was built. What is
+// left per verdict is the case's own factset rebuild — twice, once for the
+// quality and once for the source-round claim — and two O(1) lookups. That is
+// the trusted path's cost now; it used to be both derivations and the whole
+// re-reconciliation, per verdict, which made a run quadratic in its own size.
 func AssessDenominatorMembership(src PreparedDataset, reg PreparedSourceRounds, fs CommonFactset, p2, p3b PolicyDecision,
 	res ResolutionArtifact, pe PayoutEvidence) DenominatorMembership {
 	q := AssessCaseQuality(src, fs, p2, p3b, res)
@@ -616,6 +629,31 @@ func AssessDenominatorMembership(src PreparedDataset, reg PreparedSourceRounds, 
 		return out
 	}
 	out.Policy = pe.Policy
+	// A PAYOUT THAT REFUSED ITS DECISION SAYS SO HERE, above the case binding
+	// and not through it. DerivePayout withholds a refused decision's identity
+	// deliberately -- the text was never verified and framing it cost what the
+	// caller supplied -- so such an artifact carries no factset digest at all,
+	// and the binding gate below would report it as evidence about ANOTHER
+	// CASE. That is true and it is the wrong diagnosis: it is the same string
+	// a genuine cross-case splice earns, and the one the witness gate below
+	// earns for a spliced decision, so three distinguishable faults would
+	// arrive as one.
+	//
+	// THE DISCRIMINATOR IS EXACT AND NOT A HEURISTIC. decisionRefusal refuses
+	// a decision whose FactsetDigest is empty, so every payout that got past
+	// it carries a non-empty one; a DERIVED payout with none is therefore
+	// exactly a payout this package refused. WHY the decision was refused is
+	// on the artifact's own Reasons, in the refusal's own category -- which is
+	// finer than the two verdicts this gate replaces, not coarser.
+	//
+	// IT IS THE SAME REPAIR selectionRan IS, one seam over: a collapse that
+	// makes a refusal of one thing indistinguishable from a verdict about
+	// another is a lost signal even when no count moves. Neither Primary nor
+	// PlacedBet moves on any of these paths.
+	if pe.FactsetDigest == "" {
+		reason(MembershipReasonPayoutRefusedDecision)
+		return out
+	}
 	if pe.ContractVersion != PayoutEvidenceVersion || pe.Attempt != fs.Attempt || pe.FactsetDigest != fs.Digest ||
 		pe.EventID != fs.Episode.EventID || decision.Policy != pe.Policy || decision.Attempt != pe.Attempt ||
 		decision.FactsetDigest != pe.FactsetDigest || decision.EventID != pe.EventID {

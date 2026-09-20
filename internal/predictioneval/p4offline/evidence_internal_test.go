@@ -1484,6 +1484,50 @@ func claimShapesForFramingOracle() []SourceRoundClaim {
 			}
 		}
 	}
+	// AND A SECOND FAMILY IN WHICH NO TWO FIELDS OF ONE CLAIM ARE EQUAL.
+	//
+	// THE FAMILY ABOVE CANNOT SEE A REORDERING, which a Q3 lane demonstrated
+	// rather than argued: it gives a claim's session id, incarnation id and
+	// event id the same bytes, and its attempt's session and pool the same
+	// again, so swapping two of those clauses in compareEpisodeFraming leaves
+	// all 57,600 pairs agreeing. The lane's mutant reordered a real registry
+	// and this file stayed green.
+	//
+	// BOTH FAMILIES ARE KEPT because they prove different things. The uniform
+	// one is where the LENGTH PREFIX earns its place: claims built from "a"
+	// and "aa" put equal bytes in different positions, which is the aliasing
+	// a bare concatenation would lose. The distinct one is where a POSITION
+	// earns its place. Replacing the first with the second would trade one
+	// blind spot for another.
+	// EACH FIELD VARIES INDEPENDENTLY, which a suffix scheme does NOT give:
+	// deriving every field from one value makes them all move together, so a
+	// pair whose session order and event order DISAGREE never occurs and the
+	// reordering stays invisible. These are a product over one-character
+	// values, all of equal length, so the framed lengths tie and the position
+	// of a clause is the only thing left to decide the order.
+	two := []string{"a", "b"}
+	for _, es := range two {
+		for _, ep := range two {
+			for _, er := range two {
+				for _, ee := range two {
+					for _, as := range two {
+						for _, ap := range two {
+							cs = append(cs, SourceRoundClaim{
+								Episode: EpisodeIdentity{
+									CollectorEpoch: 7, CollectorSessionID: es, PoolInstanceID: ep,
+									RoundIncarnationID: er, EventID: ee,
+								},
+								Attempt: predictioneval.AttemptKey{
+									CollectorEpoch: 7, CollectorSessionID: as, PoolInstanceID: ap, AttemptID: 3,
+								},
+								FactsetDigest: es + ee,
+							})
+						}
+					}
+				}
+			}
+		}
+	}
 	return cs
 }
 
@@ -1502,8 +1546,16 @@ func TestStreamingTheClaimKeyDidNotMoveOneByteOfIt(t *testing.T) {
 		if got, want := claimKey(cs[i]), claimKeyBeforeStreaming(cs[i]); got != want {
 			t.Fatalf("claim %d: claimKey moved\n got: %s\nwant: %s", i, got, want)
 		}
-		if got, want := hexEncode(claimKeyFraming(nil, cs[i])), claimKey(cs[i]); got != want {
-			t.Fatalf("claim %d: the framing does not hex-encode to the key", i)
+		// THE APPEND CONTRACT, which registryDigest depends on and which the
+		// line above USED to assert nothing about: an earlier form of this
+		// row compared hexEncode(claimKeyFraming(nil, c)) to claimKey(c),
+		// and claimKey is DEFINED as exactly that, so it could not fail for
+		// any implementation of either. What is worth pinning is that
+		// framing into a non-empty buffer appends rather than overwrites,
+		// because registryDigest reuses one scratch buffer across every
+		// claim.
+		if got := claimKeyFraming([]byte("prefix"), cs[i]); string(got) != "prefix"+string(claimKeyFraming(nil, cs[i])) {
+			t.Fatalf("claim %d: framing into a non-empty buffer did not append", i)
 		}
 		if got, want := cs[i].Episode.framedLen(), len(cs[i].Episode.framed()); got != want {
 			t.Fatalf("claim %d: framedLen says %d, framed() is %d bytes", i, got, want)

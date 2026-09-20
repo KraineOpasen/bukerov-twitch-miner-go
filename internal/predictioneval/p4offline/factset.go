@@ -363,10 +363,14 @@ func (c causeText) Unwrap() error {
 	return c.err
 }
 
-// BuildCommonFactset re-derives the episode's selection from the dataset and
+// BuildCommonFactset reads the episode's selection from a PREPARED dataset and
 // projects the selected opportunity's inputs into a digested, outcome-free
-// factset. It takes the DATASET, not a selection: a selection is an exported
-// value anyone can build, and nothing downstream may rest on its flags.
+// factset. It takes a [PreparedDataset], never an [EvidenceSelection]: a
+// selection is an exported value anyone can build and nothing downstream may
+// rest on its flags, which is why the handle owns one this package derived and
+// hands out no view of it. The derivation happened once, at [PrepareDataset],
+// over whatever dataset the caller chose; an unprepared handle is refused as
+// [ErrSelectionNotPrepared].
 //
 // It can return ErrFactsetInconsistent, which the build path could not return
 // before the value gate existed. The consequence is larger than the value and

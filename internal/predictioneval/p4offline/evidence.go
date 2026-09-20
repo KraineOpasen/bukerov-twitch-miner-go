@@ -2708,9 +2708,18 @@ func PrepareSourceRounds(reg SourceRoundRegistry) (PreparedSourceRounds, error) 
 	// those two statuses. The clause is what makes that an ASSERTION here
 	// rather than a fact a reader has to go and check in another function,
 	// and it is the same clause the linear scan it replaces carried.
+	// AND A REPEATED ROUND NAME KEEPS THE FIRST ENTRY, matching the rule
+	// PrepareDataset's index uses, because two indexes in one package
+	// disagreeing about the same unreachable case is a question a reader has
+	// to answer twice. Neither rule is exactly the linear scan each replaces
+	// -- a scan is a disjunction over the entries and an index is not -- and
+	// neither can be reached: see the paragraph above.
 	canonical := make(map[string]SourceRoundClaim, len(reg.Entries))
 	for _, e := range reg.Entries {
 		if e.Canonical == nil || (e.Status != SourceRoundUnique && e.Status != SourceRoundDeduplicatedIdentical) {
+			continue
+		}
+		if _, seen := canonical[e.EventID]; seen {
 			continue
 		}
 		canonical[e.EventID] = *e.Canonical

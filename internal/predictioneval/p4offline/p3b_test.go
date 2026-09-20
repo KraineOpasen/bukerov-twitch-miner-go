@@ -106,6 +106,20 @@ func mustVerify(t *testing.T, r p4offline.P3bRuleset) p4offline.VerifiedP3bRules
 	return rs
 }
 
+// mustConfigCopy reads a verified ruleset's config or fails the test.
+//
+// ConfigCopy refuses an unverified handle rather than answering a zero config
+// that reads as a real one, so every caller has an error to deal with; a test
+// that means to drive that refusal calls ConfigCopy directly.
+func mustConfigCopy(t *testing.T, rs p4offline.VerifiedP3bRuleset) predictioneval.OrderedRulesConfig {
+	t.Helper()
+	cfg, err := rs.ConfigCopy()
+	if err != nil {
+		t.Fatalf("ConfigCopy: %v", err)
+	}
+	return cfg
+}
+
 func cfgWithRule(id string, comparator predictioneval.OrderedRuleComparator, threshold, rate float64) predictioneval.OrderedRulesConfig {
 	return predictioneval.OrderedRulesConfig{
 		ConfigID: id, HasDefault: true,
@@ -151,7 +165,7 @@ func TestP3bRulesetIsSuppliedVerifiedAndBound(t *testing.T) {
 		Config: cfg, NativeConfigDigest: nativeConfigDigest(t, cfg)}
 	rs := mustVerify(t, good)
 	if rs.RulesetID != "p4-synthetic-ruleset-a" || rs.RawSHA256 != wantHash || rs.Rules() != 1 ||
-		rs.NativeConfigDigest != good.NativeConfigDigest || rs.ConfigCopy().ConfigID != cfg.ConfigID {
+		rs.NativeConfigDigest != good.NativeConfigDigest || mustConfigCopy(t, rs).ConfigID != cfg.ConfigID {
 		t.Fatalf("%+v", rs)
 	}
 
@@ -245,7 +259,7 @@ func TestP3bRulesetIsSuppliedVerifiedAndBound(t *testing.T) {
 		// that the seal is a seal -- that the copy a caller can read is
 		// detached both ways -- and that is TestTheSealedRulesetCannotBeRetuned
 		// below, which drives the paths this pair of pokes used to stand for.
-		if before := len(rs.ConfigCopy().Detailed); before == 0 {
+		if before := len(mustConfigCopy(t, rs).Detailed); before == 0 {
 			t.Fatal("the fixture must carry a detailed rule for the seal rows to mean anything")
 		}
 		var decoded p4offline.VerifiedP3bRuleset
@@ -4683,12 +4697,12 @@ func TestTheSealedRulesetCannotBeRetuned(t *testing.T) {
 	if err != nil {
 		t.Fatalf("the control must evaluate: %v", err)
 	}
-	if len(rs.ConfigCopy().Detailed) == 0 {
+	if len(mustConfigCopy(t, rs).Detailed) == 0 {
 		t.Fatal("the fixture must carry a detailed rule, or nothing below is retuning anything")
 	}
 
 	t.Run("mutating the copy a caller reads changes nothing", func(t *testing.T) {
-		got := rs.ConfigCopy()
+		got := mustConfigCopy(t, rs)
 		got.Detailed[0].RawAttemptRatePercent = 0
 		got.Detailed[0].RawThresholdPercent = 500
 		got.Default.RawMinPercent = 99
@@ -4701,20 +4715,20 @@ func TestTheSealedRulesetCannotBeRetuned(t *testing.T) {
 			t.Fatalf("mutating the returned copy changed the evaluated config: %s -> %s",
 				base.Evaluation.ConfigDigest, after.Evaluation.ConfigDigest)
 		}
-		if rs.ConfigCopy().ConfigID != cfg.ConfigID {
-			t.Fatalf("the seal was reached through a returned copy: config id is now %q", rs.ConfigCopy().ConfigID)
+		if mustConfigCopy(t, rs).ConfigID != cfg.ConfigID {
+			t.Fatalf("the seal was reached through a returned copy: config id is now %q", mustConfigCopy(t, rs).ConfigID)
 		}
 	})
 
 	t.Run("two copies share no backing array", func(t *testing.T) {
-		a, b := rs.ConfigCopy(), rs.ConfigCopy()
+		a, b := mustConfigCopy(t, rs), mustConfigCopy(t, rs)
 		a.Detailed[0].RawAttemptRatePercent = 1
 		b.Detailed[0].RawAttemptRatePercent = 2
 		if a.Detailed[0].RawAttemptRatePercent == b.Detailed[0].RawAttemptRatePercent {
 			t.Fatal("two copies alias one another")
 		}
-		if rs.ConfigCopy().Detailed[0].RawAttemptRatePercent == 1 ||
-			rs.ConfigCopy().Detailed[0].RawAttemptRatePercent == 2 {
+		if mustConfigCopy(t, rs).Detailed[0].RawAttemptRatePercent == 1 ||
+			mustConfigCopy(t, rs).Detailed[0].RawAttemptRatePercent == 2 {
 			t.Fatal("a copy aliases the sealed config")
 		}
 	})
@@ -4782,6 +4796,12 @@ func TestTheSealedRulesetCannotBeRetuned(t *testing.T) {
 // assert that it does. Sealing the identity fields too would remove the second
 // share and only that one; doc.go records why that was not taken.
 //
+// AND THE METRIC IS PER IDENTIFIER BYTE, which bounds what it can see: a
+// re-proof proportional to the RULE COUNT rather than to the ConfigID would
+// not move these numbers at all, because the fixture holds the rule list
+// fixed at one rule while it grows the identifier. What the reported defect
+// was is identifier-proportional, and that is what this pins.
+//
 // SO THE INVARIANT IS A PASS COUNT, and it is a pass count because a ratio was
 // tried first and a mutant walked through it. The earlier form of this test
 // asserted that P4's work must not grow as a MULTIPLE of the native floor;
@@ -4822,7 +4842,7 @@ func TestASealedRulesetIsNotReprovedOnEveryUse(t *testing.T) {
 		// The copy is taken OUTSIDE the measured loop on purpose: ConfigCopy is
 		// P4's own allocation, and counting it against the native floor would
 		// make the floor look higher and P4's share smaller than they are.
-		sealed := rs.ConfigCopy()
+		sealed := mustConfigCopy(t, rs)
 		native = measure(func() {
 			for i := 0; i < reps; i++ {
 				_ = predictioneval.EvaluateOrderedRules(proj.Stream, sealed, trace)

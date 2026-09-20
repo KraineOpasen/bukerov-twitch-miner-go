@@ -634,6 +634,15 @@
 //     TestTheSealedRulesetCannotBeRetuned drives the alias paths -- the
 //     returned copy, two copies against each other, and the caller's own config
 //     mutated after verification.
+//     ConfigCopy REFUSES AN UNVERIFIED HANDLE rather than answering zero, and
+//     it is the one accessor here that has to: every field of
+//     OrderedRulesConfig has a legitimate zero -- the type's own doc says an
+//     omitted default decodes to a USABLE [0,0] rule -- so a zero, forged or
+//     deserialized handle would otherwise hand back a structurally complete,
+//     fully-resolved-LOOKING config with nothing to say nothing verified it. A
+//     Q3 lane named it. Rules, Digest, Rounds and Episodes answer zero on an
+//     unverified value and are deliberately left doing so: an empty count and
+//     an empty digest read as empty, where an all-zero config reads as real.
 //     WHAT IT DID NOT BUY IS THREE QUARTERS OF THE COST, and saying so needs
 //     one fact first: VerifyP3bRuleset REQUIRES RulesetID to equal the config's
 //     ConfigID, so the ruleset's name and the config's are one caller-supplied
@@ -836,6 +845,24 @@
 //     THE ONE-BYTE REFUSAL GOT DEARER, about 840 bytes at the placement seam
 //     and 260 at the payout seam, and it is recorded rather than absorbed: the
 //     extent sentence is work a refusal naming its case in full never did.
+//     AND THE WITHHOLDING CLOSED ITS OWN NEIGHBOUR ONE SEAM DOWNSTREAM, which
+//     two independent Q3 lanes found before this head was published -- the
+//     first time this branch's recurring failure was caught by a review rather
+//     than by a mutant, and its EIGHTH occurrence. A refused payout names no
+//     case, so AssessDenominatorMembership's case-binding gate fired for every
+//     one of them and reported PAYOUT_BINDING_MISMATCH -- true, and the same
+//     string a genuine cross-case splice earns, and the same string the
+//     witness gate below it earns for a spliced decision. Three
+//     distinguishable faults arriving as one is the regression selectionRan
+//     was repaired for, one seam over. namedPolicy exists precisely to keep a
+//     refusal's category where it was at the placement-to-payout seam, and
+//     that reasoning was not carried the next seam along.
+//     MembershipReasonPayoutRefusedDecision now names it above the binding
+//     gate, on an exact discriminator rather than a heuristic: decisionRefusal
+//     refuses an empty FactsetDigest, so a DERIVED payout carrying none is
+//     exactly one this package refused. WHY it was refused stays on the
+//     artifact's own Reasons, in the refusal's own category, which is finer
+//     than the two verdicts the gate displaces rather than coarser.
 //     THE PART THAT WAS CALLED WEAKER THAN THE REST IS THE PART THAT SURVIVED,
 //     and not as the piecemeal repair the earlier reading of it proposed.
 //     Policy is a two-value enum whose every other value decisionRefusal's

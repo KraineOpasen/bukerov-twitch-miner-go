@@ -868,8 +868,16 @@ func TestDenominatorVerdictSeparatesAnAbortFromAnExclusion(t *testing.T) {
 // the registry n claims, but the case judged is the same one at every width,
 // so what moves between the two readings is the run's size and not the case's.
 //
-// WHAT IT DOES NOT PIN, named here rather than left to be discovered: this
-// measures ALLOCATION, so it sees a re-derivation and not a re-SCAN. Replacing
+// WHAT IT DOES NOT PIN, named here rather than left to be discovered.
+//
+// IT SAYS NOTHING ABOUT THE PREPARES THEMSELVES. A run of N is one prepare
+// plus N verdicts, and this measures only the verdict, so a prepare that was
+// quadratic in the dataset or the registry would leave the run quadratic with
+// this green. The prepares run once and are linear by inspection --
+// SelectEpisodes over the records, one pass over the entries -- but that is
+// an argument, not this measurement.
+//
+// AND IT measures ALLOCATION, so it sees a re-derivation and not a re-SCAN. Replacing
 // either prepared index with the linear scan it stands in for allocates
 // nothing -- a comparison of episode identities or of a claim to an entry's
 // canonical -- so the run would go back to O(N^2) comparisons with this test
@@ -969,12 +977,111 @@ func TestAPreparedRunIsLinearInTheCasesItJudges(t *testing.T) {
 	const narrow, wide = 32, 256
 	small, large := verdictAt(t, narrow), verdictAt(t, wide)
 	t.Logf("one verdict: %d bytes over %d cases, %d over %d", small, narrow, large, wide)
-	// EIGHT TIMES THE RUN, AND THE VERDICT MUST NOT NOTICE. The ceiling is
-	// generous on purpose: what it has to separate is flat from proportional,
-	// and a verdict that re-selected the dataset or re-verified the registry
-	// would read multiples of this, not fractions above it.
-	if large > small*2 {
+	// EIGHT TIMES THE RUN, AND THE VERDICT MUST NOT NOTICE.
+	//
+	// AN EIGHTH, NOT A DOUBLING, and the difference is the whole calibration.
+	// A Q3 lane measured what a doubling admits: with 192 cases between the
+	// two widths it passes anything under about 200 bytes PER CASE, which is
+	// a genuinely proportional regression sailing through a test written to
+	// refuse one. The observed spread between the two readings is TWO BYTES,
+	// so an eighth still sits some thousands of times above the noise while
+	// catching about 19 bytes per case. The regression this exists for --
+	// restoring the per-verdict registry verification -- reads about 6.3 KB
+	// per claim and fails either way; the eighth is for the cheap ones.
+	if large > small+small/8 {
 		t.Fatalf("one verdict cost %d bytes over %d cases and %d over %d: the run is still being re-derived per case",
 			small, narrow, large, wide)
 	}
+}
+
+// TestARefusedDecisionsPayoutIsNamedAsThatAndNotAsAnotherCase pins the seam
+// that a Q3 lane caught BEFORE publication — twice, independently.
+//
+// WHAT WENT WRONG AND WHY IT IS THE PACKAGE'S OWN RECURRING SHAPE.
+// DerivePayout withholds a refused decision's identity on purpose, so the
+// artifact carries no factset digest. AssessDenominatorMembership's binding
+// gate compares that digest to the case's, so every refused decision's payout
+// arrived here as PAYOUT_BINDING_MISMATCH — "this evidence is about another
+// case". True, and the wrong diagnosis: it is the same string a genuine
+// cross-case splice earns and the same string the witness gate below earns
+// for a spliced decision, so three distinguishable faults collapsed into one.
+//
+// `namedPolicy` exists for EXACTLY this reason one seam earlier — to keep a
+// refusal's category where it was at the placement-to-payout comparison — and
+// that reasoning was not carried the next seam along. The entrance that was
+// named got closed and its neighbour stayed open, which is this branch's
+// oldest failure and its eighth occurrence.
+//
+// WHAT IS NOT LOST, and is the reason the repair is a new reason rather than
+// a restored echo: WHY the decision was refused is on the payout artifact's
+// own Reasons, in the refusal's own category. That is finer than the two
+// membership verdicts it replaces, not coarser — this test drives two refusal
+// shapes and reads both categories off the artifact.
+func TestARefusedDecisionsPayoutIsNamedAsThatAndNotAsAnotherCase(t *testing.T) {
+	ds, fs, fp, p2 := factualCase(t, coherentCall)
+	src := preparedDS(ds)
+	p2dec := decisionOf(t, p2, fs)
+	rs := mustVerify(t, rulesetFrom(t, cfgWithRule("one", predictioneval.ComparatorGe, 50, 100)))
+	p3b, err := p4offline.EvaluateP3bCase(fs, rs, synthCoords(fs, 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	p3bdec := decisionOf(t, p3b, fs)
+	res := winnerArtifact("o1")
+	proven := p4offline.DerivePlacement(p2dec, fp, validProof(fp))
+	reg := prepared(t, registryOf(ds, fs))
+
+	spliced := p2dec
+	spliced.Derivation = "edited" // witness broken: DECISION_NOT_DERIVED
+	negative := p2dec
+	negative.Stake = p4offline.KnownInt64(-1) // refused one clause earlier: STAKE_NEGATIVE
+
+	for _, tc := range []struct {
+		name, category string
+		decision       p4offline.PolicyDecision
+	}{
+		{"a decision whose witness was broken", "DECISION_NOT_DERIVED", spliced},
+		{"a decision refused before the witness clause", "STAKE_NEGATIVE", negative},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pe := p4offline.DerivePayout(tc.decision, proven, res, nil)
+			if !containsString(pe.Reasons, tc.category) {
+				t.Fatalf("fixture: the payout must carry its own refusal category: %v", pe.Reasons)
+			}
+			if pe.FactsetDigest != "" {
+				t.Fatalf("fixture: a refused payout names no case: %q", pe.FactsetDigest)
+			}
+			m := p4offline.AssessDenominatorMembership(src, reg, fs, tc.decision, p3bdec, res, pe)
+			if m.Primary || m.PlacedBet {
+				t.Fatalf("a refused decision is no member of anything: %+v", m.Reasons)
+			}
+			if !containsString(m.Reasons, "PAYOUT_REFUSED_ITS_DECISION") {
+				t.Fatalf("the verdict must name what the payout actually is: %v", m.Reasons)
+			}
+			if containsString(m.Reasons, "PAYOUT_BINDING_MISMATCH") {
+				t.Fatalf("a refused payout is not evidence about another case: %v", m.Reasons)
+			}
+			if m.Derivation != "" {
+				t.Fatalf("a refused decision's derivation is not published: %q", m.Derivation)
+			}
+		})
+	}
+
+	// AND THE THREE CATEGORIES IT USED TO DISPLACE ARE STILL REACHABLE, each
+	// for its own input, which is what makes the new value a SPLIT rather than
+	// a rename. Their assertions live where those inputs are built:
+	// PAYOUT_BINDING_MISMATCH at the two rows above line 500,
+	// PAYOUT_DECISION_MISMATCH at the two above line 415, and
+	// PAYOUT_RESOLUTION_UNBOUND at the foreign-placement row above line 533.
+	// This row only proves none of them is this one.
+	t.Run("an accepted decision's payout is judged on its merits", func(t *testing.T) {
+		win := p4offline.DerivePayout(p2dec, proven, res, linkedRecord(proven, p4offline.KnownInt64(120), p4offline.UnknownInt64("n/a")))
+		m := p4offline.AssessDenominatorMembership(src, reg, fs, p2dec, p3bdec, res, win)
+		if !m.Primary || !m.PlacedBet || len(m.Reasons) != 0 {
+			t.Fatalf("the control must count: %+v", m)
+		}
+		if m.Derivation != p2dec.Derivation {
+			t.Fatalf("an accepted decision's derivation is still published: %q", m.Derivation)
+		}
+	})
 }

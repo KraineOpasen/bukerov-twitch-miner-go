@@ -120,8 +120,22 @@ func (r VerifiedP3bRuleset) Rules() int { return len(r.config.Detailed) }
 // ConfigCopy returns the verified config as a DETACHED copy, so reading it
 // cannot reach the sealed value. Two calls share nothing, and neither shares
 // anything with the ruleset.
-func (r VerifiedP3bRuleset) ConfigCopy() predictioneval.OrderedRulesConfig {
-	return detachConfig(r.config)
+//
+// IT REFUSES AN UNVERIFIED HANDLE INSTEAD OF ANSWERING ZERO, and it is the one
+// accessor on this type that has to. Every field of OrderedRulesConfig has a
+// legitimate zero -- the type's own doc says an omitted default "decodes to a
+// USABLE [0,0] rule" -- so a zero, forged or deserialized handle would hand a
+// caller a structurally complete, fully-resolved-looking config with no signal
+// that nothing verified it. A run manifest recording that would record a
+// fabricated configuration. Rules and the prepared handles' counters answer
+// zero on an unverified value too, and that is left alone deliberately: an
+// empty count and an empty digest read as empty, where an all-zero config
+// reads as real.
+func (r VerifiedP3bRuleset) ConfigCopy() (predictioneval.OrderedRulesConfig, error) {
+	if err := r.check(); err != nil {
+		return predictioneval.OrderedRulesConfig{}, err
+	}
+	return detachConfig(r.config), nil
 }
 
 // check refuses a value that VerifyP3bRuleset did not produce as it is: the
@@ -823,10 +837,22 @@ func configsEqual(a, b predictioneval.OrderedRulesConfig) bool {
 		math.Float64bits(a.Default.Points.RawPercent) == math.Float64bits(b.Default.Points.RawPercent)
 }
 
+// detachConfig copies a config so that nothing of the original's backing array
+// survives in it. OrderedRulesConfig carries exactly one reference field --
+// Detailed, whose element type and its two nested structs are all value types
+// -- so the one slice copy is the whole of the detachment.
+//
+// AN EMPTY-BUT-NON-NIL Detailed STAYS EMPTY-BUT-NON-NIL. append to a nil slice
+// returns nil for a zero-length source, which would have made ConfigCopy's
+// output differ from its input by a distinction no verdict here reads --
+// nativeConfigDigest frames only the length, Rules counts it, the evaluator
+// ranges over it -- but which a caller comparing the copy to its original
+// would see. Copying into a made slice costs nothing and removes the surprise.
 func detachConfig(c predictioneval.OrderedRulesConfig) predictioneval.OrderedRulesConfig {
 	out := c
 	if c.Detailed != nil {
-		out.Detailed = append([]predictioneval.OrderedRule(nil), c.Detailed...)
+		out.Detailed = make([]predictioneval.OrderedRule, len(c.Detailed))
+		copy(out.Detailed, c.Detailed)
 	}
 	return out
 }
@@ -1038,25 +1064,29 @@ func EvaluateP3bWithTrace(fs CommonFactset, rs VerifiedP3bRuleset,
 	coords EntropyCoordinates, trace predictioneval.SuppliedDrawTrace) (P3bCaseResult, error) {
 	// THE PROTOCOL'S DOMAIN IS CHECKED FIRST, so an out-of-protocol coordinate
 	// is refused as exactly that on every path -- and refused for the price of
-	// the integer that decides it. rs.check below runs a full native
-	// evaluation over the config to re-derive its digest, which is
-	// proportional to a caller-supplied identifier and is DISCARDED on a path
-	// that refuses; a security review lane measured 2,113,748 B/op here for a
-	// refusal settled by one comparison against TrajectoryCount. The order was
-	// the other way round.
+	// the integer that decides it. THE MAGNITUDE BELOW THIS GATE HAS CHANGED
+	// AND THE REASON FOR IT HAS NOT. rs.check used to run a full native
+	// evaluation over the config through the fixed probe, and a security
+	// review lane measured 2,113,748 B/op here for a refusal settled by one
+	// comparison against TrajectoryCount. The config is sealed now and check
+	// no longer probes -- but it still FRAMES the identifier for the witness,
+	// and VerifyP3bRuleset requires RulesetID to equal the config's ConfigID,
+	// so what is below this gate is about a megabyte per megabyte of
+	// identifier rather than two. Still work a refusal decided by one integer
+	// must not pay for. The order was the other way round.
 	if err := checkEntropyCoordinates(coords); err != nil {
 		return P3bCaseResult{}, err
 	}
-	// AND THE FACTSET'S CONSTANT-SIZE ADMISSION ABOVE THE PROBE, for the same
-	// reason one line up. ProjectP3bSingleCandidate below verifies the factset
-	// in full, but its O(1) gates -- contract, protocol, the digest's shape --
-	// can refuse without the probe's product, and a security review lane
-	// measured what the old order cost: a factset refused by its
-	// ContractVersion alone allocated 2,113,920 B/op with a 1 MiB config
-	// identifier, against 9,152 with a one-byte one. The full projection stays
-	// BELOW the probe, so a valid factset beside an unverified ruleset does not
-	// pay for a projection either. Neither order alone gets both; this split
-	// does.
+	// AND THE FACTSET'S CONSTANT-SIZE ADMISSION ABOVE THE RULESET CHECK, for
+	// the same reason one line up. ProjectP3bSingleCandidate below verifies the
+	// factset in full, but its O(1) gates -- contract, protocol, the digest's
+	// shape -- can refuse without touching the ruleset at all, and a security
+	// review lane measured what the old order cost when check still probed: a
+	// factset refused by its ContractVersion alone allocated 2,113,920 B/op
+	// with a 1 MiB config identifier, against 9,152 with a one-byte one. The
+	// full projection stays BELOW the check, so a valid factset beside an
+	// unverified ruleset does not pay for a projection either. Neither order
+	// alone gets both; this split does.
 	if err := factsetAdmissionFault(fs); err != nil {
 		return P3bCaseResult{}, err
 	}
@@ -1214,13 +1244,15 @@ func evaluateProjected(fs CommonFactset, proj P3bProjection, rs VerifiedP3bRules
 // one verified candidate can consume — so exhaustion cannot occur by
 // construction and every word is reproducible from the coordinates alone.
 func EvaluateP3bCase(fs CommonFactset, rs VerifiedP3bRuleset, coords EntropyCoordinates) (P3bCaseResult, error) {
-	// The coordinate gate above the ruleset probe, for the reason stated at
-	// the sibling above: the probe's product is thrown away on this path.
+	// The coordinate gate above the ruleset check, for the reason stated at
+	// the sibling above: the check's product is thrown away on this path, and
+	// framing the identifier for its witness is proportional to what the
+	// caller supplied.
 	if err := checkEntropyCoordinates(coords); err != nil {
 		return P3bCaseResult{}, err
 	}
-	// The factset's constant-size admission above the probe, for the reason
-	// stated at the sibling above.
+	// The factset's constant-size admission above the ruleset check, for the
+	// reason stated at the sibling above.
 	if err := factsetAdmissionFault(fs); err != nil {
 		return P3bCaseResult{}, err
 	}
