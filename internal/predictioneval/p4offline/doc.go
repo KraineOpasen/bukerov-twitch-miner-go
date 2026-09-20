@@ -977,6 +977,86 @@
 //     will hide. This branch's recurring failure now has ELEVEN occurrences,
 //     every one a repair that shut the entrance it was shown and left the
 //     neighbouring one open; the last two were caught before publication.
+//   - THE REDUCTION BOUNDED THE BUCKET AND NOT THE NUMBER OF BUCKETS, which a
+//     review lane found on the published head and which is the TWELFTH
+//     occurrence of this branch's recurring failure -- the second one found
+//     inside the repair that closed the eleventh.
+//     WHAT WAS LEFT OPEN. One episode reads one bucket per distinct observation
+//     id its first opportunity carries, and nothing limits that count. A
+//     supplier that puts each of N ids on two refused rows with DIFFERENT
+//     reasons keeps both positions in every bucket -- correctly; they are
+//     different reasons -- so exclusionsFor gathered 2N integers and SORTED
+//     them to emit two strings. Measured on this tree, 50 calls: 11,875,552 B
+//     at N = 2,048 and 23,889,648 at 4,096, about 116 bytes per identifier for
+//     a two-string answer, with an O(N log N) sort no allocation ratio sees.
+//     THE AXIS WAS SEEN AND DISMISSED, which is the part worth recording. The
+//     reasoning was that work proportional to an episode's own identifier list
+//     is linear in that episode's input and so not an amplification. True of
+//     the TRAVERSAL, false of the sort and the gathering: the answer is bounded
+//     by the vocabulary, so anything growing with N to produce it is work the
+//     answer does not need.
+//     WHAT CLOSED IT is a merge that keeps the smallest position PER REASON,
+//     so the running state is bounded by the vocabulary rather than by the
+//     episode and the final ordering sorts at most fourteen entries. The
+//     duplicate-id set went with it -- merging by minimum is idempotent, so a
+//     repeated id costs one extra bucket traversal and the per-call state no
+//     longer grows with the caller at all. 50 calls now read 3,600 B at 2,048
+//     ids and 3,616 at 4,096: FLAT, where the previous test could only assert
+//     linear. TestAnEpisodesOwnIdentifierCountDoesNotEnterTheAnswersCost.
+//     AND THE ORACLE WAS WIDENED RATHER THAN LEFT COMPARING THE NEW CODE TO
+//     ITSELF: TestTheReducedPostingListsAnswerAsTheFullOnesDid now runs the
+//     ORIGINAL implementation on the UNREDUCED index against the current one on
+//     the reduced index, so one comparison spans both repairs, with the merge
+//     isolated on one index beside it.
+//   - A LOCAL ERROR CLASS WAS ECHOED INTO A FAIL-CLOSED PLACEMENT AND FRAMED
+//     AGAIN, reported by the same lane, reproduced, and CLOSED.
+//     placementStatusCoherent admits ANY class other than NONE whenever the
+//     reason code is not OK, so a supplied dataset can carry an otherwise
+//     coherent failed CALL_RETURNED whose class is arbitrarily wide. The arm
+//     copied that class into Reasons and placementEvidenceWitness framed the
+//     copy, so the artifact both returned attacker-sized diagnostic text and
+//     paid for it.
+//     THE LANE'S MECHANISM WAS ONE FRAMING OF TWO, and the correction changes
+//     what the repair can promise. The class is a field of a GENUINE
+//     FactualPlacement, so factualPlacementWitness frames it to answer whether
+//     that placement is derived -- work proportional to an artifact the dataset
+//     really carries, which is not amplification and cannot be removed without
+//     weakening the witness. Measured: 3,174,320 B/op at a 1 MiB class before,
+//     3.03x the supplied text; 1,061,552 after, 1.012x. What went is every
+//     framing BEYOND the honest one, which is why the test asserts ONE framing
+//     against a one-byte control rather than a constant.
+//     THE REPORTING LOSS IS REAL. There is no vocabulary to recognize the class
+//     against -- this repository names exactly one class constant, NONE, which
+//     this arm cannot see -- so unlike a policy name it cannot be
+//     carried-when-recognized. It is withheld outright: a caller now learns
+//     that a local error was recorded and how wide its class was, not which
+//     class it was. The status already carries what the verdict turns on.
+//   - AN EDITED RESULT PAID ITS OWN EDIT'S WIDTH TO BE REFUSED, reported by the
+//     same lane at both result types, reproduced, and CLOSED.
+//     derived() short-circuits on a missing witness, which protects a hand-BUILT
+//     result: a caller cannot set the unexported field. It did not protect a
+//     hand-EDITED one. A caller that COPIES a genuine result keeps its witness,
+//     widens one framed field and leaves the factset digest and action binding
+//     intact; the binding gates pass, and computing the witness materializes the
+//     whole edit before one hash comparison refuses it. Measured: a 1 MiB edit
+//     to Trace.RunID cost 1,062,368 B/op against 8,544 at one byte.
+//     A PER-FIELD GATE WAS THE WRONG SHAPE, and rejecting it is this round's
+//     own lesson applied before a lane had to apply it. Checking the fields the
+//     lane named -- the derivable run identity, the fixed-shape digests --
+//     closes the entrances named and leaves every other framed field open. What
+//     is checked instead is the TOTAL FRAMED WIDTH, recorded beside the witness
+//     at mint: any length-changing edit is refused in O(number of fields), and
+//     an edit preserving every length pays exactly the honest cost, which is the
+//     floor -- telling two values of equal width apart IS the hash's job.
+//     THE WIDTH CANNOT DRIFT FROM THE WITNESS because it is not a mirror: the
+//     canonical framer has a LENGTH-ONLY mode and the width is the same framing
+//     function run with bytes switched off. A hand-written mirror of a
+//     thirty-five-field framing is a second place a future field can be
+//     forgotten, and this package has already paid for one of those.
+//     TestTheRecordedFramedWidthIsTheWitnessOwn drives both modes over 400
+//     randomized results at both types and over strHexOf, which no result
+//     framing exercises. MEASURED AFTER: 4,048 B/op at one byte and 4,048 at
+//     1 MiB, at BOTH seams -- identical to the byte.
 //
 // A SECOND CLASS WAS HERE FOR ONE ROUND AND IS NOW REPAIRED, and the way it
 // was repaired is worth recording rather than quietly deleting, because the

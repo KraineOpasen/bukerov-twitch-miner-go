@@ -867,3 +867,107 @@ func payoutExtents(p p4offline.PayoutEvidence) string {
 		len(p.FactsetDigest), len(p.EventID), len(p.Derivation), len(p.ResolutionFactsDigest),
 		p.Attempt.CollectorEpoch, p.Attempt.AttemptID, len(p.Reasons))
 }
+
+// TestALocalErrorClassIsNamedByItsExtentAndNotEchoed is the receipt for the
+// local-error arm, reported by a review lane on the published head.
+//
+// THE DEFECT. placementStatusCoherent admits ANY error class other than NONE
+// whenever the reason code is not OK, so a supplied dataset can carry an
+// otherwise coherent failed CALL_RETURNED whose class is arbitrarily wide. The
+// arm copied that class into Reasons, and placementEvidenceWitness then framed
+// the copy -- so a fail-closed placement returned attacker-sized diagnostic text
+// and paid payload-sized allocations to produce it.
+//
+// THE REPAIR IS THE RULE THE REFUSED-DECISION SEAMS ALREADY FOLLOW, applied
+// without an exception: a refusal names the fault and the EXTENT, never the
+// text. There is no vocabulary to recognize the class against -- this
+// repository names exactly one class constant, NONE, which this arm cannot see
+// -- so unlike a policy name the class cannot be carried-when-recognized. It is
+// withheld outright, and the reporting loss is recorded rather than absorbed.
+//
+// WHAT IS ASSERTED IS A ONE-BYTE CONTROL, not a budget, for the reason
+// obligation D's own test records: a budget is satisfied by shrinking a
+// multiple, where a control measured on the same fixture is not.
+func TestALocalErrorClassIsNamedByItsExtentAndNotEchoed(t *testing.T) {
+	failedCall := func(class string) func(*synth, *predictioneval.SourceDecisionEnvelope) {
+		return func(s *synth, env *predictioneval.SourceDecisionEnvelope) {
+			s.placement("r1", "e1", 1, predictioneval.PhaseCallStarted,
+				*env.FinalAmount, *env.ChoiceIndex, "OK", "NONE")
+			// Coherent BY THE PRODUCER'S OWN RULE: the reason code is not OK
+			// and the class is not NONE, so the pair agrees and the record is
+			// admitted. Only the class's WIDTH is the caller's to choose.
+			s.placement("r1", "e1", 1, predictioneval.PhaseCallReturned,
+				*env.FinalAmount, *env.ChoiceIndex, "LOCAL_FAILURE", class)
+		}
+	}
+
+	derive := func(t *testing.T, class string) (p4offline.PlacementEvidence, uint64) {
+		t.Helper()
+		_, fs, fp, p2 := factualCase(t, failedCall(class))
+		if fp.LocalReasonOK {
+			t.Fatal("the fixture must reach the local-error arm")
+		}
+		if fp.ErrorClass != class {
+			t.Fatalf("the factual placement must carry the supplied class: got %d bytes, want %d",
+				len(fp.ErrorClass), len(class))
+		}
+		dec := decisionOf(t, p2, fs)
+		runtime.GC()
+		var a, b runtime.MemStats
+		runtime.ReadMemStats(&a)
+		pl := p4offline.DerivePlacement(dec, fp, nil)
+		runtime.ReadMemStats(&b)
+		return pl, b.TotalAlloc - a.TotalAlloc
+	}
+
+	const wide = 1 << 20
+	narrow, narrowCost := derive(t, "X")
+	huge, hugeCost := derive(t, strings.Repeat("X", wide))
+	t.Logf("one byte -> %d B/op; %d bytes -> %d B/op", narrowCost, wide, hugeCost)
+
+	// THE ASSERTION IS ONE FRAMING, NOT A CONSTANT, and the difference is the
+	// whole of what this seam can honestly promise. The class is a field of a
+	// GENUINE FactualPlacement, so factualPlacementWitness frames it to answer
+	// whether that placement is derived -- work proportional to an artifact the
+	// dataset really carries, which is not amplification and cannot be removed
+	// without weakening the witness. What the repair removes is every FURTHER
+	// framing: the concatenation into Reasons and placementEvidenceWitness
+	// framing that copy. Measured on this tree: 3,174,320 B/op before, which is
+	// 3.03x the supplied class, against 1,061,552 after, which is 1.012x.
+	if over := float64(hugeCost-narrowCost) / float64(wide); over > 1.5 {
+		t.Fatalf("a %d-byte error class cost %.2fx its own width above the one-byte control (%d against %d B/op): it is framed more than once",
+			wide, over, hugeCost, narrowCost)
+	}
+
+	// THE ARTIFACT MUST CARRY THE EXTENT AND NOT ONE BYTE OF THE CLASS. The
+	// second half is checked by searching every reason for the class's own
+	// text, because a reason that merely LOOKS like an extent while another
+	// carries the bytes would satisfy the first half alone.
+	for _, c := range []struct {
+		name string
+		pl   p4offline.PlacementEvidence
+		want string
+	}{
+		{"one byte", narrow, p4offline.PlacementReasonLocalErrorClassWithheldPrefix + "1 bytes"},
+		{"1 MiB", huge, p4offline.PlacementReasonLocalErrorClassWithheldPrefix + "1048576 bytes"},
+	} {
+		if !containsString(c.pl.Reasons, c.want) {
+			t.Fatalf("%s: the artifact must name the class's extent, got %v", c.name, c.pl.Reasons)
+		}
+		for _, r := range c.pl.Reasons {
+			if strings.Contains(r, strings.Repeat("X", 2)) {
+				t.Fatalf("%s: a reason carries the class's own text: %d bytes", c.name, len(r))
+			}
+		}
+		if c.pl.Status != p4offline.PlacementLocalErrorPlatformUnknown {
+			t.Fatalf("%s: the verdict must not move, got %v", c.name, c.pl.Status)
+		}
+	}
+
+	// AND THE WITNESS IS UNCHANGED BY THE WIDTH, which is the half the reason
+	// text alone cannot show: the witness frames Reasons, so a class echoed
+	// anywhere would make these two differ.
+	if narrow.Status != huge.Status {
+		t.Fatalf("the two widths reached different arms: %v against %v", narrow.Status, huge.Status)
+	}
+}

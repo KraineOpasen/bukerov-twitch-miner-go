@@ -1728,6 +1728,35 @@ func buildP2ExclusionIndexBeforeTheReduction(excluded []predictioneval.Exclusion
 	return ix
 }
 
+// exclusionsForBeforeTheMerge is the implementation the bounded merge replaced,
+// copied verbatim from 65e9249. It is the oracle, so it must NOT be tidied.
+func (ix *p2ExclusionIndex) exclusionsForBeforeTheMerge(key predictioneval.AttemptKey, obs []string) []string {
+	var hits []int
+	hits = append(hits, ix.byKey[key]...)
+	seenObs := make(map[string]bool, len(obs))
+	for _, id := range obs {
+		if id == "" || seenObs[id] {
+			continue
+		}
+		seenObs[id] = true
+		hits = append(hits, ix.byObs[id]...)
+	}
+	if len(hits) == 0 {
+		return nil
+	}
+	sort.Ints(hits)
+	var out []string
+	prev := -1
+	for _, i := range hits {
+		if i == prev {
+			continue
+		}
+		prev = i
+		out = appendOnce(out, ix.all[i].Reason)
+	}
+	return out
+}
+
 // TestTheReducedPostingListsAnswerAsTheFullOnesDid executes the identity that
 // the repair at buildP2ExclusionIndex rests on, rather than arguing it.
 //
@@ -1828,15 +1857,24 @@ func TestTheReducedPostingListsAnswerAsTheFullOnesDid(t *testing.T) {
 			for i := range obs {
 				obs[i] = queryIDs[rng.Intn(len(queryIDs))]
 			}
-			want := full.exclusionsFor(key, obs)
+			// THE ORACLE SPANS BOTH REPAIRS: the ORIGINAL implementation on the
+			// UNREDUCED index against the current one on the reduced index. A
+			// comparison of the current implementation against itself on two
+			// indexes would have stopped proving anything about the merge.
+			want := full.exclusionsForBeforeTheMerge(key, obs)
 			got := cut.exclusionsFor(key, obs)
 			compared++
 			if len(want) > 0 {
 				nonEmpty++
 			}
 			if !reflect.DeepEqual(got, want) {
-				t.Fatalf("round %d query %d: reduced index answered %v, full index answered %v\nexclusions: %+v\nkey: %+v obs: %v",
+				t.Fatalf("round %d query %d: current answered %v, the pre-repair implementation answered %v\nexclusions: %+v\nkey: %+v obs: %v",
 					round, q, got, want, excluded, key, obs)
+			}
+			// And the merge alone, isolated from the reduction, on one index.
+			if iso := cut.exclusionsForBeforeTheMerge(key, obs); !reflect.DeepEqual(cut.exclusionsFor(key, obs), iso) {
+				t.Fatalf("round %d query %d: the merge alone moved an answer on one index: %v against %v",
+					round, q, cut.exclusionsFor(key, obs), iso)
 			}
 		}
 	}
@@ -1929,4 +1967,197 @@ func TestTheReducedPostingListsAnswerAsTheFullOnesDid(t *testing.T) {
 			t.Fatal("the last-position mutant survived this fixture: the comparison above proves less than it claims")
 		}
 	})
+}
+
+// TestAnEpisodesOwnIdentifierCountDoesNotEnterTheAnswersCost is the receipt for
+// the TWELFTH occurrence of this branch's recurring failure, and the second one
+// found INSIDE the repair that closed the eleventh.
+//
+// THE HOLE THE PREVIOUS REPAIR LEFT. Reducing the posting lists bounded each
+// BUCKET by the producer's exclusion vocabulary. It said nothing about how many
+// buckets ONE EPISODE READS, which is the count of distinct observation ids its
+// first opportunity carries and which no ceiling limits. A supplier that puts
+// each of N ids on two refused rows with DIFFERENT reasons keeps both positions
+// in every bucket -- correctly, they are different reasons -- so the old form
+// gathered 2N integers and sorted them to emit TWO strings.
+//
+// I SAW THIS AXIS AND DISMISSED IT, which is the part worth recording. The
+// reasoning was that work proportional to an episode's own identifier list is
+// linear in that episode's input and therefore not an amplification. That is
+// true of the TRAVERSAL and false of the SORT and the gathering: the answer is
+// bounded by the vocabulary, so anything that grows with N to produce it is
+// work the answer does not need. A review lane named it on the published head.
+//
+// WHAT IS ASSERTED IS FLATNESS, NOT LINEARITY. A linear-in-N assertion is what
+// the previous test made, and this shape satisfies it -- 11,875,552 B at N =
+// 2,048 against 23,889,648 at 4,096 over 50 calls is a clean 2.01x. Only the
+// per-call state being INDEPENDENT of N distinguishes the repair, so that is
+// the assertion: the same number of calls must cost the same at both sizes.
+func TestAnEpisodesOwnIdentifierCountDoesNotEnterTheAnswersCost(t *testing.T) {
+	// Each id carries PAYLOAD_UNDECODABLE early and NO_TERMINAL_FACT late, the
+	// late ones laid out in REVERSE, so no bucket's two positions are adjacent
+	// and a position-gathering form has to sort them.
+	build := func(n int) (*p2ExclusionIndex, []string) {
+		excl := make([]predictioneval.Exclusion, 0, 2*n)
+		ids := make([]string, n)
+		for i := 0; i < n; i++ {
+			ids[i] = "o" + strconv.Itoa(i)
+			excl = append(excl, predictioneval.Exclusion{
+				ObservationID: ids[i], Reason: predictioneval.ExclusionPayloadUndecodable,
+			})
+		}
+		for i := n - 1; i >= 0; i-- {
+			excl = append(excl, predictioneval.Exclusion{
+				ObservationID: ids[i], Reason: predictioneval.ExclusionNoTerminalFact,
+			})
+		}
+		return buildP2ExclusionIndex(excl), ids
+	}
+	const calls = 50
+	measure := func(t *testing.T, n int) uint64 {
+		t.Helper()
+		ix, ids := build(n)
+		var key predictioneval.AttemptKey
+		// The ANSWER is checked on the same fixture that is measured, so a
+		// version that got cheap by answering less would fail here first.
+		want := []string{predictioneval.ExclusionPayloadUndecodable, predictioneval.ExclusionNoTerminalFact}
+		if got := ix.exclusionsFor(key, ids); !reflect.DeepEqual(got, want) {
+			t.Fatalf("n=%d: answered %v, want %v", n, got, want)
+		}
+		runtime.GC()
+		var a, b runtime.MemStats
+		runtime.ReadMemStats(&a)
+		for r := 0; r < calls; r++ {
+			_ = ix.exclusionsFor(key, ids)
+		}
+		runtime.ReadMemStats(&b)
+		return b.TotalAlloc - a.TotalAlloc
+	}
+
+	small := measure(t, 2048)
+	large := measure(t, 4096)
+	t.Logf("%d calls: 2048 ids -> %d bytes; 4096 ids -> %d bytes", calls, small, large)
+	if ratio := float64(large) / float64(small); ratio > 1.25 {
+		t.Fatalf("the same %d calls cost %.2fx more over twice the identifiers: the episode's own list is entering a bounded answer's cost",
+			calls, ratio)
+	}
+
+	// AND THE ORDER IS THE FIXTURE'S, not the vocabulary's. PAYLOAD_UNDECODABLE
+	// occupies position 0 and NO_TERMINAL_FACT's earliest is position n, so a
+	// merge that kept the LAST position per reason, or that ordered by anything
+	// other than the minimum, would swap these two.
+	t.Run("and the two reasons come out in first-position order", func(t *testing.T) {
+		ix, ids := build(8)
+		got := ix.exclusionsFor(predictioneval.AttemptKey{}, ids)
+		want := []string{predictioneval.ExclusionPayloadUndecodable, predictioneval.ExclusionNoTerminalFact}
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("answered %v, want %v", got, want)
+		}
+		// Reversing the query order must not move the answer: the order is the
+		// EXCLUSIONS' own, never the caller's.
+		rev := make([]string, len(ids))
+		for i := range ids {
+			rev[i] = ids[len(ids)-1-i]
+		}
+		if got := ix.exclusionsFor(predictioneval.AttemptKey{}, rev); !reflect.DeepEqual(got, want) {
+			t.Fatalf("a reversed query answered %v, want %v", got, want)
+		}
+	})
+}
+
+// TestTheRecordedFramedWidthIsTheWitnessOwn pins the one claim the derivation
+// preflight rests on: the width a result records is the width its witness
+// actually framed.
+//
+// IT IS INTERNAL BECAUSE THE PROPERTY IS. From outside, a width that disagreed
+// with the framing would present as a genuine result refusing itself -- loud,
+// but only in whatever test happened to mint one. This says it directly, and it
+// says it on values that are NOT genuine, because the question is about the two
+// framing modes and not about derivation: any P3bCaseResult, however built,
+// must frame to the width the length-only pass reports for it.
+//
+// THE MODE IS WHY THERE IS ONE FUNCTION TO PIN. A hand-written mirror of a
+// thirty-five-field framing would need this test to enumerate the fields too,
+// and an enumeration checked against an enumeration is two places to forget the
+// same field. Here both sides run frameP3bResult.
+func TestTheRecordedFramedWidthIsTheWitnessOwn(t *testing.T) {
+	rng := rand.New(rand.NewSource(20260920))
+	text := func() string {
+		n := rng.Intn(40)
+		b := make([]byte, n)
+		for i := range b {
+			// Multi-byte runes included on purpose: the framing counts BYTES,
+			// and a width computed over runes would pass an ASCII-only fixture.
+			b[i] = byte("ab\xc3\xa9\x00 z"[rng.Intn(7)])
+		}
+		return string(b)
+	}
+	for round := 0; round < 400; round++ {
+		p3b := P3bCaseResult{
+			Policy: text(), FactsetDigest: text(), RulesetID: text(),
+			RulesetRawSHA256: text(), NativeConfigDigest: text(), ProjectionRefusal: text(),
+			Trace: EntropyTraceBinding{
+				Coordinates: EntropyCoordinates{
+					DatasetID: text(), DatasetVersion: text(),
+					CommonFactsetDigest: text(), PairedOpportunityID: text(),
+					Trajectory: uint32(rng.Intn(1 << 20)),
+				},
+				RunID: text(), WordsSupplied: rng.Intn(1 << 20),
+				WordsConsumed: rng.Intn(1 << 20), EntropyDigest: text(),
+			},
+			Projection: P3bProjection{
+				Mode: text(), FactsetDigest: text(), EventID: text(),
+				CutoffPosition: int64(rng.Intn(1 << 30)), CandidateIdentity: text(),
+				OutcomeCount: rng.Intn(1000),
+			},
+			Choice: PolicyChoice{Present: rng.Intn(2) == 0, Index: rng.Intn(8), OutcomeID: text()},
+			Stake:  Int64Fact{Presence: PresenceKnown, Value: int64(rng.Intn(1 << 30)), Reason: text()},
+		}
+		p3b.Projection.Stream.SelectionDigest = text()
+		p3b.Evaluation.Reason = text()
+		p3b.Evaluation.StreamDigest = text()
+		p3b.Evaluation.ConfigDigest = text()
+		p3b.Evaluation.EntropyDigest = text()
+		p3b.Evaluation.ConsumedInputDigest = text()
+		p3b.Action = ActionMapping{MapVersion: text(), Policy: text(), NativeAction: text(),
+			Class: ActionClass(text()), SkipReason: text()}
+
+		var c canonical
+		frameP3bResult(&c, p3b)
+		if got, want := p3bResultFramedLen(p3b), len(c.bytes()); got != want {
+			t.Fatalf("round %d: P3b width %d, framing %d bytes", round, got, want)
+		}
+
+		p2 := P2CaseResult{
+			Policy: text(), FactsetDigest: text(),
+			Action: ActionMapping{MapVersion: text(), Policy: text(), NativeAction: text(),
+				Class: ActionClass(text()), SkipReason: text()},
+			Choice: PolicyChoice{Present: rng.Intn(2) == 0, Index: rng.Intn(8), OutcomeID: text()},
+			Stake:  Int64Fact{Presence: PresenceKnown, Value: int64(rng.Intn(1 << 30)), Reason: text()},
+		}
+		p2.Binding.Digest = text()
+		p2.Binding.ContractVersion = text()
+		p2.Evaluation.CommonInputDigest = text()
+		p2.Evaluation.Action = text()
+		p2.Evaluation.ActionReason = text()
+
+		var c2 canonical
+		frameP2Result(&c2, p2)
+		if got, want := p2ResultFramedLen(p2), len(c2.bytes()); got != want {
+			t.Fatalf("round %d: P2 width %d, framing %d bytes", round, got, want)
+		}
+	}
+
+	// AND THE LENGTH-ONLY MODE MUST COUNT THE HEX WRITER TOO, which no result
+	// framing exercises -- so a mode that silently dropped strHexOf would pass
+	// everything above while breaking claimKey's width if one were ever taken.
+	for _, raw := range [][]byte{nil, {0}, []byte("hello"), make([]byte, 1000)} {
+		var b canonical
+		b.strHexOf(raw)
+		l := canonical{lenOnly: true}
+		l.strHexOf(raw)
+		if l.framedLen() != len(b.bytes()) {
+			t.Fatalf("strHexOf over %d bytes: width %d, framing %d", len(raw), l.framedLen(), len(b.bytes()))
+		}
+	}
 }

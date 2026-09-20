@@ -22,12 +22,40 @@ import (
 // package that has no other use for it.
 
 // canonical accumulates framed parts and can hash them.
+//
+// IT HAS A LENGTH-ONLY MODE, and the mode exists so that ONE framing pass can
+// answer two questions. A derivation check asks whether a value is the one an
+// evaluator produced; the answer is a hash comparison, and computing the hash
+// materializes every framed field -- so an edited result used to pay its own
+// edit's width to be refused by one comparison. Recording the framed WIDTH
+// beside the witness turns any length-changing edit into an O(number of fields)
+// refusal.
+//
+// THE MODE IS WHY THAT WIDTH CANNOT DRIFT FROM THE WITNESS. A hand-written
+// mirror of a thirty-five-field framing is a second place a future field can be
+// forgotten, and this package has already paid for one of those. Here the width
+// is computed by running the SAME framing function with bytes switched off, so
+// the two cannot disagree about which fields are framed.
 type canonical struct {
 	buf []byte
+	// lenOnly switches every writer from appending bytes to accumulating the
+	// width those bytes would have had, in n.
+	lenOnly bool
+	n       int
 }
+
+// framedLen is the width the framing would have had, valid only in lenOnly
+// mode. It is a WIDTH and never a digest: two different values can frame to the
+// same width, so this answers "could this be the value that was framed" and
+// never "is it".
+func (c *canonical) framedLen() int { return c.n }
 
 // lpPrefix appends the eight-byte big-endian length of n.
 func (c *canonical) lpPrefix(n uint64) {
+	if c.lenOnly {
+		c.n += 8
+		return
+	}
 	c.buf = append(c.buf,
 		byte(n>>56), byte(n>>48), byte(n>>40), byte(n>>32),
 		byte(n>>24), byte(n>>16), byte(n>>8), byte(n))
@@ -36,6 +64,10 @@ func (c *canonical) lpPrefix(n uint64) {
 // str frames one string part.
 func (c *canonical) str(s string) {
 	c.lpPrefix(uint64(len(s)))
+	if c.lenOnly {
+		c.n += len(s)
+		return
+	}
 	c.buf = append(c.buf, s...)
 }
 
@@ -52,6 +84,10 @@ func (c *canonical) str(s string) {
 func (c *canonical) strHexOf(raw []byte) {
 	const digits = "0123456789abcdef"
 	c.lpPrefix(uint64(len(raw)) * 2)
+	if c.lenOnly {
+		c.n += 2 * len(raw)
+		return
+	}
 	// ONE EXACT EXTENSION, THEN FILL BY INDEX. Appending two digits at a time
 	// into a growing slice re-allocates on the way up and costs MORE than the
 	// single sized make inside hexEncode that this replaces -- measured, on

@@ -4884,3 +4884,99 @@ func TestASealedRulesetIsNotReprovedOnEveryUse(t *testing.T) {
 			wholePasses)
 	}
 }
+
+// TestAnEditedResultIsRefusedWithoutFramingTheEdit is the receipt for the third
+// finding a review lane returned on the published head, and for its sibling one
+// file over.
+//
+// THE DEFECT. derived() short-circuits on witness != "", which protects a
+// hand-BUILT result: a caller cannot set the unexported witness. It does not
+// protect a hand-EDITED one. A caller that COPIES a genuine result keeps its
+// witness, replaces one framed field with a producer-impossible string and
+// leaves the factset digest and the action binding intact; the binding gates
+// then pass, derived() reaches the full framing, and p3bResultWitness
+// materializes the whole edit before the comparison fails by one hash. An O(1)
+// mismatch pays payload-sized allocations to be refused.
+//
+// WHY A PER-FIELD GATE WAS NOT THE REPAIR. The first design checked the fields
+// a lane named -- Trace.RunID, which this package derives from the coordinates,
+// and the digests, which have a fixed shape. That closes the entrances named
+// and leaves every other framed field open, which is this branch's recurring
+// failure written as a design. What is checked instead is the TOTAL FRAMED
+// WIDTH, recorded beside the witness when the result is minted: any edit that
+// changes any framed field's length is refused before one byte is copied, and
+// an edit that preserves every length pays exactly what the honest path pays.
+//
+// DRIFT DEGRADES IT AND CANNOT BREAK IT. If a field is added to the witness and
+// not to the width, the width check simply stops catching edits to that field;
+// the full comparison still decides. TestTheRecordedFramedWidthIsTheWitnessOwn
+// pins the two against each other so the degradation is visible rather than
+// silent.
+func TestAnEditedResultIsRefusedWithoutFramingTheEdit(t *testing.T) {
+	_, fs, _, p2 := factualCase(t, coherentCall)
+	rs := mustVerify(t, rulesetFrom(t, cfgDefaultOnly("none", 95, 100)))
+	p3b, err := p4offline.EvaluateP3bCase(fs, rs, synthCoords(fs, 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	measure := func(t *testing.T, edit func(r *p4offline.P3bCaseResult)) uint64 {
+		t.Helper()
+		edited := p3b
+		edit(&edited)
+		runtime.GC()
+		var a, b runtime.MemStats
+		runtime.ReadMemStats(&a)
+		_, err := edited.Decision(fs)
+		runtime.ReadMemStats(&b)
+		if !errors.Is(err, p4offline.ErrResultNotDerived) {
+			t.Fatalf("an edited result must be refused as underived, got %v", err)
+		}
+		return b.TotalAlloc - a.TotalAlloc
+	}
+
+	const wide = 1 << 20
+	narrow := measure(t, func(r *p4offline.P3bCaseResult) { r.Trace.RunID += "X" })
+	huge := measure(t, func(r *p4offline.P3bCaseResult) { r.Trace.RunID += strings.Repeat("X", wide) })
+	t.Logf("one byte added -> %d B/op; %d bytes added -> %d B/op", narrow, wide, huge)
+	if over := float64(huge-narrow) / float64(wide); over > 0.5 {
+		t.Fatalf("a %d-byte edit cost %.2fx its own width above the one-byte control (%d against %d B/op): the edit is being framed",
+			wide, over, huge, narrow)
+	}
+
+	// THE P2 SIBLING HAS THE SAME SHAPE and is measured on the same fixture,
+	// because the lane named it and because a repair that closed one and not
+	// the other is the failure this whole round is about.
+	measureP2 := func(t *testing.T, edit func(r *p4offline.P2CaseResult)) uint64 {
+		t.Helper()
+		edited := p2
+		edit(&edited)
+		runtime.GC()
+		var a, b runtime.MemStats
+		runtime.ReadMemStats(&a)
+		_, err := edited.Decision(fs)
+		runtime.ReadMemStats(&b)
+		if !errors.Is(err, p4offline.ErrResultNotDerived) {
+			t.Fatalf("an edited P2 result must be refused as underived, got %v", err)
+		}
+		return b.TotalAlloc - a.TotalAlloc
+	}
+	narrow2 := measureP2(t, func(r *p4offline.P2CaseResult) { r.Binding.Digest += "X" })
+	huge2 := measureP2(t, func(r *p4offline.P2CaseResult) { r.Binding.Digest += strings.Repeat("X", wide) })
+	t.Logf("P2: one byte added -> %d B/op; %d bytes added -> %d B/op", narrow2, wide, huge2)
+	if over := float64(huge2-narrow2) / float64(wide); over > 0.5 {
+		t.Fatalf("P2: a %d-byte edit cost %.2fx its own width above the one-byte control (%d against %d B/op)",
+			wide, over, huge2, narrow2)
+	}
+
+	// AND THE GENUINE RESULTS STILL MINT, which is the control that stops the
+	// width check being satisfied by refusing everything.
+	t.Run("and an unedited result still mints its decision", func(t *testing.T) {
+		if _, err := p3b.Decision(fs); err != nil {
+			t.Fatalf("the genuine P3b result must still mint: %v", err)
+		}
+		if _, err := p2.Decision(fs); err != nil {
+			t.Fatalf("the genuine P2 result must still mint: %v", err)
+		}
+	})
+}

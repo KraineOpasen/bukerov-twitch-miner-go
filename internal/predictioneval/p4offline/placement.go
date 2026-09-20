@@ -109,33 +109,55 @@ const (
 	// decision's artifact carries beside its category: the EXTENT of the
 	// identity text that artifact does not echo.
 	//
-	// It is a prefix and not a closed value because an extent is a number,
-	// and PlacementReasonLocalErrorClassPrefix already establishes that this
-	// vocabulary admits a prefix carrying a bounded payload. What follows it
-	// is arithmetic over lengths -- never a byte of the text itself.
+	// It is a prefix and not a closed value because an extent is a number.
+	// What follows it is arithmetic over lengths -- never a byte of the text
+	// itself, which is the whole of the rule and admits no second reading.
+	// PlacementReasonLocalErrorClassWithheldPrefix is the same rule at the
+	// local-error arm; an earlier spelling of that one carried the class's
+	// TEXT, which is how this vocabulary came to hold an unbounded payload
+	// while this paragraph described a bounded one.
 	DecisionReasonIdentityWithheldPrefix = "IDENTITY_WITHHELD:"
 )
 
 // Placement reasons. Closed vocabulary.
 const (
-	PlacementReasonCaseBindingMismatch    = DecisionReasonCaseBindingMismatch
-	PlacementReasonFactualNotDerived      = "FACTUAL_PLACEMENT_NOT_DERIVED"
-	PlacementReasonPolicyStakeUnknown     = "POLICY_STAKE_UNKNOWN"
-	PlacementReasonChoiceMissing          = "CHOICE_MISSING"
-	PlacementReasonChoiceDiffers          = "CHOICE_DIFFERS"
-	PlacementReasonChoiceIdentityDiffers  = "CHOICE_IDENTITY_DIFFERS"
-	PlacementReasonTerminalSlotDiffers    = "TERMINAL_SLOT_DIFFERS"
-	PlacementReasonStakeDiffers           = "STAKE_DIFFERS"
-	PlacementReasonFactualNotPlace        = "FACTUAL_DECISION_NOT_PLACE"
-	PlacementReasonCallNotAfterCutoff     = "CALL_NOT_AFTER_CUTOFF"
-	PlacementReasonCallContradictsRecord  = "CALL_CONTRADICTS_RECORDED_DECISION"
-	PlacementReasonProofBasisNotAccepted  = "PROOF_BASIS_NOT_ACCEPTED"
-	PlacementReasonProofNotBoundToCall    = "PROOF_NOT_BOUND_TO_CALL"
-	PlacementReasonProofRoundMismatch     = "PROOF_ROUND_MISMATCH"
-	PlacementReasonProofIncomplete        = "PROOF_INCOMPLETE"
-	PlacementReasonNoProofSupplied        = "NO_PLATFORM_ACCEPTANCE_PROOF"
-	PlacementReasonLocalErrorClassPrefix  = "LOCAL_ERROR_CLASS:"
-	PlacementReasonIdentityWithheldPrefix = DecisionReasonIdentityWithheldPrefix
+	PlacementReasonCaseBindingMismatch   = DecisionReasonCaseBindingMismatch
+	PlacementReasonFactualNotDerived     = "FACTUAL_PLACEMENT_NOT_DERIVED"
+	PlacementReasonPolicyStakeUnknown    = "POLICY_STAKE_UNKNOWN"
+	PlacementReasonChoiceMissing         = "CHOICE_MISSING"
+	PlacementReasonChoiceDiffers         = "CHOICE_DIFFERS"
+	PlacementReasonChoiceIdentityDiffers = "CHOICE_IDENTITY_DIFFERS"
+	PlacementReasonTerminalSlotDiffers   = "TERMINAL_SLOT_DIFFERS"
+	PlacementReasonStakeDiffers          = "STAKE_DIFFERS"
+	PlacementReasonFactualNotPlace       = "FACTUAL_DECISION_NOT_PLACE"
+	PlacementReasonCallNotAfterCutoff    = "CALL_NOT_AFTER_CUTOFF"
+	PlacementReasonCallContradictsRecord = "CALL_CONTRADICTS_RECORDED_DECISION"
+	PlacementReasonProofBasisNotAccepted = "PROOF_BASIS_NOT_ACCEPTED"
+	PlacementReasonProofNotBoundToCall   = "PROOF_NOT_BOUND_TO_CALL"
+	PlacementReasonProofRoundMismatch    = "PROOF_ROUND_MISMATCH"
+	PlacementReasonProofIncomplete       = "PROOF_INCOMPLETE"
+	PlacementReasonNoProofSupplied       = "NO_PLATFORM_ACCEPTANCE_PROOF"
+	// PlacementReasonLocalErrorClassWithheldPrefix heads the local-error arm's
+	// one reason: the EXTENT of the producer's error class, never the class.
+	//
+	// THE CLASS IS SUPPLIER TEXT WITH NO VOCABULARY TO MATCH IT AGAINST.
+	// placementStatusCoherent admits any class other than NONE whenever the
+	// reason code is not OK, and this repository names exactly one class
+	// constant, so there is no namedPolicy-style recognition available here:
+	// a class either is echoed in full or is not echoed at all. A review lane
+	// measured what echoing it costs -- the artifact copies the class into
+	// Reasons and placementEvidenceWitness then frames that copy, so a
+	// hand-built record turns a fail-closed placement into payload-sized
+	// allocations and payload-sized diagnostic text.
+	//
+	// SO IT IS NOT ECHOED, AND THE REPORTING LOSS IS REAL AND RECORDED. A
+	// caller reading this reason learns that a local error was recorded and
+	// how wide its class was, and no longer which class it was. The status,
+	// PlacementLocalErrorPlatformUnknown, already carries what the verdict
+	// turns on; the class was diagnostic colour, and diagnostic colour is not
+	// worth an unbounded echo of text this package never verified.
+	PlacementReasonLocalErrorClassWithheldPrefix = "LOCAL_ERROR_CLASS_WITHHELD:"
+	PlacementReasonIdentityWithheldPrefix        = DecisionReasonIdentityWithheldPrefix
 )
 
 // ErrDecisionBinding is a policy result bound to a factset other than the one
@@ -802,7 +824,7 @@ func derivePlacement(policy PolicyDecision, factual FactualPlacement, proof *Pla
 	case !factual.LocalReasonOK:
 		out.Status = PlacementLocalErrorPlatformUnknown
 		if factual.ErrorClass != "" {
-			reason(PlacementReasonLocalErrorClassPrefix + factual.ErrorClass)
+			reason(PlacementReasonLocalErrorClassWithheldPrefix + suppliedTextExtent(factual.ErrorClass))
 		}
 		return out
 	}

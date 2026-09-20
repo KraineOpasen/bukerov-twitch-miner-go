@@ -522,6 +522,11 @@ var suppliedTextExtentCensus = map[string]int{
 	"p3b.go/decodeFault":                    2, // the computed sentence width, and the rendered message
 	"p3b.go/walkRulesetObject":              1, // the unknown-key gate
 	"placement.go/decisionOf":               1, // the result's own factset digest
+	// The local-error arm names the producer's error class by its EXTENT. The
+	// class is supplier text with no vocabulary to match it against, so it is
+	// withheld outright rather than recognized-or-withheld the way a policy
+	// name is; see PlacementReasonLocalErrorClassWithheldPrefix.
+	"placement.go/derivePlacement": 1,
 	// The two rows below are the extents a REFUSED decision's artifact
 	// reports in place of the identity it withholds: five fields both
 	// evidence seams echo, and the derivation only the payout seam does.

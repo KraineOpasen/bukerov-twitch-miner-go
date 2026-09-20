@@ -1075,34 +1075,78 @@ func appendFirstPositionPerReason(list []int, all []predictioneval.Exclusion, i 
 // exclusionsFor returns the reasons bearing on one episode, deduplicated, in the
 // order the exclusions themselves appear -- byte for byte what the rescan
 // produced.
+//
+// IT MERGES BY REASON RATHER THAN COLLECTING POSITIONS, and that is the second
+// repair on this function. Reducing the posting lists bounded each BUCKET by
+// the producer's exclusion vocabulary; it did not bound the number of buckets
+// ONE EPISODE READS, which is the count of distinct observation ids its first
+// opportunity carries and which no ceiling limits. A supplier that puts each of
+// N ids on two refused rows with DIFFERENT reasons keeps both positions in each
+// bucket -- correctly, they are different reasons -- so the old form gathered
+// 2N integers and sorted them to emit TWO strings. Measured before this repair,
+// 50 calls: 11,875,552 B at N = 2,048 and 23,889,648 at 4,096, about 116 bytes
+// per identifier for a two-string answer, with an O(N log N) sort on top that
+// no allocation ratio can see.
+//
+// WHAT IS KEPT IS THE MINIMUM PER REASON, which is all the answer ever needed:
+// it is the distinct reasons ordered by the smallest hit position each occupies.
+// So the running state is bounded by the vocabulary -- fourteen constants --
+// rather than by the episode, the final ordering sorts at most fourteen entries,
+// and the traversal stays O(one visit per position), which is irreducible
+// because every bucket can contribute.
+//
+// AND THE DUPLICATE-ID SET IS GONE WITH IT. The old form needed a seen-set
+// because a repeated id would have appended its bucket's positions twice; that
+// set was itself an allocation sized by the episode. Merging by minimum is
+// IDEMPOTENT -- re-reading a bucket yields the same reasons at the same minima
+// -- so a repeated id costs a second traversal of one bucket and changes
+// nothing, and the per-call state no longer grows with the caller at all.
 func (ix *p2ExclusionIndex) exclusionsFor(key predictioneval.AttemptKey, obs []string) []string {
-	var hits []int
-	hits = append(hits, ix.byKey[key]...)
-	seenObs := make(map[string]bool, len(obs))
+	// reasons and at are parallel: at[n] is the smallest position seen so far
+	// carrying reasons[n]. Both are bounded by the exclusion vocabulary.
+	var reasons []string
+	var at []int
+	merge := func(list []int) {
+		for _, i := range list {
+			r := ix.all[i].Reason
+			known := false
+			for n := range reasons {
+				if reasons[n] == r {
+					if i < at[n] {
+						at[n] = i
+					}
+					known = true
+					break
+				}
+			}
+			if !known {
+				reasons = append(reasons, r)
+				at = append(at, i)
+			}
+		}
+	}
+	merge(ix.byKey[key])
 	for _, id := range obs {
-		if id == "" || seenObs[id] {
+		// An exclusion carrying no observation id is indexed under none, so the
+		// empty id names no bucket and is skipped rather than looked up.
+		if id == "" {
 			continue
 		}
-		seenObs[id] = true
-		hits = append(hits, ix.byObs[id]...)
+		merge(ix.byObs[id])
 	}
-	if len(hits) == 0 {
+	if len(reasons) == 0 {
 		return nil
 	}
-	// The same exclusion can be reached by both routes, and the episode's ids
-	// are distinct but its buckets are not, so the positions are sorted and
-	// de-duplicated before the reasons are read off in slice order.
-	sort.Ints(hits)
-	var out []string
-	prev := -1
-	for _, i := range hits {
-		if i == prev {
-			continue
+	// Insertion sort over at most fourteen entries, ascending by position, so
+	// the reasons come out in the order the exclusions appear -- which is the
+	// order the rescan produced and the order this function has always had.
+	for n := 1; n < len(at); n++ {
+		for m := n; m > 0 && at[m] < at[m-1]; m-- {
+			at[m], at[m-1] = at[m-1], at[m]
+			reasons[m], reasons[m-1] = reasons[m-1], reasons[m]
 		}
-		prev = i
-		out = appendOnce(out, ix.all[i].Reason)
 	}
-	return out
+	return reasons
 }
 
 // poolRound keys an episode inside one session.

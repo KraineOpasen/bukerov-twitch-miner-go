@@ -237,12 +237,24 @@ type P3bCaseResult struct {
 	Choice             PolicyChoice                          `json:"choice"`
 	Stake              Int64Fact                             `json:"stake"`
 	witness            string
+	// framedLen is the width witness was computed over. Producer-only, like
+	// the witness itself: a decoded or hand-built value carries neither.
+	framedLen int
 }
 
 // derived reports whether the value is exactly what the P3b evaluator
 // produced.
+//
+// THE WIDTH IS CHECKED BEFORE THE WITNESS, and the order is the repair. The
+// witness comparison is one string comparison; COMPUTING the witness frames
+// every field, so a caller that copies a genuine result and widens one framed
+// field used to pay that field's own width to be refused. The recorded width
+// refuses any length-changing edit in O(number of fields). An edit that
+// preserves every length still reaches the framing and pays exactly what the
+// honest path pays, which is the floor: distinguishing two values of equal
+// width IS the hash's job.
 func (r P3bCaseResult) derived() bool {
-	return r.witness != "" && r.witness == p3bResultWitness(r)
+	return r.witness != "" && r.framedLen == p3bResultFramedLen(r) && r.witness == p3bResultWitness(r)
 }
 
 // p3bResultWitness frames every field a decision is minted from — the
@@ -266,6 +278,21 @@ func (r P3bCaseResult) derived() bool {
 // not detected here. A stored result is re-evaluated, never trusted.
 func p3bResultWitness(r P3bCaseResult) string {
 	var c canonical
+	frameP3bResult(&c, r)
+	return c.digest()
+}
+
+// p3bResultFramedLen is the width p3bResultWitness frames, computed by the SAME
+// pass with bytes switched off. It is the cheap half of the derivation check:
+// an edit that changes any framed field's length is refused here, before one
+// byte is copied.
+func p3bResultFramedLen(r P3bCaseResult) int {
+	c := canonical{lenOnly: true}
+	frameP3bResult(&c, r)
+	return c.framedLen()
+}
+
+func frameP3bResult(c *canonical, r P3bCaseResult) {
 	c.str("p4offline-p3b-result-witness")
 	c.str(r.Policy)
 	c.str(r.FactsetDigest)
@@ -297,10 +324,9 @@ func p3bResultWitness(r P3bCaseResult) string {
 	c.str(r.Evaluation.ConsumedInputDigest)
 	c.i64(int64(r.Evaluation.RawWordsConsumed))
 	c.i64(int64(r.Evaluation.BernoulliEvaluations))
-	frameAction(&c, r.Action)
-	frameChoice(&c, r.Choice)
-	frameFact(&c, r.Stake)
-	return c.digest()
+	frameAction(c, r.Action)
+	frameChoice(c, r.Choice)
+	frameFact(c, r.Stake)
 }
 
 // NativeActionP4ProjectionRefused is the pseudo-native action a P3b result
@@ -1231,7 +1257,7 @@ func evaluateProjected(fs CommonFactset, proj P3bProjection, rs VerifiedP3bRules
 	default:
 		res.Stake = UnknownInt64(StakeReasonUnsupportedShape)
 	}
-	res.witness = p3bResultWitness(res)
+	res.witness, res.framedLen = p3bResultWitness(res), p3bResultFramedLen(res)
 	return res, nil
 }
 
@@ -1281,7 +1307,7 @@ func EvaluateP3bCase(fs CommonFactset, rs VerifiedP3bRuleset, coords EntropyCoor
 			},
 			Stake: UnknownInt64(NativeActionP4ProjectionRefused),
 		}
-		refused.witness = p3bResultWitness(refused)
+		refused.witness, refused.framedLen = p3bResultWitness(refused), p3bResultFramedLen(refused)
 		return refused, nil
 	}
 	if err != nil {

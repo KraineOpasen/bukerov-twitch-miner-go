@@ -36,11 +36,14 @@ type P2CaseResult struct {
 	// post-clamp final for an attempt, otherwise not a number.
 	Stake   Int64Fact `json:"stake"`
 	witness string
+	// framedLen is the width witness was computed over. Producer-only, like
+	// the witness itself.
+	framedLen int
 }
 
 // derived reports whether the value is exactly what EvaluateP2Case produced.
 func (r P2CaseResult) derived() bool {
-	return r.witness != "" && r.witness == p2ResultWitness(r)
+	return r.witness != "" && r.framedLen == p2ResultFramedLen(r) && r.witness == p2ResultWitness(r)
 }
 
 // p2ResultWitness frames every field a decision is minted from — the action,
@@ -60,6 +63,20 @@ func (r P2CaseResult) derived() bool {
 // trusted.
 func p2ResultWitness(r P2CaseResult) string {
 	var c canonical
+	frameP2Result(&c, r)
+	return c.digest()
+}
+
+// p2ResultFramedLen is the width p2ResultWitness frames, computed by the SAME
+// pass with bytes switched off. See P3bCaseResult.derived for why the width is
+// checked first.
+func p2ResultFramedLen(r P2CaseResult) int {
+	c := canonical{lenOnly: true}
+	frameP2Result(&c, r)
+	return c.framedLen()
+}
+
+func frameP2Result(c *canonical, r P2CaseResult) {
 	c.str("p4offline-p2-result-witness")
 	c.str(r.Policy)
 	c.str(r.FactsetDigest)
@@ -68,10 +85,9 @@ func p2ResultWitness(r P2CaseResult) string {
 	c.str(r.Evaluation.CommonInputDigest)
 	c.str(r.Evaluation.Action)
 	c.str(r.Evaluation.ActionReason)
-	frameAction(&c, r.Action)
-	frameChoice(&c, r.Choice)
-	frameFact(&c, r.Stake)
-	return c.digest()
+	frameAction(c, r.Action)
+	frameChoice(c, r.Choice)
+	frameFact(c, r.Stake)
 }
 
 // p2Derivation is the P2 decision's derivation: the per-case config binding.
@@ -171,7 +187,7 @@ func EvaluateP2Case(fs CommonFactset) (P2CaseResult, error) {
 	default:
 		res.Stake = UnknownInt64(StakeReasonUnsupportedShape)
 	}
-	res.witness = p2ResultWitness(res)
+	res.witness, res.framedLen = p2ResultWitness(res), p2ResultFramedLen(res)
 	return res, nil
 }
 
