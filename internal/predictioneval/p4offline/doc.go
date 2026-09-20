@@ -191,9 +191,10 @@
 // graph -- not by that graph being free of os, syscall and time, which it is
 // not, but by pinning what they reach through: the closure is 99 packages with
 // a residue of internal/poll, io/fs, os, reflect, syscall and time, and
-// TestTheDocumentedResidueIsAttributableToItsRoots holds every one of them to
-// crypto/sha256, crypto/hmac and encoding/json -- three roots, not two: hmac
-// reaches five of the six on its own. The capability is in the closure and no
+// TestTheDocumentedResidueIsAttributableToItsRoots attributes every one of
+// them to TWO roots: five to crypto/sha256 and reflect to encoding/json.
+// crypto/hmac is exempted from the sweep beside them, and attributes nothing:
+// it reaches the same five the hash does, so its reach is a subset. The capability is in the closure and no
 // line of this package calls it. The sixth clause is enforced over syntax: a goroutine needs no import, so that
 // clause used to be a convention this sentence presented as a machine check.
 // It is now Rule E, and Rule E has its own control.
@@ -732,15 +733,19 @@
 //     figure that is not one is not a single delta. It may still be a reading:
 //     this suite averages in three ways -- one testing.Benchmark read through
 //     AllocedBytesPerOp, five testing.AllocsPerRun sites, and three
-//     measurements divided by a rep count -- which is why 1,055,076 and
-//     3,183,766 elsewhere in this register are not multiples of eight and are
-//     nonetheless real. What is not quoted in these two records is a figure
+//     measurements divided by a rep count -- which is why 1,055,076,
+//     2,113,586, 3,183,766 and 4,240,782 elsewhere in this register are not
+//     multiples of eight and are nonetheless real; the first and third are
+//     divided by a rep count, the second says it divides, and the fourth says
+//     it is per evaluation over sixteen. What is not quoted in these two records is a figure
 //     whose averaging basis was never recorded, because nothing can say which
 //     of the two it is. THAT RULE IS NOT APPLIED THROUGHOUT: seven figures
 //     taken on OTHER heads and quoted elsewhere here -- 147,671 and 2,113,763,
 //     2,113,748, 18,301,274, 18,301,246, 6,889,790, 1,057,073 -- are in exactly
-//     that state, and three of them sit beside allocation COUNTS, which a raw
-//     delta does not produce. They are left standing, and named, rather than
+//     that state, and four of them -- 147,671 and 2,113,763, whose series'
+//     count is given a sentence later, and 18,301,274 and 6,889,790, which
+//     carry theirs directly -- sit beside allocation COUNTS, which a raw delta
+//     does not produce. They are left standing, and named, rather than
 //     deleted on a rule this register applies in one place. The ratios hold because three independent measurements
 //     agreed on them to two decimals and they do not depend on the machine.
 //     WHERE THE COST IS, PER STAGE at 512 KiB: sha256Hex is 128 B and FLAT at
@@ -860,16 +865,20 @@
 //     TestTheExpressibilityRoutingAllocatesNothing -- and fails it on EITHER
 //     side. That test's 250-claim fixture carries a 4,096-byte FactsetDigest
 //     and asserts a canonical claim for every entry; ReconcileSourceRounds
-//     mints it and the verifier is handed it, so a ceiling in either place
-//     refuses the same fixture. The cost does NOT divide by side.
+//     mints it and checkRegistryTextExpressible is handed it, so a ceiling in
+//     either of THOSE TWO places refuses the same fixture. A ceiling in
+//     VerifySourceRoundRegistry's own body fails nothing -- that test does not
+//     call it. The cost does NOT divide by side.
 //     Closing it means routing a non-64-hex digest
 //     to INVALID in ReconcileSourceRounds AND gating it in the verifier,
 //     together -- so it costs that fixture as well, and the independent golden
 //     with it: measured, the shape gate moves golden_digests.json's
 //     sourceRoundRegistry entry from cfd77538 to 9ba343ed. EACH HALF ALONE
-//     fails ten top-level tests, nineteen counting subtests; THE PAIR fails
-//     twelve, thirty-four counting subtests. The ten is the half's figure and
-//     not the pair's.
+//     fails TEN top-level tests -- nineteen counting subtests at the producer,
+//     THIRTY-NINE at the verifier, because the two halves fail different sets.
+//     THE PAIR fails twelve, thirty-four counting subtests. The ten is a
+//     half's figure and not the pair's, and the subtest count does not
+//     generalise from one half to the other at all.
 //     A VERSION BUMP IS NOT MECHANICALLY REQUIRED, AND THE GOLDEN IS.
 //     SourceRoundRegistryVersion is framed into registryDigest as its FIRST
 //     part, so bumping it changes EVERY registry's digest. The shape gate alone
@@ -938,7 +947,8 @@
 //     TREE: DerivePlacement 1,728 B/op at one byte against 1,792 at 1 MiB,
 //     DerivePayout 1,856 against 1,968 --
 //     TestARefusedDecisionNamesItsExtentAndNotItsText, which drives both seams
-//     and the six mutants that reinstate each withheld field in turn.
+//     and asserts each withheld field absent by name -- five at the placement
+//     seam and seven at the payout seam.
 //     THE ONE-BYTE REFUSAL GOT DEARER, 856 bytes at the placement seam and 280
 //     at the payout seam, against the 872 and 1,576 recorded below, and it is recorded rather than absorbed: the
 //     extent sentence is work a refusal naming its case in full never did.
@@ -1028,9 +1038,11 @@
 //     THE IDENTITY IS EXECUTED, NOT ARGUED.
 //     TestTheReducedPostingListsAnswerAsTheFullOnesDid runs the reduced index
 //     against a VERBATIM copy of the unreduced build over 16,000 randomized
-//     queries on deliberately tiny alphabets, and carries three controls: that
-//     a posting list was actually reduced (10,038 were), that the answers had
-//     content (12,298 did), and that a mutant keeping the LAST position per
+//     queries on deliberately tiny alphabets, and carries four controls: that
+//     BOTH routes were actually reduced -- 4,782 observation-id and 5,256
+//     attempt-key posting lists, counted apart because one SUM once hid a
+//     mutant -- that the answers had content (12,298 did), and that a mutant
+//     keeping the LAST position per
 //     reason -- which preserves the reason SET and breaks only the ORDER, the
 //     half of the claim an argument is likeliest to get wrong -- is caught by
 //     that same fixture.

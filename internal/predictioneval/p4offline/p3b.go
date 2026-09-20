@@ -280,10 +280,13 @@ type P3bCaseResult struct {
 	Trace             EntropyTraceBinding `json:"trace"`
 	// Evaluation is the native evaluator's own record. Eight of its fields are
 	// framed and seventeen are not -- p3bResultWitness lists them -- and among
-	// the unframed is Evaluation.Selected, a TWIN of the attested Choice below.
-	// A value this package certifies as derived can therefore hold two
-	// disagreeing answers to what P3b chose, only one of them covered.
-	// Decision reads the attested one and never this field.
+	// the unframed are TWO TWINS of attested fields below: Evaluation.Selected
+	// beside Choice, and Evaluation.Stake beside Stake. A value this package
+	// certifies as derived can therefore hold two disagreeing answers to what
+	// P3b chose and two to what it staked, with one of each covered. Decision
+	// reads the attested ones and never this field. An audit that reads
+	// Evaluation.Selected or Evaluation.Stake is reading unattested data off a
+	// certified value; read Choice and Stake instead.
 	Evaluation predictioneval.OrderedRulesEvaluation `json:"evaluation"`
 	Action     ActionMapping                         `json:"action"`
 	// Choice is the ATTESTED choice; Evaluation.Selected is its unattested twin.

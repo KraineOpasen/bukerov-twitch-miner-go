@@ -2701,9 +2701,10 @@ func witnessComparedIn(t *testing.T, dir string) map[string]bool {
 	// either. `witness != emptyWitness(v)` passes every other clause -- the
 	// name ends in Witness, the receiver is handed in, no stored witness is
 	// read -- and returns a constant, which is the `witness != hexEncode(nil)`
-	// defeat respelled with the suffix the recognizer looks for. A
-	// recomputation must at minimum READ its own input, so one that mentions
-	// neither a parameter nor its receiver anywhere in its body is struck off.
+	// defeat respelled with the suffix the recognizer looks for. Reading the
+	// input is not enough either -- `_ = v.A; return ""` reads it and returns
+	// a constant -- so the rule is that a recomputation must REACH THE
+	// FRAMING. Every one in this package builds a canonical and digests it.
 	doesNotFrame := map[string]bool{}
 	for _, f := range files {
 		for _, d := range f.Decls {
@@ -2711,25 +2712,6 @@ func witnessComparedIn(t *testing.T, dir string) map[string]bool {
 			if !ok || fd.Body == nil || !strings.HasSuffix(fd.Name.Name, "Witness") {
 				continue
 			}
-			given := map[string]bool{}
-			lists := []*ast.FieldList{fd.Type.Params}
-			if fd.Recv != nil {
-				lists = append(lists, fd.Recv)
-			}
-			for _, fl := range lists {
-				if fl == nil {
-					continue
-				}
-				for _, field := range fl.List {
-					for _, n := range field.Names {
-						given[n.Name] = true
-					}
-				}
-			}
-			// AND IT MUST REACH THE FRAMING. Reading the input is not
-			// enough: `_ = v.A; return ""` reads it and returns a constant.
-			// Every recomputation in this package builds a canonical and
-			// digests it, so a callee that mentions neither is not one.
 			used := false
 			ast.Inspect(fd.Body, func(n ast.Node) bool {
 				id, ok := n.(*ast.Ident)
