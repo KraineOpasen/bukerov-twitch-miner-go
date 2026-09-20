@@ -2784,6 +2784,23 @@ func TestP2ExclusionAttributionIsCompleteForEveryEpisode(t *testing.T) {
 // its N rows build N buckets of one and the product never forms. The colliding
 // shape was a row no table in this package carried -- which is how each of the
 // previous three escaped too.
+//
+// WHAT THIS TEST IS THE RECEIPT FOR, EXACTLY. It pins the ANSWER'S COST: the
+// allocation this shape drives stays linear in the rows. It is NOT the
+// preaggregation's receipt. A Q3 lane removed the preaggregation and this test
+// stayed green, because exclusionsFor's bounded-vocabulary merge -- a LATER
+// repair, one function over -- caps per-episode allocation at the exclusion
+// vocabulary regardless of how long a posting list is, and this test measures
+// allocation. The quadratic does come back, in TIME (colliding 35.3 / 115.4 /
+// 367.3 ms at n = 2048 / 4096 / 8192, 3.2x per doubling, against 1.7x for
+// distinct ids), which allocation cannot see.
+// THE PREAGGREGATION'S OWN RECEIPT IS TestTheReducedPostingListsAnswerAsTheFullOnesDid,
+// which asserts the index's SHAPE -- one position per distinct reason per
+// bucket, counted separately for the byKey and byObs routes -- and fails
+// immediately and deterministically when the preaggregation is removed
+// ("byObs[\"a\"] reduced to 6 positions, want one per distinct reason"). That
+// protection already existed and is unchanged; nothing about the algorithm was
+// repaired for this correction. What was wrong was this sentence.
 func TestCollidingObservationIdsDoNotMakeAttributionQuadratic(t *testing.T) {
 	// k undecodable automatic rows, EACH ITS OWN EPISODE and each its own
 	// producer exclusion. collide is the single field that separates the attack

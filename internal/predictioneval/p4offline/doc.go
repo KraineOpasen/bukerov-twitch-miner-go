@@ -713,18 +713,31 @@
 //     admitted, and the reason a caller acts on is still named; the cut is
 //     "needs the materialized knowledge", which is statable, rather than a
 //     threshold someone has to tune. It is a reporting loss all the same.
-//   - REFUSING A RULESET DOCUMENT STILL COSTS ABOUT SEVEN TIMES THE DOCUMENT,
-//     which the decode-fault repair does not remove and is recorded so the
-//     repair is not read as closing it. Two lanes measured it: refusing a
-//     ~65.6 KB document whose one literal is over-long reads about 467 KB, and
-//     a 512 KiB one about 3.68 MB. That is encoding/json decoding the document
-//     plus the mandatory sha256Hex over RawBytes, both proportional to a
-//     buffer the caller has already materialized and one of which this package
-//     cannot skip, since the raw hash is the ruleset's identity. It is the
-//     nested-hex class rather than the shape-gate class: a constant factor
-//     over input already in hand, not a constant-size field amplified by a
-//     payload. What the repair removed is the two further copies of the
-//     literal that this package itself was making.
+//   - REFUSING A RULESET DOCUMENT STILL COSTS ABOUT SEVEN TIMES THE DOCUMENT.
+//     OWNER-DEFERRED for this supplied-evidence offline package: the measured
+//     cost is accepted under the existing provenance and binding checks, the
+//     accepted-input domain is retained, and the limit is to be revisited
+//     before a real-data runner rather than inside a repair round. Two lanes
+//     measured it and a third reproduced both figures through
+//     VerifyP3bRuleset: a ~65.6 KB document reads 457,795 B (6.98x) and a
+//     512 KiB one 3,669,099 B (7.00x).
+//     THE ATTRIBUTION RECORDED HERE BEFORE WAS WRONG AND IS CORRECTED. It said
+//     the cost was encoding/json decoding the document plus the mandatory
+//     sha256Hex over RawBytes. Measured per stage at 512 KiB: sha256Hex is
+//     128 B and FLAT at both sizes, so it is not a contributor; json.Decode
+//     NEVER RUNS, because checkRulesetKeys refuses first; checkRulesetKeys is
+//     3,668,713 B, which is 99.99% of it; decodeFault is 200 B flat. This
+//     package's own residue is 258 B. The cost is the key walk, and it is
+//     encoding/json's buffering over a buffer the caller already holds.
+//     AND REFUSAL IS THE CHEAP END, WHICH THE OLD WORDING HID. Controls at
+//     512 KiB: a giant number literal 7.00x, a giant string literal 5.00x, and
+//     a VALID document of many small tokens 13.99x. Honest input costs about
+//     twice what this refusal costs, so the figure is a property of the format
+//     rather than a penalty this seam imposes on refusal. dec.UseNumber() in
+//     checkRulesetKeys measures 7.00x -> 5.00x and is NOT taken: it moves the
+//     refusal from Token()'s typed UnmarshalTypeError arm to Decode and changes
+//     the message, and the residual 5x is stdlib buffering unreachable through
+//     the public API. rulesetRawCeiling is what bounds the carrier.
 //   - NESTED HEX IN claimKey, reported by a code review lane, reproduced at
 //     19.06x the input, and now CLOSED under owner authorization by streaming
 //     the representation instead of changing it. EpisodeIdentity.String()
@@ -769,12 +782,29 @@
 //     value and on invalid UTF-8, and on nothing else -- found
 //     by a review lane one field below the gate this round added, and
 //     reproduced: VerifySourceRoundRegistry returns nil for a registry whose
-//     claim carries a 1 MiB FactsetDigest, and pays about 14.75 MB to say so --
-//     14.06x the supplied field, and the SAME figure before this round's gates
-//     existed, so it is a carried item rather than a regression. It is the
+//     claim carries a 1 MiB FactsetDigest, and pays 11,586,217 B to say so --
+//     11.05x the supplied field, and the SAME figure before this round's gates
+//     existed, so it is a carried item rather than a regression. (An earlier
+//     "about 14.75 MB, 14.06x" recorded here is STALE and is corrected to the
+//     figures in this entry.) The full ReconcileSourceRounds plus
+//     PrepareSourceRounds path at one 1 MiB digest is 17,380,018 B, 16.57x,
+//     against 10,224 B for a well-formed 64-hex control. The multiple by width
+//     is 27.98x at 1 KiB, 17.69x at 64 KiB and 16.57x at 1 MiB -- flat to
+//     falling, so this is a LINEAR CONSTANT FACTOR and not a growing
+//     amplification. Per stage at 1 MiB: registryDigest 5,792,846 B across
+//     three passes, claimKeyFraming 1,057,562 B (1.008x -- the streaming repair
+//     did land), claimTextFault and checkRegistryTextExpressible 0. It is the
 //     class the nested-hex note above describes, a constant factor over input
 //     the caller has already materialized, not the class the three shape gates
-//     closed. The obvious repair is wrong, and the lane built it to find out:
+//     closed.
+//     OWNER-DEFERRED for this supplied-evidence offline package: the existing
+//     accepted-input domain is retained, this measured processing cost is
+//     accepted under the existing provenance and binding checks, and the limit
+//     is to be revisited before a real-data runner rather than automatically.
+//     Nothing about membership, settlement, tamper acceptance or a hidden
+//     processing failure is covered by that deferral. The exposure today is to
+//     a hand-built registry only: ClaimSourceRound derives the digest from a
+//     VERIFIED factset and no non-test caller exists. The obvious repair is wrong, and the lane built it to find out:
 //     gating the VERIFIER alone breaks the fixed point, because the producer
 //     would still route such a claim to its round, and this package's own tests
 //     catch it -- a 64-hex gate over the claims fails eight of them, among them
@@ -790,10 +820,22 @@
 //     side, which is the part a reader planning the repair needs.
 //     Closing it means routing a non-64-hex digest
 //     to INVALID in ReconcileSourceRounds AND gating it in the verifier,
-//     together -- so it costs that fixture as well, which
-//     SourceRoundRegistryVersion bumped and the independent golden regenerated
-//     -- the same shape of change as the nested hex, and not one to take inside
-//     a repair round.
+//     together -- so it costs that fixture as well, and the independent golden
+//     with it: measured, the shape gate moves golden_digests.json's
+//     sourceRoundRegistry entry from cfd77538 to 9ba343ed and fails ten
+//     top-level tests, eighteen counting subtests.
+//     THE CLAIMED NEED FOR A VERSION BUMP IS UNPROVEN AND IS RETRACTED. This
+//     entry said closing it was what SourceRoundRegistryVersion bumped.
+//     Measured: the version IS framed into registryDigest as its first part, so
+//     bumping it changes EVERY registry's digest, while the shape gate alone
+//     changes the digest only for a registry that carries a non-64-hex claim --
+//     an all-64-hex registry digests identically with and without the gate
+//     (8a129a93 both ways), and the non-64-hex one moves 8d9669cc -> 47a16705.
+//     The bump's blast radius is strictly WIDER than the defect, so it is a
+//     compatibility-signalling CHOICE and not a mechanical necessity. The
+//     golden regeneration is a necessity; the bump is not. Either way this is
+//     a new refusal of supplied input -- a validity ceiling -- and not one to
+//     take inside a repair round.
 //   - THE EVIDENCE WITNESS FRAMED A DECISION THE REFUSAL ABOVE IT HAD ALREADY
 //     REJECTED, reported by a code review lane on the published head,
 //     reproduced -- with the MECHANISM the lane gave one step off, in a way
@@ -1024,7 +1066,7 @@
 //     that placement is derived -- work proportional to an artifact the dataset
 //     really carries, which is not amplification and cannot be removed without
 //     weakening the witness. Measured: 3,174,320 B/op at a 1 MiB class before,
-//     3.03x the supplied text; 1,061,552 after, 1.012x. What went is every
+//     3.03x the supplied text; 1,061,568 after, 1.012x. What went is every
 //     framing BEYOND the honest one, which is why the test asserts ONE framing
 //     against a one-byte control rather than a constant.
 //     THE REPORTING LOSS IS REAL. There is no vocabulary to recognize the class
@@ -1065,18 +1107,17 @@
 //     independent Q3 lanes found before publication -- the THIRTEENTH
 //     occurrence, and the third in a row caught by a lane rather than by a
 //     reviewer. The width was given to the two RESULT types the report named.
-//     Five sibling seams carry a witness and re-frame it to answer a question
-//     decided by one string comparison, and four of them take a caller-sized
-//     value: FactualPlacement, PolicyDecision, PlacementEvidence and
-//     PayoutEvidence. A lane measured them at 1.008x, 1.007x and 1.007x the
-//     edit's own width; the concrete path is a struct COPY, which carries the
-//     unexported witness, widened on ErrorClass -- the very field the
-//     local-error repair above was shown -- and handed to DerivePlacement,
-//     where derived() is the first thing touched and every binding gate is
-//     skipped. All four carry a framed width now. MEASURED AFTER, one byte
-//     against 1 MiB: 2,480 / 2,480, 1,728 / 1,728, 4,688 / 4,688 and 25,856 /
-//     25,856 -- each identical to the byte, as the two result types already
-//     were at 4,048.
+//     Four sibling seams carry a witness and re-frame it to answer a question
+//     decided by one string comparison, each over a caller-sized value:
+//     FactualPlacement, PolicyDecision, PlacementEvidence and PayoutEvidence.
+//     A lane measured them at 1.008x, 1.007x, 1.008x and 1.008x the edit's own
+//     width; the concrete path is a struct COPY, which carries the unexported
+//     witness, widened on ErrorClass -- the very field the local-error repair
+//     above was shown -- and handed to DerivePlacement, where derived() is the
+//     first thing touched and every binding gate is skipped. All four carry a
+//     framed width now. MEASURED AFTER, one byte against 1 MiB: 2,480 / 2,480,
+//     1,728 / 1,728, 4,688 / 4,688 and 25,856 / 25,856 -- each identical to
+//     the byte, as the two result types already were at 4,048.
 //     THE SENTENCE THAT HID IT IS RETRACTED. This entry, and the test beside
 //     it, said the framing of a wide error class "cannot be removed without
 //     weakening the witness". True of a GENUINE placement, whose class is an
@@ -1101,6 +1142,44 @@
 //     wrapped and reported a growth of 1.76e13: an instrument failing loudly in
 //     the one direction that means "no growth". Both fixed, and the helper that
 //     replaces them says why in its own comment.
+//     AND THE ENUMERATION ABOVE WAS ITSELF WRONG, which a Q3 lane found on the
+//     published head -- the FOURTEENTH occurrence, and the first where the
+//     sentence that missed the neighbour was written by the repair. It said
+//     five seams carried a witness and four took a caller-sized value. The
+//     package has SEVEN witness-bearing types, and the seventh,
+//     VerifiedP3bRuleset, takes one: VerifyP3bRuleset requires RulesetID to
+//     EQUAL the config's ConfigID, which carries no per-string length bound, so
+//     check re-framed a copied-and-widened identity on every ConfigCopy, Digest
+//     and EvaluateP3bCase to answer a refusal decided by one string comparison.
+//     MEASURED: 856 B/op at one byte against 1,057,053 at 1 MiB, 1.0073x the
+//     edit; AFTER: 0 and 16. All seven carry a width now.
+//     THE OBJECTION RECORDED AGAINST CLOSING IT IS RETRACTED. check's own
+//     comment called the cost "the price of leaving the identity fields
+//     exported" and said removing it meant sealing those too. It does not: the
+//     width is recorded at the mint and compared first, with the identity
+//     fields left exported, exactly as at the other six seams.
+//     THE COUNT IS NO LONGER PROSE. Three rounds enumerated these seams by
+//     hand and three enumerations were short.
+//     TestEveryWitnessBearingTypeCarriesAFramedWidth walks the production files
+//     and fails on any witness-bearing struct without a width, naming it, with
+//     its own synthetic control; a new witness type is a failing test rather
+//     than a sentence someone forgets to update.
+//     WHAT A WIDTH IS AND IS NOT. It is a cheap REJECTION TEST: it refuses a
+//     width-changing edit in O(fields) before a byte is materialized. It is not
+//     proof of identity -- two different values can frame to one width -- so an
+//     equal-width alteration passes it and is refused by the witness, which is
+//     the only thing here that verifies content. Nor is it an O(1) claim for
+//     genuine input: a handle carrying a large VALID identity still frames it
+//     once per use, because the witness must cover what the caller really
+//     supplied. Both halves are driven, in the refusal test and in its
+//     equal-width and wide-genuine subtests.
+//     AND THE POSITIVE-WIDTH TERM IS DEFENCE IN DEPTH, RETAINED KNOWINGLY. A
+//     lane showed that deleting `framedLen > 0` from every derived() leaves the
+//     suite green, because `witness != ""` already excludes the zero value for
+//     every producer this package currently has. That makes the mutant
+//     equivalent TODAY, not the term useless: it is what makes the vacuous-mode
+//     slip above fail loudly if a future mint ever records a zero. It stays,
+//     and no test is added that would only pin an equivalent mutant.
 //
 // A SECOND CLASS WAS HERE FOR ONE ROUND AND IS NOW REPAIRED, and the way it
 // was repaired is worth recording rather than quietly deleting, because the

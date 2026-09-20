@@ -112,6 +112,16 @@ type VerifiedP3bRuleset struct {
 	// matches.
 	config  predictioneval.OrderedRulesConfig
 	witness string
+	// framedLen is the total width rulesetWitness framed for those identity
+	// fields, recorded at the mint beside the witness it belongs to.
+	//
+	// IT IS A REJECTION TEST, NOT AN IDENTITY PROOF. check compares it first,
+	// so a handle whose identity was widened after verification is refused in
+	// O(fields) without materializing the edit; an alteration that preserves
+	// the total width passes it and is refused by the witness, which is the
+	// only thing here that verifies CONTENT. Removing the witness and keeping
+	// this would accept any equal-width forgery.
+	framedLen int
 }
 
 // Rules is the number of ordered detailed rules.
@@ -162,7 +172,9 @@ func (r VerifiedP3bRuleset) ConfigCopy() (predictioneval.OrderedRulesConfig, err
 // Changing an identity field after verification also fails, because the
 // witness covers all three.
 func (r VerifiedP3bRuleset) check() error {
-	if r.witness == "" || r.witness != rulesetWitness(r.RulesetID, r.RawSHA256, r.NativeConfigDigest) {
+	if r.witness == "" || r.framedLen <= 0 ||
+		r.framedLen != rulesetFramedLen(r.RulesetID, r.RawSHA256, r.NativeConfigDigest) ||
+		r.witness != rulesetWitness(r.RulesetID, r.RawSHA256, r.NativeConfigDigest) {
 		return ErrRulesetNotVerified
 	}
 	return nil
@@ -186,13 +198,27 @@ func nativeConfigDigest(cfg predictioneval.OrderedRulesConfig) (string, error) {
 	return ev.ConfigDigest, nil
 }
 
-func rulesetWitness(id, rawSHA256, nativeDigest string) string {
-	var c canonical
+// frameRuleset writes the identity framing. It is the ONE enumeration of these
+// fields: the witness and the width both run it, so a field added to one is
+// added to the other by construction rather than by a matching edit.
+func frameRuleset(c *canonical, id, rawSHA256, nativeDigest string) {
 	c.str("p4offline-verified-ruleset-witness")
 	c.str(id)
 	c.str(rawSHA256)
 	c.str(nativeDigest)
+}
+
+func rulesetWitness(id, rawSHA256, nativeDigest string) string {
+	var c canonical
+	frameRuleset(&c, id, rawSHA256, nativeDigest)
 	return c.digest()
+}
+
+// rulesetFramedLen reports what frameRuleset WOULD write, without writing it.
+func rulesetFramedLen(id, rawSHA256, nativeDigest string) int {
+	c := canonical{lenOnly: true}
+	frameRuleset(&c, id, rawSHA256, nativeDigest)
+	return c.framedLen()
 }
 
 // P3bProjection is the one-candidate stream projected from a factset.
@@ -706,6 +732,7 @@ func VerifyP3bRuleset(r P3bRuleset) (VerifiedP3bRuleset, error) {
 		NativeConfigDigest: r.NativeConfigDigest,
 		config:             detachConfig(r.Config),
 		witness:            rulesetWitness(r.RulesetID, r.RawSHA256, r.NativeConfigDigest),
+		framedLen:          rulesetFramedLen(r.RulesetID, r.RawSHA256, r.NativeConfigDigest),
 	}, nil
 }
 

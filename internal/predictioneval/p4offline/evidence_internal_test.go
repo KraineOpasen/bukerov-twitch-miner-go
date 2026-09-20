@@ -2146,6 +2146,94 @@ func TestTheRecordedFramedWidthIsTheWitnessOwn(t *testing.T) {
 		if got, want := p2ResultFramedLen(p2), len(c2.bytes()); got != want {
 			t.Fatalf("round %d: P2 width %d, framing %d bytes", round, got, want)
 		}
+
+		// AND THE OTHER FIVE FRAMINGS, for the reason the two above were not
+		// enough. A Q3 mutant that made framePayoutEvidence's
+		// ResolutionFactsDigest writer forget the length-only mode left the
+		// whole suite green while the recorded width under-counted: two of the
+		// seven framings were pinned and five were not, so the preflight could
+		// go silently vacuous on any of them. Every framing this package has is
+		// driven here, against the bytes its own writer produces.
+		attempt := predictioneval.AttemptKey{
+			CollectorEpoch: int64(rng.Intn(1 << 30)), CollectorSessionID: text(),
+			PoolInstanceID: text(), AttemptID: uint64(rng.Intn(1 << 30)),
+		}
+		action := ActionMapping{MapVersion: text(), Policy: text(), NativeAction: text(),
+			Class: ActionClass(text()), Legal: rng.Intn(2) == 0,
+			Illegality: strs(rng, text), SkipReason: text()}
+		choice := PolicyChoice{Present: rng.Intn(2) == 0, Index: rng.Intn(8), OutcomeID: text()}
+		fact := func() Int64Fact {
+			return Int64Fact{Presence: PresenceKnown, Value: int64(rng.Intn(1 << 30)), Reason: text()}
+		}
+		oi, of := rng.Intn(1<<20), int64(rng.Intn(1<<30))
+
+		fp := FactualPlacement{
+			Attempt: attempt, FactsetDigest: text(), EventID: text(),
+			CutoffPosition: int64(rng.Intn(1 << 30)), TerminalDecision: text(),
+			RecordedChoiceIndex: &oi, RecordedChoiceOutcomeID: text(),
+			RecordedFinalAmount: &of, RecordedTerminalSlot: &oi,
+			Coherence: text(), StartedOnly: rng.Intn(2) == 0, CallPresent: rng.Intn(2) == 0,
+			CallStartedObservationID: text(), CallStartedPosition: int64(rng.Intn(1 << 30)),
+			Stake: &of, Slot: &oi, Returned: rng.Intn(2) == 0,
+			LocalReasonOK: rng.Intn(2) == 0, ErrorClass: text(),
+		}
+		var c3 canonical
+		frameFactualPlacement(&c3, fp)
+		if got, want := factualPlacementFramedLen(fp), len(c3.bytes()); got != want {
+			t.Fatalf("round %d: FactualPlacement width %d, framing %d bytes", round, got, want)
+		}
+
+		dec := PolicyDecision{
+			Policy: text(), Attempt: attempt, FactsetDigest: text(), EventID: text(),
+			CutoffPosition: int64(rng.Intn(1 << 30)), Derivation: text(),
+			OutcomeIDs: strs(rng, text), Action: action, Choice: choice, Stake: fact(),
+		}
+		var c4 canonical
+		framePolicyDecision(&c4, dec)
+		if got, want := policyDecisionFramedLen(dec), len(c4.bytes()); got != want {
+			t.Fatalf("round %d: PolicyDecision width %d, framing %d bytes", round, got, want)
+		}
+
+		pl := PlacementEvidence{
+			ContractVersion: text(), Policy: text(), Attempt: attempt,
+			FactsetDigest: text(), EventID: text(), Status: PlacementStatus(text()),
+			Reasons: strs(rng, text), PolicyStake: fact(), AttributedOutcomeID: text(),
+			AttributedCallObservationID: text(),
+			AttributedCallPosition:      int64(rng.Intn(1 << 30)),
+		}
+		var c5 canonical
+		framePlacementEvidence(&c5, pl)
+		if got, want := placementEvidenceFramedLen(pl), len(c5.bytes()); got != want {
+			t.Fatalf("round %d: PlacementEvidence width %d, framing %d bytes", round, got, want)
+		}
+
+		po := PayoutEvidence{
+			ContractVersion: text(), Policy: text(), Attempt: attempt,
+			FactsetDigest: text(), EventID: text(), Outcome: PayoutOutcome(text()),
+			ChoiceCorrect:            ChoiceVerdict(text()),
+			PrimaryDenominatorMember: rng.Intn(2) == 0, PlacedBetDenominatorMember: rng.Intn(2) == 0,
+			Stake: fact(), Payout: fact(), Net: fact(), Reasons: strs(rng, text),
+			ResolutionFactsDigest: text(), Derivation: text(),
+		}
+		// decisionWitness is framed and is unexported, so only an internal test
+		// can vary it -- and it must be varied, or the last writer in the
+		// framing is pinned against a constant.
+		po.decisionWitness = text()
+		var c6 canonical
+		framePayoutEvidence(&c6, po)
+		if got, want := payoutEvidenceFramedLen(po), len(c6.bytes()); got != want {
+			t.Fatalf("round %d: PayoutEvidence width %d, framing %d bytes", round, got, want)
+		}
+
+		// THE RULESET FRAMING IS THE SEVENTH, and it is the one an enumeration
+		// in doc.go asserted did not take a caller-sized value. It does, and it
+		// carries a width now like the other six.
+		rid, rsha, rnat := text(), text(), text()
+		var c7 canonical
+		frameRuleset(&c7, rid, rsha, rnat)
+		if got, want := rulesetFramedLen(rid, rsha, rnat), len(c7.bytes()); got != want {
+			t.Fatalf("round %d: ruleset width %d, framing %d bytes", round, got, want)
+		}
 	}
 
 	// AND THE LENGTH-ONLY MODE MUST COUNT THE HEX WRITER TOO, which no result
@@ -2159,5 +2247,73 @@ func TestTheRecordedFramedWidthIsTheWitnessOwn(t *testing.T) {
 		if l.framedLen() != len(b.bytes()) {
 			t.Fatalf("strHexOf over %d bytes: width %d, framing %d", len(raw), l.framedLen(), len(b.bytes()))
 		}
+	}
+}
+
+// strs builds a random slice of framed strings, including the empty slice, so
+// the count prefix and the per-element widths are both exercised.
+func strs(rng *rand.Rand, text func() string) []string {
+	n := rng.Intn(4)
+	if n == 0 {
+		return nil
+	}
+	out := make([]string, n)
+	for i := range out {
+		out[i] = text()
+	}
+	return out
+}
+
+// TestABoundedRefusalAnswerIsNotSizedOnTheCallersList is the receipt for the
+// capacity hint sessionRefusalKinds no longer takes.
+//
+// THE SHAPE. The answer is the DISTINCT refusal kinds, which the closed
+// refusal, anomaly and exclusion vocabularies bound at a few dozen. The list
+// it reads is the caller's dataset. A hint of make([]string, 0, len(rs)) made
+// that bounded answer allocate a caller-sized slice -- the posting-list defect
+// one function over, and a Q3 lane showed that removing the hint again left
+// the whole suite green, so the removal had no receipt.
+//
+// IT MEASURES THE ANSWER AGAINST THE INPUT, NOT A CONSTANT. Growing the input
+// by 64x must not grow the allocation, because the vocabulary it collapses to
+// has not changed.
+func TestABoundedRefusalAnswerIsNotSizedOnTheCallersList(t *testing.T) {
+	// A CLOSED SET OF KINDS, REPEATED. The distinct answer is 4 members at
+	// every size, so any growth is the list's and not the answer's.
+	kinds := []string{"A_REFUSAL", "B_REFUSAL", "C_REFUSAL", "D_REFUSAL"}
+	build := func(n int) []string {
+		out := make([]string, n)
+		for i := range out {
+			out[i] = kinds[i%len(kinds)]
+		}
+		return out
+	}
+	measure := func(rs []string) uint64 {
+		// The input is built OUTSIDE the measured closure, and one untimed
+		// call warms the path: both are lessons this round already paid for.
+		_ = sessionRefusalKinds(rs)
+		runtime.GC()
+		var a, b runtime.MemStats
+		runtime.ReadMemStats(&a)
+		got := sessionRefusalKinds(rs)
+		runtime.ReadMemStats(&b)
+		if len(got) != len(kinds) {
+			t.Fatalf("the answer must be the %d distinct kinds, got %d", len(kinds), len(got))
+		}
+		return b.TotalAlloc - a.TotalAlloc
+	}
+
+	const small, large = 1 << 10, 1 << 16
+	narrow, wide := build(small), build(large)
+	narrowCost, wideCost := measure(narrow), measure(wide)
+	t.Logf("%d refusals -> %d B; %d refusals -> %d B", small, narrowCost, large, wideCost)
+
+	// THE ASSERTION IS A RATIO AGAINST THE INPUT'S GROWTH. A slice sized on the
+	// caller's list grows with it; an answer sized on the vocabulary does not.
+	// The map the dedup keeps is bounded by the distinct set too, so the honest
+	// floor here is flat.
+	if grown := float64(wideCost) - float64(narrowCost); grown > float64(large-small) {
+		t.Fatalf("a %dx longer list of the SAME %d kinds cost %.0f more bytes (%d against %d): the answer is sized on the caller's list",
+			large/small, len(kinds), grown, wideCost, narrowCost)
 	}
 }

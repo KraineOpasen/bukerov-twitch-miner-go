@@ -760,3 +760,154 @@ func TestTheSuppliedTextExtentCensusMatchesAScan(t *testing.T) {
 	}
 	t.Logf("%d production call sites of suppliedTextExtent, scanned across %d production files", total, files)
 }
+
+// TestEveryWitnessBearingTypeCarriesAFramedWidth is the mechanical answer to
+// the way the framed-width preflight was rolled out: by enumeration.
+//
+// THE ENUMERATION WAS WRONG AND SAID SO IN PROSE. doc.go named five sibling
+// seams and asserted four of them took a caller-sized value; the fifth,
+// VerifiedP3bRuleset, took one too, and a Q3 lane measured its identity at
+// 1.007x the caller's edit on every use. Two earlier rounds had closed the
+// seams a reviewer named and left the neighbour open. A sentence cannot stop
+// that recurring; a census can.
+//
+// THE RULE. A type that carries an unexported `witness string` answers a
+// question by re-framing its own fields, so it must also carry `framedLen int`
+// and compare it first -- a rejection test that refuses a width-changing edit
+// before any byte is materialized. This walks the production files and fails on
+// any witness-bearing struct without a width, naming it. A NEW witness type is
+// therefore a compile-and-fail, not a prose omission.
+//
+// IT DOES NOT CHECK THAT THE WIDTH IS USED WELL. That is
+// TestTheRecordedFramedWidthIsTheWitnessOwn's job, and the two are deliberately
+// separate: this one answers "is there one", that one answers "is it right".
+func TestEveryWitnessBearingTypeCarriesAFramedWidth(t *testing.T) {
+	entries, err := os.ReadDir(".")
+	if err != nil {
+		t.Fatalf("read package dir: %v", err)
+	}
+	fset := token.NewFileSet()
+	type site struct{ name, pos string }
+	var withWitness, missing []site
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		f, err := parser.ParseFile(fset, name, nil, parser.SkipObjectResolution)
+		if err != nil {
+			t.Fatalf("parse %s: %v", name, err)
+		}
+		ast.Inspect(f, func(n ast.Node) bool {
+			ts, ok := n.(*ast.TypeSpec)
+			if !ok {
+				return true
+			}
+			st, ok := ts.Type.(*ast.StructType)
+			if !ok || st.Fields == nil {
+				return true
+			}
+			var witness, width bool
+			for _, fld := range st.Fields.List {
+				for _, id := range fld.Names {
+					switch id.Name {
+					case "witness":
+						if x, ok := fld.Type.(*ast.Ident); ok && x.Name == "string" {
+							witness = true
+						}
+					case "framedLen":
+						if x, ok := fld.Type.(*ast.Ident); ok && x.Name == "int" {
+							width = true
+						}
+					}
+				}
+			}
+			if !witness {
+				return true
+			}
+			s := site{ts.Name.Name, fset.Position(ts.Pos()).String()}
+			withWitness = append(withWitness, s)
+			if !width {
+				missing = append(missing, s)
+			}
+			return true
+		})
+	}
+
+	if len(missing) > 0 {
+		for _, m := range missing {
+			t.Errorf("%s (%s) carries a witness with no framedLen: it re-frames its own fields to answer a question, so a caller-sized edit is paid for before it is refused",
+				m.name, m.pos)
+		}
+		t.Fatalf("%d of %d witness-bearing types carry no framed width", len(missing), len(withWitness))
+	}
+
+	// THE COUNT IS PINNED SO THE WALK CANNOT GO QUIETLY BLIND. A census that
+	// stopped finding types would pass this test by finding nothing, which is
+	// exactly the failure mode the prose enumeration had.
+	const wantTypes = 7
+	if len(withWitness) != wantTypes {
+		names := make([]string, 0, len(withWitness))
+		for _, s := range withWitness {
+			names = append(names, s.name)
+		}
+		sort.Strings(names)
+		t.Fatalf("the census found %d witness-bearing types, want %d: %v -- if a type was added or removed, update the count with its width, not the count alone",
+			len(withWitness), wantTypes, names)
+	}
+}
+
+// TestTheWitnessCensusWouldCatchAWidthlessType is that census's own control: a
+// synthetic witness-bearing struct with no width must be reported. Without it
+// the census above could pass by never recognising a witness field at all.
+func TestTheWitnessCensusWouldCatchAWidthlessType(t *testing.T) {
+	const src = `package p
+type withWidth struct { A string; witness string; framedLen int }
+type withoutWidth struct { B string; witness string }
+type unrelated struct { C string }
+`
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, "synthetic.go", src, parser.SkipObjectResolution)
+	if err != nil {
+		t.Fatalf("parse synthetic: %v", err)
+	}
+	var seen, missing []string
+	ast.Inspect(f, func(n ast.Node) bool {
+		ts, ok := n.(*ast.TypeSpec)
+		if !ok {
+			return true
+		}
+		st, ok := ts.Type.(*ast.StructType)
+		if !ok || st.Fields == nil {
+			return true
+		}
+		var witness, width bool
+		for _, fld := range st.Fields.List {
+			for _, id := range fld.Names {
+				switch id.Name {
+				case "witness":
+					if x, ok := fld.Type.(*ast.Ident); ok && x.Name == "string" {
+						witness = true
+					}
+				case "framedLen":
+					if x, ok := fld.Type.(*ast.Ident); ok && x.Name == "int" {
+						width = true
+					}
+				}
+			}
+		}
+		if witness {
+			seen = append(seen, ts.Name.Name)
+			if !width {
+				missing = append(missing, ts.Name.Name)
+			}
+		}
+		return true
+	})
+	if want := []string{"withWidth", "withoutWidth"}; !reflect.DeepEqual(seen, want) {
+		t.Fatalf("the walk saw %v, want %v", seen, want)
+	}
+	if want := []string{"withoutWidth"}; !reflect.DeepEqual(missing, want) {
+		t.Fatalf("the walk reported %v as widthless, want %v", missing, want)
+	}
+}

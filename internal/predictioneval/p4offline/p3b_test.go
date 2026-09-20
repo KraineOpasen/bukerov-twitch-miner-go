@@ -5111,3 +5111,156 @@ func TestAnEditedResultIsRefusedWithoutFramingTheEdit(t *testing.T) {
 		}
 	})
 }
+
+// TestAnEditedRulesetIdentityIsRefusedWithoutFramingTheEdit is the fifth
+// sibling seam, and it is here because the sentence that enumerated the other
+// four asserted this one did not take a caller-sized value. It does.
+//
+// WHAT THE SEAM IS. VerifiedP3bRuleset.check answers one question -- was this
+// handle minted by VerifyP3bRuleset and is it unaltered -- and answered it by
+// re-framing all three identity fields into a witness digest on every use.
+// RulesetID is caller-supplied and VerifyP3bRuleset requires it to EQUAL the
+// config's ConfigID, which carries no per-string length bound, so a copied
+// handle with a widened identity paid about its own width on every ConfigCopy,
+// Digest and EvaluateP3bCase, to answer a refusal decided by one string
+// comparison. A Q3 lane measured 1.007x and this session reproduced 1.0073x.
+//
+// WHAT THE WIDTH CHECK IS AND IS NOT. The recorded width is a CHEAP REJECTION
+// TEST, not proof of identity: it refuses a length-changing edit in O(fields)
+// before any byte is materialized. An alteration that preserves the total
+// framed width passes it and is then refused by the witness, which is the only
+// thing that verifies CONTENT. Both halves are asserted below, because a width
+// check that had replaced the witness would pass the first half alone.
+//
+// AND IT IS NOT AN O(1) CLAIM FOR GENUINE INPUT. A genuine handle carrying a
+// large VALID identity still frames that identity once per use: that is an
+// artifact the caller really supplied, the witness must cover it, and the
+// subtest below drives exactly that case to keep the promise honest.
+func TestAnEditedRulesetIdentityIsRefusedWithoutFramingTheEdit(t *testing.T) {
+	rs := mustVerify(t, rulesetFrom(t, cfgDefaultOnly("none", 95, 100)))
+
+	// THE EDITED HANDLES ARE BUILT OUTSIDE THE MEASUREMENT. Building them
+	// inside reads the strings.Repeat and the concatenation, not the framing --
+	// the instrument defect this round already paid for once.
+	edited := func(extra string) p4offline.VerifiedP3bRuleset {
+		e := rs
+		e.RulesetID += extra
+		return e
+	}
+	refused := func(e p4offline.VerifiedP3bRuleset) {
+		if _, err := e.ConfigCopy(); !errors.Is(err, p4offline.ErrRulesetNotVerified) {
+			t.Fatalf("an edited ruleset identity must be refused as unverified, got %v", err)
+		}
+	}
+	cost := func(t *testing.T, e p4offline.VerifiedP3bRuleset) uint64 {
+		t.Helper()
+		refused(e)
+		runtime.GC()
+		var a, b runtime.MemStats
+		runtime.ReadMemStats(&a)
+		refused(e)
+		runtime.ReadMemStats(&b)
+		return b.TotalAlloc - a.TotalAlloc
+	}
+
+	const wide = 1 << 20
+	narrowV, hugeV := edited("X"), edited(strings.Repeat("X", wide))
+	narrow, huge := cost(t, narrowV), cost(t, hugeV)
+	t.Logf("one byte added -> %d B/op; %d bytes added -> %d B/op", narrow, wide, huge)
+	if over := grew(narrow, huge, wide); over > 0.5 {
+		t.Fatalf("a %d-byte identity edit cost %.2fx its own width above the one-byte control (%d against %d B/op): the edit is being framed",
+			wide, over, huge, narrow)
+	}
+
+	// THE WIDTH IS A REJECTION TEST, NOT AN IDENTITY PROOF. An alteration that
+	// keeps the TOTAL framed width identical passes the width comparison, so
+	// only the witness can refuse it -- and it must.
+	t.Run("and an equal-width alteration is still refused, by content", func(t *testing.T) {
+		same := rs
+		id := []byte(same.RulesetID)
+		if len(id) == 0 {
+			t.Fatal("the fixture must carry a non-empty identity")
+		}
+		id[0] ^= 0x20
+		same.RulesetID = string(id)
+		if same.RulesetID == rs.RulesetID {
+			t.Fatal("the alteration must actually change the identity")
+		}
+		if len(same.RulesetID) != len(rs.RulesetID) {
+			t.Fatalf("the alteration must preserve the width: %d against %d",
+				len(same.RulesetID), len(rs.RulesetID))
+		}
+		if _, err := same.ConfigCopy(); !errors.Is(err, p4offline.ErrRulesetNotVerified) {
+			t.Fatalf("an equal-width alteration must still be refused, got %v", err)
+		}
+
+		// AND THE SAME FOR A TRANSFER BETWEEN FIELDS, which keeps the total
+		// width identical while moving bytes across a framing boundary -- the
+		// one shape a sum-of-lengths check would admit.
+		moved := rs
+		moved.RulesetID = rs.RulesetID + rs.RawSHA256[:1]
+		moved.RawSHA256 = rs.RawSHA256[1:]
+		if len(moved.RulesetID)+len(moved.RawSHA256) != len(rs.RulesetID)+len(rs.RawSHA256) {
+			t.Fatal("the transfer must preserve the total width")
+		}
+		if _, err := moved.ConfigCopy(); !errors.Is(err, p4offline.ErrRulesetNotVerified) {
+			t.Fatalf("a byte moved between identity fields must still be refused, got %v", err)
+		}
+	})
+
+	// A GENUINE HANDLE STILL MINTS, and a genuine handle carrying a LARGE VALID
+	// identity still works -- paying its own framing once, which is honest and
+	// is not what this repair removes.
+	t.Run("and a genuine handle still answers, at any identity width", func(t *testing.T) {
+		if _, err := rs.ConfigCopy(); err != nil {
+			t.Fatalf("the genuine ruleset must still answer: %v", err)
+		}
+		big := strings.Repeat("w", 1<<16)
+		wideRS := mustVerify(t, rulesetFrom(t, cfgDefaultOnly(big, 95, 100)))
+		cfg, err := wideRS.ConfigCopy()
+		if err != nil {
+			t.Fatalf("a genuine ruleset with a %d-byte identity must still answer: %v", len(big), err)
+		}
+		if cfg.ConfigID != big {
+			t.Fatalf("the answered config must carry the supplied identity: %d bytes, want %d",
+				len(cfg.ConfigID), len(big))
+		}
+		if wideRS.Rules() != rs.Rules() {
+			t.Fatalf("the wide handle must seal the same config shape: %d rules against %d",
+				wideRS.Rules(), rs.Rules())
+		}
+	})
+
+	// THE ZERO, THE FORGED, THE DESERIALIZED AND THE CROSS-BOUND ALL STILL FAIL,
+	// which is what stops the width check passing by refusing nothing.
+	t.Run("and zero, forged, deserialized and cross-bound handles still fail", func(t *testing.T) {
+		var zero p4offline.VerifiedP3bRuleset
+		if _, err := zero.ConfigCopy(); !errors.Is(err, p4offline.ErrRulesetNotVerified) {
+			t.Fatalf("the zero handle must be refused, got %v", err)
+		}
+		forged := p4offline.VerifiedP3bRuleset{
+			RulesetID: rs.RulesetID, RawSHA256: rs.RawSHA256,
+			NativeConfigDigest: rs.NativeConfigDigest,
+		}
+		if _, err := forged.ConfigCopy(); !errors.Is(err, p4offline.ErrRulesetNotVerified) {
+			t.Fatalf("a forged handle must be refused, got %v", err)
+		}
+		raw, err := json.Marshal(rs)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var round p4offline.VerifiedP3bRuleset
+		if err := json.Unmarshal(raw, &round); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := round.ConfigCopy(); !errors.Is(err, p4offline.ErrRulesetNotVerified) {
+			t.Fatalf("a deserialized handle must be refused, got %v", err)
+		}
+		other := mustVerify(t, rulesetFrom(t, cfgWithRule("other", predictioneval.ComparatorGe, 50, 100)))
+		crossed := other
+		crossed.RulesetID = rs.RulesetID
+		if _, err := crossed.ConfigCopy(); !errors.Is(err, p4offline.ErrRulesetNotVerified) {
+			t.Fatalf("a cross-bound handle must be refused, got %v", err)
+		}
+	})
+}

@@ -934,7 +934,7 @@ func TestALocalErrorClassIsNamedByItsExtentAndNotEchoed(t *testing.T) {
 	// field. What the repair removes is every FURTHER framing: the
 	// concatenation into Reasons and placementEvidenceWitness framing that
 	// copy. Measured on this tree: 3,174,320 B/op before, which is 3.03x the
-	// supplied class, against 1,061,552 after, which is 1.012x.
+	// supplied class, against 1,061,568 after, which is 1.012x.
 	//
 	// AN EDITED PLACEMENT IS A DIFFERENT QUESTION AND IS NOT THIS TEST'S. A Q3
 	// lane pointed out that a copied-and-widened placement is NOT an artifact
