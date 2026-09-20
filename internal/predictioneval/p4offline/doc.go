@@ -727,12 +727,19 @@
 //     99.99% of it; decodeFault is flat in the document. The cost is the key
 //     walk, and it is encoding/json's buffering over a buffer the caller
 //     already holds -- not a decode and not the hash.
-//     IT IS THE CHEAP END OF THAT BAND. Controls at 512 KiB: a giant number
-//     literal 7.00x, a giant string literal 5.00x. A document of many small
-//     tokens reads about 14x, but nothing that shape is ACCEPTED here --
-//     MaxOrderedRulesRules caps an accepted ruleset at 128 rules, so a 512 KiB
-//     many-token document is refused input too, and the comparison is between
-//     two refusals rather than against honest input. dec.UseNumber() in
+//     THE CONTROLS ARE MEASURED AT ONE STAGE AND THE HEADLINE FIGURES END TO
+//     END, which is worth saying because the two bases coincide only for the
+//     number document, where the key walk is 99.99% of the cost. At
+//     checkRulesetKeys alone, 512 KiB: a giant number literal 7.00x, a giant
+//     string literal 5.00x, many small tokens about 13.5x. END TO END through
+//     VerifyP3bRuleset the same documents read about 7x, 10x and 19x, because
+//     the decode and the config comparison then run -- so on a like-for-like
+//     basis this refusal is NOT the cheapest of the three, and a comparison
+//     that makes it look cheapest is comparing two different bases.
+//     None of the three is accepted input in any case: MaxOrderedRulesRules
+//     caps an accepted ruleset at 128 rules, so a 512 KiB many-token document
+//     is refused too -- after the walk has been paid, since the refusal comes
+//     from the core below it. dec.UseNumber() in
 //     checkRulesetKeys measures 7.00x -> 5.00x and is NOT taken: it moves the
 //     refusal from Token()'s typed UnmarshalTypeError arm to Decode and changes
 //     the message, and the residual 5x is stdlib buffering unreachable through
@@ -833,7 +840,8 @@
 //     A VERSION BUMP IS NOT MECHANICALLY REQUIRED, AND THE GOLDEN IS.
 //     SourceRoundRegistryVersion is framed into registryDigest as its FIRST
 //     part, so bumping it changes EVERY registry's digest. The shape gate alone
-//     changes the digest only for a registry that carries a non-64-hex claim:
+//     changes the digest only for a registry that carries a claim outside 64
+//     LOWER-CASE hex (isCanonicalHex requires the lower case):
 //     every all-64-hex fixture digests identically with and without it, and
 //     every non-64-hex one moves. The bump's blast radius is strictly WIDER
 //     than the defect, so it is a compatibility-signalling CHOICE. Either way
@@ -1110,6 +1118,9 @@
 //     independent Q3 lanes found before publication -- the THIRTEENTH
 //     occurrence, and the third in a row caught by a lane rather than by a
 //     reviewer. The width was given to the two RESULT types the report named.
+//     THE FIFTH SIBLING WAS A FURTHER OCCURRENCE OF THE SAME CLASS -- the
+//     FOURTEENTH, and the first found by auditing an enumeration rather than a
+//     diff.
 //     SEVEN TYPES IN THIS PACKAGE CARRY A WITNESS. Two are the result types
 //     the report named. The other FIVE are sibling seams that re-frame a
 //     witness to answer a question decided by one string comparison, and ALL
@@ -1157,22 +1168,36 @@
 //     recorded at the mint and compared first, with RulesetID, RawSHA256 and
 //     NativeConfigDigest left exported.
 //     THE COUNT IS NOT PROSE. TestEveryWitnessBearingTypeCarriesAFramedWidth
-//     walks the production files, reports any witness-bearing struct with no
-//     framedLen, reports any that never COMPARES its witness against a
-//     recomputation -- a width-only check accepts every equal-width forgery --
-//     and compares the set it finds against the set the width test actually
-//     drives, so neither a new type nor an undriven framing passes quietly.
-//     Its control drives THE SAME WALK over synthetic sources, including a
-//     witness spelled as a named string type, an aliased one, a pointer one
-//     and one inside an anonymous struct: each of those evaded a first draft.
-//     AND THE WIDTH IS CHECKED AGAINST A CONSTRUCTION, NOT AGAINST ITSELF.
-//     Running one framer with bytes on against the same framer with bytes off
-//     is a two-mode differential: it sees the modes disagree and is blind to
-//     WHICH fields a framer enumerates and HOW it delimits them, because both
-//     sides lose a field, or a boundary, together.
-//     TestTheRulesetFramingIsTheOneTheContractDescribes builds the framing
-//     independently -- an eight-byte big-endian length before each part -- and
-//     asserts both the bytes and the recorded width against it.
+//     walks the production files and reports a witness-bearing struct with no
+//     framedLen, one whose methods never compare its witness against a
+//     recomputation, and one the width test does not drive -- the driven set
+//     is built BY the drive, so a name cannot outlive its assertion. Its
+//     control drives THE SAME WALK over synthetic sources: a witness spelled
+//     as a named string type, an aliased one, a pointer one, one inside an
+//     anonymous struct, a comparison against a call that is not a witness
+//     recomputation, and a real comparison whose answer is discarded. Every
+//     one of those defeated an earlier draft of one of the two recognizers.
+//     WHAT THE CENSUS DOES NOT PROMISE, stated because a sentence here once
+//     promised it. It triggers on the field NAME: a seam that spells its
+//     witness something else is invisible to it. It requires a width field and
+//     a witness comparison, not that the width is ever compared. It is a
+//     tripwire against the way this class has recurred, not a proof that the
+//     class cannot recur.
+//     AND THE FRAMINGS ARE CHECKED AGAINST A CONSTRUCTION, NOT ONLY AGAINST
+//     THEMSELVES. Running one framer with bytes on against the same framer
+//     with bytes off is a two-mode differential: it sees the modes disagree
+//     and is blind to WHICH fields a framer enumerates and HOW it delimits
+//     them, because both sides lose a field, or a boundary, together. Lanes
+//     demonstrated all three of dropped field, collapsed delimiter and
+//     borrowed domain tag against six of the seven framings with the suite
+//     green. TestEveryWitnessFramingHasItsOwnTagAndItsOwnParts parses each
+//     framing back into length-prefixed parts with an independent reader and
+//     holds it to a part count DECLARED from the field list and to its own
+//     domain tag; TestTheRulesetFramingIsTheOneTheContractDescribes goes
+//     further for frameRuleset alone, asserting the parts themselves and each
+//     field's effect on them. Swapping two same-shaped fields inside one
+//     framing moves neither the tag nor the count and is caught only for that
+//     one framing.
 //     WHAT A WIDTH IS AND IS NOT. It is a cheap REJECTION TEST: it refuses a
 //     width-changing edit in O(fields) before a byte is materialized. It is not
 //     proof of identity -- two different values can frame to one width -- so an

@@ -5117,7 +5117,8 @@ func TestAnEditedResultIsRefusedWithoutFramingTheEdit(t *testing.T) {
 // TestAnEditedRulesetIdentityIsRefusedWithoutFramingTheEdit drives the fifth
 // sibling seam. Three successive enumerations of these seams were written by
 // hand and all three were short, which is why the count is a walk over the
-// source now (fence_test.go) and this comment states only what it drives.
+// source now (TestEveryWitnessBearingTypeCarriesAFramedWidth) and this comment
+// states only what it drives.
 //
 // WHAT THE SEAM IS. VerifiedP3bRuleset.check answers one question -- was this
 // handle minted by VerifyP3bRuleset and is it unaltered -- and answered it by
@@ -5125,8 +5126,9 @@ func TestAnEditedResultIsRefusedWithoutFramingTheEdit(t *testing.T) {
 // RulesetID is caller-supplied and VerifyP3bRuleset requires it to EQUAL the
 // config's ConfigID, which carries no per-string length bound, so a copied
 // handle with a widened identity paid about its own width on every ConfigCopy,
-// Digest and EvaluateP3bCase, to answer a refusal decided by one string
-// comparison. A Q3 lane measured 1.007x and this session reproduced 1.0073x.
+// EvaluateP3bCase and EvaluateP3bWithTrace -- the three methods that call check
+// -- to answer a refusal decided by one string comparison. Measured at 1.0073x
+// the caller's edit.
 //
 // WHAT THE WIDTH CHECK IS AND IS NOT. The recorded width is a CHEAP REJECTION
 // TEST, not proof of identity: it refuses a length-changing edit in O(fields)

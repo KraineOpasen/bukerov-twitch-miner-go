@@ -2089,8 +2089,8 @@ func TestAnEpisodesOwnIdentifierCountDoesNotEnterTheAnswersCost(t *testing.T) {
 // checkEveryFramingWidth drives every witness framing this package has for one
 // randomized round and returns the names of the types it checked.
 //
-// IT RETURNS THE NAMES SO THE CENSUS CAN BIND TO THEM. The census in
-// fence_test.go finds the witness-bearing types from the source; this returns
+// IT RETURNS THE NAMES SO THE CENSUS CAN BIND TO THEM. The census below
+// finds the witness-bearing types from the source; this returns
 // the ones actually DRIVEN here. A Q3 lane showed the two could drift: an
 // eighth witness-bearing type with both fields, whose framing nothing pinned,
 // passed the census and this test together. Comparing the two sets is what
@@ -2098,6 +2098,20 @@ func TestAnEpisodesOwnIdentifierCountDoesNotEnterTheAnswersCost(t *testing.T) {
 // hand-written enumeration replacing the one in doc.go.
 func checkEveryFramingWidth(t *testing.T, rng *rand.Rand, round int) map[string]bool {
 	t.Helper()
+	// THE SET IS BUILT BY THE DRIVE, NOT DECLARED BESIDE IT. A first version
+	// returned a hand-written literal of the seven names, and a Q3 lane deleted
+	// a whole framing's driving block while leaving its name in the literal:
+	// the suite stayed green, so an undriven framing passed quietly -- which is
+	// the one thing this return value exists to prevent. Each check below
+	// records its own name as it runs, so the name cannot outlive the drive.
+	driven := map[string]bool{}
+	checkWidth := func(name string, got, want int) {
+		t.Helper()
+		driven[name] = true
+		if got != want {
+			t.Fatalf("round %d: %s width %d, framing %d bytes", round, name, got, want)
+		}
+	}
 	text := func() string {
 		n := rng.Intn(40)
 		b := make([]byte, n)
@@ -2138,14 +2152,17 @@ func checkEveryFramingWidth(t *testing.T, rng *rand.Rand, round int) map[string]
 	p3b.Evaluation.ConfigDigest = text()
 	p3b.Evaluation.EntropyDigest = text()
 	p3b.Evaluation.ConsumedInputDigest = text()
+	// Framed integers a first fixture left at zero, next to the Status field a
+	// lane found empty: a length-only arm that mishandled their rendering
+	// agreed with itself at "0".
+	p3b.Evaluation.RawWordsConsumed = rng.Intn(1 << 20)
+	p3b.Evaluation.BernoulliEvaluations = rng.Intn(1 << 20)
 	p3b.Action = ActionMapping{MapVersion: text(), Policy: text(), NativeAction: text(),
 		Class: ActionClass(text()), SkipReason: text()}
 
 	var c canonical
 	frameP3bResult(&c, p3b)
-	if got, want := p3bResultFramedLen(p3b), len(c.bytes()); got != want {
-		t.Fatalf("round %d: P3b width %d, framing %d bytes", round, got, want)
-	}
+	checkWidth("P3bCaseResult", p3bResultFramedLen(p3b), len(c.bytes()))
 
 	p2 := P2CaseResult{
 		Policy: text(), FactsetDigest: text(),
@@ -2162,9 +2179,7 @@ func checkEveryFramingWidth(t *testing.T, rng *rand.Rand, round int) map[string]
 
 	var c2 canonical
 	frameP2Result(&c2, p2)
-	if got, want := p2ResultFramedLen(p2), len(c2.bytes()); got != want {
-		t.Fatalf("round %d: P2 width %d, framing %d bytes", round, got, want)
-	}
+	checkWidth("P2CaseResult", p2ResultFramedLen(p2), len(c2.bytes()))
 
 	// AND THE OTHER FIVE FRAMINGS, for the reason the two above were not
 	// enough. A Q3 mutant that made framePayoutEvidence's
@@ -2182,7 +2197,14 @@ func checkEveryFramingWidth(t *testing.T, rng *rand.Rand, round int) map[string]
 		Illegality: strs(rng, text), SkipReason: text()}
 	choice := PolicyChoice{Present: rng.Intn(2) == 0, Index: rng.Intn(8), OutcomeID: text()}
 	fact := func() Int64Fact {
-		return Int64Fact{Presence: PresenceKnown, Value: int64(rng.Intn(1 << 30)), Reason: text()}
+		// UNKNOWN is a live production value -- derivePayout's refusal arm
+		// sets Stake, Payout and Net to it -- and a fixture pinned to KNOWN
+		// framed one string length every round.
+		p := PresenceKnown
+		if rng.Intn(2) == 0 {
+			p = PresenceUnknown
+		}
+		return Int64Fact{Presence: p, Value: int64(rng.Intn(1 << 30)), Reason: text()}
 	}
 	oi, of := rng.Intn(1<<20), int64(rng.Intn(1<<30))
 
@@ -2198,9 +2220,7 @@ func checkEveryFramingWidth(t *testing.T, rng *rand.Rand, round int) map[string]
 	}
 	var c3 canonical
 	frameFactualPlacement(&c3, fp)
-	if got, want := factualPlacementFramedLen(fp), len(c3.bytes()); got != want {
-		t.Fatalf("round %d: FactualPlacement width %d, framing %d bytes", round, got, want)
-	}
+	checkWidth("FactualPlacement", factualPlacementFramedLen(fp), len(c3.bytes()))
 
 	dec := PolicyDecision{
 		Policy: text(), Attempt: attempt, FactsetDigest: text(), EventID: text(),
@@ -2209,9 +2229,7 @@ func checkEveryFramingWidth(t *testing.T, rng *rand.Rand, round int) map[string]
 	}
 	var c4 canonical
 	framePolicyDecision(&c4, dec)
-	if got, want := policyDecisionFramedLen(dec), len(c4.bytes()); got != want {
-		t.Fatalf("round %d: PolicyDecision width %d, framing %d bytes", round, got, want)
-	}
+	checkWidth("PolicyDecision", policyDecisionFramedLen(dec), len(c4.bytes()))
 
 	pl := PlacementEvidence{
 		ContractVersion: text(), Policy: text(), Attempt: attempt,
@@ -2222,9 +2240,7 @@ func checkEveryFramingWidth(t *testing.T, rng *rand.Rand, round int) map[string]
 	}
 	var c5 canonical
 	framePlacementEvidence(&c5, pl)
-	if got, want := placementEvidenceFramedLen(pl), len(c5.bytes()); got != want {
-		t.Fatalf("round %d: PlacementEvidence width %d, framing %d bytes", round, got, want)
-	}
+	checkWidth("PlacementEvidence", placementEvidenceFramedLen(pl), len(c5.bytes()))
 
 	po := PayoutEvidence{
 		ContractVersion: text(), Policy: text(), Attempt: attempt,
@@ -2240,9 +2256,7 @@ func checkEveryFramingWidth(t *testing.T, rng *rand.Rand, round int) map[string]
 	po.decisionWitness = text()
 	var c6 canonical
 	framePayoutEvidence(&c6, po)
-	if got, want := payoutEvidenceFramedLen(po), len(c6.bytes()); got != want {
-		t.Fatalf("round %d: PayoutEvidence width %d, framing %d bytes", round, got, want)
-	}
+	checkWidth("PayoutEvidence", payoutEvidenceFramedLen(po), len(c6.bytes()))
 
 	// THE RULESET FRAMING IS THE SEVENTH, and it is the one successive
 	// hand-written enumerations of these seams kept leaving out. It carries
@@ -2250,14 +2264,8 @@ func checkEveryFramingWidth(t *testing.T, rng *rand.Rand, round int) map[string]
 	rid, rsha, rnat := text(), text(), text()
 	var c7 canonical
 	frameRuleset(&c7, rid, rsha, rnat)
-	if got, want := rulesetFramedLen(rid, rsha, rnat), len(c7.bytes()); got != want {
-		t.Fatalf("round %d: ruleset width %d, framing %d bytes", round, got, want)
-	}
-	return map[string]bool{
-		"P2CaseResult": true, "P3bCaseResult": true, "FactualPlacement": true,
-		"PolicyDecision": true, "PlacementEvidence": true, "PayoutEvidence": true,
-		"VerifiedP3bRuleset": true,
-	}
+	checkWidth("VerifiedP3bRuleset", rulesetFramedLen(rid, rsha, rnat), len(c7.bytes()))
+	return driven
 }
 
 func TestTheRecordedFramedWidthIsTheWitnessOwn(t *testing.T) {
@@ -2283,7 +2291,10 @@ func TestTheRecordedFramedWidthIsTheWitnessOwn(t *testing.T) {
 // strs builds a random slice of framed strings, including the empty slice, so
 // the count prefix and the per-element widths are both exercised.
 func strs(rng *rand.Rand, text func() string) []string {
-	n := rng.Intn(4)
+	// PAST ONE DIGIT ON PURPOSE. The count itself is framed as a decimal
+	// string, so its own width grows at ten; a generator capped at three
+	// pinned every count call site in its single-digit range only.
+	n := rng.Intn(14)
 	if n == 0 {
 		return nil
 	}
@@ -2577,22 +2588,61 @@ func witnessComparedIn(t *testing.T, dir string) map[string]bool {
 			if !ok {
 				continue
 			}
-			ast.Inspect(fd.Body, func(n ast.Node) bool {
-				be, ok := n.(*ast.BinaryExpr)
-				if !ok || (be.Op != token.EQL && be.Op != token.NEQ) {
+			// ONLY WHERE THE ANSWER IS USED. A comparison assigned to a
+			// variable that is then discarded -- the shape a "temporarily
+			// disabled" gate takes -- is not a verification, so the walk
+			// starts from the expressions a decision is actually made on.
+			decide := func(n ast.Node) {
+				ast.Inspect(n, func(n ast.Node) bool {
+					be, ok := n.(*ast.BinaryExpr)
+					if !ok || (be.Op != token.EQL && be.Op != token.NEQ) {
+						return true
+					}
+					for i, side := range []ast.Expr{be.X, be.Y} {
+						sel, ok := side.(*ast.SelectorExpr)
+						if !ok || sel.Sel.Name != "witness" {
+							continue
+						}
+						other := be.Y
+						if i == 1 {
+							other = be.X
+						}
+						call, ok := other.(*ast.CallExpr)
+						if !ok {
+							continue
+						}
+						// AND AGAINST A RECOMPUTATION OF THE WITNESS, not any
+						// call at all. A lane defeated an earlier form of this
+						// with `witness != hexEncode(nil)`, which is the empty
+						// string spelled as a call -- literally the mutant the
+						// predicate exists to catch.
+						var name string
+						switch fn := call.Fun.(type) {
+						case *ast.Ident:
+							name = fn.Name
+						case *ast.SelectorExpr:
+							name = fn.Sel.Name
+						}
+						if strings.HasSuffix(name, "Witness") {
+							out[id.Name] = true
+						}
+					}
 					return true
-				}
-				for i, side := range []ast.Expr{be.X, be.Y} {
-					sel, ok := side.(*ast.SelectorExpr)
-					if !ok || sel.Sel.Name != "witness" {
-						continue
+				})
+			}
+			ast.Inspect(fd.Body, func(n ast.Node) bool {
+				switch x := n.(type) {
+				case *ast.ReturnStmt:
+					for _, r := range x.Results {
+						decide(r)
 					}
-					other := be.Y
-					if i == 1 {
-						other = be.X
+				case *ast.IfStmt:
+					if x.Cond != nil {
+						decide(x.Cond)
 					}
-					if _, ok := other.(*ast.CallExpr); ok {
-						out[id.Name] = true
+				case *ast.SwitchStmt:
+					if x.Tag != nil {
+						decide(x.Tag)
 					}
 				}
 				return true
@@ -2823,6 +2873,67 @@ type wrongWidthType struct {
 type unrelated struct {
 	C string
 }
+
+type comparesAgainstACall struct {
+	witness   string
+	framedLen int
+}
+
+func comparesAgainstACallWitness(v comparesAgainstACall) string { return "" }
+
+func (v comparesAgainstACall) derived() bool {
+	return v.witness != "" && v.witness == comparesAgainstACallWitness(v)
+}
+
+type comparesInAPointerMethod struct {
+	witness   string
+	framedLen int
+}
+
+func (v *comparesInAPointerMethod) check() bool {
+	return v.witness != comparesAgainstACallWitness(comparesAgainstACall{})
+}
+
+type comparesAgainstALiteral struct {
+	witness   string
+	framedLen int
+}
+
+func (v comparesAgainstALiteral) derived() bool {
+	// A non-empty test is a comparison and is NOT a verification.
+	return v.witness != "" && v.framedLen > 0
+}
+
+type comparesNothing struct {
+	witness   string
+	framedLen int
+}
+
+func (v comparesNothing) derived() bool { return v.framedLen > 0 }
+
+type comparesAgainstANonWitnessCall struct {
+	witness   string
+	framedLen int
+}
+
+func hexEncode(b []byte) string { return "" }
+
+func (v comparesAgainstANonWitnessCall) derived() bool {
+	// The empty string spelled as a call: a lane used exactly this to defeat
+	// an earlier form of the predicate.
+	return v.witness != hexEncode(nil) && v.framedLen > 0
+}
+
+type comparesButDiscardsTheAnswer struct {
+	witness   string
+	framedLen int
+}
+
+func (v comparesButDiscardsTheAnswer) derived() bool {
+	content := v.witness == comparesAgainstACallWitness(comparesAgainstACall{})
+	_ = content
+	return v.framedLen > 0
+}
 `
 	// A _test.go file must be SKIPPED by the walk, so one is written too.
 	if err := os.WriteFile(filepath.Join(dir, "a.go"), []byte(src), 0o600); err != nil {
@@ -2863,13 +2974,36 @@ type unrelated struct {
 	if anon != 1 {
 		t.Errorf("the walk saw %d anonymous witness-bearing structs, want 1 (the one inside `nested`)", anon)
 	}
-	if len(withWitness) != 8 {
+	if len(withWitness) != 14 {
 		names := make([]string, 0, len(withWitness))
 		for _, s := range withWitness {
 			names = append(names, s.name)
 		}
 		sort.Strings(names)
-		t.Errorf("the walk saw %d witness-bearing structs, want 8: %v", len(withWitness), names)
+		t.Errorf("the walk saw %d witness-bearing structs, want 14: %v", len(withWitness), names)
+	}
+
+	// AND THE COMPARISON RECOGNIZER NEEDS ITS OWN CONTROL, by the same rule:
+	// a Q3 lane replaced witnessComparedIn's call-expression requirement with
+	// an unconditional true -- making it accept `witness != ""`, which its own
+	// comment calls the mutant it exists to catch -- and the suite stayed
+	// green, because nothing drove it over sources whose answer is known.
+	compared := witnessComparedIn(t, dir)
+	for _, want := range []string{"comparesAgainstACall", "comparesInAPointerMethod"} {
+		if !compared[want] {
+			t.Errorf("the comparison recognizer did not see %s comparing its witness against a recomputation", want)
+		}
+	}
+	for _, notWant := range []string{
+		"comparesAgainstALiteral", "comparesNothing", "plain",
+		// Both of these were built by a Q3 lane to defeat the predicate and
+		// are kept as regressions: a call that is not a witness
+		// recomputation, and a real comparison whose answer is thrown away.
+		"comparesAgainstANonWitnessCall", "comparesButDiscardsTheAnswer",
+	} {
+		if compared[notWant] {
+			t.Errorf("the comparison recognizer counted %s, whose witness is never compared against a recomputation", notWant)
+		}
 	}
 
 	// AND IT MUST REPORT EXACTLY THE ONES WITH NO USABLE WIDTH -- everything
@@ -2892,5 +3026,159 @@ type unrelated struct {
 	}
 	if len(missing) != 7 {
 		t.Errorf("the walk reported %d missing widths, want 7 (six named plus the nested anonymous one)", len(missing))
+	}
+}
+
+// splitFramedParts parses a framing back into its length-prefixed parts with an
+// independent reader: eight big-endian bytes of length, then that many bytes.
+// It refuses anything it cannot consume exactly, so a malformed framing is a
+// failure rather than a short read.
+func splitFramedParts(t *testing.T, b []byte) []string {
+	t.Helper()
+	var out []string
+	for len(b) > 0 {
+		if len(b) < 8 {
+			t.Fatalf("a framing ended mid-prefix with %d bytes left", len(b))
+		}
+		n := binary.BigEndian.Uint64(b[:8])
+		b = b[8:]
+		if uint64(len(b)) < n {
+			t.Fatalf("a framing declares a %d-byte part with %d bytes left", n, len(b))
+		}
+		out = append(out, string(b[:n]))
+		b = b[n:]
+	}
+	return out
+}
+
+// TestEveryWitnessFramingHasItsOwnTagAndItsOwnParts is the structural receipt
+// for all seven framings, and it exists because the width test cannot be one.
+//
+// WHAT THE WIDTH TEST CANNOT SEE. Running a framer with bytes on against the
+// same framer with bytes off catches the two modes disagreeing, and nothing
+// else: drop a field, collapse two length prefixes into one, or give a framing
+// another framing's domain tag, and BOTH sides change together. Q3 lanes
+// demonstrated all three against six of the seven framings with the whole suite
+// green -- including giving PlacementEvidence the PolicyDecision tag, which is
+// the cross-artifact separation the tags exist for, and dropping
+// PlacementEvidence's three attribution fields, which is what DerivePayout
+// reads.
+//
+// WHAT THIS ASSERTS. Each framing is parsed back into parts by an independent
+// reader, and two things are checked against a count DECLARED HERE from the
+// contract rather than measured from the framer: the first part is that
+// framing's own domain tag, and the number of parts is the number its fields
+// require. A dropped field, a collapsed delimiter and a borrowed tag each move
+// one of those two.
+//
+// IT IS NOT A FIELD-BY-FIELD ORACLE. Only frameRuleset has one of those
+// (TestTheRulesetFramingIsTheOneTheContractDescribes). Swapping two same-shaped
+// fields inside one framing moves neither the tag nor the count and is not
+// caught here; that residue is recorded rather than implied away.
+func TestEveryWitnessFramingHasItsOwnTagAndItsOwnParts(t *testing.T) {
+	rng := rand.New(rand.NewSource(20260922))
+	text := func() string {
+		n := rng.Intn(40)
+		b := make([]byte, n)
+		for i := range b {
+			b[i] = byte("ab\xc3\xa9\x00 z"[rng.Intn(7)])
+		}
+		return string(b)
+	}
+	strsOf := func(n int) []string {
+		out := make([]string, n)
+		for i := range out {
+			out[i] = text()
+		}
+		return out
+	}
+	fact := func() Int64Fact {
+		return Int64Fact{Presence: PresenceKnown, Value: int64(rng.Intn(1 << 20)), Reason: text()}
+	}
+	attempt := predictioneval.AttemptKey{
+		CollectorEpoch: 7, CollectorSessionID: text(), PoolInstanceID: text(), AttemptID: 9,
+	}
+	// frameAction writes four strings, a bool, a count, one string per
+	// illegality and a skip reason; frameChoice and frameFact write three each.
+	const actionFixed, choiceParts, factParts = 7, 3, 3
+	illeg, outcomes, reasons := strsOf(2), strsOf(3), strsOf(4)
+	action := ActionMapping{MapVersion: text(), Policy: text(), NativeAction: text(),
+		Class: ActionClass(text()), Legal: true, Illegality: illeg, SkipReason: text()}
+	choice := PolicyChoice{Present: true, Index: 3, OutcomeID: text()}
+	oi, of := 5, int64(11)
+
+	p2 := P2CaseResult{Policy: text(), FactsetDigest: text(), Action: action, Choice: choice, Stake: fact()}
+	p2.Binding.ContractVersion, p2.Binding.Digest = text(), text()
+	p2.Evaluation.CommonInputDigest, p2.Evaluation.Action, p2.Evaluation.ActionReason = text(), text(), text()
+
+	p3b := P3bCaseResult{Policy: text(), FactsetDigest: text(), RulesetID: text(),
+		RulesetRawSHA256: text(), NativeConfigDigest: text(), ProjectionRefusal: text(),
+		Action: action, Choice: choice, Stake: fact()}
+
+	fp := FactualPlacement{Attempt: attempt, FactsetDigest: text(), EventID: text(),
+		TerminalDecision: text(), RecordedChoiceIndex: &oi, RecordedChoiceOutcomeID: text(),
+		RecordedFinalAmount: &of, RecordedTerminalSlot: &oi, Coherence: text(),
+		CallStartedObservationID: text(), Stake: &of, Slot: &oi, ErrorClass: text()}
+	fpNil := FactualPlacement{Attempt: attempt, FactsetDigest: text(), EventID: text()}
+
+	dec := PolicyDecision{Policy: text(), Attempt: attempt, FactsetDigest: text(), EventID: text(),
+		Derivation: text(), OutcomeIDs: outcomes, Action: action, Choice: choice, Stake: fact()}
+	pl := PlacementEvidence{ContractVersion: text(), Policy: text(), Attempt: attempt,
+		FactsetDigest: text(), EventID: text(), Status: PlacementStatus(text()), Reasons: reasons,
+		PolicyStake: fact(), AttributedOutcomeID: text(), AttributedCallObservationID: text()}
+	po := PayoutEvidence{ContractVersion: text(), Policy: text(), Attempt: attempt,
+		FactsetDigest: text(), EventID: text(), Outcome: PayoutOutcome(text()),
+		ChoiceCorrect: ChoiceVerdict(text()), Stake: fact(), Payout: fact(), Net: fact(),
+		Reasons: reasons, ResolutionFactsDigest: text(), Derivation: text()}
+	po.decisionWitness = text()
+	rid, rsha, rnat := text(), text(), text()
+
+	for _, tc := range []struct {
+		name  string
+		tag   string
+		parts int
+		frame func(*canonical)
+	}{
+		// Each count is read off the framer's own field list, not measured.
+		{"P2CaseResult", "p4offline-p2-result-witness",
+			8 + actionFixed + len(illeg) + choiceParts + factParts,
+			func(c *canonical) { frameP2Result(c, p2) }},
+		{"P3bCaseResult", "p4offline-p3b-result-witness",
+			31 + actionFixed + len(illeg) + choiceParts + factParts,
+			func(c *canonical) { frameP3bResult(c, p3b) }},
+		{"FactualPlacement", "p4offline-factual-placement-witness",
+			18 + 2 + 2 + 2 + 2 + 2, // five optionals, all present: a bool plus a value each
+			func(c *canonical) { frameFactualPlacement(c, fp) }},
+		{"FactualPlacement, optionals absent", "p4offline-factual-placement-witness",
+			18 + 1 + 1 + 1 + 1 + 1, // five optionals, all absent: the bool alone
+			func(c *canonical) { frameFactualPlacement(c, fpNil) }},
+		{"PolicyDecision", "p4offline-policy-decision-witness",
+			11 + len(outcomes) + actionFixed + len(illeg) + choiceParts + factParts,
+			func(c *canonical) { framePolicyDecision(c, dec) }},
+		{"PlacementEvidence", "p4offline-placement-evidence-witness",
+			11 + len(reasons) + factParts + 3,
+			func(c *canonical) { framePlacementEvidence(c, pl) }},
+		{"PayoutEvidence", "p4offline-payout-evidence-witness",
+			13 + 3*factParts + 1 + len(reasons) + 3,
+			func(c *canonical) { framePayoutEvidence(c, po) }},
+		{"VerifiedP3bRuleset", "p4offline-verified-ruleset-witness", 4,
+			func(c *canonical) { frameRuleset(c, rid, rsha, rnat) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var c canonical
+			tc.frame(&c)
+			got := splitFramedParts(t, c.bytes())
+			if len(got) == 0 || got[0] != tc.tag {
+				first := ""
+				if len(got) > 0 {
+					first = got[0]
+				}
+				t.Fatalf("the framing opens with %q, its own domain tag is %q", first, tc.tag)
+			}
+			if len(got) != tc.parts {
+				t.Fatalf("the framing wrote %d parts, its fields require %d: a part missing is a field the witness no longer covers, a part too few is two fields sharing one length prefix",
+					len(got), tc.parts)
+			}
+		})
 	}
 }
