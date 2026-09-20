@@ -2105,12 +2105,27 @@ func checkEveryFramingWidth(t *testing.T, rng *rand.Rand, round int) map[string]
 	// the one thing this return value exists to prevent. Each check below
 	// records its own name as it runs, so the name cannot outlive the drive.
 	driven := map[string]bool{}
-	checkWidth := func(name string, got, want int) {
+	// IT TAKES THE FRAMER, NOT TWO INTEGERS. A lane neutered one of these by
+	// passing the same expression on both sides: the width assertion became a
+	// tautology while the name stayed in the driven set and the census stayed
+	// content. With the framing passed in, the bytes side cannot be spelled as
+	// the width side.
+	checkWidth := func(name string, width int, frame func(*canonical)) {
 		t.Helper()
 		driven[name] = true
-		if got != want {
-			t.Fatalf("round %d: %s width %d, framing %d bytes", round, name, got, want)
+		var c canonical
+		frame(&c)
+		if want := len(c.bytes()); width != want {
+			t.Fatalf("round %d: %s width %d, framing %d bytes", round, name, width, want)
 		}
+	}
+	// A presence that varies, for the two result fixtures. UNKNOWN is a live
+	// production value and these two were the framings the widening skipped.
+	presence := func() Presence {
+		if rng.Intn(2) == 0 {
+			return PresenceUnknown
+		}
+		return PresenceKnown
 	}
 	text := func() string {
 		n := rng.Intn(40)
@@ -2140,7 +2155,7 @@ func checkEveryFramingWidth(t *testing.T, rng *rand.Rand, round int) map[string]
 			OutcomeCount: rng.Intn(1000),
 		},
 		Choice: PolicyChoice{Present: rng.Intn(2) == 0, Index: rng.Intn(8), OutcomeID: text()},
-		Stake:  Int64Fact{Presence: PresenceKnown, Value: int64(rng.Intn(1 << 30)), Reason: text()},
+		Stake:  Int64Fact{Presence: presence(), Value: int64(rng.Intn(1 << 30)), Reason: text()},
 	}
 	p3b.Projection.Stream.SelectionDigest = text()
 	// Status is framed and was the ONE field this fixture always left
@@ -2158,18 +2173,20 @@ func checkEveryFramingWidth(t *testing.T, rng *rand.Rand, round int) map[string]
 	p3b.Evaluation.RawWordsConsumed = rng.Intn(1 << 20)
 	p3b.Evaluation.BernoulliEvaluations = rng.Intn(1 << 20)
 	p3b.Action = ActionMapping{MapVersion: text(), Policy: text(), NativeAction: text(),
-		Class: ActionClass(text()), SkipReason: text()}
+		Class: ActionClass(text()), Legal: rng.Intn(2) == 0,
+		Illegality: strs(rng, text), SkipReason: text()}
 
 	var c canonical
 	frameP3bResult(&c, p3b)
-	checkWidth("P3bCaseResult", p3bResultFramedLen(p3b), len(c.bytes()))
+	checkWidth("P3bCaseResult", p3bResultFramedLen(p3b), func(c *canonical) { frameP3bResult(c, p3b) })
 
 	p2 := P2CaseResult{
 		Policy: text(), FactsetDigest: text(),
 		Action: ActionMapping{MapVersion: text(), Policy: text(), NativeAction: text(),
-			Class: ActionClass(text()), SkipReason: text()},
+			Class: ActionClass(text()), Legal: rng.Intn(2) == 0,
+			Illegality: strs(rng, text), SkipReason: text()},
 		Choice: PolicyChoice{Present: rng.Intn(2) == 0, Index: rng.Intn(8), OutcomeID: text()},
-		Stake:  Int64Fact{Presence: PresenceKnown, Value: int64(rng.Intn(1 << 30)), Reason: text()},
+		Stake:  Int64Fact{Presence: presence(), Value: int64(rng.Intn(1 << 30)), Reason: text()},
 	}
 	p2.Binding.Digest = text()
 	p2.Binding.ContractVersion = text()
@@ -2179,7 +2196,7 @@ func checkEveryFramingWidth(t *testing.T, rng *rand.Rand, round int) map[string]
 
 	var c2 canonical
 	frameP2Result(&c2, p2)
-	checkWidth("P2CaseResult", p2ResultFramedLen(p2), len(c2.bytes()))
+	checkWidth("P2CaseResult", p2ResultFramedLen(p2), func(c *canonical) { frameP2Result(c, p2) })
 
 	// AND THE OTHER FIVE FRAMINGS, for the reason the two above were not
 	// enough. A Q3 mutant that made framePayoutEvidence's
@@ -2220,7 +2237,7 @@ func checkEveryFramingWidth(t *testing.T, rng *rand.Rand, round int) map[string]
 	}
 	var c3 canonical
 	frameFactualPlacement(&c3, fp)
-	checkWidth("FactualPlacement", factualPlacementFramedLen(fp), len(c3.bytes()))
+	checkWidth("FactualPlacement", factualPlacementFramedLen(fp), func(c *canonical) { frameFactualPlacement(c, fp) })
 
 	dec := PolicyDecision{
 		Policy: text(), Attempt: attempt, FactsetDigest: text(), EventID: text(),
@@ -2229,7 +2246,7 @@ func checkEveryFramingWidth(t *testing.T, rng *rand.Rand, round int) map[string]
 	}
 	var c4 canonical
 	framePolicyDecision(&c4, dec)
-	checkWidth("PolicyDecision", policyDecisionFramedLen(dec), len(c4.bytes()))
+	checkWidth("PolicyDecision", policyDecisionFramedLen(dec), func(c *canonical) { framePolicyDecision(c, dec) })
 
 	pl := PlacementEvidence{
 		ContractVersion: text(), Policy: text(), Attempt: attempt,
@@ -2240,7 +2257,7 @@ func checkEveryFramingWidth(t *testing.T, rng *rand.Rand, round int) map[string]
 	}
 	var c5 canonical
 	framePlacementEvidence(&c5, pl)
-	checkWidth("PlacementEvidence", placementEvidenceFramedLen(pl), len(c5.bytes()))
+	checkWidth("PlacementEvidence", placementEvidenceFramedLen(pl), func(c *canonical) { framePlacementEvidence(c, pl) })
 
 	po := PayoutEvidence{
 		ContractVersion: text(), Policy: text(), Attempt: attempt,
@@ -2256,7 +2273,7 @@ func checkEveryFramingWidth(t *testing.T, rng *rand.Rand, round int) map[string]
 	po.decisionWitness = text()
 	var c6 canonical
 	framePayoutEvidence(&c6, po)
-	checkWidth("PayoutEvidence", payoutEvidenceFramedLen(po), len(c6.bytes()))
+	checkWidth("PayoutEvidence", payoutEvidenceFramedLen(po), func(c *canonical) { framePayoutEvidence(c, po) })
 
 	// THE RULESET FRAMING IS THE SEVENTH, and it is the one successive
 	// hand-written enumerations of these seams kept leaving out. It carries
@@ -2264,7 +2281,7 @@ func checkEveryFramingWidth(t *testing.T, rng *rand.Rand, round int) map[string]
 	rid, rsha, rnat := text(), text(), text()
 	var c7 canonical
 	frameRuleset(&c7, rid, rsha, rnat)
-	checkWidth("VerifiedP3bRuleset", rulesetFramedLen(rid, rsha, rnat), len(c7.bytes()))
+	checkWidth("VerifiedP3bRuleset", rulesetFramedLen(rid, rsha, rnat), func(c *canonical) { frameRuleset(c, rid, rsha, rnat) })
 	return driven
 }
 
@@ -2597,8 +2614,38 @@ func witnessComparedIn(t *testing.T, dir string) map[string]bool {
 			// variable that is then discarded -- the shape a "temporarily
 			// disabled" gate takes -- is not a verification, so the walk
 			// starts from the expressions a decision is actually made on.
+			recvName := ""
+			if names := fd.Recv.List[0].Names; len(names) == 1 {
+				recvName = names[0].Name
+			}
+			// MENTIONS THE RECEIVER, somewhere in the call's arguments. A
+			// recomputation of THIS value's witness has to be handed this
+			// value; a lane defeated an earlier form with a call on a foreign
+			// type's zero value, which recomputes nothing about the receiver.
+			mentionsRecv := func(e ast.Expr) bool {
+				found := false
+				ast.Inspect(e, func(n ast.Node) bool {
+					if id, ok := n.(*ast.Ident); ok && recvName != "" && id.Name == recvName {
+						found = true
+					}
+					return true
+				})
+				return found
+			}
 			decide := func(n ast.Node) {
 				ast.Inspect(n, func(n ast.Node) bool {
+					// A DISCARDED CLOSURE IS NOT A DECISION. Its body holds a
+					// return of its own, which an earlier form of this walk
+					// took for the method's.
+					if _, ok := n.(*ast.FuncLit); ok {
+						return false
+					}
+					// || IS NOT SKIPPED, and that is deliberate: check is a
+					// REFUSAL-shaped disjunction, so its witness comparison is
+					// a disjunct and skipping them would blind this walk to
+					// the seam it exists for. The cost is that a comparison
+					// placed behind an always-true || operand is not told
+					// apart from a reachable one; doc.go records that.
 					be, ok := n.(*ast.BinaryExpr)
 					if !ok || (be.Op != token.EQL && be.Op != token.NEQ) {
 						return true
@@ -2628,7 +2675,7 @@ func witnessComparedIn(t *testing.T, dir string) map[string]bool {
 						case *ast.SelectorExpr:
 							name = fn.Sel.Name
 						}
-						if strings.HasSuffix(name, "Witness") {
+						if strings.HasSuffix(name, "Witness") && len(call.Args) > 0 && mentionsRecv(call) {
 							out[id.Name] = true
 						}
 					}
@@ -2636,6 +2683,9 @@ func witnessComparedIn(t *testing.T, dir string) map[string]bool {
 				})
 			}
 			ast.Inspect(fd.Body, func(n ast.Node) bool {
+				if _, ok := n.(*ast.FuncLit); ok {
+					return false
+				}
 				switch x := n.(type) {
 				case *ast.ReturnStmt:
 					for _, r := range x.Results {
@@ -2880,23 +2930,73 @@ type unrelated struct {
 }
 
 type comparesAgainstACall struct {
+	A         string
 	witness   string
 	framedLen int
 }
 
-func comparesAgainstACallWitness(v comparesAgainstACall) string { return "" }
+func comparesAgainstACallWitness(v comparesAgainstACall) string { return v.A + "w" }
 
 func (v comparesAgainstACall) derived() bool {
 	return v.witness != "" && v.witness == comparesAgainstACallWitness(v)
 }
 
 type comparesInAPointerMethod struct {
+	A         string
 	witness   string
 	framedLen int
 }
 
+func comparesInAPointerMethodWitness(v *comparesInAPointerMethod) string { return v.A + "w" }
+
 func (v *comparesInAPointerMethod) check() bool {
-	return v.witness != comparesAgainstACallWitness(comparesAgainstACall{})
+	return v.witness != comparesInAPointerMethodWitness(v)
+}
+
+type comparesAgainstAZeroValueWitness struct {
+	A         string
+	witness   string
+	framedLen int
+}
+
+func (v comparesAgainstAZeroValueWitness) derived() bool {
+	// A recomputation that is handed no receiver recomputes nothing.
+	return v.witness == comparesAgainstACallWitness(comparesAgainstACall{})
+}
+
+type comparesInsideADiscardedClosure struct {
+	A         string
+	witness   string
+	framedLen int
+}
+
+func (v comparesInsideADiscardedClosure) derived() bool {
+	verify := func() bool { return v.witness == comparesAgainstACallWitness(comparesAgainstACall{A: v.A}) }
+	_ = verify
+	return v.framedLen > 0
+}
+
+type comparesBehindAnAlwaysTrueOr struct {
+	A         string
+	witness   string
+	framedLen int
+}
+
+func (v comparesBehindAnAlwaysTrueOr) derived() bool {
+	return v.framedLen >= 0 || v.witness == comparesAgainstACallWitness(comparesAgainstACall{A: v.A})
+}
+
+type comparesAgainstAnotherNonWitnessCall struct {
+	A         string
+	witness   string
+	framedLen int
+}
+
+func (v comparesAgainstAnotherNonWitnessCall) derived() bool {
+	// It is not hexEncode, so a recognizer that special-cases that one name
+	// fails here; and it DOES mention the receiver, so the receiver rule
+	// cannot mask the name rule and leave this control vacuous.
+	return v.witness != strconv.Itoa(len(v.A)) && v.framedLen > 0
 }
 
 type comparesAgainstALiteral struct {
@@ -2979,13 +3079,13 @@ func (v comparesButDiscardsTheAnswer) derived() bool {
 	if anon != 1 {
 		t.Errorf("the walk saw %d anonymous witness-bearing structs, want 1 (the one inside `nested`)", anon)
 	}
-	if len(withWitness) != 14 {
+	if len(withWitness) != 18 {
 		names := make([]string, 0, len(withWitness))
 		for _, s := range withWitness {
 			names = append(names, s.name)
 		}
 		sort.Strings(names)
-		t.Errorf("the walk saw %d witness-bearing structs, want 14: %v", len(withWitness), names)
+		t.Errorf("the walk saw %d witness-bearing structs, want 18: %v", len(withWitness), names)
 	}
 
 	// AND THE COMPARISON RECOGNIZER NEEDS ITS OWN CONTROL, by the same rule:
@@ -2994,17 +3094,28 @@ func (v comparesButDiscardsTheAnswer) derived() bool {
 	// comment calls the mutant it exists to catch -- and the suite stayed
 	// green, because nothing drove it over sources whose answer is known.
 	compared := witnessComparedIn(t, dir)
-	for _, want := range []string{"comparesAgainstACall", "comparesInAPointerMethod"} {
+	// comparesBehindAnAlwaysTrueOr is deliberately on the POSITIVE side: the
+	// walk does not skip ||, because check is a refusal-shaped disjunction and
+	// skipping them would blind it to the seam it exists for. This row records
+	// that residual as a checked fact rather than leaving it to be discovered.
+	for _, want := range []string{
+		"comparesAgainstACall", "comparesInAPointerMethod", "comparesBehindAnAlwaysTrueOr",
+	} {
 		if !compared[want] {
 			t.Errorf("the comparison recognizer did not see %s comparing its witness against a recomputation", want)
 		}
 	}
 	for _, notWant := range []string{
 		"comparesAgainstALiteral", "comparesNothing", "plain",
-		// Both of these were built by a Q3 lane to defeat the predicate and
-		// are kept as regressions: a call that is not a witness
-		// recomputation, and a real comparison whose answer is thrown away.
-		"comparesAgainstANonWitnessCall", "comparesButDiscardsTheAnswer",
+		// Every one of these was built by a Q3 lane to defeat the predicate
+		// and is kept as a regression: a call that is not a witness
+		// recomputation; a second one under a different name, so a recognizer
+		// that special-cases the first still fails; a real comparison whose
+		// answer is thrown away; a recomputation handed no receiver; one
+		// inside a discarded closure; and one behind an always-true ||.
+		"comparesAgainstANonWitnessCall", "comparesAgainstAnotherNonWitnessCall",
+		"comparesButDiscardsTheAnswer", "comparesAgainstAZeroValueWitness",
+		"comparesInsideADiscardedClosure",
 	} {
 		if compared[notWant] {
 			t.Errorf("the comparison recognizer counted %s, whose witness is never compared against a recomputation", notWant)
@@ -3083,7 +3194,7 @@ func splitFramedParts(t *testing.T, b []byte) []string {
 func TestEveryWitnessFramingHasItsOwnTagAndItsOwnParts(t *testing.T) {
 	rng := rand.New(rand.NewSource(20260922))
 	text := func() string {
-		n := rng.Intn(40)
+		n := rng.Intn(40) + 1
 		b := make([]byte, n)
 		for i := range b {
 			b[i] = byte("ab\xc3\xa9\x00 z"[rng.Intn(7)])
@@ -3097,15 +3208,19 @@ func TestEveryWitnessFramingHasItsOwnTagAndItsOwnParts(t *testing.T) {
 		}
 		return out
 	}
+	num := int64(100)
+	nz := func() int64 { num += 7; return num }
+	// EVERY FRAMED FIELD GETS A NON-ZERO, DISTINCT VALUE. A field left at its
+	// zero makes the mutant that replaces it with that zero EQUIVALENT for this
+	// fixture, which is how a first build of this table could not see a blanked
+	// bool: the value list and the framer agreed on "false" either way.
 	fact := func() Int64Fact {
-		return Int64Fact{Presence: PresenceKnown, Value: int64(rng.Intn(1 << 20)), Reason: text()}
+		return Int64Fact{Presence: PresenceKnown, Value: nz(), Reason: text()}
 	}
-	attempt := predictioneval.AttemptKey{
-		CollectorEpoch: 7, CollectorSessionID: text(), PoolInstanceID: text(), AttemptID: 9,
+	attemptOne := predictioneval.AttemptKey{
+		CollectorEpoch: nz(), CollectorSessionID: text(),
+		PoolInstanceID: text(), AttemptID: uint64(nz()),
 	}
-	// frameAction writes four strings, a bool, a count, one string per
-	// illegality and a skip reason; frameChoice and frameFact write three each.
-	const actionFixed, choiceParts, factParts = 7, 3, 3
 	illeg, outcomes, reasons := strsOf(2), strsOf(3), strsOf(4)
 	action := ActionMapping{MapVersion: text(), Policy: text(), NativeAction: text(),
 		Class: ActionClass(text()), Legal: true, Illegality: illeg, SkipReason: text()}
@@ -3119,70 +3234,194 @@ func TestEveryWitnessFramingHasItsOwnTagAndItsOwnParts(t *testing.T) {
 	p3b := P3bCaseResult{Policy: text(), FactsetDigest: text(), RulesetID: text(),
 		RulesetRawSHA256: text(), NativeConfigDigest: text(), ProjectionRefusal: text(),
 		Action: action, Choice: choice, Stake: fact()}
+	p3b.Trace.Coordinates = EntropyCoordinates{DatasetID: text(), DatasetVersion: text(),
+		CommonFactsetDigest: text(), PairedOpportunityID: text(), Trajectory: uint32(nz())}
+	p3b.Trace.RunID, p3b.Trace.EntropyDigest = text(), text()
+	p3b.Trace.WordsSupplied, p3b.Trace.WordsConsumed = int(nz()), int(nz())
+	p3b.Projection = P3bProjection{Mode: text(), FactsetDigest: text(), EventID: text(),
+		CutoffPosition: nz(), CandidateIdentity: text(), OutcomeCount: int(nz())}
+	p3b.Projection.Stream.SelectionDigest = text()
+	p3b.Evaluation.Status = predictioneval.OrderedRulesStatus(text())
+	p3b.Evaluation.Reason, p3b.Evaluation.StreamDigest = text(), text()
+	p3b.Evaluation.ConfigDigest, p3b.Evaluation.EntropyDigest = text(), text()
+	p3b.Evaluation.ConsumedInputDigest = text()
+	p3b.Evaluation.RawWordsConsumed, p3b.Evaluation.BernoulliEvaluations = int(nz()), int(nz())
 
-	fp := FactualPlacement{Attempt: attempt, FactsetDigest: text(), EventID: text(),
-		TerminalDecision: text(), RecordedChoiceIndex: &oi, RecordedChoiceOutcomeID: text(),
+	fp := FactualPlacement{Attempt: attemptOne, FactsetDigest: text(), EventID: text(),
+		CutoffPosition: nz(), TerminalDecision: text(),
+		RecordedChoiceIndex: &oi, RecordedChoiceOutcomeID: text(),
 		RecordedFinalAmount: &of, RecordedTerminalSlot: &oi, Coherence: text(),
-		CallStartedObservationID: text(), Stake: &of, Slot: &oi, ErrorClass: text()}
-	fpNil := FactualPlacement{Attempt: attempt, FactsetDigest: text(), EventID: text()}
+		StartedOnly: true, CallPresent: true,
+		CallStartedObservationID: text(), CallStartedPosition: nz(),
+		Stake: &of, Slot: &oi, Returned: true, LocalReasonOK: true, ErrorClass: text()}
+	// The absent-optional row is deliberately the OTHER polarity on every bool,
+	// so between the two rows each boolean is framed both ways.
+	fpNil := FactualPlacement{Attempt: attemptOne, FactsetDigest: text(), EventID: text(),
+		CutoffPosition: nz(), TerminalDecision: text(), RecordedChoiceOutcomeID: text(),
+		Coherence: text(), CallStartedObservationID: text(), CallStartedPosition: nz(),
+		ErrorClass: text()}
 
-	dec := PolicyDecision{Policy: text(), Attempt: attempt, FactsetDigest: text(), EventID: text(),
-		Derivation: text(), OutcomeIDs: outcomes, Action: action, Choice: choice, Stake: fact()}
-	pl := PlacementEvidence{ContractVersion: text(), Policy: text(), Attempt: attempt,
+	dec := PolicyDecision{Policy: text(), Attempt: attemptOne, FactsetDigest: text(),
+		EventID: text(), CutoffPosition: nz(), Derivation: text(), OutcomeIDs: outcomes,
+		Action: action, Choice: choice, Stake: fact()}
+	pl := PlacementEvidence{ContractVersion: text(), Policy: text(), Attempt: attemptOne,
 		FactsetDigest: text(), EventID: text(), Status: PlacementStatus(text()), Reasons: reasons,
-		PolicyStake: fact(), AttributedOutcomeID: text(), AttributedCallObservationID: text()}
-	po := PayoutEvidence{ContractVersion: text(), Policy: text(), Attempt: attempt,
+		PolicyStake: fact(), AttributedOutcomeID: text(), AttributedCallObservationID: text(),
+		AttributedCallPosition: nz()}
+	po := PayoutEvidence{ContractVersion: text(), Policy: text(), Attempt: attemptOne,
 		FactsetDigest: text(), EventID: text(), Outcome: PayoutOutcome(text()),
-		ChoiceCorrect: ChoiceVerdict(text()), Stake: fact(), Payout: fact(), Net: fact(),
+		ChoiceCorrect:            ChoiceVerdict(text()),
+		PrimaryDenominatorMember: true, PlacedBetDenominatorMember: true,
+		Stake: fact(), Payout: fact(), Net: fact(),
 		Reasons: reasons, ResolutionFactsDigest: text(), Derivation: text()}
 	po.decisionWitness = text()
 	rid, rsha, rnat := text(), text(), text()
 
+	// THE RENDERINGS ARE THE CONTRACT'S, written out here rather than called
+	// from canonical: i64, u64, boolean and count all funnel through str, so
+	// each is exactly one length-prefixed part carrying its decimal or literal
+	// spelling.
+	i := func(v int64) string { return strconv.FormatInt(v, 10) }
+	u := func(v uint64) string { return strconv.FormatUint(v, 10) }
+	bl := func(v bool) string { return strconv.FormatBool(v) }
+	cnt := func(n int) string { return strconv.FormatInt(int64(n), 10) }
+	optI := func(v *int) []string {
+		if v == nil {
+			return []string{bl(false)}
+		}
+		return []string{bl(true), i(int64(*v))}
+	}
+	optI64 := func(v *int64) []string {
+		if v == nil {
+			return []string{bl(false)}
+		}
+		return []string{bl(true), i(*v)}
+	}
+	actionOf := func(a ActionMapping) []string {
+		p := []string{a.MapVersion, a.Policy, a.NativeAction, string(a.Class),
+			bl(a.Legal), cnt(len(a.Illegality))}
+		p = append(p, a.Illegality...)
+		return append(p, a.SkipReason)
+	}
+	choiceOf := func(ch PolicyChoice) []string {
+		return []string{bl(ch.Present), i(int64(ch.Index)), ch.OutcomeID}
+	}
+	factOf := func(f Int64Fact) []string {
+		return []string{string(f.Presence), i(f.Value), f.Reason}
+	}
+	attemptOf := func(a predictioneval.AttemptKey) []string {
+		return []string{i(a.CollectorEpoch), a.CollectorSessionID, a.PoolInstanceID, u(a.AttemptID)}
+	}
+	join := func(groups ...[]string) []string {
+		var out []string
+		for _, g := range groups {
+			out = append(out, g...)
+		}
+		return out
+	}
+
 	for _, tc := range []struct {
 		name  string
-		tag   string
-		parts int
+		want  []string
 		frame func(*canonical)
 	}{
-		// Each count is read off the framer's own field list, not measured.
-		{"P2CaseResult", "p4offline-p2-result-witness",
-			8 + actionFixed + len(illeg) + choiceParts + factParts,
+		{"P2CaseResult", join(
+			[]string{"p4offline-p2-result-witness", p2.Policy, p2.FactsetDigest,
+				p2.Binding.ContractVersion, p2.Binding.Digest,
+				p2.Evaluation.CommonInputDigest, p2.Evaluation.Action, p2.Evaluation.ActionReason},
+			actionOf(p2.Action), choiceOf(p2.Choice), factOf(p2.Stake)),
 			func(c *canonical) { frameP2Result(c, p2) }},
-		{"P3bCaseResult", "p4offline-p3b-result-witness",
-			31 + actionFixed + len(illeg) + choiceParts + factParts,
+
+		{"P3bCaseResult", join(
+			[]string{"p4offline-p3b-result-witness", p3b.Policy, p3b.FactsetDigest,
+				p3b.RulesetID, p3b.RulesetRawSHA256, p3b.NativeConfigDigest, p3b.ProjectionRefusal,
+				p3b.Trace.Coordinates.DatasetID, p3b.Trace.Coordinates.DatasetVersion,
+				p3b.Trace.Coordinates.CommonFactsetDigest, p3b.Trace.Coordinates.PairedOpportunityID,
+				u(uint64(p3b.Trace.Coordinates.Trajectory)), p3b.Trace.RunID,
+				i(int64(p3b.Trace.WordsSupplied)), i(int64(p3b.Trace.WordsConsumed)),
+				p3b.Trace.EntropyDigest,
+				p3b.Projection.Mode, p3b.Projection.FactsetDigest, p3b.Projection.EventID,
+				i(p3b.Projection.CutoffPosition), p3b.Projection.CandidateIdentity,
+				i(int64(p3b.Projection.OutcomeCount)), p3b.Projection.Stream.SelectionDigest,
+				string(p3b.Evaluation.Status), p3b.Evaluation.Reason, p3b.Evaluation.StreamDigest,
+				p3b.Evaluation.ConfigDigest, p3b.Evaluation.EntropyDigest,
+				p3b.Evaluation.ConsumedInputDigest,
+				i(int64(p3b.Evaluation.RawWordsConsumed)), i(int64(p3b.Evaluation.BernoulliEvaluations))},
+			actionOf(p3b.Action), choiceOf(p3b.Choice), factOf(p3b.Stake)),
 			func(c *canonical) { frameP3bResult(c, p3b) }},
-		{"FactualPlacement", "p4offline-factual-placement-witness",
-			18 + 2 + 2 + 2 + 2 + 2, // five optionals, all present: a bool plus a value each
+
+		{"FactualPlacement", join(
+			[]string{"p4offline-factual-placement-witness"}, attemptOf(fp.Attempt),
+			[]string{fp.FactsetDigest, fp.EventID, i(fp.CutoffPosition), fp.TerminalDecision},
+			optI(fp.RecordedChoiceIndex), []string{fp.RecordedChoiceOutcomeID},
+			optI64(fp.RecordedFinalAmount), optI(fp.RecordedTerminalSlot),
+			[]string{fp.Coherence, bl(fp.StartedOnly), bl(fp.CallPresent),
+				fp.CallStartedObservationID, i(fp.CallStartedPosition)},
+			optI64(fp.Stake), optI(fp.Slot),
+			[]string{bl(fp.Returned), bl(fp.LocalReasonOK), fp.ErrorClass}),
 			func(c *canonical) { frameFactualPlacement(c, fp) }},
-		{"FactualPlacement, optionals absent", "p4offline-factual-placement-witness",
-			18 + 1 + 1 + 1 + 1 + 1, // five optionals, all absent: the bool alone
+
+		{"FactualPlacement, optionals absent", join(
+			[]string{"p4offline-factual-placement-witness"}, attemptOf(fpNil.Attempt),
+			[]string{fpNil.FactsetDigest, fpNil.EventID, i(fpNil.CutoffPosition), fpNil.TerminalDecision},
+			optI(fpNil.RecordedChoiceIndex), []string{fpNil.RecordedChoiceOutcomeID},
+			optI64(fpNil.RecordedFinalAmount), optI(fpNil.RecordedTerminalSlot),
+			[]string{fpNil.Coherence, bl(fpNil.StartedOnly), bl(fpNil.CallPresent),
+				fpNil.CallStartedObservationID, i(fpNil.CallStartedPosition)},
+			optI64(fpNil.Stake), optI(fpNil.Slot),
+			[]string{bl(fpNil.Returned), bl(fpNil.LocalReasonOK), fpNil.ErrorClass}),
 			func(c *canonical) { frameFactualPlacement(c, fpNil) }},
-		{"PolicyDecision", "p4offline-policy-decision-witness",
-			11 + len(outcomes) + actionFixed + len(illeg) + choiceParts + factParts,
+
+		{"PolicyDecision", join(
+			[]string{"p4offline-policy-decision-witness", dec.Policy}, attemptOf(dec.Attempt),
+			[]string{dec.FactsetDigest, dec.EventID, i(dec.CutoffPosition), dec.Derivation,
+				cnt(len(dec.OutcomeIDs))}, dec.OutcomeIDs,
+			actionOf(dec.Action), choiceOf(dec.Choice), factOf(dec.Stake)),
 			func(c *canonical) { framePolicyDecision(c, dec) }},
-		{"PlacementEvidence", "p4offline-placement-evidence-witness",
-			11 + len(reasons) + factParts + 3,
+
+		{"PlacementEvidence", join(
+			[]string{"p4offline-placement-evidence-witness", pl.ContractVersion, pl.Policy},
+			attemptOf(pl.Attempt),
+			[]string{pl.FactsetDigest, pl.EventID, string(pl.Status), cnt(len(pl.Reasons))},
+			pl.Reasons, factOf(pl.PolicyStake),
+			[]string{pl.AttributedOutcomeID, pl.AttributedCallObservationID,
+				i(pl.AttributedCallPosition)}),
 			func(c *canonical) { framePlacementEvidence(c, pl) }},
-		{"PayoutEvidence", "p4offline-payout-evidence-witness",
-			13 + 3*factParts + 1 + len(reasons) + 3,
+
+		{"PayoutEvidence", join(
+			[]string{"p4offline-payout-evidence-witness", po.ContractVersion, po.Policy},
+			attemptOf(po.Attempt),
+			[]string{po.FactsetDigest, po.EventID, string(po.Outcome), string(po.ChoiceCorrect),
+				bl(po.PrimaryDenominatorMember), bl(po.PlacedBetDenominatorMember)},
+			factOf(po.Stake), factOf(po.Payout), factOf(po.Net),
+			[]string{cnt(len(po.Reasons))}, po.Reasons,
+			[]string{po.ResolutionFactsDigest, po.Derivation, po.decisionWitness}),
 			func(c *canonical) { framePayoutEvidence(c, po) }},
-		{"VerifiedP3bRuleset", "p4offline-verified-ruleset-witness", 4,
+
+		{"VerifiedP3bRuleset",
+			[]string{"p4offline-verified-ruleset-witness", rid, rsha, rnat},
 			func(c *canonical) { frameRuleset(c, rid, rsha, rnat) }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var c canonical
 			tc.frame(&c)
 			got := splitFramedParts(t, c.bytes())
-			if len(got) == 0 || got[0] != tc.tag {
+			if len(got) == 0 || got[0] != tc.want[0] {
 				first := ""
 				if len(got) > 0 {
 					first = got[0]
 				}
-				t.Fatalf("the framing opens with %q, its own domain tag is %q", first, tc.tag)
+				t.Fatalf("the framing opens with %q, its own domain tag is %q", first, tc.want[0])
 			}
-			if len(got) != tc.parts {
+			if len(got) != len(tc.want) {
 				t.Fatalf("the framing wrote %d parts, its fields require %d: a part missing is a field the witness no longer covers, a part too few is two fields sharing one length prefix",
-					len(got), tc.parts)
+					len(got), len(tc.want))
+			}
+			for k := range tc.want {
+				if got[k] != tc.want[k] {
+					t.Fatalf("part %d is %q, the field list puts %q there: a part carrying the wrong value is a field the witness does not actually cover",
+						k, got[k], tc.want[k])
+				}
 			}
 		})
 	}

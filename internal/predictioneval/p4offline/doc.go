@@ -1196,7 +1196,11 @@
 //     method compares the witness, not that every entry point reaches one --
 //     Rules answers on an unverified handle by design, and the census is
 //     content with that. It is a tripwire against the way this class has
-//     recurred, not a proof that the class cannot recur.
+//     recurred, not a proof that the class cannot recur. And it does not skip
+//     ||, because check is a REFUSAL-shaped disjunction whose witness
+//     comparison is a disjunct; the price is that a comparison placed behind
+//     an always-true || operand reads the same as a reachable one, which the
+//     control records as a checked fact rather than leaving to be found.
 //     AND THE FRAMINGS ARE CHECKED AGAINST A CONSTRUCTION, NOT ONLY AGAINST
 //     THEMSELVES. Running one framer with bytes on against the same framer
 //     with bytes off is a two-mode differential: it sees the modes disagree
