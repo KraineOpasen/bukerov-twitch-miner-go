@@ -122,14 +122,28 @@ type EpisodeIdentity struct {
 
 // String renders the identity canonically (length-prefixed, so a component
 // containing a delimiter cannot alias another identity).
-func (e EpisodeIdentity) String() string {
+func (e EpisodeIdentity) String() string { return hexEncode(e.framed()) }
+
+// framed is String's input: the canonical framing String hex-encodes. It is
+// separated so a caller that only needs to FEED the hex rendering into another
+// framing can stream it (see canonical.strHexOf) instead of building the hex
+// string and copying it again. String's own bytes are unchanged.
+// framedLen is len(framed()) computed without building it: five parts, each an
+// eight-byte length prefix plus its bytes.
+func (e EpisodeIdentity) framedLen() int {
+	return 5*8 + len(strconv.FormatInt(e.CollectorEpoch, 10)) +
+		len(e.CollectorSessionID) + len(e.PoolInstanceID) +
+		len(e.RoundIncarnationID) + len(e.EventID)
+}
+
+func (e EpisodeIdentity) framed() []byte {
 	var c canonical
 	c.i64(e.CollectorEpoch)
 	c.str(e.CollectorSessionID)
 	c.str(e.PoolInstanceID)
 	c.str(e.RoundIncarnationID)
 	c.str(e.EventID)
-	return hexEncode(c.bytes())
+	return c.bytes()
 }
 
 // CallKind classifies a raw CALL_STARTED signal.
@@ -2393,6 +2407,7 @@ func ReconcileSourceRounds(claims []SourceRoundClaim) SourceRoundRegistry {
 // digests them, so a registry can be re-verified from its own entries.
 func registryDigest(entries []SourceRoundEntry) string {
 	var c canonical
+	var scratch []byte
 	c.str(SourceRoundRegistryVersion)
 	c.count(len(entries))
 	for _, e := range entries {
@@ -2400,7 +2415,11 @@ func registryDigest(entries []SourceRoundEntry) string {
 		c.str(string(e.Status))
 		c.count(len(e.Claims))
 		for _, cl := range e.Claims {
-			c.str(claimKey(cl))
+			// ONE REUSED BUFFER ACROSS EVERY CLAIM, and no hex string at all:
+			// strHexOf writes the digits c.str(claimKey(cl)) would have
+			// written, from a framing built into scratch. Identical bytes.
+			scratch = claimKeyFraming(scratch[:0], cl)
+			c.strHexOf(scratch)
 		}
 		c.boolean(e.Canonical != nil)
 	}
@@ -2662,13 +2681,23 @@ func sortClaimsByKey(cs []SourceRoundClaim) {
 	if len(cs) < 2 {
 		return
 	}
-	keys := make([]string, len(cs))
+	// THE ORDER IS DECIDED WITHOUT BUILDING A KEY AT ALL.
+	//
+	// The key is a concatenation of length-prefixed parts, so comparing two
+	// keys byte for byte compares those parts in order, and within a part
+	// compares the eight-byte length before the bytes. compareClaimKeys does
+	// exactly that comparison against the claims themselves, allocating
+	// nothing -- and TestTheAllocationFreeClaimOrderIsTheFramingsOwnOrder pins
+	// it against the framing over random claims, so the two cannot drift.
+	//
+	// MATERIALIZING THE KEYS WAS THE OLD COST, and it was the larger half:
+	// over 8,192 claims, 16.80 MB as hex strings, 6.44 MB as framings, and
+	// nothing here.
 	idx := make([]int, len(cs))
 	for i := range cs {
-		keys[i] = claimKey(cs[i])
 		idx[i] = i
 	}
-	sort.Slice(idx, func(a, b int) bool { return keys[idx[a]] < keys[idx[b]] })
+	sort.Slice(idx, func(a, b int) bool { return compareClaimKeys(cs[idx[a]], cs[idx[b]]) < 0 })
 	sorted := make([]SourceRoundClaim, len(cs))
 	for i, j := range idx {
 		sorted[i] = cs[j]
@@ -2676,13 +2705,105 @@ func sortClaimsByKey(cs []SourceRoundClaim) {
 	copy(cs, sorted)
 }
 
-func claimKey(c SourceRoundClaim) string {
-	var k canonical
-	k.str(c.Episode.String())
+// compareClaimKeys orders two claims exactly as their claimKey framings order,
+// reading the claims directly instead of building either key.
+//
+// WHY IT IS THE SAME ORDER. Every part of the framing is written as an
+// eight-byte big-endian length followed by the bytes, so a byte-for-byte
+// comparison of two framings compares part by part, and inside a part compares
+// the length first and the bytes only on a tie -- which is what lpCompare
+// does. The first part is the hex rendering of the episode's own framing;
+// hexEncode spends two ascending digits on each byte, so comparing the
+// renderings is comparing the framings, and their lengths differ exactly when
+// the framings' do.
+//
+// IT MIRRORS A FRAMING WRITTEN ELSEWHERE, which is a drift risk and is treated
+// as one: the equivalence is pinned by a property test over random claims
+// rather than argued here.
+func compareClaimKeys(a, b SourceRoundClaim) int {
+	if c := cmpInt(a.Episode.framedLen(), b.Episode.framedLen()); c != 0 {
+		return c
+	}
+	if c := compareEpisodeFraming(a.Episode, b.Episode); c != 0 {
+		return c
+	}
+	if c := lpCompare(strconv.FormatInt(a.Attempt.CollectorEpoch, 10), strconv.FormatInt(b.Attempt.CollectorEpoch, 10)); c != 0 {
+		return c
+	}
+	if c := lpCompare(a.Attempt.CollectorSessionID, b.Attempt.CollectorSessionID); c != 0 {
+		return c
+	}
+	if c := lpCompare(a.Attempt.PoolInstanceID, b.Attempt.PoolInstanceID); c != 0 {
+		return c
+	}
+	if c := lpCompare(strconv.FormatUint(a.Attempt.AttemptID, 10), strconv.FormatUint(b.Attempt.AttemptID, 10)); c != 0 {
+		return c
+	}
+	return lpCompare(a.FactsetDigest, b.FactsetDigest)
+}
+
+// compareEpisodeFraming compares two episode framings of EQUAL total length,
+// part by part, in the order EpisodeIdentity.framed writes them.
+func compareEpisodeFraming(a, b EpisodeIdentity) int {
+	if c := lpCompare(strconv.FormatInt(a.CollectorEpoch, 10), strconv.FormatInt(b.CollectorEpoch, 10)); c != 0 {
+		return c
+	}
+	if c := lpCompare(a.CollectorSessionID, b.CollectorSessionID); c != 0 {
+		return c
+	}
+	if c := lpCompare(a.PoolInstanceID, b.PoolInstanceID); c != 0 {
+		return c
+	}
+	if c := lpCompare(a.RoundIncarnationID, b.RoundIncarnationID); c != 0 {
+		return c
+	}
+	return lpCompare(a.EventID, b.EventID)
+}
+
+// lpCompare compares two strings as canonical.str frames them: the eight-byte
+// length first, the bytes only when the lengths are equal.
+func lpCompare(a, b string) int {
+	if c := cmpInt(len(a), len(b)); c != 0 {
+		return c
+	}
+	// Compared by hand rather than with strings.Compare: the package's
+	// dependency fence admits no such import, and the loop allocates nothing.
+	for i := 0; i < len(a); i++ {
+		if a[i] != b[i] {
+			return cmpInt(int(a[i]), int(b[i]))
+		}
+	}
+	return 0
+}
+
+func cmpInt(a, b int) int {
+	switch {
+	case a < b:
+		return -1
+	case a > b:
+		return 1
+	}
+	return 0
+}
+
+func claimKey(c SourceRoundClaim) string { return hexEncode(claimKeyFraming(nil, c)) }
+
+// claimKeyFraming appends the framing claimKey hex-encodes to dst and returns
+// the result, so a caller may reuse one buffer across claims.
+//
+// THE KEY'S BYTES ARE UNCHANGED. This is the same framing in the same order,
+// including the nested hex of the episode identity, which is now streamed by
+// strHexOf rather than built as a string and copied in. Comparing two keys by
+// these bytes is the same comparison as comparing their hex renderings,
+// because hexEncode's alphabet ascends with the byte it renders and spends
+// exactly two digits on each -- so ordering is preserved without the doubling.
+func claimKeyFraming(dst []byte, c SourceRoundClaim) []byte {
+	k := canonical{buf: dst}
+	k.strHexOf(c.Episode.framed())
 	k.i64(c.Attempt.CollectorEpoch)
 	k.str(c.Attempt.CollectorSessionID)
 	k.str(c.Attempt.PoolInstanceID)
 	k.str(strconv.FormatUint(c.Attempt.AttemptID, 10))
 	k.str(c.FactsetDigest)
-	return hexEncode(k.bytes())
+	return k.buf
 }

@@ -1426,3 +1426,175 @@ func TestTheLocalOrderFaultAgreesWithTheMaterializer(t *testing.T) {
 		}
 	})
 }
+
+// claimKeyBeforeStreaming is claimKey as it stood before the framing was
+// streamed, copied verbatim from de848c8. It is the oracle for obligation A,
+// so it must NOT be tidied: it builds the episode's hex rendering as a string,
+// frames that string, and hex-encodes the result.
+func claimKeyBeforeStreaming(c SourceRoundClaim) string {
+	var k canonical
+	k.str(c.Episode.String())
+	k.i64(c.Attempt.CollectorEpoch)
+	k.str(c.Attempt.CollectorSessionID)
+	k.str(c.Attempt.PoolInstanceID)
+	k.str(strconv.FormatUint(c.Attempt.AttemptID, 10))
+	k.str(c.FactsetDigest)
+	return hexEncode(k.bytes())
+}
+
+// registryDigestBeforeStreaming is registryDigest as it stood before the same
+// change, likewise verbatim and likewise not to be tidied.
+func registryDigestBeforeStreaming(entries []SourceRoundEntry) string {
+	var c canonical
+	c.str(SourceRoundRegistryVersion)
+	c.count(len(entries))
+	for _, e := range entries {
+		c.str(e.EventID)
+		c.str(string(e.Status))
+		c.count(len(e.Claims))
+		for _, cl := range e.Claims {
+			c.str(claimKeyBeforeStreaming(cl))
+		}
+		c.boolean(e.Canonical != nil)
+	}
+	return c.digest()
+}
+
+// claimShapesForFramingOracle spans the field shapes the framing distinguishes:
+// empty and non-empty strings, lengths that collide and lengths that do not,
+// negative and multi-digit integers, and bytes no encoding may reinterpret.
+func claimShapesForFramingOracle() []SourceRoundClaim {
+	vals := []string{"", "a", "b", "aa", "ab", "ba", "zzz", "\xff\xfe", "shared", "round-10"}
+	epochs := []int64{-1, 0, 1, 9, 10, 100}
+	ids := []uint64{0, 1, 9, 10}
+	var cs []SourceRoundClaim
+	for _, v := range vals {
+		for _, e := range epochs {
+			for _, id := range ids {
+				cs = append(cs, SourceRoundClaim{
+					Episode: EpisodeIdentity{
+						CollectorEpoch: e, CollectorSessionID: v, PoolInstanceID: v + "p",
+						RoundIncarnationID: v, EventID: v,
+					},
+					Attempt: predictioneval.AttemptKey{
+						CollectorEpoch: e, CollectorSessionID: v, PoolInstanceID: v, AttemptID: id,
+					},
+					FactsetDigest: v + "d",
+				})
+			}
+		}
+	}
+	return cs
+}
+
+// TestStreamingTheClaimKeyDidNotMoveOneByteOfIt is obligation A's compatibility
+// proof, and it is an ORACLE rather than a recorded constant: the pre-change
+// functions are kept verbatim above and every claim is put through both.
+//
+// The nesting claimKey frames -- a hex rendering of a framing, framed and
+// hex-encoded again -- is the representation an independent golden pins, so it
+// had to survive exactly. What changed is only that the intermediate strings
+// are no longer built. A recorded digest could not tell those two apart; this
+// can.
+func TestStreamingTheClaimKeyDidNotMoveOneByteOfIt(t *testing.T) {
+	cs := claimShapesForFramingOracle()
+	for i := range cs {
+		if got, want := claimKey(cs[i]), claimKeyBeforeStreaming(cs[i]); got != want {
+			t.Fatalf("claim %d: claimKey moved\n got: %s\nwant: %s", i, got, want)
+		}
+		if got, want := hexEncode(claimKeyFraming(nil, cs[i])), claimKey(cs[i]); got != want {
+			t.Fatalf("claim %d: the framing does not hex-encode to the key", i)
+		}
+		if got, want := cs[i].Episode.framedLen(), len(cs[i].Episode.framed()); got != want {
+			t.Fatalf("claim %d: framedLen says %d, framed() is %d bytes", i, got, want)
+		}
+	}
+	// AND THE REGISTRY DIGEST, over reconciliations of real shapes rather than
+	// over loose claims: unique rounds, a conflict, and exact duplicates.
+	for _, tc := range []struct {
+		name  string
+		build func() []SourceRoundClaim
+	}{
+		{"distinct rounds", func() []SourceRoundClaim { return cs[:12] }},
+		{"one shared round", func() []SourceRoundClaim {
+			out := append([]SourceRoundClaim(nil), cs[:8]...)
+			for i := range out {
+				out[i].Episode.EventID = "shared"
+			}
+			return out
+		}},
+		{"exact duplicates", func() []SourceRoundClaim {
+			return []SourceRoundClaim{cs[3], cs[3], cs[3]}
+		}},
+		{"every shape at once", func() []SourceRoundClaim { return cs }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			reg := ReconcileSourceRounds(tc.build())
+			if got, want := reg.Digest, registryDigestBeforeStreaming(reg.Entries); got != want {
+				t.Fatalf("registry digest moved\n got: %s\nwant: %s", got, want)
+			}
+			if err := VerifySourceRoundRegistry(reg); err != nil {
+				t.Fatalf("the reconciliation must verify: %v", err)
+			}
+		})
+	}
+}
+
+// TestTheAllocationFreeClaimOrderIsTheFramingsOwnOrder pins the one risk the
+// ordering repair introduces: compareClaimKeys mirrors a framing written
+// elsewhere, so the two could drift apart silently and reorder a registry.
+//
+// Every ordered pair of the shape fixture is compared both ways. A comparator
+// that agreed on the fixtures a sort happens to visit, and disagreed elsewhere,
+// would still pass a test that only sorted -- so this compares pairs directly.
+func TestTheAllocationFreeClaimOrderIsTheFramingsOwnOrder(t *testing.T) {
+	cs := claimShapesForFramingOracle()
+	sign := func(n int) int {
+		switch {
+		case n < 0:
+			return -1
+		case n > 0:
+			return 1
+		}
+		return 0
+	}
+	framings := make([][]byte, len(cs))
+	for i := range cs {
+		framings[i] = claimKeyFraming(nil, cs[i])
+	}
+	pairs, disagreed := 0, 0
+	for i := range cs {
+		for j := range cs {
+			pairs++
+			want := sign(compareFramingBytes(framings[i], framings[j]))
+			got := sign(compareClaimKeys(cs[i], cs[j]))
+			if got != want {
+				disagreed++
+				if disagreed <= 3 {
+					t.Errorf("pair (%d,%d): comparator says %d, the framing says %d", i, j, got, want)
+				}
+			}
+		}
+	}
+	if pairs < 10000 {
+		t.Fatalf("the fixture must exercise a wide pair set, got %d pairs", pairs)
+	}
+	if disagreed != 0 {
+		t.Fatalf("%d of %d pairs disagree with the framing's own order", disagreed, pairs)
+	}
+}
+
+// compareFramingBytes is the byte comparison the sort used to perform on
+// materialized keys, kept here as the order oracle.
+func compareFramingBytes(a, b []byte) int {
+	n := len(a)
+	if len(b) < n {
+		n = len(b)
+	}
+	for i := 0; i < n; i++ {
+		if a[i] != b[i] {
+			return int(a[i]) - int(b[i])
+		}
+	}
+	return len(a) - len(b)
+}

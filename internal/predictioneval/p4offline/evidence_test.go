@@ -4687,3 +4687,84 @@ func TestARecordOrderFaultIsNotMaskedByASessionRefusal(t *testing.T) {
 		})
 	}
 }
+
+// TestReconcilingAClaimDoesNotCostTwentyTimesItsIdentity is obligation A's cost
+// proof, and it measures the PUBLIC paths -- ReconcileSourceRounds and
+// VerifySourceRoundRegistry -- rather than the helper that was repaired.
+//
+// The nesting is unchanged and is not free: a claim key contains the hex
+// rendering of the episode's framing, so the digest reads about four times the
+// identity however it is produced. What was avoidable, and is gone, is
+// BUILDING those renderings as strings and copying them again. Measured on
+// this fixture before and after the streaming repair, as multiples of the
+// identity bytes supplied:
+//
+//	one claim, 1 MiB identity      Reconcile 19.06x -> 14.54x   Verify 38.11x -> 29.08x
+//	eight claims, 128 KiB each     Reconcile 32.72x -> 11.65x   Verify 65.43x -> 23.29x
+//	sixty-four claims, 4 KiB each  Reconcile 36.94x -> 12.13x   Verify 73.80x -> 24.18x
+//
+// THE BUDGETS BELOW ARE NOT THOSE FIGURES. They are ceilings with room for
+// allocator rounding and for a Go version that sizes a growth differently;
+// what they refuse is the return of the materialization, which cost half again
+// to three times as much. A single fixture proves no universal bound, so three
+// shapes are measured and each is checked against its own input.
+func TestReconcilingAClaimDoesNotCostTwentyTimesItsIdentity(t *testing.T) {
+	measure := func(f func()) uint64 {
+		runtime.GC()
+		var a, b runtime.MemStats
+		runtime.ReadMemStats(&a)
+		f()
+		runtime.ReadMemStats(&b)
+		return b.TotalAlloc - a.TotalAlloc
+	}
+	build := func(n, idBytes int) []p4offline.SourceRoundClaim {
+		big := strings.Repeat("R", idBytes)
+		out := make([]p4offline.SourceRoundClaim, n)
+		for i := range out {
+			out[i] = p4offline.SourceRoundClaim{
+				Episode: p4offline.EpisodeIdentity{
+					CollectorEpoch: 1, CollectorSessionID: "s", PoolInstanceID: "p",
+					RoundIncarnationID: big + strconv.Itoa(i), EventID: "e" + strconv.Itoa(i),
+				},
+				Attempt: predictioneval.AttemptKey{
+					CollectorEpoch: 1, CollectorSessionID: "s", PoolInstanceID: "p", AttemptID: uint64(i + 1),
+				},
+				FactsetDigest: strings.Repeat("0", 64),
+			}
+		}
+		return out
+	}
+	for _, tc := range []struct {
+		name                    string
+		n, id                   int
+		reconcileMax, verifyMax float64
+	}{
+		{"one claim carrying a 1 MiB identity", 1, 1 << 20, 17.0, 34.0},
+		{"eight claims carrying 128 KiB each", 8, 1 << 17, 15.0, 30.0},
+		{"sixty-four claims carrying 4 KiB each", 64, 4096, 16.0, 32.0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			claims := build(tc.n, tc.id)
+			input := float64(tc.n * tc.id)
+			var reg p4offline.SourceRoundRegistry
+			rec := float64(measure(func() { reg = p4offline.ReconcileSourceRounds(claims) }))
+			var verr error
+			ver := float64(measure(func() { verr = p4offline.VerifySourceRoundRegistry(reg) }))
+			t.Logf("input=%.0f reconcile=%.0f (%.2fx) verify=%.0f (%.2fx)", input, rec, rec/input, ver, ver/input)
+			if verr != nil {
+				t.Fatalf("the reconciliation must verify, or the measurement is of a refusal: %v", verr)
+			}
+			if len(reg.Entries) != tc.n {
+				t.Fatalf("expected %d entries, got %d: the fixture did not reach the path it claims to measure", tc.n, len(reg.Entries))
+			}
+			if rec/input > tc.reconcileMax {
+				t.Fatalf("ReconcileSourceRounds cost %.2fx the identity bytes, above %.2fx: the key materialization is back",
+					rec/input, tc.reconcileMax)
+			}
+			if ver/input > tc.verifyMax {
+				t.Fatalf("VerifySourceRoundRegistry cost %.2fx the identity bytes, above %.2fx: the key materialization is back",
+					ver/input, tc.verifyMax)
+			}
+		})
+	}
+}

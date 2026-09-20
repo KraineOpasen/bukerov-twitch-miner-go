@@ -39,6 +39,59 @@ func (c *canonical) str(s string) {
 	c.buf = append(c.buf, s...)
 }
 
+// strHexOf frames the HEX RENDERING of raw without ever materializing that
+// rendering. The bytes it appends are exactly the bytes c.str(hexEncode(raw))
+// appends: the same eight-byte length prefix, which is twice len(raw) because
+// hex is two digits per byte, followed by the same digits in the same order.
+//
+// IT EXISTS TO STREAM A REPRESENTATION, NOT TO CHANGE ONE. This package frames
+// a hex rendering of a framing in claimKey, and that nesting is load-bearing:
+// the registry digest is computed over those exact bytes and an independent
+// golden pins it. So the nesting stays and only its INTERMEDIATE STRINGS go --
+// which is the whole of the repair, and the reason the digest is unchanged.
+func (c *canonical) strHexOf(raw []byte) {
+	const digits = "0123456789abcdef"
+	c.lpPrefix(uint64(len(raw)) * 2)
+	// ONE EXACT EXTENSION, THEN FILL BY INDEX. Appending two digits at a time
+	// into a growing slice re-allocates on the way up and costs MORE than the
+	// single sized make inside hexEncode that this replaces -- measured, on
+	// the first attempt at this function: one claim carrying a 1 MiB
+	// identifier went from 19.06x the input to 31.24x. The saving is only real
+	// when the destination is grown once.
+	c.grow(len(raw) * 2)
+	at := len(c.buf)
+	c.buf = c.buf[:at+len(raw)*2]
+	out := c.buf[at:]
+	for i, v := range raw {
+		out[i*2] = digits[v>>4]
+		out[i*2+1] = digits[v&0x0f]
+	}
+}
+
+// grow reserves room for n more bytes in one allocation, leaving the length
+// unchanged.
+//
+// IT KEEPS GEOMETRIC GROWTH, and that is not an optimization detail -- it is
+// the difference between linear and quadratic. A canonical buffer is usually
+// ACCUMULATING: registryDigest appends every claim's key into one buffer, so a
+// grow that reserves exactly what this call needs re-copies everything already
+// written, once per call. Measured, on the first version of this helper, which
+// did exactly that: 64 claims carrying 4 KiB identifiers went from 36.94x the
+// input to 41.82x, while the single-claim case improved -- the signature of
+// quadratic copying that only shows up once there is something to re-copy.
+func (c *canonical) grow(n int) {
+	if cap(c.buf)-len(c.buf) >= n {
+		return
+	}
+	size := cap(c.buf) * 2
+	if need := len(c.buf) + n; size < need {
+		size = need
+	}
+	grown := make([]byte, len(c.buf), size)
+	copy(grown, c.buf)
+	c.buf = grown
+}
+
 func (c *canonical) i64(v int64)    { c.str(strconv.FormatInt(v, 10)) }
 func (c *canonical) u64(v uint64)   { c.str(strconv.FormatUint(v, 10)) }
 func (c *canonical) boolean(v bool) { c.str(strconv.FormatBool(v)) }
