@@ -16,7 +16,6 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"errors"
-	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/predictioneval"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -30,6 +29,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/predictioneval"
 )
 
 // matchingBeforeTheMerge is the implementation eachMatching replaced, copied
@@ -2928,10 +2929,19 @@ func TestEveryWitnessBearingTypeCarriesAFramedWidth(t *testing.T) {
 		t.Fatalf("%d of %d witness-bearing types carry no framed width", len(missing), len(withWitness))
 	}
 
-	// THE COUNT IS PINNED SO THE WALK CANNOT GO QUIETLY BLIND. A census that
-	// stopped finding types would pass this test by finding nothing, which is
-	// exactly the failure mode the prose enumeration had. It catches a type the
-	// walk RECOGNISES; the control below is what holds the recognizer itself.
+	// NOTHING HERE PINS A COUNT, and a census that stopped finding types would
+	// satisfy every assertion above it by finding nothing -- which is exactly
+	// the failure mode the prose enumeration had. What stops that is the
+	// driven/found comparison at the END of this test: checkEveryFramingWidth
+	// names the framings it drove without consulting the census, so a walk gone
+	// blind is reported as seven stale drives instead of as silence. A lane
+	// renamed the field on all seven production types to check that, and got
+	// the seven. What stays invisible is a NEW seam spelling its witness
+	// something else: the walk cannot recognise it and no drive names it, so
+	// neither side of that comparison knows it exists.
+	//
+	// This test catches a type the walk RECOGNISES; the control below is what
+	// holds the recognizer itself.
 	// AND A WIDTH IS NOT A VERIFICATION. The field census alone enforces
 	// "declares a width", which a Q3 lane showed is the wrong lesson to teach:
 	// it added an eighth type whose check compared the WIDTH ONLY, bumped the
