@@ -287,11 +287,12 @@ type P3bCaseResult struct {
 
 // derived reports whether the value is what the P3b evaluator produced OVER
 // THE FIELDS p3bResultWitness FRAMES -- not the whole value. The Projection
-// stream body below SelectionDigest and all of Evaluation but its three framed
+// stream body below SelectionDigest and all of Evaluation but its EIGHT framed
 // fields are unframed, so an edit to any of those is ACCEPTED here, and none
 // of them can move a verdict because Decision reads framed fields only.
-// p3bResultWitness enumerates the gap. The four sibling types frame every exported field and
-// their answer IS about the whole value; these two are the exception.
+// p3bResultWitness enumerates the gap. The four sibling types frame every
+// exported field and their answer IS about the whole value; these two are the
+// exception.
 //
 // THE WIDTH IS CHECKED BEFORE THE WITNESS, and the order is the repair. The
 // witness comparison is one string comparison; COMPUTING the witness frames

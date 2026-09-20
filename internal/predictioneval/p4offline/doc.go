@@ -192,7 +192,8 @@
 // not, but by pinning what they reach through: the closure is 99 packages with
 // a residue of internal/poll, io/fs, os, reflect, syscall and time, and
 // TestTheDocumentedResidueIsAttributableToItsRoots holds every one of them to
-// crypto/sha256 and encoding/json. The capability is in the closure and no
+// crypto/sha256, crypto/hmac and encoding/json -- three roots, not two: hmac
+// reaches five of the six on its own. The capability is in the closure and no
 // line of this package calls it. The sixth clause is enforced over syntax: a goroutine needs no import, so that
 // clause used to be a convention this sentence presented as a machine check.
 // It is now Rule E, and Rule E has its own control.
@@ -735,7 +736,12 @@
 //     3,183,766 elsewhere in this register are not multiples of eight and are
 //     nonetheless real. What is not quoted in these two records is a figure
 //     whose averaging basis was never recorded, because nothing can say which
-//     of the two it is. The ratios hold because three independent measurements
+//     of the two it is. THAT RULE IS NOT APPLIED THROUGHOUT: seven figures
+//     taken on OTHER heads and quoted elsewhere here -- 147,671 and 2,113,763,
+//     2,113,748, 18,301,274, 18,301,246, 6,889,790, 1,057,073 -- are in exactly
+//     that state, and three of them sit beside allocation COUNTS, which a raw
+//     delta does not produce. They are left standing, and named, rather than
+//     deleted on a rule this register applies in one place. The ratios hold because three independent measurements
 //     agreed on them to two decimals and they do not depend on the machine.
 //     WHERE THE COST IS, PER STAGE at 512 KiB: sha256Hex is 128 B and FLAT at
 //     both sizes, so it is not a contributor; json.Decode NEVER RUNS, because
@@ -860,8 +866,10 @@
 //     to INVALID in ReconcileSourceRounds AND gating it in the verifier,
 //     together -- so it costs that fixture as well, and the independent golden
 //     with it: measured, the shape gate moves golden_digests.json's
-//     sourceRoundRegistry entry from cfd77538 to 9ba343ed and fails ten
-//     top-level tests, nineteen counting subtests.
+//     sourceRoundRegistry entry from cfd77538 to 9ba343ed. EACH HALF ALONE
+//     fails ten top-level tests, nineteen counting subtests; THE PAIR fails
+//     twelve, thirty-four counting subtests. The ten is the half's figure and
+//     not the pair's.
 //     A VERSION BUMP IS NOT MECHANICALLY REQUIRED, AND THE GOLDEN IS.
 //     SourceRoundRegistryVersion is framed into registryDigest as its FIRST
 //     part, so bumping it changes EVERY registry's digest. The shape gate alone
@@ -1022,7 +1030,7 @@
 //     against a VERBATIM copy of the unreduced build over 16,000 randomized
 //     queries on deliberately tiny alphabets, and carries three controls: that
 //     a posting list was actually reduced (10,038 were), that the answers had
-//     content (12,844 did), and that a mutant keeping the LAST position per
+//     content (12,298 did), and that a mutant keeping the LAST position per
 //     reason -- which preserves the reason SET and breaks only the ORDER, the
 //     half of the claim an argument is likeliest to get wrong -- is caught by
 //     that same fixture.

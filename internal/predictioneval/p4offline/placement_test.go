@@ -657,12 +657,12 @@ func TestTerminalSlotMustMatchBeforeInheritance(t *testing.T) {
 // same path with three of the five strings wide read 2.19x where five read
 // 3.49x, because what moves between them is the canonical buffer's growth
 // series. A one-byte control measured on the same fixture cannot be satisfied
-// that way. It now reads 1,712 -> 1,792 bytes for DerivePlacement and
-// 1,840 -> 1,952 for DerivePayout across the same span.
+// that way. It now reads 1,728 -> 1,792 bytes for DerivePlacement and
+// 1,856 -> 1,968 for DerivePayout across the same span.
 //
 // THE ONE-BYTE REFUSAL GOT DEARER AND THAT IS PART OF THE TRADE, recorded here
-// rather than absorbed: the extent sentence costs about 840 bytes at the
-// placement seam and about 260 at the payout seam that a refusal naming its
+// rather than absorbed: the extent sentence costs 856 bytes at the placement
+// seam and 280 at the payout seam that a refusal naming its
 // case in full did not pay. What it buys is 18.3 MB at 1 MiB and an artifact
 // that echoes no unverified text at any width.
 func TestARefusedDecisionNamesItsExtentAndNotItsText(t *testing.T) {
@@ -840,9 +840,10 @@ func TestARefusedDecisionNamesItsExtentAndNotItsText(t *testing.T) {
 // identity than at a one-byte one.
 //
 // IT IS NOT A BUDGET FOR THE PAYLOAD, it is room for the EXTENT SENTENCE: six
-// numbers grow from one digit to seven, and the canonical buffer that frames
-// the reasons takes its growth in steps rather than by the byte. Measured on
-// this tree the two seams grow by 80 and 112 bytes across that span, so the
+// numbers grow from one digit to seven at the payout seam and five at the
+// placement seam, and the canonical buffer that frames the reasons takes its
+// growth in steps rather than by the byte. Measured on this tree the two seams
+// grow by 64 and 112 bytes across that span, so the
 // ceiling is an order of magnitude above what the sentence costs and six
 // orders below what one reinstated framing would.
 const refusedArtifactSlack = 1024
