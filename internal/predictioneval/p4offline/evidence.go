@@ -928,6 +928,67 @@ func sessionRefusalsWithoutKnowledge(ds predictioneval.SourceDataset) []string {
 // appended as it went; this walks only the positions that match, in the same
 // order, so the list it produces is identical member for member.
 //
+// AND IT STORES ONE POSITION PER DISTINCT REASON IN EACH LIST, not every
+// position -- which is the FOURTH repair on this seam and the one an external
+// security lane reported. A supplier controls the observation id, so it can
+// stamp N rows on N distinct rounds with ONE id: that builds a single posting
+// list of length N which all N episodes read, copy, sort and then collapse --
+// via appendOnce -- to the handful of distinct reasons it actually carried.
+// MEASURED ON THIS TREE before the repair: 40,352,320 and 147,957,848 B for
+// 2,048 and 4,096 such rows -- a 3.7x ratio over a 2x input -- against
+// 13,671,760 B for the SAME rows with distinct ids.
+//
+// THE LANE'S OWN FIGURES ARE KEPT APART FROM THIS TREE'S, and the separation is
+// load-bearing rather than tidy: it reported 41.5 and 150.2 MB against 15.9 MB,
+// its two colliding figures reproduce here to within 3%, and its control does
+// NOT, being 14% apart. Its fixture is not published, so the RATIO is what
+// carries across and every absolute above is this tree's own measurement.
+//
+// AND THE NEW TEST DOES NOT REVIVE THE OLD ONE'S BLIND SPOT, which is stated
+// because a reader meeting an allocation-ratio test here would reasonably ask.
+// The paragraphs above say an allocation ratio cannot tell the index from the
+// rescan it replaced; that is STILL TRUE on the colliding fixture, and it was
+// re-measured rather than assumed. Reinstating the rescan as a well-formed
+// mutant reads 6,737,792 and 13,606,256 B where this tree reads 6,754,176 and
+// 13,639,056 -- indistinguishable. The mechanism is that the rescan allocates
+// only `out`, which the vocabulary bounds, while the index allocated `hits`,
+// which the bucket did. The colliding shape is what the new test sees; the
+// rescan is still argued and not pinned.
+//
+// THE REDUCTION IS OUTPUT-IDENTICAL, and that is a proof rather than a hope.
+// The answer is the distinct reasons ordered by the SMALLEST hit position each
+// one occupies. Take any reason r in the answer and let p be that smallest
+// position; p lies in some bucket B that the query read, and p is minimal for r
+// within B too, since B's positions are a subset of the hits. The reduction
+// keeps exactly the first position of each reason in each bucket, so p is kept.
+// No reason is lost and none moves. That argument is EXECUTED, not rested on:
+// TestTheReducedPostingListsAnswerAsTheFullOnesDid runs this index against a
+// verbatim copy of the unreduced build over randomized colliding fixtures.
+//
+// WHAT IT DOES NOT DO is refuse anything. The lane offered "reject or
+// preaggregate duplicate ObservationID values"; rejecting would be a new
+// validity ceiling on supplied data, refusing datasets this package certifies
+// today, and this package answers costs by doing less work, never by admitting
+// less evidence. The bound comes from the producer's exclusion vocabulary being
+// CLOSED -- fourteen constants in materialize.go, none of them caller text --
+// so a bucket cannot exceed fourteen positions whatever a supplier sends.
+//
+// THAT BOUND IS A PRODUCER INVARIANT AND NOT A TYPE GUARANTEE, which is worth
+// separating because only one of the two would survive a change upstream.
+// Exclusion is exported and JSON-tagged, and this function takes a plain
+// []predictioneval.Exclusion, so nothing in the type system stops a fifteenth
+// constant -- or a Reason built from caller text -- from widening a bucket. The
+// IDENTITY above does not depend on the vocabulary at all and would survive
+// that; only the CONSTANT does. The test asserts the reduced length equals the
+// distinct-reason count, so a widened vocabulary shows up as a wider bucket
+// rather than as a silently weaker bound.
+//
+// AND THE POSTING LISTS ARE NOW REASON-COMPLETE, NOT POSITION-COMPLETE, which
+// is a constraint on future readers rather than on this one. exclusionsFor
+// reads nothing but ix.all[i].Reason; a consumer added later that wanted an
+// exclusion's Detail or its Key would silently see one exclusion per reason and
+// not one per record, and would have to walk ix.all instead.
+//
 // AND THAT IDENTITY IS WHY THIS REPAIR IS ARGUED HERE AND NOT PINNED BY A TEST,
 // stated rather than left as an unexplained mutation survivor. Reinstating the
 // rescan as a well-formed mutant -- with this index still built, so nothing is
@@ -951,17 +1012,64 @@ func buildP2ExclusionIndex(excluded []predictioneval.Exclusion) *p2ExclusionInde
 		all:   excluded,
 	}
 	for i, e := range excluded {
+		// byObs IS THE LIVE ENTRANCE, AND THE REASON IS BUCKET SIZE RATHER THAN
+		// WHO CONTROLS THE FIELD. Both routes are keyed on supplier-derived
+		// data -- AttemptKey carries the supplier's pool instance and attempt
+		// id, and it does NOT carry the round incarnation, so episodes on
+		// distinct rounds can share one key and read one byKey bucket. What
+		// separates the two is how much the materializer can PUT in a bucket,
+		// not how many readers can arrive at it: amplification needs both, and
+		// a bucket of one costs its readers one position each.
+		//
+		// byKey TAKES THE SAME TREATMENT AS DEFENCE IN DEPTH, AND THAT WORD IS
+		// EXACT RATHER THAN MODEST. Today a byKey bucket cannot exceed ONE:
+		// materializeAttempt is called once per DEDUPED key, and each of its
+		// six keyed refusals is a `return nil, append(excl, ...)` off an excl
+		// that is still nil, so one key yields at most one keyed exclusion. The
+		// reduction here therefore never fires on any input the materializer
+		// can produce. It is kept because it costs a scan of a one-element
+		// list, because it is the same shape one field over, and because a
+		// future keyed path emitting two would otherwise reopen the class.
+		//
+		// AND IT IS PINNED RATHER THAN ARGUED, which this one needs more than
+		// most: leaving a route unreduced is output-IDENTICAL by construction,
+		// so no differential comparison can see it, and a combined "something
+		// was reduced" counter is satisfied by byObs alone.
+		// TestTheReducedPostingListsAnswerAsTheFullOnesDid counts the two
+		// routes separately for exactly that reason.
 		if e.Key != nil {
-			ix.byKey[*e.Key] = append(ix.byKey[*e.Key], i)
+			ix.byKey[*e.Key] = appendFirstPositionPerReason(ix.byKey[*e.Key], excluded, i)
 		}
 		// An exclusion carrying no observation id is indexed under none: the
 		// lookup below never asks for "", because the episode's own ids are
 		// filtered, so a bucket at "" could only ever be dead weight.
 		if e.ObservationID != "" {
-			ix.byObs[e.ObservationID] = append(ix.byObs[e.ObservationID], i)
+			ix.byObs[e.ObservationID] = appendFirstPositionPerReason(ix.byObs[e.ObservationID], excluded, i)
 		}
 	}
 	return ix
+}
+
+// appendFirstPositionPerReason adds position i to a posting list unless the list
+// already holds a position carrying the same reason.
+//
+// The scan it does is over the LIST, whose length is bounded by the number of
+// distinct reasons already in it, not over the input -- so the build stays
+// linear in the exclusions it indexes.
+//
+// IT KEEPS THE EARLIEST POSITION ONLY BECAUSE ITS CALLER FEEDS POSITIONS IN
+// INCREASING ORDER, and the identity argument above rests on that, so the
+// dependency is stated here rather than read as a property of this function.
+// buildP2ExclusionIndex's `for i, e := range excluded` is the whole of it. A
+// caller that fed positions out of order would keep a different representative
+// and would move an answer.
+func appendFirstPositionPerReason(list []int, all []predictioneval.Exclusion, i int) []int {
+	for _, j := range list {
+		if all[j].Reason == all[i].Reason {
+			return list
+		}
+	}
+	return append(list, i)
 }
 
 // exclusionsFor returns the reasons bearing on one episode, deduplicated, in the

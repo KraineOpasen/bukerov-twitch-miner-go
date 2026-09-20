@@ -907,6 +907,76 @@
 //     would let one byte deny a whole registry and would attribute to every
 //     round a claim that was about one. roundsWithUnreconcilableClaims argues
 //     it at the site and a named test pins it as an exception.
+//   - A COLLIDING OBSERVATION ID MADE P2 EXCLUSION ATTRIBUTION QUADRATIC,
+//     reported by a security review lane on the published head, reproduced,
+//     and CLOSED IN THIS ROUND without refusing anything.
+//     WHAT THE DEFECT WAS. p2ExclusionIndex answers one episode by copying the
+//     posting list of every observation id that episode carries. The
+//     observation id is the SUPPLIER'S text, so N causally ordered,
+//     metadata-consistent undecodable AUTO_DUE rows on N DISTINCT round
+//     incarnations -- hence N episodes -- all stamped with ONE id build a
+//     single posting list of length N that all N episodes copy, sort and
+//     position-dedup, and that appendOnce then collapses to the ONE reason it
+//     actually carried. The work was quadratic and the answer was one string.
+//     MEASURED ON THIS TREE through the exported SelectEpisodes, before the
+//     repair: 40,352,320 B at 2,048 rows and 147,957,848 B at 4,096 -- a 3.7x
+//     ratio over a 2x input -- against 13,671,760 B for the SAME rows with
+//     distinct ids. The lane reported 12.1 / 41.5 / 150.2 MB at 1,024 / 2,048
+//     / 4,096 against 3.7 / 7.9 / 15.9 MB. The two colliding figures reproduce
+//     to within 3%; the distinct-id control is 14% apart, and that gap is
+//     recorded rather than smoothed -- the lane's fixture is not published, so
+//     the RATIO is what survives, exactly as the per-verdict entry above says.
+//     WHAT CLOSED IT IS A PREAGGREGATION AND NOT A CEILING. The lane offered
+//     "reject or preaggregate duplicate ObservationID values". Rejecting is a
+//     new validity ceiling on supplied data: it would refuse datasets this
+//     package certifies today, and this package answers a cost by doing less
+//     WORK, never by admitting less EVIDENCE. So each posting list now keeps
+//     one position per DISTINCT REASON. That is output-identical -- the answer
+//     is the distinct reasons ordered by the smallest hit position each one
+//     occupies, and that position is minimal within its own bucket too, so the
+//     reduction keeps it -- and the bound comes from the producer's exclusion
+//     vocabulary being CLOSED at fourteen constants, none of them caller text.
+//     AFTER: 6,754,176 B at 2,048 and 13,639,056 B at 4,096, a 2.02x ratio,
+//     and 0.998x what the same rows cost with distinct ids. 10.8x less at
+//     4,096, and nothing refused that was not refused before.
+//     THE IDENTITY IS EXECUTED, NOT ARGUED.
+//     TestTheReducedPostingListsAnswerAsTheFullOnesDid runs the reduced index
+//     against a VERBATIM copy of the unreduced build over 16,000 randomized
+//     queries on deliberately tiny alphabets, and carries three controls: that
+//     a posting list was actually reduced (10,038 were), that the answers had
+//     content (12,844 did), and that a mutant keeping the LAST position per
+//     reason -- which preserves the reason SET and breaks only the ORDER, the
+//     half of the claim an argument is likeliest to get wrong -- is caught by
+//     that same fixture.
+//     THE NEIGHBOURS WERE HUNTED, AND THE HUNT'S FIRST FRAME WAS WRONG.
+//     byKey takes the same reduction although no lane named it -- as DEFENCE
+//     IN DEPTH and not as a closed live entrance: a byKey bucket cannot exceed
+//     one today, because materializeAttempt runs once per deduped key and each
+//     of its six keyed refusals returns immediately off a nil excl. A Q3 lane
+//     established that by execution, and established too that reverting that
+//     half left the whole suite green -- leaving a route unreduced is
+//     output-identical, so only a per-route control can see it, and that is
+//     what the test now carries. The package's three other
+//     posting-list indexes were enumerated -- SelectEpisodes' duplicate-round
+//     grouping, signalIndex, and ReconcileSourceRounds' claim groups -- and
+//     each visits every group exactly once.
+//     AND THEN A SECOND Q3 LANE FOUND THE ENTRANCE THAT ENUMERATION COULD NOT
+//     SEE, because "posting-list index" was the wrong frame: the class is a
+//     SUPPLIER-SIZED LIST RE-READ PER CONSUMER, and the second instance is not
+//     an index at all. lookupEpisode runs per CASE, and on a session refused
+//     by its own P2 exclusions it rebuilt the refusal summary every time --
+//     scanning a list whose length is the caller's dataset, twice, for a
+//     sentence that never changes. 5,615,856 B for 512 cases over 512 refusals
+//     against 20,422,752 B at 1,024, a 3.64x ratio; after building it once per
+//     HANDLE in PrepareDataset, 36,864 and 73,728 B, exactly 2.00x, with the
+//     sentence pinned BYTE FOR BYTE against a hand-counted literal. It is the
+//     same lesson one turn later than the earlier repair on that seam, which
+//     stopped the list being RENDERED into the message and left the recompute
+//     standing -- so BOTH instances found in this round are closed, and what
+//     is recorded is that the enumeration, not the code, is where the next one
+//     will hide. This branch's recurring failure now has ELEVEN occurrences,
+//     every one a repair that shut the entrance it was shown and left the
+//     neighbouring one open; the last two were caught before publication.
 //
 // A SECOND CLASS WAS HERE FOR ONE ROUND AND IS NOW REPAIRED, and the way it
 // was repaired is worth recording rather than quietly deleting, because the

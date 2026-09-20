@@ -2755,6 +2755,218 @@ func TestP2ExclusionAttributionIsCompleteForEveryEpisode(t *testing.T) {
 	})
 }
 
+// TestCollidingObservationIdsDoNotMakeAttributionQuadratic is the receipt for
+// the FOURTH superlinear accumulation found on this seam, reported by an
+// external security lane against the indexed form that repaired the third.
+//
+// THE SHAPE. The index answers one episode by copying the posting list of every
+// observation id that episode carries. A supplier that gives N causally
+// ordered, metadata-consistent undecodable AUTO_DUE rows on N DISTINCT round
+// incarnations -- so N episodes -- but stamps every one of them with the SAME
+// ObservationID builds ONE posting list of length N that all N episodes read.
+// The copy, the sort and the position dedup are then each N per episode, and
+// appendOnce collapses the whole bucket to ONE reason at the end: the work is
+// quadratic and the answer is a single string. Reported measurement: 12.1 /
+// 41.5 / 150.2 MB at N = 1024 / 2048 / 4096, against 3.7 / 7.9 / 15.9 MB for
+// the same rows with distinct ids.
+//
+// WHAT THE REPAIR IS, AND WHAT IT IS NOT. The lane offered "reject or
+// preaggregate". Rejecting is a new validity ceiling on supplied data, which
+// this package does not do and this effort's contract forbids: it would refuse
+// datasets that verify today. So the posting lists are PREAGGREGATED at build
+// time to one position per distinct reason within each list. That is
+// output-identical, and the proof is executed rather than argued -- see the
+// randomized oracle in evidence_internal_test.go. Nothing is refused and no
+// answer moves.
+//
+// WHY THE SIBLING TEST COULD NOT SEE IT. Its fixture leaves the DEFAULT
+// observation id on every row, and that id embeds the collector sequence, so
+// its N rows build N buckets of one and the product never forms. The colliding
+// shape was a row no table in this package carried -- which is how each of the
+// previous three escaped too.
+func TestCollidingObservationIdsDoNotMakeAttributionQuadratic(t *testing.T) {
+	// k undecodable automatic rows, EACH ITS OWN EPISODE and each its own
+	// producer exclusion. collide is the single field that separates the attack
+	// from its control, so both are built by the same code.
+	build := func(k int, collide bool) predictioneval.SourceDataset {
+		s := newSynth()
+		for i := 0; i < k; i++ {
+			r := s.fact(predictioneval.KindAutoDecision, predictioneval.PhaseAutoDue,
+				"r"+strconv.Itoa(i), "e1", 1)
+			r.PayloadUndecodable = true
+			if collide {
+				r.ObservationID = "collide"
+			}
+			s.add(r)
+		}
+		return s.dataset()
+	}
+	measure := func(t *testing.T, ds predictioneval.SourceDataset) uint64 {
+		t.Helper()
+		runtime.GC()
+		var a, b runtime.MemStats
+		runtime.ReadMemStats(&a)
+		if _, err := p4offline.SelectEpisodes(ds); err != nil {
+			t.Fatal(err)
+		}
+		runtime.ReadMemStats(&b)
+		return b.TotalAlloc - a.TotalAlloc
+	}
+
+	small := measure(t, build(2048, true))
+	large := measure(t, build(4096, true))
+	t.Logf("colliding ids: 2048 rows -> %d bytes; 4096 -> %d bytes", small, large)
+	if ratio := float64(large) / float64(small); ratio > 3 {
+		t.Fatalf("allocation grew %.1fx over a 2x input: one posting list is copied per episode", ratio)
+	}
+
+	// THE CONTROL IS THE SAME ROWS WITHOUT THE COLLISION, at the same size.
+	// Without it a fixture that had stopped reaching the attribution at all
+	// would pass the ratio above, which is the failure mode the third repair's
+	// own test was renamed for.
+	distinct := measure(t, build(4096, false))
+	t.Logf("distinct ids: 4096 rows -> %d bytes", distinct)
+	if ratio := float64(large) / float64(distinct); ratio > 2 {
+		t.Fatalf("colliding ids cost %.1fx what distinct ids cost at the same size", ratio)
+	}
+
+	t.Run("and every episode still carries the collided bucket's one reason", func(t *testing.T) {
+		// Every episode's id is the SAME id, so every episode is attributed the
+		// whole bucket -- and the whole bucket is one reason. The preaggregation
+		// must not turn that into none, nor into a different reason, nor into a
+		// reason some episodes get and others do not.
+		const n = 8
+		sel, err := p4offline.SelectEpisodes(build(n, true))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(sel.Episodes) != n {
+			t.Fatalf("the fixture must produce one episode per row: got %d, want %d", len(sel.Episodes), n)
+		}
+		for i := range sel.Episodes {
+			got := sel.Episodes[i].P2Exclusions
+			if len(got) != 1 || got[0] != predictioneval.ExclusionPayloadUndecodable {
+				t.Fatalf("episode %d must carry the bucket's single refusal, got %v", i, got)
+			}
+		}
+	})
+}
+
+// TestARefusedSessionIsNotRescannedForEveryCase is the receipt for the SECOND
+// entrance of the class the security lane reported one seam over -- and it was
+// found by this round's own Q3 lanes BEFORE publication rather than by a review
+// lane after it.
+//
+// THE SHAPE. A session refused by its own P2 exclusions carries one refusal
+// entry PER session-level exclusion, and materialization emits one per
+// undecodable record that names no observation and no attempt. So
+// SessionRefusals is the caller's dataset -- which sessionRefusalKinds' own
+// comment has said since the round that stopped the list being RENDERED into
+// the message. What that repair did not stop was RECOMPUTING the summary:
+// lookupEpisode runs per CASE, and it scanned the whole list twice on every
+// one of them, so a run of C cases over N refusals cost C x N.
+//
+// MEASURED ON THIS TREE before the repair, through the exported seam: 5,615,856
+// B for 512 cases over 512 refusals and 20,422,752 B at 1,024 -- a 3.64x ratio
+// over a 2x input. After: the summary is built once per HANDLE, in
+// PrepareDataset, and only when the session is actually refused.
+//
+// THE MESSAGE IS PINNED BYTE FOR BYTE, not merely "still an error", because
+// moving a computation is exactly the change that silently shortens what a
+// refusal reports -- and this package has already been caught once reporting a
+// carrier's width instead of a sentence's. The expected string here is derived
+// from the contract by hand -- three entries of forty bytes each -- and not
+// from the code that produces it.
+func TestARefusedSessionIsNotRescannedForEveryCase(t *testing.T) {
+	// k undecodable automatic rows naming NO observation, which is what makes
+	// each one a SESSION-level exclusion rather than an episode's own.
+	build := func(k int) predictioneval.SourceDataset {
+		s := newSynth()
+		for i := 0; i < k; i++ {
+			r := s.fact(predictioneval.KindAutoDecision, predictioneval.PhaseAutoDue,
+				"r"+strconv.Itoa(i), "e1", 1)
+			r.PayloadUndecodable = true
+			r.ObservationID = ""
+			s.add(r)
+		}
+		return s.dataset()
+	}
+
+	t.Run("the fixture really refuses the session", func(t *testing.T) {
+		// Without this the growth measurement below could be timing an arm it
+		// never enters, which is the failure the sibling seam's test was
+		// renamed for.
+		sel, err := p4offline.SelectEpisodes(build(8))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if sel.SessionAdmitted {
+			t.Fatal("the fixture must refuse the session, or the arm under test is never reached")
+		}
+		if len(sel.SessionRefusals) != 8 {
+			t.Fatalf("the refusal list must grow with the dataset: got %d entries for 8 rows", len(sel.SessionRefusals))
+		}
+	})
+
+	measure := func(t *testing.T, k int) uint64 {
+		t.Helper()
+		src, err := p4offline.PrepareDataset(build(k))
+		if err != nil {
+			t.Fatal(err)
+		}
+		runtime.GC()
+		var a, b runtime.MemStats
+		runtime.ReadMemStats(&a)
+		for i := 0; i < k; i++ {
+			if _, err := p4offline.BuildCommonFactset(src, p4offline.EpisodeIdentity{EventID: "e1"}); err == nil {
+				t.Fatal("a refused session must refuse every case")
+			}
+		}
+		runtime.ReadMemStats(&b)
+		return b.TotalAlloc - a.TotalAlloc
+	}
+
+	small := measure(t, 512)
+	large := measure(t, 1024)
+	t.Logf("512 cases over 512 refusals -> %d bytes; 1024 over 1024 -> %d bytes", small, large)
+	if ratio := float64(large) / float64(small); ratio > 3 {
+		t.Fatalf("allocation grew %.1fx over a 2x input: the refusal list is rescanned per case", ratio)
+	}
+
+	t.Run("and the refusal still names the whole list", func(t *testing.T) {
+		// Three entries of "SESSION_P2_EXCLUSION:PAYLOAD_UNDECODABLE" -- twenty
+		// characters, a colon and nineteen -- is 120 bytes, and the three
+		// collapse to one distinct kind. Counted here rather than read off the
+		// implementation.
+		const want = "p4offline: session refused: 3 reasons, 120 bytes: SESSION_P2_EXCLUSION:PAYLOAD_UNDECODABLE"
+		src, err := p4offline.PrepareDataset(build(3))
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = p4offline.BuildCommonFactset(src, p4offline.EpisodeIdentity{EventID: "e1"})
+		if err == nil {
+			t.Fatal("a refused session must refuse the case")
+		}
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("the refusal must name the whole list:\n got %q\nwant it to contain %q", err.Error(), want)
+		}
+		if !errors.Is(err, p4offline.ErrEpisodeNotSelected) {
+			t.Fatalf("the refusal must stay reachable as ErrEpisodeNotSelected, got %v", err)
+		}
+
+		// EVERY case gets the SAME sentence, which is the half a precomputed
+		// value could break without the count above noticing: a handle that
+		// answered the first case and then something shorter would still report
+		// 3 reasons on the call this test reads.
+		for i := 0; i < 4; i++ {
+			_, again := p4offline.BuildCommonFactset(src, p4offline.EpisodeIdentity{EventID: "e1"})
+			if again == nil || again.Error() != err.Error() {
+				t.Fatalf("case %d got a different refusal: %v", i, again)
+			}
+		}
+	})
+}
+
 // registryStringSites walks a registry by reflection and returns a POINTER to
 // it beside every string position reachable from it. The pointer is the point:
 // the sites index into the value this function holds, so returning the registry

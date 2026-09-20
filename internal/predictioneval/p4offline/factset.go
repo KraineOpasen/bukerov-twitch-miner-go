@@ -203,6 +203,30 @@ type PreparedDataset struct {
 	prepared bool
 	sel      EvidenceSelection
 	selErr   error
+	// sessionRefusal is the whole sentence lookupEpisode returns when the
+	// session was not admitted, built ONCE here instead of once per case.
+	//
+	// THE SECOND ENTRANCE OF THE CLASS A SECURITY LANE REPORTED ONE SEAM OVER,
+	// found by this round's own Q3 before publication rather than by a lane
+	// after it. SessionRefusals is dataset-sized BY DESIGN -- sessionRefusals
+	// appends one entry per session-level P2 exclusion, and materialization
+	// emits one per undecodable record carrying no observation id -- and
+	// lookupEpisode runs per CASE. Recomputing the extent and the distinct
+	// kinds there made a run of C cases cost C x N: measured on this tree
+	// before the repair, 5,615,856 B for 512 cases over 512 refusals against
+	// 20,422,752 B at 1,024, a 3.64x ratio over a 2x input.
+	//
+	// THE EARLIER REPAIR ON THIS SEAM CLOSED THE ENTRANCE IT WAS SHOWN. The
+	// comment at sessionRefusalKinds already says the list "is NOT" bounded and
+	// that "its length is the caller's dataset"; what that repair stopped was
+	// RENDERING the list into the message. Recomputing the summary per case was
+	// the neighbour, and it stayed open.
+	//
+	// IT IS FILLED ONLY WHEN THE SESSION IS REFUSED, so an admitted session
+	// pays nothing for it, and it is filled by the only constructor that can
+	// set prepared, so a handle that reaches lookupEpisode's refusal arm always
+	// carries it.
+	sessionRefusal string
 	// byEpisode indexes sel.Episodes. It is written only while it is being
 	// built and no method returns it or a view of it.
 	//
@@ -250,6 +274,10 @@ func PrepareDataset(ds predictioneval.SourceDataset) (PreparedDataset, error) {
 	if err != nil {
 		return out, err
 	}
+	if !sel.SessionAdmitted {
+		out.sessionRefusal = "p4offline: session refused: " + reasonListExtent(sel.SessionRefusals) +
+			": " + joinReasons(sessionRefusalKinds(sel.SessionRefusals))
+	}
 	out.byEpisode = make(map[EpisodeIdentity]int, len(sel.Episodes))
 	for i := range sel.Episodes {
 		if _, seen := out.byEpisode[sel.Episodes[i].Episode]; seen {
@@ -290,9 +318,11 @@ func lookupEpisode(src PreparedDataset, episode EpisodeIdentity) (EpisodeSelecti
 	}
 	sel := src.sel
 	if !sel.SessionAdmitted {
+		// THE SENTENCE IS READ, NOT REBUILT. It is byte-identical to what this
+		// arm used to compute; what changed is that it is computed once per
+		// HANDLE instead of once per CASE. See PreparedDataset.sessionRefusal.
 		return EpisodeSelection{}, false, errors.Join(ErrEpisodeNotSelected,
-			errors.New("p4offline: session refused: "+reasonListExtent(sel.SessionRefusals)+
-				": "+joinReasons(sessionRefusalKinds(sel.SessionRefusals))))
+			errors.New(src.sessionRefusal))
 	}
 	i, found := src.byEpisode[episode]
 	if !found {

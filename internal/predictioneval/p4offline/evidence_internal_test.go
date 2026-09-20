@@ -1707,3 +1707,226 @@ func TestTheClaimComparatorAllocatesNothing(t *testing.T) {
 			grew, reps)
 	}
 }
+
+// buildP2ExclusionIndexBeforeTheReduction is the build that
+// appendFirstPositionPerReason replaced, copied verbatim from cef68f7. It is the
+// oracle, so it must NOT be tidied.
+func buildP2ExclusionIndexBeforeTheReduction(excluded []predictioneval.Exclusion) *p2ExclusionIndex {
+	ix := &p2ExclusionIndex{
+		byKey: make(map[predictioneval.AttemptKey][]int, len(excluded)),
+		byObs: make(map[string][]int, len(excluded)),
+		all:   excluded,
+	}
+	for i, e := range excluded {
+		if e.Key != nil {
+			ix.byKey[*e.Key] = append(ix.byKey[*e.Key], i)
+		}
+		if e.ObservationID != "" {
+			ix.byObs[e.ObservationID] = append(ix.byObs[e.ObservationID], i)
+		}
+	}
+	return ix
+}
+
+// TestTheReducedPostingListsAnswerAsTheFullOnesDid executes the identity that
+// the repair at buildP2ExclusionIndex rests on, rather than arguing it.
+//
+// THE CLAIM UNDER TEST. Keeping only the first position of each distinct reason
+// in each posting list cannot move any answer, because the answer is the
+// distinct reasons ordered by the smallest hit position each occupies, and that
+// smallest position is minimal within its own bucket too, so the reduction
+// keeps it.
+//
+// WHY RANDOMIZED AND NOT A TABLE. The argument is about the INTERACTION of two
+// routes, duplicate reasons inside one bucket, and positions that interleave
+// across buckets. A table encodes the cases its author thought of; the previous
+// three defects on this seam were each a case nobody had thought of. The
+// alphabets are deliberately tiny -- three observation ids, three attempt keys,
+// four reasons -- so collisions are the common case rather than a rare draw.
+//
+// THE THREE CONTROLS matter as much as the comparison. Without them an oracle
+// that never reached a reduced bucket, or never produced a non-empty answer,
+// would pass while proving nothing: the test therefore requires that the
+// reduction actually FIRED, that the answers actually had content, and that a
+// deliberately broken reduction -- keeping the LAST position per reason instead
+// of the first -- is caught by this same fixture.
+func TestTheReducedPostingListsAnswerAsTheFullOnesDid(t *testing.T) {
+	reasons := []string{
+		predictioneval.ExclusionPayloadUndecodable,
+		predictioneval.ExclusionNoTerminalFact,
+		predictioneval.ExclusionForeignSession,
+		predictioneval.ExclusionMultipleTerminalFacts,
+	}
+	obsIDs := []string{"", "a", "b"}
+	// "c" is never stamped on an exclusion, so the obs route is also exercised
+	// with an id the index has never heard of -- a shape a Q3 lane pointed out
+	// the first draft reached only on the key route.
+	queryIDs := []string{"", "a", "b", "c"}
+	keys := []predictioneval.AttemptKey{
+		{CollectorEpoch: 7, CollectorSessionID: "s", PoolInstanceID: "p", AttemptID: 1},
+		{CollectorEpoch: 7, CollectorSessionID: "s", PoolInstanceID: "p", AttemptID: 2},
+		{CollectorEpoch: 7, CollectorSessionID: "s", PoolInstanceID: "q", AttemptID: 1},
+	}
+	// absent is a key no exclusion ever carries, so the byKey route contributes
+	// nothing on some queries and the obs route has to answer alone.
+	absent := predictioneval.AttemptKey{CollectorEpoch: 9, CollectorSessionID: "z", PoolInstanceID: "z", AttemptID: 9}
+
+	// distinctReasons is the bound the repair claims, computed independently of
+	// the code that enforces it.
+	distinctReasons := func(all []predictioneval.Exclusion, list []int) int {
+		var seen []string
+		for _, i := range list {
+			seen = appendOnce(seen, all[i].Reason)
+		}
+		return len(seen)
+	}
+
+	rng := rand.New(rand.NewSource(20260920))
+	var compared, nonEmpty, reducedObs, reducedKey int
+	for round := 0; round < 4000; round++ {
+		excluded := make([]predictioneval.Exclusion, rng.Intn(24))
+		for i := range excluded {
+			e := predictioneval.Exclusion{
+				ObservationID: obsIDs[rng.Intn(len(obsIDs))],
+				Reason:        reasons[rng.Intn(len(reasons))],
+			}
+			if rng.Intn(3) != 0 {
+				k := keys[rng.Intn(len(keys))]
+				e.Key = &k
+			}
+			excluded[i] = e
+		}
+
+		full := buildP2ExclusionIndexBeforeTheReduction(excluded)
+		cut := buildP2ExclusionIndex(excluded)
+
+		for id, list := range full.byObs {
+			if n := distinctReasons(excluded, list); len(cut.byObs[id]) != n {
+				t.Fatalf("round %d: byObs[%q] reduced to %d positions, want one per distinct reason (%d)",
+					round, id, len(cut.byObs[id]), n)
+			}
+			if len(cut.byObs[id]) < len(list) {
+				reducedObs++
+			}
+		}
+		for k, list := range full.byKey {
+			if n := distinctReasons(excluded, list); len(cut.byKey[k]) != n {
+				t.Fatalf("round %d: byKey[%+v] reduced to %d positions, want one per distinct reason (%d)",
+					round, k, len(cut.byKey[k]), n)
+			}
+			if len(cut.byKey[k]) < len(list) {
+				reducedKey++
+			}
+		}
+
+		for q := 0; q < 4; q++ {
+			key := absent
+			if rng.Intn(4) != 0 {
+				key = keys[rng.Intn(len(keys))]
+			}
+			obs := make([]string, rng.Intn(4))
+			for i := range obs {
+				obs[i] = queryIDs[rng.Intn(len(queryIDs))]
+			}
+			want := full.exclusionsFor(key, obs)
+			got := cut.exclusionsFor(key, obs)
+			compared++
+			if len(want) > 0 {
+				nonEmpty++
+			}
+			if !reflect.DeepEqual(got, want) {
+				t.Fatalf("round %d query %d: reduced index answered %v, full index answered %v\nexclusions: %+v\nkey: %+v obs: %v",
+					round, q, got, want, excluded, key, obs)
+			}
+		}
+	}
+	t.Logf("%d comparisons, %d with a non-empty answer, %d obs and %d key buckets actually reduced",
+		compared, nonEmpty, reducedObs, reducedKey)
+	// THE TWO COUNTERS ARE SEPARATE BECAUSE ONE SUM HID A MUTANT. A Q3 lane
+	// reverted the byKey half of the repair to a plain append and the whole
+	// suite stayed green: byObs alone kept a combined counter above zero, and
+	// the comparison above cannot see it, because leaving a route unreduced is
+	// output-IDENTICAL by construction. byKey buckets are length one on every
+	// input the materializer can produce, so nothing else in this package can
+	// pin that half at all.
+	if reducedObs == 0 {
+		t.Fatal("no observation-id posting list was ever reduced: the fixture never reached the repair")
+	}
+	if reducedKey == 0 {
+		t.Fatal("no attempt-key posting list was ever reduced: the byKey half of the repair is unpinned")
+	}
+	if nonEmpty*4 < compared {
+		t.Fatalf("only %d of %d answers had content: the fixture is mostly measuring the empty case", nonEmpty, compared)
+	}
+
+	t.Run("and the same fixture catches a reduction that keeps the wrong position", func(t *testing.T) {
+		// Keeping the LAST position per reason preserves the reason SET and
+		// breaks only the ORDER, which is exactly the half of the claim an
+		// argument is likeliest to get wrong.
+		//
+		// WHAT THIS SUBTEST IS, STATED PRECISELY. A production mutant that kept
+		// the last position would already be caught by the comparison above,
+		// because the oracle is the UNREDUCED index and the order would move.
+		// So this is not that mutant: it is evidence that the FIXTURE reaches
+		// order-sensitive cases at all. Without it, a fixture whose buckets
+		// never held two positions with the same reason would pass the
+		// comparison while proving only set equality, and the distinction
+		// between the two would be invisible.
+		lastPerReason := func(all []predictioneval.Exclusion, list []int) []int {
+			var out []int
+			for _, i := range list {
+				replaced := false
+				for n, j := range out {
+					if all[j].Reason == all[i].Reason {
+						out[n], replaced = i, true
+						break
+					}
+				}
+				if !replaced {
+					out = append(out, i)
+				}
+			}
+			return out
+		}
+		rng := rand.New(rand.NewSource(20260920))
+		caught := false
+		for round := 0; round < 4000 && !caught; round++ {
+			excluded := make([]predictioneval.Exclusion, rng.Intn(24))
+			for i := range excluded {
+				e := predictioneval.Exclusion{
+					ObservationID: obsIDs[rng.Intn(len(obsIDs))],
+					Reason:        reasons[rng.Intn(len(reasons))],
+				}
+				if rng.Intn(3) != 0 {
+					k := keys[rng.Intn(len(keys))]
+					e.Key = &k
+				}
+				excluded[i] = e
+			}
+			full := buildP2ExclusionIndexBeforeTheReduction(excluded)
+			mutant := buildP2ExclusionIndexBeforeTheReduction(excluded)
+			for id, list := range mutant.byObs {
+				mutant.byObs[id] = lastPerReason(excluded, list)
+			}
+			for k, list := range mutant.byKey {
+				mutant.byKey[k] = lastPerReason(excluded, list)
+			}
+			for q := 0; q < 4 && !caught; q++ {
+				key := absent
+				if rng.Intn(4) != 0 {
+					key = keys[rng.Intn(len(keys))]
+				}
+				obs := make([]string, rng.Intn(4))
+				for i := range obs {
+					obs[i] = queryIDs[rng.Intn(len(queryIDs))]
+				}
+				if !reflect.DeepEqual(mutant.exclusionsFor(key, obs), full.exclusionsFor(key, obs)) {
+					caught = true
+				}
+			}
+		}
+		if !caught {
+			t.Fatal("the last-position mutant survived this fixture: the comparison above proves less than it claims")
+		}
+	})
+}
