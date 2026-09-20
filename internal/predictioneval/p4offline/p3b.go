@@ -90,29 +90,66 @@ type P3bRuleset struct {
 // not survive a JSON round trip — a stored ruleset is re-verified from its
 // raw bytes, never trusted from its typed form.
 type VerifiedP3bRuleset struct {
-	RulesetID          string                            `json:"rulesetId"`
-	RawSHA256          string                            `json:"rawSha256"`
-	NativeConfigDigest string                            `json:"nativeConfigDigest"`
-	Config             predictioneval.OrderedRulesConfig `json:"config"`
-	witness            string
+	RulesetID          string `json:"rulesetId"`
+	RawSHA256          string `json:"rawSha256"`
+	NativeConfigDigest string `json:"nativeConfigDigest"`
+
+	// config is the SEALED config: a detached copy taken at verification and
+	// never handed out. Evaluation reads this and nothing else.
+	//
+	// IT IS UNEXPORTED BECAUSE VERIFICATION IS ABOUT A VALUE, NOT A NAME. When
+	// the config was an exported field, a caller could verify a ruleset and
+	// then change what had been verified, so every use had to re-derive the
+	// native digest to notice -- a full evaluation of the config through the
+	// probe, paid per case, proportional to a caller-supplied identifier. The
+	// seal makes that re-derivation unnecessary rather than cheaper: there is
+	// no longer a path by which the evaluated config can differ from the
+	// verified one.
+	//
+	// The identity fields above stay exported and are still bound: the witness
+	// covers them, so changing one makes check fail. What a caller cannot do
+	// any more is change the config OUT FROM UNDER a witness that still
+	// matches.
+	config  predictioneval.OrderedRulesConfig
+	witness string
 }
 
 // Rules is the number of ordered detailed rules.
-func (r VerifiedP3bRuleset) Rules() int { return len(r.Config.Detailed) }
+func (r VerifiedP3bRuleset) Rules() int { return len(r.config.Detailed) }
+
+// ConfigCopy returns the verified config as a DETACHED copy, so reading it
+// cannot reach the sealed value. Two calls share nothing, and neither shares
+// anything with the ruleset.
+func (r VerifiedP3bRuleset) ConfigCopy() predictioneval.OrderedRulesConfig {
+	return detachConfig(r.config)
+}
 
 // check refuses a value that VerifyP3bRuleset did not produce as it is: the
-// identity fields must match the witness, and the config must still digest
-// — in the core's own terms — to the verified native digest. The probe runs
-// again here so a config mutated after verification into a shape the core
-// refuses (which reports no digest at all) is caught as firmly as one
-// mutated into a shape it accepts.
+// identity fields must match the witness.
+//
+// WHAT THE SEAL REMOVED FROM HERE IS THE CONFIG RE-PROOF, not the check. It
+// used to ALSO re-derive the config's native digest on every call -- a full
+// evaluation through the fixed probe -- because the config was an exported
+// field a caller could change after verification. It is sealed now, so there is
+// nothing to re-check: the evaluated config IS the verified one, by
+// construction rather than by comparison.
+//
+// WHAT REMAINS IS PROPORTIONAL TO THE IDENTIFIER, AND THIS IS NOT O(1). The
+// witness frames RulesetID, and VerifyP3bRuleset requires RulesetID to EQUAL
+// the config's ConfigID, so the two names are one caller-supplied value: a
+// 1 MiB identifier costs about a megabyte here on every use. That is the price
+// of leaving the identity fields exported, and they are exported because a
+// result carries them. Sealing those too would remove this share and is
+// recorded in doc.go with what it would cost; the probe was the reported
+// defect and the probe is what this removes.
+//
+// The zero value, a forged value and a deserialized one all fail here, because
+// the witness is unexported and nothing outside this package can set it.
+// Changing an identity field after verification also fails, because the
+// witness covers all three.
 func (r VerifiedP3bRuleset) check() error {
 	if r.witness == "" || r.witness != rulesetWitness(r.RulesetID, r.RawSHA256, r.NativeConfigDigest) {
 		return ErrRulesetNotVerified
-	}
-	digest, err := nativeConfigDigest(r.Config)
-	if err != nil || digest != r.NativeConfigDigest {
-		return errors.Join(ErrRulesetNotVerified, errors.New("p4offline: the config no longer digests to the verified native digest"))
 	}
 	return nil
 }
@@ -626,7 +663,7 @@ func VerifyP3bRuleset(r P3bRuleset) (VerifiedP3bRuleset, error) {
 		RulesetID:          r.RulesetID,
 		RawSHA256:          r.RawSHA256,
 		NativeConfigDigest: r.NativeConfigDigest,
-		Config:             detachConfig(r.Config),
+		config:             detachConfig(r.Config),
 		witness:            rulesetWitness(r.RulesetID, r.RawSHA256, r.NativeConfigDigest),
 	}, nil
 }
@@ -1118,7 +1155,7 @@ func evaluateProjected(fs CommonFactset, proj P3bProjection, rs VerifiedP3bRules
 	if err := ValidateEntropyWords(coords, trace.Words); err != nil {
 		return P3bCaseResult{}, err
 	}
-	ev := predictioneval.EvaluateOrderedRules(proj.Stream, rs.Config, trace)
+	ev := predictioneval.EvaluateOrderedRules(proj.Stream, rs.config, trace)
 	action := MapP3bAction(ev)
 	admitted := action.Legal && determinate(action.Class)
 	if admitted && (ev.StreamDigest == "" || ev.ConfigDigest == "") {

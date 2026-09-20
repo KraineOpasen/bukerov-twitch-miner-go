@@ -151,7 +151,7 @@ func TestP3bRulesetIsSuppliedVerifiedAndBound(t *testing.T) {
 		Config: cfg, NativeConfigDigest: nativeConfigDigest(t, cfg)}
 	rs := mustVerify(t, good)
 	if rs.RulesetID != "p4-synthetic-ruleset-a" || rs.RawSHA256 != wantHash || rs.Rules() != 1 ||
-		rs.NativeConfigDigest != good.NativeConfigDigest || rs.Config.ConfigID != cfg.ConfigID {
+		rs.NativeConfigDigest != good.NativeConfigDigest || rs.ConfigCopy().ConfigID != cfg.ConfigID {
 		t.Fatalf("%+v", rs)
 	}
 
@@ -219,7 +219,7 @@ func TestP3bRulesetIsSuppliedVerifiedAndBound(t *testing.T) {
 	t.Run("a hand-built or altered verified ruleset is refused at use", func(t *testing.T) {
 		_, fs := selectedFactset(t, nil, nil)
 		forged := p4offline.VerifiedP3bRuleset{RulesetID: "impostor", RawSHA256: "not-a-hash",
-			NativeConfigDigest: good.NativeConfigDigest, Config: cfg}
+			NativeConfigDigest: good.NativeConfigDigest}
 		if _, err := p4offline.EvaluateP3bCase(fs, forged, synthCoords(fs, 0)); !errors.Is(err, p4offline.ErrRulesetNotVerified) {
 			t.Fatalf("got %v", err)
 		}
@@ -238,17 +238,15 @@ func TestP3bRulesetIsSuppliedVerifiedAndBound(t *testing.T) {
 		if _, err := p4offline.EvaluateP3bCase(fs, altered, synthCoords(fs, 0)); !errors.Is(err, p4offline.ErrRulesetNotVerified) {
 			t.Fatalf("got %v", err)
 		}
-		retuned := rs
-		retuned.Config.Detailed = append([]predictioneval.OrderedRule(nil), rs.Config.Detailed...)
-		retuned.Config.Detailed[0].RawAttemptRatePercent = 0
-		if _, err := p4offline.EvaluateP3bCase(fs, retuned, synthCoords(fs, 0)); !errors.Is(err, p4offline.ErrRulesetNotVerified) {
-			t.Fatalf("a config altered after verification no longer digests to the verified native digest: %v", err)
-		}
-		broken := rs
-		broken.Config.Detailed = append([]predictioneval.OrderedRule(nil), rs.Config.Detailed...)
-		broken.Config.Detailed[0].RawThresholdPercent = 500 // a shape the core refuses outright
-		if _, err := p4offline.EvaluateP3bCase(fs, broken, synthCoords(fs, 0)); !errors.Is(err, p4offline.ErrRulesetNotVerified) {
-			t.Fatalf("a config the core refuses is not a typed REFUSED under the honest identity; it is an unverified ruleset: %v", err)
+		// A CONFIG ALTERED AFTER VERIFICATION USED TO BE DETECTED HERE, by
+		// re-deriving the native digest on every use. It is now IMPOSSIBLE
+		// instead: the verified config is sealed in an unexported field, so
+		// there is no expression that reaches it. What is left to prove is
+		// that the seal is a seal -- that the copy a caller can read is
+		// detached both ways -- and that is TestTheSealedRulesetCannotBeRetuned
+		// below, which drives the paths this pair of pokes used to stand for.
+		if before := len(rs.ConfigCopy().Detailed); before == 0 {
+			t.Fatal("the fixture must carry a detailed rule for the seal rows to mean anything")
 		}
 		var decoded p4offline.VerifiedP3bRuleset
 		raw := mustMarshal(t, rs)
@@ -4663,4 +4661,206 @@ func TestAnOverCeilingRefusalDoesNotDisplaceAnEarlierNativeGate(t *testing.T) {
 			t.Fatalf("the shortcut displaced an earlier native gate.\n got: %q\nwant: %q", err.Error(), want)
 		}
 	})
+}
+
+// TestTheSealedRulesetCannotBeRetuned is obligation C's alias proof: the
+// verified config must be reachable by nothing a caller holds.
+//
+// Before the seal, the config was an exported field, so "verified" named a
+// value a caller could change afterwards — and the only defence was to
+// re-derive its native digest on every single use, a full evaluation through
+// the probe proportional to a caller-supplied ConfigID. The seal removes the
+// reachability rather than the detection, so the re-derivation is unnecessary
+// rather than merely cheaper. These rows are what makes that claim checkable.
+func TestTheSealedRulesetCannotBeRetuned(t *testing.T) {
+	cfg := cfgWithRule("sealed-cfg", predictioneval.ComparatorGe, 50, 100)
+	raw := rulesetFrom(t, cfg)
+	rs := mustVerify(t, raw)
+	_, _, fs := selectedCase(t, nil, nil)
+	coords := synthCoords(fs, 0)
+
+	base, err := p4offline.EvaluateP3bCase(fs, rs, coords)
+	if err != nil {
+		t.Fatalf("the control must evaluate: %v", err)
+	}
+	if len(rs.ConfigCopy().Detailed) == 0 {
+		t.Fatal("the fixture must carry a detailed rule, or nothing below is retuning anything")
+	}
+
+	t.Run("mutating the copy a caller reads changes nothing", func(t *testing.T) {
+		got := rs.ConfigCopy()
+		got.Detailed[0].RawAttemptRatePercent = 0
+		got.Detailed[0].RawThresholdPercent = 500
+		got.Default.RawMinPercent = 99
+		got.ConfigID = "retuned"
+		after, err := p4offline.EvaluateP3bCase(fs, rs, coords)
+		if err != nil {
+			t.Fatalf("the sealed ruleset must still evaluate: %v", err)
+		}
+		if after.Evaluation.ConfigDigest != base.Evaluation.ConfigDigest {
+			t.Fatalf("mutating the returned copy changed the evaluated config: %s -> %s",
+				base.Evaluation.ConfigDigest, after.Evaluation.ConfigDigest)
+		}
+		if rs.ConfigCopy().ConfigID != cfg.ConfigID {
+			t.Fatalf("the seal was reached through a returned copy: config id is now %q", rs.ConfigCopy().ConfigID)
+		}
+	})
+
+	t.Run("two copies share no backing array", func(t *testing.T) {
+		a, b := rs.ConfigCopy(), rs.ConfigCopy()
+		a.Detailed[0].RawAttemptRatePercent = 1
+		b.Detailed[0].RawAttemptRatePercent = 2
+		if a.Detailed[0].RawAttemptRatePercent == b.Detailed[0].RawAttemptRatePercent {
+			t.Fatal("two copies alias one another")
+		}
+		if rs.ConfigCopy().Detailed[0].RawAttemptRatePercent == 1 ||
+			rs.ConfigCopy().Detailed[0].RawAttemptRatePercent == 2 {
+			t.Fatal("a copy aliases the sealed config")
+		}
+	})
+
+	t.Run("mutating the input after verification changes nothing", func(t *testing.T) {
+		// The caller still owns the config it handed to VerifyP3bRuleset.
+		raw.Config.Detailed[0].RawAttemptRatePercent = 0
+		raw.Config.ConfigID = "mutated-after-verification"
+		after, err := p4offline.EvaluateP3bCase(fs, rs, coords)
+		if err != nil {
+			t.Fatalf("the sealed ruleset must still evaluate: %v", err)
+		}
+		if after.Evaluation.ConfigDigest != base.Evaluation.ConfigDigest {
+			t.Fatalf("the verified ruleset followed its caller's config: %s -> %s",
+				base.Evaluation.ConfigDigest, after.Evaluation.ConfigDigest)
+		}
+	})
+
+	t.Run("repeated use is the same verdict every time", func(t *testing.T) {
+		for i := 0; i < 8; i++ {
+			got, err := p4offline.EvaluateP3bCase(fs, rs, coords)
+			if err != nil {
+				t.Fatalf("evaluation %d: %v", i, err)
+			}
+			if got.Evaluation.ConfigDigest != base.Evaluation.ConfigDigest ||
+				got.Evaluation.StreamDigest != base.Evaluation.StreamDigest ||
+				got.Evaluation.Status != base.Evaluation.Status {
+				t.Fatalf("evaluation %d drifted from the first", i)
+			}
+		}
+	})
+}
+
+// TestASealedRulesetIsNotReprovedOnEveryUse is obligation C's cost evidence,
+// and it states what sealing does and does not buy.
+//
+// ONE IDENTIFIER WEARS TWO NAMES HERE, which has to be said before any figure
+// below means anything: VerifyP3bRuleset requires RulesetID to EQUAL the
+// config's ConfigID, and rulesetFrom honours that, so the string this test
+// grows is at once the ruleset's name and the config's. A reader who takes it
+// for the config's alone will mis-attribute three quarters of what follows.
+//
+// WHAT IT REMOVED, exactly: one full pass over the config per evaluation. The
+// old check re-derived the native digest on every use by running the config
+// through the fixed probe, because the config was an exported field a caller
+// could change after verification. Measured over sixteen evaluations of one
+// case at a 1 MiB identifier: 4,240,782 bytes per evaluation on the published
+// head de848c8, 3,183,766 here -- a difference of about 1 MiB, which is one
+// hash of the identifier. Repeated runs reproduce each figure to within a few
+// dozen bytes, so the digits past the first six are the run's, not the
+// change's.
+//
+// WHAT IT DID NOT REMOVE, and is not claimed to. An allocation profile of 400
+// evaluations at that width splits the 3,183,766 into three nearly equal
+// shares of about 1,057,000 bytes each, and the seal reaches none of them:
+//   - the NATIVE EVALUATOR digests the config it is handed. On this fixture
+//     EvaluateOrderedRules alone costs 1,055,076 bytes, and that is the floor
+//     beneath everything here;
+//   - CHECK still frames the identifier, because the witness binds RulesetID
+//     and that field stays exported;
+//   - THE RESULT WITNESS frames it again, because a P3bCaseResult carries the
+//     ruleset's name and the artifact's framing is frozen.
+//
+// Sealing does not make evaluation O(1) in the config, and this test does not
+// assert that it does. Sealing the identity fields too would remove the second
+// share and only that one; doc.go records why that was not taken.
+//
+// SO THE INVARIANT IS A PASS COUNT, and it is a pass count because a ratio was
+// tried first and a mutant walked through it. The earlier form of this test
+// asserted that P4's work must not grow as a MULTIPLE of the native floor;
+// restoring the re-proof inside check left it green, because at a one-byte
+// identifier the probe's fixed cost is larger than the floor itself and lifts
+// both ends of the ratio together. What the re-proof actually changes is how
+// many times one evaluation walks the identifier, so that is what is measured:
+// the marginal bytes per identifier byte between a one-byte and a 1 MiB
+// fixture. The native floor comes out at 1.00 passes, the whole path at 3.01,
+// and the mutant that survived the ratio reads 4.01 here. Both sides are
+// measured on the same fixtures so neither can drift into the other.
+func TestASealedRulesetIsNotReprovedOnEveryUse(t *testing.T) {
+	measure := func(f func()) uint64 {
+		runtime.GC()
+		var a, b runtime.MemStats
+		runtime.ReadMemStats(&a)
+		f()
+		runtime.ReadMemStats(&b)
+		return b.TotalAlloc - a.TotalAlloc
+	}
+	_, _, fs := selectedCase(t, nil, nil)
+	coords := synthCoords(fs, 0)
+	const reps = 16
+
+	// at reports what one native evaluation and one whole EvaluateP3bCase cost
+	// at a given identifier width, in bytes allocated per call.
+	at := func(t *testing.T, size int) (native, whole uint64) {
+		t.Helper()
+		rs := mustVerify(t, rulesetFrom(t, cfgWithRule(strings.Repeat("a", size), predictioneval.ComparatorGe, 50, 100)))
+		proj, err := p4offline.ProjectP3bSingleCandidate(fs)
+		if err != nil {
+			t.Fatalf("the fixture must project, or nothing below measures an evaluation: %v", err)
+		}
+		trace := mustDrawTrace(t, coords, 2)
+		if _, err := p4offline.EvaluateP3bCase(fs, rs, coords); err != nil {
+			t.Fatalf("the fixture must evaluate, or the measurement is of a refusal: %v", err)
+		}
+		// The copy is taken OUTSIDE the measured loop on purpose: ConfigCopy is
+		// P4's own allocation, and counting it against the native floor would
+		// make the floor look higher and P4's share smaller than they are.
+		sealed := rs.ConfigCopy()
+		native = measure(func() {
+			for i := 0; i < reps; i++ {
+				_ = predictioneval.EvaluateOrderedRules(proj.Stream, sealed, trace)
+			}
+		}) / reps
+		whole = measure(func() {
+			for i := 0; i < reps; i++ {
+				if _, err := p4offline.EvaluateP3bCase(fs, rs, coords); err != nil {
+					t.Fatalf("evaluate: %v", err)
+				}
+			}
+		}) / reps
+		if native == 0 || whole == 0 {
+			t.Fatal("a measurement came back zero; nothing below would mean anything")
+		}
+		return native, whole
+	}
+
+	const narrow, wide = 1, 1 << 20
+	nativeNarrow, wholeNarrow := at(t, narrow)
+	nativeWide, wholeWide := at(t, wide)
+	passes := func(lo, hi uint64) float64 { return float64(hi-lo) / float64(wide-narrow) }
+	nativePasses, wholePasses := passes(nativeNarrow, nativeWide), passes(wholeNarrow, wholeWide)
+	t.Logf("native %d -> %d = %.2f passes", nativeNarrow, nativeWide, nativePasses)
+	t.Logf("whole  %d -> %d = %.2f passes", wholeNarrow, wholeWide, wholePasses)
+
+	// The native floor is ONE pass, measured here rather than assumed, because
+	// every statement above about P4's three is relative to it.
+	if nativePasses < 0.5 || nativePasses > 1.5 {
+		t.Fatalf("the native evaluator makes %.2f passes over the identifier, not the one this test is calibrated against; recalibrate before reading the line below",
+			nativePasses)
+	}
+	// Three passes are accounted for and named above. A FOURTH is the re-proof
+	// returning, and there is nowhere cheaper for it to show: it is invisible
+	// to a ratio against the floor, because at a one-byte identifier the
+	// probe's fixed cost exceeds that floor and lifts both ends together.
+	if wholePasses > 3.5 {
+		t.Fatalf("one evaluation makes %.2f passes over the identifier where three are accounted for: the ruleset is being re-proved on use",
+			wholePasses)
+	}
 }

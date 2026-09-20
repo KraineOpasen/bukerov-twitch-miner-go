@@ -520,77 +520,116 @@
 //     is no non-test caller today because the shape needs a runner this package
 //     deliberately does not contain. Designing that API now would be guessing
 //     at a consumer that does not exist; it belongs with the runner, and with
-//     the seam re-approved. THIS PACKAGE HAS NO WORKING EXAMPLE OF THAT SHAPE
-//     TO COPY: VerifiedP3bRuleset is the nearest thing to one and the entry
-//     below reports that it re-verifies on every use, so whoever builds the
-//     handle is building the first one here rather than following a pattern.
-//   - A VERIFIED RULESET IS RE-VERIFIED ON EVERY USE, SO THE PROTOCOL'S OWN
-//     SCHEDULE PAYS FOR IT 16,384 TIMES. Reported by a security review lane on
-//     the published head, reproduced, and NOT repaired. VerifiedP3bRuleset.check
-//     runs at the top of both EvaluateP3bCase and its sibling, and it does not
-//     merely re-check the witness: it calls nativeConfigDigest, which runs the
-//     native evaluator over the whole config through the fixed probe. The
-//     config's identifier is caller-supplied text bounded only by
-//     MaxOrderedRulesAggregateBytes, which is 128 MiB, so a 1 MiB identifier is
-//     an ordinary supported value and not an extreme one.
-//     MEASURED ON THIS TREE, without the race detector, on check alone: 8,984
-//     B/op for a one-byte identifier, 147,671 B/op at 64 KiB, and 2,113,763
-//     B/op at 1 MiB -- about 235x the one-byte check, and about two allocated
-//     bytes per identifier byte, paid twice over, once when the witness frames
-//     the identifier and once when the probe frames the config. THE ALLOCATION
-//     COUNT IS FLAT at about 402 across all three widths, so what grows is size
-//     and not the number of operations, which is what makes the growth the
-//     identifier's rather than the config's shape. THE CONFIG IS ONE DETAILED
-//     RULE BESIDE A DEFAULT, which belongs beside the count because the count
-//     is the config's: a lane reconstructing the fixture without the rule read
-//     393 at every width and reproduced the byte figures anyway. The bytes are
-//     the identifier's; the allocation count is not. The lane's own reading
-//     divides to 2,113,586 bytes per check and its extrapolation to about
-//     34.6 GB for one case's 16,384-trajectory schedule follows from this
-//     tree's figure too.
-//     ITS READING OF THAT TOTAL NEEDS ONE CORRECTION, because it changes what
-//     the fix buys. Nothing here is RETAINED between calls: the allocations are
-//     transient and the allocation count is flat, so a schedule's 34.6 GB is
+//     the seam re-approved. THIS PACKAGE NOW HAS ONE WORKING EXAMPLE OF THE
+//     SHAPE: VerifiedP3bRuleset seals its config in an unexported field as of
+//     this round, and the entry below records both what that bought and the
+//     three-quarters it did not. Whoever builds the source-round handle should
+//     read that entry first, because its instructive half is the accounting and
+//     not the seal -- sealing one field left two framings of the same
+//     caller-supplied identifier untouched, and a handle claimed to make
+//     verification free will be measured the same way.
+//   - A VERIFIED RULESET WAS RE-VERIFIED ON EVERY USE, SO THE PROTOCOL'S OWN
+//     SCHEDULE PAID FOR IT 16,384 TIMES. Reported by a security review lane on
+//     the published head, reproduced, and CLOSED IN THIS ROUND under owner
+//     authorization to change the seam it sat on. The entry stays because the
+//     measurement is both the evidence the repair was needed and the bound on
+//     what it bought.
+//     WHAT THE DEFECT WAS. VerifiedP3bRuleset.check ran at the top of both
+//     EvaluateP3bCase and its sibling, and it did not merely re-check the
+//     witness: it called nativeConfigDigest, which runs the native evaluator
+//     over the whole config through the fixed probe. The config's identifier is
+//     caller-supplied text bounded only by MaxOrderedRulesAggregateBytes, which
+//     is 128 MiB, so a 1 MiB identifier is an ordinary supported value and not
+//     an extreme one. MEASURED ON THE PUBLISHED HEAD, without the race
+//     detector, on check alone: 8,984 B/op for a one-byte identifier, 147,671
+//     B/op at 64 KiB, and 2,113,763 B/op at 1 MiB -- about 235x the one-byte
+//     check, and about two allocated bytes per identifier byte, paid twice
+//     over, once when the witness frames the identifier and once when the probe
+//     frames the config. THE ALLOCATION COUNT WAS FLAT at about 402 across all
+//     three widths, so what grew was size and not the number of operations,
+//     which is what made the growth the identifier's rather than the config's
+//     shape. THE CONFIG IS ONE DETAILED RULE BESIDE A DEFAULT, which belongs
+//     beside the count because the count is the config's: a lane reconstructing
+//     the fixture without the rule read 393 at every width and reproduced the
+//     byte figures anyway. The bytes were the identifier's; the allocation
+//     count was not. The lane's own reading divides to 2,113,586 bytes per
+//     check and its extrapolation to about 34.6 GB for one case's
+//     16,384-trajectory schedule follows from that tree's figure too.
+//     ITS READING OF THAT TOTAL NEEDED ONE CORRECTION, because it changes what
+//     the fix buys. Nothing there was RETAINED between calls: the allocations
+//     were transient and the allocation count flat, so a schedule's 34.6 GB was
 //     cumulative throughput through the allocator and the collector, and the
-//     resident cost stays one call's few megabytes. The exposure is CPU and GC
-//     pressure across a long run, not a peak that exhausts a process. NO
+//     resident cost stayed one call's few megabytes. The exposure was CPU and
+//     GC pressure across a long run, not a peak that exhausts a process. NO
 //     WALL-CLOCK FIGURE IS QUOTED, because two on this branch failed to
-//     reproduce across hosts and were retired; the durable statement is that
-//     each check is one full native evaluation of the config.
-//     AND THE PROBE IS NOT THE ONLY CONFIG-PROPORTIONAL WORK PER EVALUATION,
-//     which a fix sold as removing the cost will be measured against: the real
-//     EvaluateOrderedRules over the same config measures 1,053,193 B/op at a
-//     1 MiB identifier, so sealing the handle removes about two thirds of the
-//     per-evaluation config cost and not all of it.
-//     ONE HALF OF IT IS CLOSED IN THIS ROUND AND THE OTHER IS NOT, and the two
-//     are worth separating because only one needed the redesign. The same
-//     probe was also charged on a REFUSAL decided by one integer:
-//     EvaluateP3bCase ran rs.check above checkEntropyCoordinates, so an
-//     out-of-protocol trajectory paid 2,113,748 B/op and threw the probe away.
-//     That is the WORK half of canonical.go's rule and it needed a swap, not a
-//     seam: the coordinate gate is above the probe at both evaluators now and
-//     that refusal measures 152 B/op flat from a one-byte identifier to a
-//     1 MiB one, pinned by
-//     TestAnOutOfProtocolCoordinateIsRefusedWithoutProbingTheRuleset. What
-//     REMAINS is the cost on the path that does not refuse -- an evaluation
-//     that proceeds still re-verifies -- and that is the part below.
-//     WHAT IT COSTS TO CLOSE IS AN EXPORTED FIELD. The probe runs again on
-//     purpose, for the reason stated at check itself: Config is an exported
-//     field of a value type, so a caller may mutate it between verification and
-//     use, and the probe is what catches that -- INCLUDING a mutation into a
-//     shape the core REFUSES, which reports no digest at all. A CHEAPER DIGEST
-//     WOULD CATCH IT -- a review lane built one and showed that a package-local
-//     content hash distinguishes a config mutated past MaxOrderedRulesRules
-//     from the verified one, so "it would be this package's digest rather than
-//     the core's verdict" is an argument about authority and not about
-//     detection. The reason the handle cannot simply cache a digest and keep
-//     the field is the one that survives that correction: ANY digest compared
-//     on every use is still work proportional to the config, so caching shrinks
-//     the constant and leaves the shape. Closing it means an unexported
-//     verified copy evaluated from directly, which changes an exported field on
-//     an approved seam. As with the per-verdict re-verification above, there is
-//     no non-test caller: the 16,384-run schedule is the protocol's, and this
-//     package deliberately contains no runner to execute it.
+//     reproduce across hosts and were retired.
+//     WHAT IT COST TO CLOSE WAS AN EXPORTED FIELD. The probe used to run again
+//     on purpose, for the reason stated at check itself: Config was an exported
+//     field of a value type, so a caller could mutate it between verification
+//     and use, and the probe was what caught that -- INCLUDING a mutation into
+//     a shape the core REFUSES, which reports no digest at all. A CHEAPER
+//     DIGEST WOULD HAVE CAUGHT IT TOO -- a review lane built one and showed
+//     that a package-local content hash distinguishes a config mutated past
+//     MaxOrderedRulesRules from the verified one, so "it would be this
+//     package's digest rather than the core's verdict" was an argument about
+//     authority and not about detection. The reason the handle could not simply
+//     cache a digest and keep the field is the one that survived that
+//     correction: ANY digest compared on every use is still work proportional
+//     to the config, so caching shrinks the constant and leaves the shape.
+//     SO THE REPAIR REMOVED THE REACHABILITY, NOT THE COMPARISON. The verified
+//     config is an unexported field now, detached at verification and handed
+//     out only as a detached copy by ConfigCopy; evaluation reads the sealed
+//     value and nothing else. There is no expression left by which the
+//     evaluated config can differ from the verified one, so the re-derivation
+//     is UNNECESSARY rather than cheaper. The identity fields stay exported and
+//     stay bound, because the witness covers them; a zero value, a forged value
+//     and a deserialized one all still fail, because the witness is unexported
+//     and nothing outside this package can set it.
+//     TestTheSealedRulesetCannotBeRetuned drives the alias paths -- the
+//     returned copy, two copies against each other, and the caller's own config
+//     mutated after verification.
+//     WHAT IT DID NOT BUY IS THREE QUARTERS OF THE COST, and saying so needs
+//     one fact first: VerifyP3bRuleset REQUIRES RulesetID to equal the config's
+//     ConfigID, so the ruleset's name and the config's are one caller-supplied
+//     value and every framing of either pays for it. Measured here over sixteen
+//     evaluations of one case at a 1 MiB identifier: 4,240,782 B/op per
+//     evaluation on the published head, 3,183,766 now. An allocation profile of
+//     400 evaluations splits what REMAINS into three nearly equal shares of
+//     about 1,057,000 B/op -- the native EvaluateOrderedRules digesting the
+//     config it is handed (1,055,076 B/op measured alone, the floor beneath
+//     everything here), check framing the identifier for the witness, and
+//     p3bResultWitness framing it again because a P3bCaseResult carries the
+//     ruleset's name and that artifact's framing is frozen. SEALING DID NOT
+//     MAKE EVALUATION O(1) IN THE CONFIG and nothing here claims it did; check
+//     itself is not O(1) either, for the second of those three reasons.
+//     THE ONE SHARE STILL REACHABLE IS CHECK'S, and it is not taken here. It
+//     would mean unexporting RulesetID, RawSHA256 and NativeConfigDigest behind
+//     accessors -- three more exported fields on an approved seam, all three
+//     read to populate a frozen artifact -- to remove one third of what is
+//     left, while the result witness keeps paying the identifier regardless.
+//     The reported defect was the probe; the probe is what this removes.
+//     THE DURABLE INVARIANT IS A PASS COUNT, AND A MUTANT IS WHY. The obvious
+//     form -- P4's work as a MULTIPLE of the native floor -- was written first
+//     and is blind: restoring the re-proof inside check leaves it green,
+//     because at a one-byte identifier the probe's fixed cost exceeds the floor
+//     and lifts both ends of the ratio together (4.04x and 3.02x before, 5.29x
+//     and 4.02x after; the ceiling never trips). What a re-proof changes is how
+//     many times one evaluation WALKS the identifier, so that is what
+//     TestASealedRulesetIsNotReprovedOnEveryUse measures -- marginal bytes per
+//     identifier byte between a one-byte and a 1 MiB fixture. The native floor
+//     reads 1.00 passes, the whole path 3.01, and the surviving mutant 4.01.
+//     THE PROSE ABOVE DID NOT CATCH THIS AND THE MUTANT DID, which is the same
+//     lesson this file records for gate order, arriving here through a cost
+//     ceiling instead.
+//     ONE HALF OF THIS WAS CLOSED IN AN EARLIER ROUND and is kept here because
+//     the two halves needed different repairs. The same probe was also charged
+//     on a REFUSAL decided by one integer: EvaluateP3bCase ran rs.check above
+//     checkEntropyCoordinates, so an out-of-protocol trajectory paid 2,113,748
+//     B/op and threw the probe away. That was the WORK half of canonical.go's
+//     rule and it needed a swap, not a seam: the coordinate gate is above the
+//     probe at both evaluators now and that refusal measures 152 B/op flat from
+//     a one-byte identifier to a 1 MiB one, pinned by
+//     TestAnOutOfProtocolCoordinateIsRefusedWithoutProbingTheRuleset.
 //   - A SESSION REFUSED BY ITS OWN PROVENANCE NO LONGER CARRIES ITS ANOMALY
 //     REASONS, which is what the preflight at the top of SelectEpisodes costs
 //     and is recorded because a trade absorbed in silence is the defect behind

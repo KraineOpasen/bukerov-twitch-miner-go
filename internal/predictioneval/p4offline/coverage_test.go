@@ -152,7 +152,7 @@ func TestDigestedArtifactsSurviveTheirOwnJSONRoundTrip(t *testing.T) {
 	if err := json.Unmarshal(raw, &proj2); err != nil {
 		t.Fatal(err)
 	}
-	native := predictioneval.EvaluateOrderedRules(proj2.Stream, rs.Config, trace)
+	native := predictioneval.EvaluateOrderedRules(proj2.Stream, rs.ConfigCopy(), trace)
 	if native.ConsumedInputDigest != a.Evaluation.ConsumedInputDigest || native.StreamDigest != a.Projection.Stream.SelectionDigest {
 		t.Fatalf("the round-tripped stream is not the projected stream: %s vs %s", native.ConsumedInputDigest, a.Evaluation.ConsumedInputDigest)
 	}

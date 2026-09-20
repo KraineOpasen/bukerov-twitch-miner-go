@@ -670,7 +670,12 @@ func AssessDenominatorMembership(ds predictioneval.SourceDataset, reg SourceRoun
 	// itself.
 	//
 	// The fix is the one the lane named: verify once per run and carry an
-	// immutable verified handle, exactly as VerifiedP3bRuleset does. That
+	// immutable verified handle, exactly as VerifiedP3bRuleset does since its
+	// config was sealed. WHAT THAT PRECEDENT TEACHES IS THE ACCOUNTING, not the
+	// seal: sealing one field there removed one of four per-use passes over the
+	// same caller-supplied identifier and left the other three, so a handle
+	// built here must be measured for what it leaves rather than credited for
+	// what it removes. doc.go's entry carries that split. The change also
 	// changes THIS function's signature, and this function is where seam 12
 	// composes with seams 3 and 10 -- an approved seam, not an implementation
 	// detail. There is also no non-test caller today: the shape needs a runner,
