@@ -987,7 +987,14 @@ func (s *shapeCheck) finish(m ActionMapping) ActionMapping {
 //	                        beside it. The old entry gave the recomputation
 //	                        reason for all five statuses; it was true of one.
 //
-// MapP3bAction maps a native P3b evaluation.
+// MapP3bAction maps a native P3b evaluation. IT IS A SHAPE CHECK AND NOT A
+// BINDING, exactly as [MapP2Action] is: nothing here reads the evaluation's
+// digests, so a direct caller gets no tie to a stream, a config or an entropy
+// trace. That matters most at this door, because P3bCaseResult.Evaluation is
+// UNATTESTED and carries twins of the attested Choice and Stake -- so
+// MapP3bAction(certified.Evaluation) can return a legal-looking mapping that
+// DISAGREES with certified.Action, and nothing about the result says which one
+// the witness covers. Nothing in this package reads it that way; a caller can.
 //
 // Every status keeps its own class: PARTICIPATION_ADMITTED_STAKE_UNKNOWN and
 // NO_ATTEMPT_IN_SUPPLIED_PREFIX are distinct from each other and from every

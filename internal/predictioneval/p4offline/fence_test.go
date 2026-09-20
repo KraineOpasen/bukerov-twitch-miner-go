@@ -370,6 +370,19 @@ func TestTheDocumentedResidueIsAttributableToItsRoots(t *testing.T) {
 	if !jsonc["reflect"] {
 		t.Error("reflect is documented as residue of encoding/json but json does not reach it")
 	}
+	// AND THE EXEMPTION BESIDE THEM IS CHECKED TOO. crypto/hmac is skipped by
+	// the sweep below on the ground that its reach is a SUBSET of the hash's,
+	// which doc.go states as five of the six. Nothing checked that, so the
+	// number was prose sitting in a paragraph about a machine check.
+	hmac := transitiveClosure(t, []string{"crypto/hmac"})
+	for _, p := range []string{"internal/poll", "io/fs", "os", "syscall", "time"} {
+		if !hmac[p] {
+			t.Errorf("crypto/hmac is documented as reaching %q and does not: the exemption below rests on its reach being the hash's", p)
+		}
+	}
+	if hmac["reflect"] {
+		t.Error("crypto/hmac reaches reflect, so it is not a subset of the hash and cannot be exempted on that ground")
+	}
 	for imp := range allowedDirectImports {
 		if imp == "crypto/sha256" || imp == "crypto/hmac" || imp == "encoding/json" || strings.HasPrefix(imp, modulePath) {
 			continue
