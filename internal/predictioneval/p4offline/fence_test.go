@@ -761,49 +761,129 @@ func TestTheSuppliedTextExtentCensusMatchesAScan(t *testing.T) {
 	t.Logf("%d production call sites of suppliedTextExtent, scanned across %d production files", total, files)
 }
 
-// TestEveryWitnessBearingTypeCarriesAFramedWidth is the mechanical answer to
-// the way the framed-width preflight was rolled out: by enumeration.
+// witnessSite is one struct that carries a producer-only witness.
+type witnessSite struct{ name, pos string }
+
+// witnessComparedIn reports every type whose methods compare a `.witness`
+// selector against a RECOMPUTATION -- a call expression, which is what
+// re-framing the value looks like.
 //
-// THE ENUMERATION WAS WRONG AND SAID SO IN PROSE. doc.go named five sibling
-// seams and asserted four of them took a caller-sized value; the fifth,
-// VerifiedP3bRuleset, took one too, and a Q3 lane measured its identity at
-// 1.007x the caller's edit on every use. Two earlier rounds had closed the
-// seams a reviewer named and left the neighbour open. A sentence cannot stop
-// that recurring; a census can.
-//
-// THE RULE. A type that carries an unexported `witness string` answers a
-// question by re-framing its own fields, so it must also carry `framedLen int`
-// and compare it first -- a rejection test that refuses a width-changing edit
-// before any byte is materialized. This walks the production files and fails on
-// any witness-bearing struct without a width, naming it. A NEW witness type is
-// therefore a compile-and-fail, not a prose omission.
-//
-// IT DOES NOT CHECK THAT THE WIDTH IS USED WELL. That is
-// TestTheRecordedFramedWidthIsTheWitnessOwn's job, and the two are deliberately
-// separate: this one answers "is there one", that one answers "is it right".
-func TestEveryWitnessBearingTypeCarriesAFramedWidth(t *testing.T) {
-	entries, err := os.ReadDir(".")
+// THE "AGAINST A CALL" PART IS THE WHOLE PREDICATE, and a first draft that
+// accepted any comparison was vacuous: `f.witness != ""` is a comparison, it
+// appears in every one of these methods, and a type whose check is
+// `witness != "" && framedLen == …FramedLen(f)` satisfied it while accepting
+// every equal-width forgery. That is exactly the mutant this predicate exists
+// to catch, so a non-empty test does not count and a literal on the other side
+// does not count.
+func witnessComparedIn(t *testing.T, dir string) map[string]bool {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
 	if err != nil {
-		t.Fatalf("read package dir: %v", err)
+		t.Fatalf("read %s: %v", dir, err)
 	}
+	out := map[string]bool{}
 	fset := token.NewFileSet()
-	type site struct{ name, pos string }
-	var withWitness, missing []site
 	for _, e := range entries {
 		name := e.Name()
 		if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
 			continue
 		}
-		f, err := parser.ParseFile(fset, name, nil, parser.SkipObjectResolution)
+		f, err := parser.ParseFile(fset, filepath.Join(dir, name), nil, parser.SkipObjectResolution)
 		if err != nil {
 			t.Fatalf("parse %s: %v", name, err)
 		}
-		ast.Inspect(f, func(n ast.Node) bool {
-			ts, ok := n.(*ast.TypeSpec)
-			if !ok {
-				return true
+		for _, d := range f.Decls {
+			fd, ok := d.(*ast.FuncDecl)
+			if !ok || fd.Recv == nil || len(fd.Recv.List) != 1 || fd.Body == nil {
+				continue
 			}
-			st, ok := ts.Type.(*ast.StructType)
+			recv := fd.Recv.List[0].Type
+			if star, ok := recv.(*ast.StarExpr); ok {
+				recv = star.X
+			}
+			id, ok := recv.(*ast.Ident)
+			if !ok {
+				continue
+			}
+			ast.Inspect(fd.Body, func(n ast.Node) bool {
+				be, ok := n.(*ast.BinaryExpr)
+				if !ok || (be.Op != token.EQL && be.Op != token.NEQ) {
+					return true
+				}
+				for i, side := range []ast.Expr{be.X, be.Y} {
+					sel, ok := side.(*ast.SelectorExpr)
+					if !ok || sel.Sel.Name != "witness" {
+						continue
+					}
+					other := be.Y
+					if i == 1 {
+						other = be.X
+					}
+					if _, ok := other.(*ast.CallExpr); ok {
+						out[id.Name] = true
+					}
+				}
+				return true
+			})
+		}
+	}
+	return out
+}
+
+// witnessCensusOfDir walks the production files of dir and reports every struct
+// carrying an unexported `witness` field, and which of those carry no
+// `framedLen int` beside it.
+//
+// IT IS A FUNCTION SO THAT ITS CONTROL CAN DRIVE THE SAME WALK. The sibling
+// census twenty lines up factors censusOfDir out for exactly that reason, and
+// the rule it states applies here word for word: a machine check whose own
+// mechanisms nothing asserts is a convention again. A control that
+// re-implemented this walk would pass unchanged while this one went blind --
+// which a Q3 lane demonstrated against the first draft of this census, by
+// deleting its reporting arm and watching both tests stay green.
+//
+// THE TWO MATCHES ARE DELIBERATELY ASYMMETRIC, and the asymmetry is the whole
+// safety argument. What TRIGGERS the requirement is matched WIDELY: any field
+// named `witness`, whatever its type is spelled as. What SATISFIES it is
+// matched NARROWLY: a field named `framedLen` whose type is the identifier
+// `int`. Both directions therefore fail towards reporting. A first draft
+// required the witness to be spelled `string`, and a lane put
+// `type q3Digest string` -- this package's own idiom, the one ActionClass,
+// PayoutOutcome, ChoiceVerdict and PlacementStatus already use -- into
+// production with the whole suite green.
+//
+// IT WALKS EVERY STRUCT TYPE, not only the named ones, so a witness moved
+// inside an anonymous `seal struct{...}` is still seen. Anonymous structs are
+// named by their position, which is what a reader needs to find them.
+func witnessCensusOfDir(t *testing.T, dir string) (withWitness, missing []witnessSite) {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("read %s: %v", dir, err)
+	}
+	fset := token.NewFileSet()
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		f, err := parser.ParseFile(fset, filepath.Join(dir, name), nil, parser.SkipObjectResolution)
+		if err != nil {
+			t.Fatalf("parse %s: %v", name, err)
+		}
+		// Named structs are labelled by their type name; every other struct
+		// literal type is labelled by where it is.
+		named := map[*ast.StructType]string{}
+		ast.Inspect(f, func(n ast.Node) bool {
+			if ts, ok := n.(*ast.TypeSpec); ok {
+				if st, ok := ts.Type.(*ast.StructType); ok {
+					named[st] = ts.Name.Name
+				}
+			}
+			return true
+		})
+		ast.Inspect(f, func(n ast.Node) bool {
+			st, ok := n.(*ast.StructType)
 			if !ok || st.Fields == nil {
 				return true
 			}
@@ -812,9 +892,8 @@ func TestEveryWitnessBearingTypeCarriesAFramedWidth(t *testing.T) {
 				for _, id := range fld.Names {
 					switch id.Name {
 					case "witness":
-						if x, ok := fld.Type.(*ast.Ident); ok && x.Name == "string" {
-							witness = true
-						}
+						// ANY type. See the asymmetry note above.
+						witness = true
 					case "framedLen":
 						if x, ok := fld.Type.(*ast.Ident); ok && x.Name == "int" {
 							width = true
@@ -825,7 +904,11 @@ func TestEveryWitnessBearingTypeCarriesAFramedWidth(t *testing.T) {
 			if !witness {
 				return true
 			}
-			s := site{ts.Name.Name, fset.Position(ts.Pos()).String()}
+			label, ok := named[st]
+			if !ok {
+				label = "anonymous struct"
+			}
+			s := witnessSite{label, fset.Position(st.Pos()).String()}
 			withWitness = append(withWitness, s)
 			if !width {
 				missing = append(missing, s)
@@ -833,6 +916,29 @@ func TestEveryWitnessBearingTypeCarriesAFramedWidth(t *testing.T) {
 			return true
 		})
 	}
+	return withWitness, missing
+}
+
+// TestEveryWitnessBearingTypeCarriesAFramedWidth is the mechanical answer to
+// the way the framed-width preflight was rolled out: by enumeration.
+//
+// ENUMERATING THEM IN PROSE KEPT FAILING. Three successive hand-written
+// enumerations of these seams were short, each missing a neighbour that took a
+// caller-sized value -- most recently VerifiedP3bRuleset, measured at 1.0073x
+// the caller's edit on every use. A sentence cannot stop that recurring; a
+// walk over the source can.
+//
+// THE RULE. A type that carries an unexported `witness` answers a question by
+// re-framing its own fields, so it must also carry `framedLen int` and compare
+// it first -- a rejection test that refuses a width-changing edit before any
+// byte is materialized. A NEW witness type is therefore a failing test, not a
+// prose omission.
+//
+// IT DOES NOT CHECK THAT THE WIDTH IS USED WELL. That is
+// TestTheRecordedFramedWidthIsTheWitnessOwn's job, and the two are deliberately
+// separate: this one answers "is there one", that one answers "is it right".
+func TestEveryWitnessBearingTypeCarriesAFramedWidth(t *testing.T) {
+	withWitness, missing := witnessCensusOfDir(t, ".")
 
 	if len(missing) > 0 {
 		for _, m := range missing {
@@ -844,7 +950,27 @@ func TestEveryWitnessBearingTypeCarriesAFramedWidth(t *testing.T) {
 
 	// THE COUNT IS PINNED SO THE WALK CANNOT GO QUIETLY BLIND. A census that
 	// stopped finding types would pass this test by finding nothing, which is
-	// exactly the failure mode the prose enumeration had.
+	// exactly the failure mode the prose enumeration had. It catches a type the
+	// walk RECOGNISES; the control below is what holds the recognizer itself.
+	// AND A WIDTH IS NOT A VERIFICATION. The field census alone enforces
+	// "declares a width", which a Q3 lane showed is the wrong lesson to teach:
+	// it added an eighth type whose check compared the WIDTH ONLY, bumped the
+	// count this test prints, and the suite went green while an equal-width
+	// forgery was accepted. The width refuses a width-changing edit cheaply;
+	// only the witness verifies CONTENT. So a witness-bearing type must also
+	// COMPARE its witness somewhere in its own methods.
+	compared := witnessComparedIn(t, ".")
+	for _, s := range withWitness {
+		if s.name == "anonymous struct" {
+			t.Errorf("a witness lives in an anonymous struct at %s: give it a named type so its comparison can be checked", s.pos)
+			continue
+		}
+		if !compared[s.name] {
+			t.Errorf("%s (%s) carries a witness that none of its methods compares: a width refuses a width-changing edit, but only the witness verifies content, so this type accepts any equal-width forgery",
+				s.name, s.pos)
+		}
+	}
+
 	const wantTypes = 7
 	if len(withWitness) != wantTypes {
 		names := make([]string, 0, len(withWitness))
@@ -857,57 +983,130 @@ func TestEveryWitnessBearingTypeCarriesAFramedWidth(t *testing.T) {
 	}
 }
 
-// TestTheWitnessCensusWouldCatchAWidthlessType is that census's own control: a
-// synthetic witness-bearing struct with no width must be reported. Without it
-// the census above could pass by never recognising a witness field at all.
-func TestTheWitnessCensusWouldCatchAWidthlessType(t *testing.T) {
+// TestTheWitnessCensusSeesWhatItClaimsTo holds the census's own walk to
+// synthetic sources, by calling THE SAME FUNCTION over a temporary directory.
+//
+// EVERY EVASION BELOW WAS FOUND IN PRODUCTION BY A Q3 LANE, against a first
+// draft that matched the witness only when its type was spelled `string` and
+// only on named struct types. Each row is that lane's construct, kept as a
+// regression: a future narrowing of the recognizer fails here rather than in a
+// release.
+func TestTheWitnessCensusSeesWhatItClaimsTo(t *testing.T) {
+	dir := t.TempDir()
 	const src = `package p
-type withWidth struct { A string; witness string; framedLen int }
-type withoutWidth struct { B string; witness string }
-type unrelated struct { C string }
+
+type q3Digest string
+type aliasString = string
+
+type plain struct {
+	A         string
+	witness   string
+	framedLen int
+}
+
+type widthless struct {
+	B       string
+	witness string
+}
+
+type namedStringWitness struct {
+	witness q3Digest
+}
+
+type aliasWitness struct {
+	witness aliasString
+}
+
+type pointerWitness struct {
+	witness *string
+}
+
+type parenthesizedWitness struct {
+	witness (string)
+}
+
+type nested struct {
+	seal struct {
+		witness string
+	}
+}
+
+type wrongWidthType struct {
+	witness   string
+	framedLen int64
+}
+
+type unrelated struct {
+	C string
+}
 `
-	fset := token.NewFileSet()
-	f, err := parser.ParseFile(fset, "synthetic.go", src, parser.SkipObjectResolution)
-	if err != nil {
-		t.Fatalf("parse synthetic: %v", err)
+	// A _test.go file must be SKIPPED by the walk, so one is written too.
+	if err := os.WriteFile(filepath.Join(dir, "a.go"), []byte(src), 0o600); err != nil {
+		t.Fatal(err)
 	}
-	var seen, missing []string
-	ast.Inspect(f, func(n ast.Node) bool {
-		ts, ok := n.(*ast.TypeSpec)
-		if !ok {
-			return true
-		}
-		st, ok := ts.Type.(*ast.StructType)
-		if !ok || st.Fields == nil {
-			return true
-		}
-		var witness, width bool
-		for _, fld := range st.Fields.List {
-			for _, id := range fld.Names {
-				switch id.Name {
-				case "witness":
-					if x, ok := fld.Type.(*ast.Ident); ok && x.Name == "string" {
-						witness = true
-					}
-				case "framedLen":
-					if x, ok := fld.Type.(*ast.Ident); ok && x.Name == "int" {
-						width = true
-					}
-				}
-			}
-		}
-		if witness {
-			seen = append(seen, ts.Name.Name)
-			if !width {
-				missing = append(missing, ts.Name.Name)
-			}
-		}
-		return true
-	})
-	if want := []string{"withWidth", "withoutWidth"}; !reflect.DeepEqual(seen, want) {
-		t.Fatalf("the walk saw %v, want %v", seen, want)
+	decoy := "package p\n\ntype inATestFile struct{ witness string }\n"
+	if err := os.WriteFile(filepath.Join(dir, "a_test.go"), []byte(decoy), 0o600); err != nil {
+		t.Fatal(err)
 	}
-	if want := []string{"withoutWidth"}; !reflect.DeepEqual(missing, want) {
-		t.Fatalf("the walk reported %v as widthless, want %v", missing, want)
+
+	withWitness, missing := witnessCensusOfDir(t, dir)
+	seen := map[string]bool{}
+	for _, s := range withWitness {
+		seen[s.name] = true
+	}
+	for _, want := range []string{
+		"plain", "widthless", "namedStringWitness", "aliasWitness",
+		"pointerWitness", "parenthesizedWitness", "wrongWidthType",
+	} {
+		if !seen[want] {
+			t.Errorf("the walk did not see %s as witness-bearing", want)
+		}
+	}
+	if seen["unrelated"] {
+		t.Error("the walk saw a struct with no witness as witness-bearing")
+	}
+	if seen["inATestFile"] {
+		t.Error("the walk read a _test.go file; it must read production files only")
+	}
+	// The nested anonymous struct is reported at its position, not by the name
+	// of the type that encloses it, so it is matched on count rather than name.
+	anon := 0
+	for _, s := range withWitness {
+		if s.name == "anonymous struct" {
+			anon++
+		}
+	}
+	if anon != 1 {
+		t.Errorf("the walk saw %d anonymous witness-bearing structs, want 1 (the one inside `nested`)", anon)
+	}
+	if len(withWitness) != 8 {
+		names := make([]string, 0, len(withWitness))
+		for _, s := range withWitness {
+			names = append(names, s.name)
+		}
+		sort.Strings(names)
+		t.Errorf("the walk saw %d witness-bearing structs, want 8: %v", len(withWitness), names)
+	}
+
+	// AND IT MUST REPORT EXACTLY THE ONES WITH NO USABLE WIDTH -- everything
+	// above except `plain`, including `wrongWidthType`, whose framedLen is not
+	// an int and therefore does not satisfy the rule.
+	got := map[string]bool{}
+	for _, m := range missing {
+		got[m.name] = true
+	}
+	if got["plain"] {
+		t.Error("the walk reported a struct that DOES carry framedLen int as missing a width")
+	}
+	for _, want := range []string{
+		"widthless", "namedStringWitness", "aliasWitness", "pointerWitness",
+		"parenthesizedWitness", "wrongWidthType",
+	} {
+		if !got[want] {
+			t.Errorf("the walk did not report %s as missing a width", want)
+		}
+	}
+	if len(missing) != 7 {
+		t.Errorf("the walk reported %d missing widths, want 7 (six named plus the nested anonymous one)", len(missing))
 	}
 }

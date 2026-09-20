@@ -137,10 +137,15 @@ func (r VerifiedP3bRuleset) Rules() int { return len(r.config.Detailed) }
 // USABLE [0,0] rule" -- so a zero, forged or deserialized handle would hand a
 // caller a structurally complete, fully-resolved-looking config with no signal
 // that nothing verified it. A run manifest recording that would record a
-// fabricated configuration. Rules and the prepared handles' counters answer
-// zero on an unverified value too, and that is left alone deliberately: an
-// empty count and an empty digest read as empty, where an all-zero config
-// reads as real.
+// fabricated configuration. Rules and the prepared handles' counters are left
+// ungated deliberately, and what that buys is narrower than "an empty count
+// reads as empty": on a ZERO, FORGED or DESERIALIZED handle they do answer
+// zero, which reads as empty where an all-zero config reads as real. On a
+// COPIED-AND-EDITED handle Rules answers the sealed count, which is the real
+// count of the ruleset the caller did verify, paired with an identity every
+// gated accessor refuses. So Rules() == 0 is not an "unverified" signal.
+// Gating it would make an O(1) counter pay the witness, which is the cost the
+// preflight above exists to remove.
 func (r VerifiedP3bRuleset) ConfigCopy() (predictioneval.OrderedRulesConfig, error) {
 	if err := r.check(); err != nil {
 		return predictioneval.OrderedRulesConfig{}, err
@@ -149,7 +154,14 @@ func (r VerifiedP3bRuleset) ConfigCopy() (predictioneval.OrderedRulesConfig, err
 }
 
 // check refuses a value that VerifyP3bRuleset did not produce as it is: the
-// identity fields must match the witness.
+// recorded width must match what the identity fields would frame to, and then
+// the identity fields must match the witness.
+//
+// THE WIDTH IS FIRST AND IT IS A REJECTION TEST. It refuses a width-changing
+// edit in O(fields) before a byte is materialized. It proves nothing about
+// identity -- two different values can frame to one width -- so the disjunction
+// below is ordered to short-circuit only towards the REFUSAL: every path that
+// returns nil has run the witness comparison.
 //
 // WHAT THE SEAL REMOVED FROM HERE IS THE CONFIG RE-PROOF, not the check. It
 // used to ALSO re-derive the config's native digest on every call -- a full
@@ -158,14 +170,19 @@ func (r VerifiedP3bRuleset) ConfigCopy() (predictioneval.OrderedRulesConfig, err
 // nothing to re-check: the evaluated config IS the verified one, by
 // construction rather than by comparison.
 //
-// WHAT REMAINS IS PROPORTIONAL TO THE IDENTIFIER, AND THIS IS NOT O(1). The
-// witness frames RulesetID, and VerifyP3bRuleset requires RulesetID to EQUAL
-// the config's ConfigID, so the two names are one caller-supplied value: a
-// 1 MiB identifier costs about a megabyte here on every use. That is the price
-// of leaving the identity fields exported, and they are exported because a
-// result carries them. Sealing those too would remove this share and is
-// recorded in doc.go with what it would cost; the probe was the reported
-// defect and the probe is what this removes.
+// WHAT REMAINS IS PROPORTIONAL TO THE IDENTIFIER FOR A GENUINE HANDLE, AND
+// THIS IS NOT O(1). The witness frames RulesetID, and VerifyP3bRuleset requires
+// RulesetID to EQUAL the config's ConfigID, so the two names are one
+// caller-supplied value: verifying a genuine 1 MiB identifier costs about a
+// megabyte here on every use. That is honest work over a value the caller
+// really supplied, and the witness must cover it.
+//
+// AN EDITED HANDLE NO LONGER PAYS IT. Widening an identity after verification
+// changes the framed width, which the preflight above compares first, so the
+// edit is refused without being framed: measured 856 B/op at a one-byte edit
+// and 1,057,053 at 1 MiB before the width existed, 0 at both after. Closing
+// that did NOT require sealing the identity fields, and they stay exported
+// because a result carries them.
 //
 // The zero value, a forged value and a deserialized one all fail here, because
 // the witness is unexported and nothing outside this package can set it.
@@ -599,9 +616,11 @@ func decodeFault(err error) error {
 	// one over-long literal is 64 KiB measured about half a megabyte in total;
 	// about 72 KB of that was this function rendering what it was about to
 	// refuse to carry, and it is that 72 KB the repair removes. The remaining
-	// ~460 KB is encoding/json decoding a document 64 KiB larger -- the
-	// decoder's own cost, proportional to RawBytes, which sha256Hex below
-	// already reads in full, and which this function does not touch.
+	// ~460 KB is NOT a decode and NOT the hash, which the register entry in
+	// doc.go records per stage: checkRulesetKeys refuses before Decode is ever
+	// reached and is 99.99% of it, while sha256Hex measures 128 B flat. It is
+	// encoding/json's buffering inside the key walk, proportional to RawBytes,
+	// and this function does not touch it.
 	//
 	// THE COST OF ASKING is real and is O(1): errors.As takes the address of
 	// a local, so it escapes, and it runs a reflect assignability walk on

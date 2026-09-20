@@ -4993,12 +4993,14 @@ func TestAnEditedResultIsRefusedWithoutFramingTheEdit(t *testing.T) {
 			wide, over, huge2, narrow2)
 	}
 
-	// THE FOUR SIBLING SEAMS HAVE THE SAME SHAPE, and closing only the two a
-	// lane named would have been this branch's recurring failure written as a
-	// design. Two independent Q3 lanes found them before publication and one
+	// FOUR OF THE FIVE SIBLING SEAMS HAVE THE SAME SHAPE, and closing only the
+	// two a lane named would have been this branch's recurring failure written
+	// as a design. Two independent Q3 lanes found them before publication and
 	// measured them: FactualPlacement 1.008x, PolicyDecision 1.007x,
-	// PlacementEvidence 1.007x the edit's own width, each for a refusal decided
-	// by one string comparison. Every one carries a framed width now.
+	// PlacementEvidence 1.008x and PayoutEvidence 1.008x the edit's own width,
+	// each for a refusal decided by one string comparison. Every one carries a
+	// framed width now. The FIFTH is VerifiedP3bRuleset, driven by
+	// TestAnEditedRulesetIdentityIsRefusedWithoutFramingTheEdit below.
 	t.Run("and the four sibling artifacts refuse an edit without framing it", func(t *testing.T) {
 		ds, fs2, fp, p2b := factualCase(t, coherentCall)
 		_ = ds
@@ -5112,9 +5114,10 @@ func TestAnEditedResultIsRefusedWithoutFramingTheEdit(t *testing.T) {
 	})
 }
 
-// TestAnEditedRulesetIdentityIsRefusedWithoutFramingTheEdit is the fifth
-// sibling seam, and it is here because the sentence that enumerated the other
-// four asserted this one did not take a caller-sized value. It does.
+// TestAnEditedRulesetIdentityIsRefusedWithoutFramingTheEdit drives the fifth
+// sibling seam. Three successive enumerations of these seams were written by
+// hand and all three were short, which is why the count is a walk over the
+// source now (fence_test.go) and this comment states only what it drives.
 //
 // WHAT THE SEAM IS. VerifiedP3bRuleset.check answers one question -- was this
 // handle minted by VerifyP3bRuleset and is it unaltered -- and answered it by

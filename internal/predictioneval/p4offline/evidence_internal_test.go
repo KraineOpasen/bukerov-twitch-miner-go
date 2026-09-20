@@ -2225,9 +2225,9 @@ func TestTheRecordedFramedWidthIsTheWitnessOwn(t *testing.T) {
 			t.Fatalf("round %d: PayoutEvidence width %d, framing %d bytes", round, got, want)
 		}
 
-		// THE RULESET FRAMING IS THE SEVENTH, and it is the one an enumeration
-		// in doc.go asserted did not take a caller-sized value. It does, and it
-		// carries a width now like the other six.
+		// THE RULESET FRAMING IS THE SEVENTH, and it is the one successive
+		// hand-written enumerations of these seams kept leaving out. It carries
+		// a width now like the other six.
 		rid, rsha, rnat := text(), text(), text()
 		var c7 canonical
 		frameRuleset(&c7, rid, rsha, rnat)
@@ -2316,4 +2316,69 @@ func TestABoundedRefusalAnswerIsNotSizedOnTheCallersList(t *testing.T) {
 		t.Fatalf("a %dx longer list of the SAME %d kinds cost %.0f more bytes (%d against %d): the answer is sized on the caller's list",
 			large/small, len(kinds), grown, wideCost, narrowCost)
 	}
+}
+
+// TestARecordedWidthIsRequiredAndNotJustRecorded pins the ruleset preflight
+// behaviourally, which its cost test cannot.
+//
+// WHY A SECOND TEST. TestAnEditedRulesetIdentityIsRefusedWithoutFramingTheEdit
+// is an allocation ratio over runtime.MemStats, and a Q3 lane pointed out that
+// removing both width terms from check leaves every FUNCTIONAL assertion in the
+// package green -- only that ratio moves. A ratio is a soft instrument to rest
+// a gate on. The shape below is the one input that separates the repaired gate
+// from the unrepaired one by its ANSWER rather than by its cost: a handle whose
+// witness is correct and whose recorded width is not.
+//
+// IT IS INTERNAL BECAUSE ONLY THIS PACKAGE CAN MINT ONE. The external tests
+// cannot set an unexported field, so from outside there is no way to hold a
+// value that has a right witness and a wrong width.
+func TestARecordedWidthIsRequiredAndNotJustRecorded(t *testing.T) {
+	const id, raw, nat = "ruleset-id", "raw-sha", "native-digest"
+	good := VerifiedP3bRuleset{
+		RulesetID: id, RawSHA256: raw, NativeConfigDigest: nat,
+		witness:   rulesetWitness(id, raw, nat),
+		framedLen: rulesetFramedLen(id, raw, nat),
+	}
+	if err := good.check(); err != nil {
+		t.Fatalf("a correctly built handle must pass: %v", err)
+	}
+
+	for _, tc := range []struct {
+		name  string
+		width int
+	}{
+		// Zero is the width an un-set field holds, and it is also what a width
+		// computed WITHOUT the length-only mode returns -- the slip that made
+		// an earlier form of this preflight vacuous.
+		{"an unrecorded width", 0},
+		{"a negative width", -1},
+		{"a width one byte short", good.framedLen - 1},
+		{"a width one byte long", good.framedLen + 1},
+	} {
+		t.Run(tc.name+" is refused, although the witness is right", func(t *testing.T) {
+			bad := good
+			bad.framedLen = tc.width
+			if bad.witness != rulesetWitness(bad.RulesetID, bad.RawSHA256, bad.NativeConfigDigest) {
+				t.Fatal("the fixture must keep a CORRECT witness, or it proves nothing about the width")
+			}
+			if err := bad.check(); !errors.Is(err, ErrRulesetNotVerified) {
+				t.Fatalf("check accepted a handle whose recorded width is %d against a framing of %d: got %v",
+					tc.width, good.framedLen, err)
+			}
+		})
+	}
+
+	// AND THE WITNESS IS STILL REQUIRED, so this test cannot be satisfied by a
+	// gate that checks the width alone -- the failure a lane demonstrated on a
+	// synthetic eighth seam.
+	t.Run("and a right width with a wrong witness is refused too", func(t *testing.T) {
+		bad := good
+		bad.witness = rulesetWitness(id+"x", raw, nat)
+		if bad.framedLen != rulesetFramedLen(bad.RulesetID, bad.RawSHA256, bad.NativeConfigDigest) {
+			t.Fatal("the fixture must keep a CORRECT width, or it proves nothing about the witness")
+		}
+		if err := bad.check(); !errors.Is(err, ErrRulesetNotVerified) {
+			t.Fatalf("check accepted a handle with a wrong witness: %v", err)
+		}
+	})
 }
