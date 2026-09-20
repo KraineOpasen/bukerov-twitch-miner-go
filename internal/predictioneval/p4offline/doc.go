@@ -718,28 +718,36 @@
 //     cost is accepted under the existing provenance and binding checks, the
 //     accepted-input domain is retained, and the limit is to be revisited
 //     before a real-data runner rather than inside a repair round. Two lanes
-//     measured it and a third reproduced both figures through
-//     VerifyP3bRuleset: a ~65.6 KB document reads 457,795 B (6.98x) and a
-//     512 KiB one 3,669,099 B (7.00x).
+//     measured it and a third reproduced both RATIOS through VerifyP3bRuleset:
+//     a ~65.6 KB document whose one literal is over-long reads 6.98x, a
+//     512 KiB one 7.00x.
+//     THE RATIOS ARE QUOTED AND THE BYTE COUNTS ARE NOT, deliberately. The only
+//     instrument in this package is a runtime.MemStats.TotalAlloc delta, and
+//     the suite carries no benchmark and no averaging harness, so a single
+//     reading here is always a multiple of eight and is machine-specific. The
+//     multiple is what three independent measurements agreed on to two
+//     decimals; an exact integer would be one machine's reading dressed as a
+//     constant.
 //     WHERE THE COST IS, PER STAGE at 512 KiB: sha256Hex is 128 B and FLAT at
 //     both sizes, so it is not a contributor; json.Decode NEVER RUNS, because
-//     checkRulesetKeys refuses first; checkRulesetKeys is 3,668,713 B, which is
-//     99.99% of it; decodeFault is flat in the document. The cost is the key
-//     walk, and it is encoding/json's buffering over a buffer the caller
-//     already holds -- not a decode and not the hash.
-//     THE CONTROLS ARE MEASURED AT ONE STAGE AND THE HEADLINE FIGURES END TO
-//     END, which is worth saying because the two bases coincide only for the
-//     number document, where the key walk is 99.99% of the cost. At
-//     checkRulesetKeys alone, 512 KiB: a giant number literal 7.00x, a giant
-//     string literal 5.00x, many small tokens about 13.5x. END TO END through
-//     VerifyP3bRuleset the same documents read about 7x, 10x and 19x, because
-//     the decode and the config comparison then run -- so on a like-for-like
-//     basis this refusal is NOT the cheapest of the three, and a comparison
-//     that makes it look cheapest is comparing two different bases.
-//     None of the three is accepted input in any case: MaxOrderedRulesRules
-//     caps an accepted ruleset at 128 rules, so a 512 KiB many-token document
-//     is refused too -- after the walk has been paid, since the refusal comes
-//     from the core below it. dec.UseNumber() in
+//     checkRulesetKeys refuses first; checkRulesetKeys is 99.99% of it;
+//     decodeFault is flat in the document. The cost is the key walk, and it is
+//     encoding/json's buffering over a buffer the caller already holds -- not a
+//     decode and not the hash.
+//     THE CONTROLS ARE MEASURED AT ONE STAGE AND THE HEADLINE FIGURE END TO
+//     END, and the two bases coincide only for this document, where the key
+//     walk is 99.99% of the cost. At checkRulesetKeys alone, 512 KiB: a giant
+//     number literal 7.00x, a giant string literal 5.00x, many small tokens
+//     about 14x. END TO END through VerifyP3bRuleset: 7.00x, 10.00x and about
+//     19.9x, because the decode and the config comparison then run. So on the
+//     like-for-like end-to-end basis THIS refusal is the CHEAPEST of the three
+//     shapes, and the two dearer ones are not hypothetical: a document whose
+//     bulk is one giant string literal in ConfigID VERIFIES -- ConfigID carries
+//     no per-string length bound, which rulesetRawCeiling's own note records --
+//     so 10.00x is the price of honest input, paid on the accepting path. The
+//     many-token shape is refused, by the core rather than here, and only after
+//     the whole walk has been paid: MaxOrderedRulesRules caps an accepted
+//     ruleset at 128 rules. dec.UseNumber() in
 //     checkRulesetKeys measures 7.00x -> 5.00x and is NOT taken: it moves the
 //     refusal from Token()'s typed UnmarshalTypeError arm to Decode and changes
 //     the message, and the residual 5x is stdlib buffering unreachable through
@@ -796,15 +804,15 @@
 //     value and on invalid UTF-8, and on nothing else -- found
 //     by a review lane one field below the gate this round added, and
 //     reproduced: VerifySourceRoundRegistry returns nil for a registry whose
-//     claim carries a 1 MiB FactsetDigest, and pays 11,586,217 B to say so --
-//     11.05x the supplied field, and the SAME figure before this round's gates
+//     claim carries a 1 MiB FactsetDigest, and pays 11.05x the supplied field
+//     to say so -- the same multiple before this round's gates
 //     existed, so it is a carried item rather than a regression. The full
 //     ReconcileSourceRounds plus PrepareSourceRounds path at one 1 MiB digest
-//     is 17,380,018 B, 16.57x. The multiple by width FALLS as the field grows
+//     is 16.57x. The multiple by width FALLS as the field grows
 //     -- 17.69x at 64 KiB against 16.57x at 1 MiB -- so this is a LINEAR
 //     CONSTANT FACTOR and not a growing amplification. Per stage at 1 MiB:
-//     registryDigest 5,792,846 B PER PASS and the path makes three of them,
-//     claimKeyFraming 1,057,562 B (1.008x -- the streaming repair did land),
+//     registryDigest is a third of it PER PASS and the path makes three passes,
+//     claimKeyFraming 1.008x (the streaming repair did land),
 //     claimTextFault and checkRegistryTextExpressible 0. It is the
 //     class the nested-hex note above describes, a constant factor over input
 //     the caller has already materialized, not the class the three shape gates
@@ -816,7 +824,8 @@
 //     Nothing about membership, settlement, tamper acceptance or a hidden
 //     processing failure is covered by that deferral. The exposure today is to
 //     a hand-built registry only: ClaimSourceRound derives the digest from a
-//     VERIFIED factset and no non-test caller exists.
+//     VERIFIED factset, and nothing outside this package calls it -- no other
+//     package in the repository imports p4offline at all.
 //     THE OBVIOUS REPAIR IS WRONG, and the lane built it to find out:
 //     gating the VERIFIER alone breaks the fixed point, because the producer
 //     would still route such a claim to its round, and this package's own tests
@@ -1162,8 +1171,9 @@
 //     wrapped and reported a growth of 1.76e13: an instrument failing loudly in
 //     the one direction that means "no growth". Both fixed, and the helper that
 //     replaces them says why in its own comment.
-//     THE RULESET SEAM COST 856 B/op at a one-byte identity edit against
-//     1,057,053 at 1 MiB before its width existed, and 0 at both widths after.
+//     THE RULESET SEAM COST 1.0073x the caller's edit before its width existed
+//     -- a one-byte edit against a 1 MiB one -- and 0 B/op at both widths
+//     after, which is the one figure here that is not a multiple of anything.
 //     Closing it did NOT require sealing the identity fields: the width is
 //     recorded at the mint and compared first, with RulesetID, RawSHA256 and
 //     NativeConfigDigest left exported.
@@ -1177,12 +1187,16 @@
 //     anonymous struct, a comparison against a call that is not a witness
 //     recomputation, and a real comparison whose answer is discarded. Every
 //     one of those defeated an earlier draft of one of the two recognizers.
-//     WHAT THE CENSUS DOES NOT PROMISE, stated because a sentence here once
-//     promised it. It triggers on the field NAME: a seam that spells its
-//     witness something else is invisible to it. It requires a width field and
-//     a witness comparison, not that the width is ever compared. It is a
-//     tripwire against the way this class has recurred, not a proof that the
-//     class cannot recur.
+//     WHAT THE CENSUS DOES NOT PROMISE. It triggers on the field NAME, so a
+//     seam that spells its witness something else is invisible to it. It
+//     requires a width field and a witness comparison, not that the width is
+//     ever compared. It reads one flat directory. It recognises a recomputation
+//     by the called function's name ending in Witness, and only where the
+//     comparison sits in a return, an if or a switch. And it asks that SOME
+//     method compares the witness, not that every entry point reaches one --
+//     Rules answers on an unverified handle by design, and the census is
+//     content with that. It is a tripwire against the way this class has
+//     recurred, not a proof that the class cannot recur.
 //     AND THE FRAMINGS ARE CHECKED AGAINST A CONSTRUCTION, NOT ONLY AGAINST
 //     THEMSELVES. Running one framer with bytes on against the same framer
 //     with bytes off is a two-mode differential: it sees the modes disagree

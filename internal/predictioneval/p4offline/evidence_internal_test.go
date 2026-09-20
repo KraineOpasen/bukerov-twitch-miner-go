@@ -2500,12 +2500,17 @@ func TestTheRulesetFramingIsTheOneTheContractDescribes(t *testing.T) {
 	}
 }
 
-// TestTheWidthIsHonestOnValuesTheFixturesNeverBuild covers the shapes the
-// randomized width fixtures cannot reach, which a Q3 lane censused: every
-// framed integer they draw is NON-NEGATIVE, every framed collection they build
-// has fewer than ten elements, and every optional pointer they set is
-// NON-NIL. A writer that mishandled the length-only mode on any of those three
-// agreed with itself everywhere the fixtures looked.
+// TestTheWidthIsHonestOnValuesTheFixturesNeverBuild covers shapes the
+// randomized width fixtures do not reach, which a Q3 lane censused: every
+// framed integer they draw is NON-NEGATIVE and every optional pointer they set
+// is NON-NIL, so neither the minus sign nor the absent arm is framed anywhere
+// else. A writer that mishandled the length-only mode on either agreed with
+// itself everywhere the fixtures looked.
+//
+// THE COLLECTION ROW IS DIFFERENT AND IS KEPT ANYWAY. The generator was capped
+// below ten when that row was written; it reaches past ten now, so the row is
+// no longer the only thing covering a multi-digit count. It stays as the fixed
+// case beside a randomized one, because a generator can be narrowed again.
 func TestTheWidthIsHonestOnValuesTheFixturesNeverBuild(t *testing.T) {
 	t.Run("a negative framed integer", func(t *testing.T) {
 		// Reachable in production: a losing payout sets Net to the negated
@@ -2523,7 +2528,7 @@ func TestTheWidthIsHonestOnValuesTheFixturesNeverBuild(t *testing.T) {
 
 	t.Run("a collection past one digit", func(t *testing.T) {
 		// The count itself is framed as a decimal string, so its OWN width
-		// grows at ten. The fixtures never build more than three elements.
+		// grows at ten, and this row fixes one case there.
 		po := PayoutEvidence{ContractVersion: "v", Reasons: make([]string, 12)}
 		var c canonical
 		framePayoutEvidence(&c, po)

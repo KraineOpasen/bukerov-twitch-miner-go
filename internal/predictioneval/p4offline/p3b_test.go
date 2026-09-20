@@ -5126,7 +5126,7 @@ func TestAnEditedResultIsRefusedWithoutFramingTheEdit(t *testing.T) {
 // RulesetID is caller-supplied and VerifyP3bRuleset requires it to EQUAL the
 // config's ConfigID, which carries no per-string length bound, so a copied
 // handle with a widened identity paid about its own width on every ConfigCopy,
-// EvaluateP3bCase and EvaluateP3bWithTrace -- the three methods that call check
+// EvaluateP3bCase and EvaluateP3bWithTrace -- the three entry points that call check
 // -- to answer a refusal decided by one string comparison. Measured at 1.0073x
 // the caller's edit.
 //
