@@ -10,7 +10,10 @@ package p4offline_test
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"math"
+	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/predictioneval"
@@ -632,4 +635,235 @@ func TestTerminalSlotMustMatchBeforeInheritance(t *testing.T) {
 			t.Fatalf("%+v", pl)
 		}
 	})
+}
+
+// TestARefusedDecisionNamesItsExtentAndNotItsText is obligation D's proof, and
+// it covers BOTH evidence seams from one place because they share one rule,
+// one helper and one refusal: derivePlacement states the rule in full and
+// derivePayout defers to it, so two tests would be two copies of one table to
+// drift apart.
+//
+// WHAT THE DEFECT WAS. A decision decisionRefusal rejects has never been shown
+// to be this package's, so every string on it is the caller's and nothing
+// bounds it. Both seams copied those strings into the artifact and then hashed
+// the artifact into its witness, so a refusal decided by ONE comparison
+// allocated 18,301,274 B/op on a decision carrying five 1 MiB strings --
+// about 3.49x what the caller supplied -- against 872 B/op for the same
+// refusal at one byte. DerivePayout read 18,301,246 against 1,576.
+//
+// WHAT IS ASSERTED IS FLATNESS, not a budget. A budget alone passes for a
+// repair that shrinks the multiple and leaves the shape, and doc.go's own
+// entry on this finding warns that the multiple is not even a constant: the
+// same path with three of the five strings wide read 2.19x where five read
+// 3.49x, because what moves between them is the canonical buffer's growth
+// series. A one-byte control measured on the same fixture cannot be satisfied
+// that way. It now reads 1,712 -> 1,792 bytes for DerivePlacement and
+// 1,840 -> 1,952 for DerivePayout across the same span.
+//
+// THE ONE-BYTE REFUSAL GOT DEARER AND THAT IS PART OF THE TRADE, recorded here
+// rather than absorbed: the extent sentence costs about 840 bytes at the
+// placement seam and about 260 at the payout seam that a refusal naming its
+// case in full did not pay. What it buys is 18.3 MB at 1 MiB and an artifact
+// that echoes no unverified text at any width.
+func TestARefusedDecisionNamesItsExtentAndNotItsText(t *testing.T) {
+	measure := func(f func()) uint64 {
+		runtime.GC()
+		var a, b runtime.MemStats
+		runtime.ReadMemStats(&a)
+		f()
+		runtime.ReadMemStats(&b)
+		return b.TotalAlloc - a.TotalAlloc
+	}
+	// The FIRST clause of decisionRefusal refuses a policy name that is
+	// neither P2 nor P3b, so nothing below that clause runs and every byte
+	// measured is the artifact's own.
+	decisionAt := func(width int) p4offline.PolicyDecision {
+		v := strings.Repeat("x", width)
+		return p4offline.PolicyDecision{
+			Policy: v,
+			Attempt: predictioneval.AttemptKey{CollectorEpoch: 20260901, CollectorSessionID: v,
+				PoolInstanceID: v, AttemptID: 7},
+			FactsetDigest: v, EventID: v, Derivation: v,
+			OutcomeIDs: []string{"o1", "o2"}, Stake: p4offline.UnknownInt64(v),
+		}
+	}
+	const wide = 1 << 20
+	narrowDec, wideDec := decisionAt(1), decisionAt(wide)
+	wideText := strings.Repeat("x", wide)
+
+	// withheld holds one refused artifact's reasons to the whole rule: the
+	// category survives, the extent is stated, and no byte of the text is.
+	withheld := func(t *testing.T, seam string, reasons []string, wantExtent string) {
+		t.Helper()
+		if !containsString(reasons, "POLICY_BINDING_MISMATCH") {
+			t.Fatalf("%s: the refusal category did not survive the withholding: %v", seam, reasons)
+		}
+		var extent string
+		for _, r := range reasons {
+			if len(r) > 512 {
+				t.Fatalf("%s: a reason of %d bytes is carrying its input, not describing it", seam, len(r))
+			}
+			if strings.Contains(r, wideText) {
+				t.Fatalf("%s: a reason re-exported the text it withheld", seam)
+			}
+			if strings.HasPrefix(r, p4offline.PlacementReasonIdentityWithheldPrefix) {
+				extent = r
+			}
+		}
+		if extent == "" {
+			t.Fatalf("%s: a refused artifact that names no extent has lost the case in silence: %v", seam, reasons)
+		}
+		if extent != wantExtent {
+			t.Fatalf("%s: the extent report is\n got %q\nwant %q", seam, extent, wantExtent)
+		}
+	}
+	const wideExtent = "1048576 bytes"
+	wantPlacement := p4offline.PlacementReasonIdentityWithheldPrefix + "policy " + wideExtent +
+		", session " + wideExtent + ", pool " + wideExtent + ", factset digest " + wideExtent +
+		", event " + wideExtent
+	wantPayout := wantPlacement + ", derivation " + wideExtent
+
+	t.Run("the placement seam withholds the identity and states its extent", func(t *testing.T) {
+		var narrow, wideOut p4offline.PlacementEvidence
+		narrowCost := measure(func() { narrow = p4offline.DerivePlacement(narrowDec, p4offline.FactualPlacement{}, nil) })
+		wideCost := measure(func() { wideOut = p4offline.DerivePlacement(wideDec, p4offline.FactualPlacement{}, nil) })
+		t.Logf("DerivePlacement refused: %d bytes at one byte supplied, %d at 1 MiB", narrowCost, wideCost)
+
+		if wideOut.Status != p4offline.PlacementUnknown {
+			t.Fatalf("a refusal must not become a verdict: status %s, %s", wideOut.Status, placementExtents(wideOut))
+		}
+		withheld(t, "DerivePlacement", wideOut.Reasons, wantPlacement)
+		if wideOut.Policy != "" || wideOut.FactsetDigest != "" || wideOut.EventID != "" ||
+			wideOut.Attempt.CollectorSessionID != "" || wideOut.Attempt.PoolInstanceID != "" {
+			t.Fatalf("the artifact echoed identity the refusal never verified: %s", placementExtents(wideOut))
+		}
+		// The case is withheld, not lost: the two fixed-width numbers are the
+		// caller's own and cost nothing to carry.
+		if wideOut.Attempt.CollectorEpoch != 20260901 || wideOut.Attempt.AttemptID != 7 {
+			t.Fatalf("the refused artifact does not name its attempt at all: %s", placementExtents(wideOut))
+		}
+		if wideOut.PolicyStake.Known() || wideOut.PolicyStake.Reason != "POLICY_BINDING_MISMATCH" {
+			t.Fatalf("a refused decision has no established policy stake: %s", placementExtents(wideOut))
+		}
+		if !wideOut.PolicyStake.Known() && strings.Contains(wideOut.PolicyStake.Reason, wideText) {
+			t.Fatalf("the stake's reason carried the caller's text")
+		}
+		if narrow.Policy != "" || narrow.Attempt.CollectorEpoch != 20260901 {
+			t.Fatalf("the one-byte control must be the same shape: %+v", narrow)
+		}
+		if wideCost > narrowCost+refusedArtifactSlack {
+			t.Fatalf("the refusal grew by %d bytes as its input grew by %d: it is still framing what it refused",
+				wideCost-narrowCost, wide-1)
+		}
+	})
+
+	t.Run("the payout seam withholds one field more", func(t *testing.T) {
+		var narrow, wideOut p4offline.PayoutEvidence
+		var res p4offline.ResolutionArtifact
+		narrowCost := measure(func() {
+			narrow = p4offline.DerivePayout(narrowDec, p4offline.PlacementEvidence{}, res, nil)
+		})
+		wideCost := measure(func() {
+			wideOut = p4offline.DerivePayout(wideDec, p4offline.PlacementEvidence{}, res, nil)
+		})
+		t.Logf("DerivePayout refused: %d bytes at one byte supplied, %d at 1 MiB", narrowCost, wideCost)
+
+		if wideOut.Outcome != p4offline.PayoutUnknown || wideOut.ChoiceCorrect != p4offline.ChoiceUnknown ||
+			wideOut.PrimaryDenominatorMember || wideOut.PlacedBetDenominatorMember {
+			t.Fatalf("a refusal must not become a settlement or a denominator member: outcome %s, %s", wideOut.Outcome, payoutExtents(wideOut))
+		}
+		withheld(t, "DerivePayout", wideOut.Reasons, wantPayout)
+		if wideOut.Policy != "" || wideOut.FactsetDigest != "" || wideOut.EventID != "" ||
+			wideOut.Derivation != "" || wideOut.ResolutionFactsDigest != "" ||
+			wideOut.Attempt.CollectorSessionID != "" || wideOut.Attempt.PoolInstanceID != "" {
+			t.Fatalf("the artifact echoed identity the refusal never verified: %s", payoutExtents(wideOut))
+		}
+		if wideOut.Stake.Known() || wideOut.Payout.Known() || wideOut.Net.Known() {
+			t.Fatalf("a refused decision is paid nothing and is owed nothing: %s", payoutExtents(wideOut))
+		}
+		if narrow.Policy != "" || narrow.Attempt.AttemptID != 7 {
+			t.Fatalf("the one-byte control must be the same shape: %+v", narrow)
+		}
+		if wideCost > narrowCost+refusedArtifactSlack {
+			t.Fatalf("the refusal grew by %d bytes as its input grew by %d: it is still framing what it refused",
+				wideCost-narrowCost, wide-1)
+		}
+	})
+
+	t.Run("a recognized policy name survives, and only a recognized one", func(t *testing.T) {
+		_, fs, fp, p2 := factualCase(t, coherentCall)
+		dec := decisionOf(t, p2, fs)
+		negative := dec
+		negative.Stake = p4offline.KnownInt64(-1) // refused below the policy clause
+		pl := p4offline.DerivePlacement(negative, fp, validProof(fp))
+		if !containsString(pl.Reasons, "STAKE_NEGATIVE") {
+			t.Fatalf("fixture: this decision must be refused for its stake: %+v", pl)
+		}
+		// THE NAME IS THIS PACKAGE'S CONSTANT MATCHED BY VALUE, so carrying it
+		// echoes nothing unbounded -- and it is what keeps a refused placement
+		// being refused downstream for the CASE it does not name rather than
+		// for the policy it does.
+		if pl.Policy != p4offline.PolicyP2 {
+			t.Fatalf("a recognized policy name is not unverified text and must survive: %s", placementExtents(pl))
+		}
+		if pl.FactsetDigest != "" || pl.EventID != "" || pl.Attempt.CollectorSessionID != "" {
+			t.Fatalf("everything else is still withheld: %s", placementExtents(pl))
+		}
+		if pe := p4offline.DerivePayout(dec, pl, winnerArtifact("o1"), nil); pe.Outcome != p4offline.PayoutUnknown ||
+			!containsString(pe.Reasons, "PLACEMENT_BINDING_MISMATCH") {
+			t.Fatalf("a refused placement settles nothing, and says so as a CASE mismatch: %+v", pe)
+		}
+	})
+
+	t.Run("an accepted decision still carries its whole identity", func(t *testing.T) {
+		_, fs, fp, p2 := factualCase(t, coherentCall)
+		dec := decisionOf(t, p2, fs)
+		pl := p4offline.DerivePlacement(dec, fp, validProof(fp))
+		if pl.Policy != dec.Policy || pl.Attempt != dec.Attempt || pl.FactsetDigest != dec.FactsetDigest ||
+			pl.EventID != dec.EventID || pl.PolicyStake != dec.Stake {
+			t.Fatalf("the accepted path lost identity the withholding was never meant to touch: %s", placementExtents(pl))
+		}
+		for _, r := range pl.Reasons {
+			if strings.HasPrefix(r, p4offline.PlacementReasonIdentityWithheldPrefix) {
+				t.Fatalf("an accepted artifact reports no withholding: %v", pl.Reasons)
+			}
+		}
+		pe := p4offline.DerivePayout(dec, pl, winnerArtifact("o1"), nil)
+		if pe.Policy != dec.Policy || pe.FactsetDigest != dec.FactsetDigest || pe.EventID != dec.EventID ||
+			pe.Derivation != dec.Derivation {
+			t.Fatalf("the accepted payout path lost identity: %s", payoutExtents(pe))
+		}
+	})
+}
+
+// refusedArtifactSlack is how much wider a refused artifact may be at a 1 MiB
+// identity than at a one-byte one.
+//
+// IT IS NOT A BUDGET FOR THE PAYLOAD, it is room for the EXTENT SENTENCE: six
+// numbers grow from one digit to seven, and the canonical buffer that frames
+// the reasons takes its growth in steps rather than by the byte. Measured on
+// this tree the two seams grow by 80 and 112 bytes across that span, so the
+// ceiling is an order of magnitude above what the sentence costs and six
+// orders below what one reinstated framing would.
+const refusedArtifactSlack = 1024
+
+// placementExtents and payoutExtents render an artifact's caller-supplied
+// strings BY LENGTH.
+//
+// THEY EXIST BECAUSE A FAILURE MESSAGE IS AN ARTIFACT TOO. The first build of
+// the test above printed the whole evidence with %+v, so the one mutant that
+// reinstated a 1 MiB field made the test emit six megabytes of x. A test that
+// proves a refusal does not carry its input must not carry it either.
+func placementExtents(p p4offline.PlacementEvidence) string {
+	return fmt.Sprintf("policy=%d session=%d pool=%d factset=%d event=%d epoch=%d attempt=%d stake=%s/%d/reason=%d reasons=%d",
+		len(p.Policy), len(p.Attempt.CollectorSessionID), len(p.Attempt.PoolInstanceID),
+		len(p.FactsetDigest), len(p.EventID), p.Attempt.CollectorEpoch, p.Attempt.AttemptID,
+		p.PolicyStake.Presence, p.PolicyStake.Value, len(p.PolicyStake.Reason), len(p.Reasons))
+}
+
+func payoutExtents(p p4offline.PayoutEvidence) string {
+	return fmt.Sprintf("policy=%d session=%d pool=%d factset=%d event=%d derivation=%d resolution=%d epoch=%d attempt=%d reasons=%d",
+		len(p.Policy), len(p.Attempt.CollectorSessionID), len(p.Attempt.PoolInstanceID),
+		len(p.FactsetDigest), len(p.EventID), len(p.Derivation), len(p.ResolutionFactsDigest),
+		p.Attempt.CollectorEpoch, p.Attempt.AttemptID, len(p.Reasons))
 }

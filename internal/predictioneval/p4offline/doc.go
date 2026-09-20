@@ -455,7 +455,14 @@
 //	(1,030 bytes for the fixture carrying a +Inf).
 //
 // WHAT REMAINS, listed rather than summarised, because a summary is how the
-// item below this list came to be denied for a round:
+// item below this list came to be denied for a round.
+//
+// AN ENTRY STAYS WHEN IT CLOSES, marked as closed and carrying both readings.
+// Deleting it would delete the measurement that shows the repair was needed
+// and the one that bounds what it bought, and a repair with neither on the
+// record is indistinguishable from a claim. Every such entry states what it
+// did NOT buy in the same breath, because that residue is what the next
+// reader inherits:
 //
 //   - Framing is still by bits, so +0.0 and -0.0 -- equal under comparison,
 //     both encodable, and both round-tripping through JSON with the sign bit
@@ -728,65 +735,83 @@
 //     SourceRoundRegistryVersion bumped and the independent golden regenerated
 //     -- the same shape of change as the nested hex, and not one to take inside
 //     a repair round.
-//   - THE EVIDENCE WITNESS FRAMES A DECISION THE REFUSAL ABOVE IT HAS ALREADY
-//     REJECTED, reported by a code review lane on the published head and
+//   - THE EVIDENCE WITNESS FRAMED A DECISION THE REFUSAL ABOVE IT HAD ALREADY
+//     REJECTED, reported by a code review lane on the published head,
 //     reproduced -- with the MECHANISM the lane gave one step off, in a way
-//     that moves the fix. The lane named derivePlacement's struct literal,
-//     which copies the caller's strings into PlacementEvidence before
-//     decisionRefusal rejects them. In Go a string field copies a two-word
+//     that moved the fix -- and CLOSED IN THIS ROUND under owner authorization
+//     to change what a refusal may name.
+//     WHAT THE DEFECT WAS. The lane named derivePlacement's struct literal,
+//     which copied the caller's strings into PlacementEvidence before
+//     decisionRefusal rejected them. In Go a string field copies a two-word
 //     header and not the bytes, so that literal is O(1), and so is
-//     decisionRefusal: derivePlacement measures 16 B/op and ONE allocation on
-//     a decision whose five caller-controlled strings are 1 MiB each, flat
-//     against the same decision at one byte. What costs is
+//     decisionRefusal: derivePlacement measured 16 B/op and ONE allocation on
+//     a decision whose five caller-controlled strings were 1 MiB each, flat
+//     against the same decision at one byte. What cost was
 //     placementEvidenceWitness, which DerivePlacement calls AFTER
 //     derivePlacement returns -- on every path, the refused one included --
 //     and which frames Policy, the attempt's collector session and pool
 //     instance identifiers, FactsetDigest and EventID into the canonical
-//     buffer and hashes them. The lane's CONCLUSION is right; what does it is
-//     the witness and not the copy, and that is the difference between a fix
+//     buffer and hashes them. The lane's CONCLUSION was right; what did it was
+//     the witness and not the copy, and that was the difference between a fix
 //     inside derivePlacement and a change to what a refusal may name.
-//     MEASURED ON THIS TREE, without the race detector, on a decision refused
-//     by decisionRefusal's FIRST clause so that nothing below that clause
-//     runs: 872 B/op and 8 allocations with all five strings at one byte,
-//     against 18,301,274 B/op and 11 allocations with all five at 1 MiB --
-//     about 21,000x the one-byte refusal, and about 3.49x the 5,242,880 bytes
-//     supplied. DerivePayout is the same shape on the same fixture: 1,576
-//     B/op at one byte against 18,301,246 B/op at 1 MiB. THE SPREAD ACROSS
-//     REPEATS IS UNDER 200 BYTES on 18.3 MB, so the reading is the fixture's
-//     rather than one run's.
-//     THE MULTIPLE OF THE INPUT IS NOT A CONSTANT, and the fixture has to be
+//     MEASURED ON THE PUBLISHED HEAD, without the race detector, on a decision
+//     refused by decisionRefusal's FIRST clause so that nothing below that
+//     clause runs: 872 B/op and 8 allocations with all five strings at one
+//     byte, against 18,301,274 B/op and 11 allocations with all five at 1 MiB
+//     -- about 21,000x the one-byte refusal, and about 3.49x the 5,242,880
+//     bytes supplied. DerivePayout was the same shape on the same fixture:
+//     1,576 B/op at one byte against 18,301,246 B/op at 1 MiB. THE SPREAD
+//     ACROSS REPEATS WAS UNDER 200 BYTES on 18.3 MB, so the reading was the
+//     fixture's rather than one run's.
+//     THE MULTIPLE OF THE INPUT WAS NOT A CONSTANT, and the fixture has to be
 //     named for that reason rather than for tidiness. The same path with THREE
-//     of the five strings at 1 MiB reads 6,889,790 B/op and NINE allocations:
+//     of the five strings at 1 MiB read 6,889,790 B/op and NINE allocations:
 //     2.19x the 3,145,728 bytes supplied, where five strings read 3.49x. Both
-//     readings are right; what moves between them is the canonical buffer's
+//     readings were right; what moved between them was the canonical buffer's
 //     growth series. It is Go's slice growth, which doubles only below 256
 //     bytes and grows by about a quarter above it, with need-driven jumps: a
 //     lane walked the capacities for this exact framing and read ratios of
 //     2.450, 1.253, 1.563 and 1.250, not 2. So the total allocated over one
-//     call is a step function of the payload rather than a multiple of it,
-//     and the extra allocations at the wider fixture are extra growth steps
-//     rather than doublings. So
-//     the durable statement is the shape, that a refusal decided in constant
-//     time frames every identity field in full, and not any one ratio.
-//     CLOSING IT IS A CONTRACT CHANGE RATHER THAN A REPAIR. The witness is
-//     unexported, is not serialized, and no golden pins it, so its FORMAT is
-//     free -- but it is a hash, and a hash of an artifact is proportional to
-//     the artifact, while the refused artifact carries the caller's identity
-//     fields because a refusal names the case it refused. Making that path
-//     O(1) means a refusal stops naming its case, which is a change at two
-//     approved seams and not an implementation detail.
-//     ONE PART IS WEAKER THAN THE REST, and is named here rather than quietly
-//     repaired: Policy is a two-value enum whose every other value the first
-//     clause refuses in constant time, and it is framed in full anyway --
-//     1,057,073 B/op for a 1 MiB Policy with every other field at one byte,
-//     which is the SAME SHAPE as the three constant-size digest gates this
-//     round closed. Repairing only Policy leaves EventID, FactsetDigest and
-//     the attempt identity behind, so it shrinks the amplification without
-//     closing the finding, and it is not taken piecemeal. What remains after
-//     that is the class the nested-hex entry above describes -- a constant
-//     factor over input the caller has already materialized -- rather than
-//     the class the shape gates closed.
-//   - AND THE FAIL-CLOSED RULE HAS ONE FAIL-OPEN CARVE-OUT, stated here because
+//     call was a step function of the payload rather than a multiple of it,
+//     and the extra allocations at the wider fixture were extra growth steps
+//     rather than doublings. The durable statement was the shape, that a
+//     refusal decided in constant time framed every identity field in full,
+//     and not any one ratio -- WHICH IS WHY THE TEST THAT CLOSES IT ASSERTS A
+//     ONE-BYTE CONTROL rather than a budget. A budget is satisfied by shrinking
+//     a multiple; only a control measured on the same fixture is not.
+//     WHAT CLOSING IT COST WAS THE CONTRACT, AND THE OWNER AUTHORIZED IT.
+//     A hash of an artifact is proportional to the artifact, and the refused
+//     artifact carried the caller's identity fields because a refusal names the
+//     case it refused; so making the path constant meant a refusal stops naming
+//     its case IN TEXT. It names it in ARITHMETIC instead: both seams now
+//     return a bounded artifact above decisionRefusal's verdict, carrying the
+//     category, the attempt's two fixed-width numbers, and one reason under
+//     the IDENTITY_WITHHELD prefix that states how wide each withheld field
+//     was and not one byte of it. Nothing is invented, no refusal becomes a
+//     verdict, and no consumer can bind to an artifact that names no case,
+//     because every consumer compares the identity in WHOLE. MEASURED ON THIS
+//     TREE: DerivePlacement 1,712 B/op at one byte against 1,792 at 1 MiB,
+//     DerivePayout 1,840 against 1,952 --
+//     TestARefusedDecisionNamesItsExtentAndNotItsText, which drives both seams
+//     and the six mutants that reinstate each withheld field in turn.
+//     THE ONE-BYTE REFUSAL GOT DEARER, about 840 bytes at the placement seam
+//     and 260 at the payout seam, and it is recorded rather than absorbed: the
+//     extent sentence is work a refusal naming its case in full never did.
+//     THE PART THAT WAS CALLED WEAKER THAN THE REST IS THE PART THAT SURVIVED,
+//     and not as the piecemeal repair the earlier reading of it proposed.
+//     Policy is a two-value enum whose every other value decisionRefusal's
+//     first clause refuses in constant time, and it was framed in full anyway
+//     -- 1,057,073 B/op for a 1 MiB Policy with every other field at one byte.
+//     It is not repaired by shrinking; it is repaired by the same withholding
+//     as the rest, with ONE exemption stated at namedPolicy: a policy name
+//     EQUAL to PolicyP2 or PolicyP3b is this package's own three-byte constant
+//     matched by value, not caller text carried on trust, and a 1 MiB one
+//     fails that comparison and is withheld like everything else. Carrying the
+//     recognized name is also what keeps a refusal's CATEGORY where it was: a
+//     payout compares the placement's policy before it compares the case, so a
+//     placement naming no policy at all would be refused as a POLICY binding
+//     mismatch, which is true and which hides that the placement refused its
+//     own decision.
 //     this round's own lesson is that a trade absorbed in silence is the defect
 //     behind the defect. A claim whose ROUND NAME is itself unreadable names no
 //     round, so it contests none, and a round whose only competing claim was

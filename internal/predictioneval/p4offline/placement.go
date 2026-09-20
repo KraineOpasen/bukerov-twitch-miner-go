@@ -105,27 +105,37 @@ const (
 	DecisionReasonChoiceIndexIdentityMismatch = "CHOICE_INDEX_ID_MISMATCH"
 	DecisionReasonStakeNegative               = "STAKE_NEGATIVE"
 	DecisionReasonNotDerived                  = "DECISION_NOT_DERIVED"
+	// DecisionReasonIdentityWithheldPrefix heads the one reason a refused
+	// decision's artifact carries beside its category: the EXTENT of the
+	// identity text that artifact does not echo.
+	//
+	// It is a prefix and not a closed value because an extent is a number,
+	// and PlacementReasonLocalErrorClassPrefix already establishes that this
+	// vocabulary admits a prefix carrying a bounded payload. What follows it
+	// is arithmetic over lengths -- never a byte of the text itself.
+	DecisionReasonIdentityWithheldPrefix = "IDENTITY_WITHHELD:"
 )
 
 // Placement reasons. Closed vocabulary.
 const (
-	PlacementReasonCaseBindingMismatch   = DecisionReasonCaseBindingMismatch
-	PlacementReasonFactualNotDerived     = "FACTUAL_PLACEMENT_NOT_DERIVED"
-	PlacementReasonPolicyStakeUnknown    = "POLICY_STAKE_UNKNOWN"
-	PlacementReasonChoiceMissing         = "CHOICE_MISSING"
-	PlacementReasonChoiceDiffers         = "CHOICE_DIFFERS"
-	PlacementReasonChoiceIdentityDiffers = "CHOICE_IDENTITY_DIFFERS"
-	PlacementReasonTerminalSlotDiffers   = "TERMINAL_SLOT_DIFFERS"
-	PlacementReasonStakeDiffers          = "STAKE_DIFFERS"
-	PlacementReasonFactualNotPlace       = "FACTUAL_DECISION_NOT_PLACE"
-	PlacementReasonCallNotAfterCutoff    = "CALL_NOT_AFTER_CUTOFF"
-	PlacementReasonCallContradictsRecord = "CALL_CONTRADICTS_RECORDED_DECISION"
-	PlacementReasonProofBasisNotAccepted = "PROOF_BASIS_NOT_ACCEPTED"
-	PlacementReasonProofNotBoundToCall   = "PROOF_NOT_BOUND_TO_CALL"
-	PlacementReasonProofRoundMismatch    = "PROOF_ROUND_MISMATCH"
-	PlacementReasonProofIncomplete       = "PROOF_INCOMPLETE"
-	PlacementReasonNoProofSupplied       = "NO_PLATFORM_ACCEPTANCE_PROOF"
-	PlacementReasonLocalErrorClassPrefix = "LOCAL_ERROR_CLASS:"
+	PlacementReasonCaseBindingMismatch    = DecisionReasonCaseBindingMismatch
+	PlacementReasonFactualNotDerived      = "FACTUAL_PLACEMENT_NOT_DERIVED"
+	PlacementReasonPolicyStakeUnknown     = "POLICY_STAKE_UNKNOWN"
+	PlacementReasonChoiceMissing          = "CHOICE_MISSING"
+	PlacementReasonChoiceDiffers          = "CHOICE_DIFFERS"
+	PlacementReasonChoiceIdentityDiffers  = "CHOICE_IDENTITY_DIFFERS"
+	PlacementReasonTerminalSlotDiffers    = "TERMINAL_SLOT_DIFFERS"
+	PlacementReasonStakeDiffers           = "STAKE_DIFFERS"
+	PlacementReasonFactualNotPlace        = "FACTUAL_DECISION_NOT_PLACE"
+	PlacementReasonCallNotAfterCutoff     = "CALL_NOT_AFTER_CUTOFF"
+	PlacementReasonCallContradictsRecord  = "CALL_CONTRADICTS_RECORDED_DECISION"
+	PlacementReasonProofBasisNotAccepted  = "PROOF_BASIS_NOT_ACCEPTED"
+	PlacementReasonProofNotBoundToCall    = "PROOF_NOT_BOUND_TO_CALL"
+	PlacementReasonProofRoundMismatch     = "PROOF_ROUND_MISMATCH"
+	PlacementReasonProofIncomplete        = "PROOF_INCOMPLETE"
+	PlacementReasonNoProofSupplied        = "NO_PLATFORM_ACCEPTANCE_PROOF"
+	PlacementReasonLocalErrorClassPrefix  = "LOCAL_ERROR_CLASS:"
+	PlacementReasonIdentityWithheldPrefix = DecisionReasonIdentityWithheldPrefix
 )
 
 // ErrDecisionBinding is a policy result bound to a factset other than the one
@@ -319,6 +329,11 @@ type PlacementEvidence struct {
 	// PolicyStake is the policy's OWN stake, carried verbatim whatever the
 	// placement verdict: withholding a call never changes what the policy
 	// would have staked, and a skip's exact zero stays an exact zero.
+	//
+	// ON A REFUSED DECISION IT IS UNKNOWN, naming the refusal. That is not an
+	// exception to the sentence above but its precondition: there is no
+	// policy stake to carry until the decision has been accepted as one this
+	// package produced.
 	PolicyStake                 Int64Fact `json:"policyStake"`
 	AttributedOutcomeID         string    `json:"attributedOutcomeId,omitempty"`
 	AttributedCallObservationID string    `json:"attributedCallObservationId,omitempty"`
@@ -472,6 +487,73 @@ func decisionRefusal(p PolicyDecision) string {
 	return ""
 }
 
+// refusedDecisionIdentity reports, BY EXTENT ONLY, the identity text that a
+// refused decision's artifact does not echo.
+//
+// A DECISION decisionRefusal REJECTED WAS NEVER PROVED TO BE THIS PACKAGE'S,
+// so every string on it is the caller's, bounded by nothing. Echoing those
+// into an artifact -- and then hashing them into its witness -- turns a
+// refusal decided by one comparison into work proportional to what the caller
+// supplied. The artifact still has to NAME the case it refused, so the naming
+// becomes arithmetic: how wide each withheld field was, and not one byte of
+// it. Two refusals of different cases stay distinguishable by their extents,
+// their numeric attempt key and their category, which is what keeps a refused
+// case from disappearing in silence.
+//
+// IT NAMES THE FIELDS THE PLACEMENT ARTIFACT WOULD HAVE ECHOED. The payout
+// artifact echoes one more, so it calls the wrapper below rather than
+// re-spelling the list; a second spelling is a second place a future field can
+// be forgotten.
+func refusedDecisionIdentity(p PolicyDecision) string {
+	return DecisionReasonIdentityWithheldPrefix +
+		"policy " + suppliedTextExtent(p.Policy) +
+		", session " + suppliedTextExtent(p.Attempt.CollectorSessionID) +
+		", pool " + suppliedTextExtent(p.Attempt.PoolInstanceID) +
+		", factset digest " + suppliedTextExtent(p.FactsetDigest) +
+		", event " + suppliedTextExtent(p.EventID)
+}
+
+// refusedDecisionIdentityWithDerivation is the same sentence for the payout
+// seam, whose artifact also echoes the decision's derivation.
+func refusedDecisionIdentityWithDerivation(p PolicyDecision) string {
+	return refusedDecisionIdentity(p) + ", derivation " + suppliedTextExtent(p.Derivation)
+}
+
+// namedPolicy is the policy name a refused artifact may still carry: one this
+// package RECOGNIZES, and otherwise nothing.
+//
+// IT IS NOT AN EXCEPTION TO THE WITHHOLDING, it is the same rule read exactly.
+// What a refused artifact may not echo is unverified text of unbounded extent.
+// A policy name that equals PolicyP2 or PolicyP3b is neither: the comparison
+// is decisionRefusal's own first clause, it admits two three-byte constants,
+// and a 1 MiB policy name fails it and is withheld like everything else. What
+// is carried is this package's constant matched by value, not the caller's
+// string carried on trust.
+//
+// IT IS ALSO WHAT KEEPS A REFUSAL'S CATEGORY WHERE IT WAS. A payout compares
+// the placement's policy before it compares the rest of the case, so a
+// placement that named no policy at all would be refused as a POLICY binding
+// mismatch -- which is true, and which hides that the placement refused its
+// own decision. Carrying the recognized name lets that comparison pass and the
+// case comparison below it speak, exactly as before this withholding existed.
+func namedPolicy(p string) string {
+	if p == PolicyP2 || p == PolicyP3b {
+		return p
+	}
+	return ""
+}
+
+// namedAttempt is the part of an attempt key a refused artifact may still
+// carry: the two fixed-width numbers, never the two caller-supplied strings.
+//
+// It is not a fabricated identity -- both values are the caller's own, copied
+// verbatim -- and it is not a binding: nothing downstream may act on an
+// attempt key whose strings are absent, because every consumer compares the
+// WHOLE key and an absent string never equals a present one.
+func namedAttempt(k predictioneval.AttemptKey) predictioneval.AttemptKey {
+	return predictioneval.AttemptKey{CollectorEpoch: k.CollectorEpoch, AttemptID: k.AttemptID}
+}
+
 // ProjectFactualPlacement reads the selected attempt's recorded decision and
 // its post-decision placement facts through the P2 projections. The factset
 // must be exactly what the dataset derives for its episode.
@@ -553,6 +635,40 @@ func DerivePlacement(policy PolicyDecision, factual FactualPlacement, proof *Pla
 }
 
 func derivePlacement(policy PolicyDecision, factual FactualPlacement, proof *PlatformAcceptanceProof) PlacementEvidence {
+	// THE REFUSAL IS ABOVE THE ARTIFACT, AND ITS ARTIFACT ECHOES NO UNVERIFIED
+	// IDENTITY. Until decisionRefusal returns empty nothing has established
+	// that this decision is one this package produced, so its strings are the
+	// caller's and nothing bounds them. The struct literal below is O(1) -- a
+	// Go string field copies a two-word header -- but the WITNESS
+	// DerivePlacement takes over the returned value is not: it frames Policy,
+	// the attempt's two identifiers, FactsetDigest and EventID and hashes
+	// them, so a refusal decided by one comparison used to allocate 18.3 MB on
+	// a decision carrying five 1 MiB strings. Withholding the text at the
+	// source is what makes the witness constant; the witness itself is
+	// unchanged.
+	//
+	// WHAT THE REFUSED ARTIFACT STILL SAYS: its category, the extent of each
+	// withheld field, and the attempt's two fixed-width numbers. What it does
+	// not say, it does not invent -- an absent identity reads as absent, and
+	// every consumer of a placement compares the identity in WHOLE, so an
+	// artifact missing one can bind to nothing.
+	//
+	// THE STAKE IS WITHHELD TOO, and that is a narrower statement than the
+	// field's doc above. Int64Fact.Reason is an exported string on a value the
+	// caller built, so carrying the stake verbatim carries unbounded text --
+	// and worse, it presents a stake this package never accepted as the
+	// policy's own. UNKNOWN naming the refusal is what was actually
+	// established.
+	if why := decisionRefusal(policy); why != "" {
+		return PlacementEvidence{
+			ContractVersion: PlacementEvidenceVersion,
+			Policy:          namedPolicy(policy.Policy),
+			Attempt:         namedAttempt(policy.Attempt),
+			Status:          PlacementUnknown,
+			Reasons:         []string{why, refusedDecisionIdentity(policy)},
+			PolicyStake:     UnknownInt64(why),
+		}
+	}
 	out := PlacementEvidence{
 		ContractVersion: PlacementEvidenceVersion,
 		Policy:          policy.Policy,
@@ -564,10 +680,6 @@ func derivePlacement(policy PolicyDecision, factual FactualPlacement, proof *Pla
 	}
 	reason := func(r string) { out.Reasons = appendOnce(out.Reasons, r) }
 
-	if why := decisionRefusal(policy); why != "" {
-		reason(why)
-		return out
-	}
 	if !factual.derived() {
 		reason(PlacementReasonFactualNotDerived)
 		return out

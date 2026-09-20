@@ -124,6 +124,7 @@ const (
 	PayoutReasonLoseByResolution             = "LOSE_BY_RESOLUTION"
 	PayoutReasonRefundByResolution           = "REFUND_BY_RESOLUTION"
 	PayoutReasonNotEvaluated                 = "NOT_EVALUATED"
+	PayoutReasonIdentityWithheldPrefix       = DecisionReasonIdentityWithheldPrefix
 )
 
 // PayoutRecord is supplied evidence of what the platform paid on a specific
@@ -219,6 +220,33 @@ func DerivePayout(policy PolicyDecision, placement PlacementEvidence, res Resolu
 }
 
 func derivePayout(policy PolicyDecision, placement PlacementEvidence, res ResolutionArtifact, record *PayoutRecord) PayoutEvidence {
+	// THE REFUSAL IS ABOVE THE ARTIFACT, for the reason stated in full at
+	// derivePlacement: until decisionRefusal returns empty, nothing has
+	// established that this decision is one this package produced, and the
+	// witness DerivePayout takes over the returned value frames every identity
+	// field it carries. This seam echoes one field more than the placement
+	// seam -- the decision's Derivation -- so it withholds one more.
+	//
+	// THE DECISION WITNESS IS WITHHELD AS WELL, and it is the one withholding
+	// that is not about size: it is a 64-character digest and costs nothing to
+	// frame. Some refused decisions are genuinely derived -- an illegal native
+	// shape is refused by its own clause while its witness still matches -- so
+	// carrying it would state a binding to a decision that this seam has just
+	// declined to accept. An artifact that refuses a decision does not get to
+	// assert which decision it was bound to.
+	if why := decisionRefusal(policy); why != "" {
+		return PayoutEvidence{
+			ContractVersion: PayoutEvidenceVersion,
+			Policy:          namedPolicy(policy.Policy),
+			Attempt:         namedAttempt(policy.Attempt),
+			Outcome:         PayoutUnknown,
+			ChoiceCorrect:   ChoiceUnknown,
+			Stake:           UnknownInt64(PayoutReasonNotEvaluated),
+			Payout:          UnknownInt64(PayoutReasonNotEvaluated),
+			Net:             UnknownInt64(PayoutReasonNotEvaluated),
+			Reasons:         []string{why, refusedDecisionIdentityWithDerivation(policy)},
+		}
+	}
 	out := PayoutEvidence{
 		ContractVersion: PayoutEvidenceVersion,
 		Policy:          policy.Policy,
@@ -235,10 +263,6 @@ func derivePayout(policy PolicyDecision, placement PlacementEvidence, res Resolu
 	}
 	reason := func(r string) { out.Reasons = appendOnce(out.Reasons, r) }
 
-	if why := decisionRefusal(policy); why != "" {
-		reason(why)
-		return out
-	}
 	if !placement.derived() {
 		reason(PayoutReasonPlacementNotDerived)
 		return out

@@ -514,15 +514,20 @@ var suppliedTextExtentCensus = map[string]int{
 	// like any other. Exempting the file a mechanism lives in is how the
 	// comment register's first build hid five of its own instances, and that
 	// lesson is cheaper to apply here than to relearn.
-	"canonical.go/suppliedTextExtent":        1, // the string spelling delegating to the computed one
-	"evidence.go/VerifySourceRoundRegistry":  2, // the Version clause and the digest-shape gate
-	"factset.go/factsetAdmissionFault":       3, // contract, protocol, the digest's shape
-	"factset.go/VerifyCommonFactset":         1, // the completeness vocabulary; the three above moved to the admission helper the evaluators hoist
-	"factset.go/checkFactsetConsistency":     2, // the stealth-proof arm and the completeness arm
-	"p3b.go/decodeFault":                     2, // the computed sentence width, and the rendered message
-	"p3b.go/walkRulesetObject":               1, // the unknown-key gate
-	"placement.go/decisionOf":                1, // the result's own factset digest
-	"resolution.go/VerifyResolutionArtifact": 5, // contract, obligations, the digest's shape, the hoisted outcome gate, the outcome arm
+	"canonical.go/suppliedTextExtent":       1, // the string spelling delegating to the computed one
+	"evidence.go/VerifySourceRoundRegistry": 2, // the Version clause and the digest-shape gate
+	"factset.go/factsetAdmissionFault":      3, // contract, protocol, the digest's shape
+	"factset.go/VerifyCommonFactset":        1, // the completeness vocabulary; the three above moved to the admission helper the evaluators hoist
+	"factset.go/checkFactsetConsistency":    2, // the stealth-proof arm and the completeness arm
+	"p3b.go/decodeFault":                    2, // the computed sentence width, and the rendered message
+	"p3b.go/walkRulesetObject":              1, // the unknown-key gate
+	"placement.go/decisionOf":               1, // the result's own factset digest
+	// The two rows below are the extents a REFUSED decision's artifact
+	// reports in place of the identity it withholds: five fields both
+	// evidence seams echo, and the derivation only the payout seam does.
+	"placement.go/refusedDecisionIdentity":               5,
+	"placement.go/refusedDecisionIdentityWithDerivation": 1,
+	"resolution.go/VerifyResolutionArtifact":             5, // contract, obligations, the digest's shape, the hoisted outcome gate, the outcome arm
 }
 
 // firstGateTableRows is how many rows TestFirstGatesDoNotMaterializeSuppliedText
