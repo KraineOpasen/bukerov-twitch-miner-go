@@ -267,19 +267,29 @@ type EntropyTraceBinding struct {
 
 // P3bCaseResult is the P3b side of one case, for one trajectory.
 type P3bCaseResult struct {
-	Policy             string                                `json:"policy"`
-	FactsetDigest      string                                `json:"factsetDigest"`
-	RulesetID          string                                `json:"rulesetId"`
-	RulesetRawSHA256   string                                `json:"rulesetRawSha256"`
-	NativeConfigDigest string                                `json:"nativeConfigDigest"`
-	Projection         P3bProjection                         `json:"projection"`
-	ProjectionRefusal  string                                `json:"projectionRefusal,omitempty"`
-	Trace              EntropyTraceBinding                   `json:"trace"`
-	Evaluation         predictioneval.OrderedRulesEvaluation `json:"evaluation"`
-	Action             ActionMapping                         `json:"action"`
-	Choice             PolicyChoice                          `json:"choice"`
-	Stake              Int64Fact                             `json:"stake"`
-	witness            string
+	Policy             string `json:"policy"`
+	FactsetDigest      string `json:"factsetDigest"`
+	RulesetID          string `json:"rulesetId"`
+	RulesetRawSHA256   string `json:"rulesetRawSha256"`
+	NativeConfigDigest string `json:"nativeConfigDigest"`
+	// Projection is framed down to SelectionDigest; the Stream body under it
+	// is not, so the digest is what attests the stream and the stream itself
+	// is a convenience copy.
+	Projection        P3bProjection       `json:"projection"`
+	ProjectionRefusal string              `json:"projectionRefusal,omitempty"`
+	Trace             EntropyTraceBinding `json:"trace"`
+	// Evaluation is the native evaluator's own record. Eight of its fields are
+	// framed and seventeen are not -- p3bResultWitness lists them -- and among
+	// the unframed is Evaluation.Selected, a TWIN of the attested Choice below.
+	// A value this package certifies as derived can therefore hold two
+	// disagreeing answers to what P3b chose, only one of them covered.
+	// Decision reads the attested one and never this field.
+	Evaluation predictioneval.OrderedRulesEvaluation `json:"evaluation"`
+	Action     ActionMapping                         `json:"action"`
+	// Choice is the ATTESTED choice; Evaluation.Selected is its unattested twin.
+	Choice  PolicyChoice `json:"choice"`
+	Stake   Int64Fact    `json:"stake"`
+	witness string
 	// framedLen is the width witness was computed over. Producer-only, like
 	// the witness itself: a decoded or hand-built value carries neither.
 	framedLen int

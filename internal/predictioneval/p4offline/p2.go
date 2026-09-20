@@ -26,12 +26,23 @@ type PolicyChoice struct {
 
 // P2CaseResult is the P2 side of one case.
 type P2CaseResult struct {
-	Policy        string                    `json:"policy"`
-	FactsetDigest string                    `json:"factsetDigest"`
-	Binding       P2ConfigBinding           `json:"binding"`
-	Evaluation    predictioneval.Evaluation `json:"evaluation"`
-	Action        ActionMapping             `json:"action"`
-	Choice        PolicyChoice              `json:"choice"`
+	Policy        string          `json:"policy"`
+	FactsetDigest string          `json:"factsetDigest"`
+	Binding       P2ConfigBinding `json:"binding"`
+	// Evaluation is the native evaluator's own record, and it is MOSTLY
+	// UNATTESTED: the witness frames only CommonInputDigest, Action and
+	// ActionReason out of it. It also carries TWINS of two fields that ARE
+	// attested -- Evaluation.Choice beside Choice, and Evaluation.Clamp's
+	// final beside Stake -- so a value this package certifies as derived can
+	// hold two disagreeing answers to what P2 chose, and only the ones below
+	// are covered. Decision reads the attested ones and never this field. An
+	// audit that reads Evaluation.Choice is reading unattested data off a
+	// certified value; read Choice and Stake instead.
+	Evaluation predictioneval.Evaluation `json:"evaluation"`
+	Action     ActionMapping             `json:"action"`
+	// Choice is the ATTESTED choice: the witness frames it. Evaluation.Choice
+	// is its unattested twin.
+	Choice PolicyChoice `json:"choice"`
 	// Stake is the policy's stake: exact zero for a POLICY_SKIP, the
 	// post-clamp final for an attempt, otherwise not a number.
 	Stake   Int64Fact `json:"stake"`
