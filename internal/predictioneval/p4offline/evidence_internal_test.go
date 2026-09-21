@@ -6520,3 +6520,75 @@ func TestEveryClosedVocabularyIsDifferentiatedByItsFraming(t *testing.T) {
 		}
 	}
 }
+
+// THE CLAIM COMPARATOR'S LENGTH CLAUSE WAS HELD BY NOTHING. lpCompare orders
+// two strings the way canonical.str frames them -- the eight-byte length first,
+// the bytes only when the lengths are equal -- and that order is what
+// sortClaimsByKey feeds into registryDigest. Deleting the clause left the WHOLE
+// SUITE GREEN, the registry verifier and the registry golden included, while
+// producing a different registryDigest for the same registry.
+//
+// THE FIXTURE COULD NOT SEE IT, and the reason is the shape this branch keeps
+// finding. Every claim shape it draws either differs in Episode.framedLen -- so
+// compareClaimKeys returns before lpCompare is reached -- or uses one-character
+// values, so every operand pair is equal-length. lpCompare was never called
+// with unequal-length operands at all. A previous round closed the POSITION
+// half of that blind spot by adding the one-character family; this is the
+// LENGTH half it left open.
+//
+// THE ORACLE IS THE FRAMING ITSELF, not a restatement of the comparator: the
+// expected order is a byte comparison of what canonical.str actually writes. A
+// comparator checked against its own arithmetic would agree with any mutant of
+// it. The three Attempt sites sit behind no length-tie constraint, so
+// unequal-length operands reach lpCompare on ordinary input.
+func TestTheClaimComparatorOrdersUnequalLengthsAsTheFramingDoes(t *testing.T) {
+	framed := func(s string) string {
+		var c canonical
+		c.str(s)
+		return string(c.bytes())
+	}
+	sign := func(n int) int {
+		switch {
+		case n < 0:
+			return -1
+		case n > 0:
+			return 1
+		}
+		return 0
+	}
+	disagreements := 0
+	for _, pair := range [][2]string{
+		// Unequal lengths where byte order and FRAMING order disagree: "aa"
+		// sorts before "b" by bytes and after it by framing, because the
+		// framing compares the length first.
+		{"b", "aa"}, {"aa", "b"},
+		{"z", "ab"}, {"ab", "z"},
+		{"9", "10"}, {"10", "9"},
+		{"~", "!!"},
+		// The empty string is a length the framing distinguishes and the byte
+		// loop cannot reach.
+		{"", "a"}, {"a", ""}, {"", ""},
+		// Across the 255/256 boundary, where the length's own rendering grows.
+		{strings.Repeat("a", 255), strings.Repeat("b", 256)},
+		{strings.Repeat("b", 256), strings.Repeat("a", 255)},
+		// Equal lengths, so the byte loop is what decides.
+		{"aa", "ab"}, {"ab", "aa"}, {"aa", "aa"},
+	} {
+		a, b := pair[0], pair[1]
+		want := sign(strings.Compare(framed(a), framed(b)))
+		if got := sign(lpCompare(a, b)); got != want {
+			t.Errorf("lpCompare(%q, %q) = %d, the framing orders them %d: the comparator must "+
+				"reproduce the order registryDigest is computed over", a, b, got, want)
+		}
+		if len(a) != len(b) && sign(strings.Compare(a, b)) != want {
+			disagreements++
+		}
+	}
+	// NON-VACUITY. At least one row must be a pair whose BYTE order differs
+	// from its FRAMING order, or every row above would pass for a comparator
+	// with no length clause at all -- which is exactly the mutant that survived.
+	if disagreements == 0 {
+		t.Fatal("no row distinguishes framing order from byte order; every case above would " +
+			"pass for a comparator that ignored length entirely")
+	}
+}
