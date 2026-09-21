@@ -5459,7 +5459,14 @@ func fieldIndexOf(typ ast.Expr, name string) int {
 //     a reader of the surrounding sentence can catch that. The kinds are named
 //     rather than numbered so that a wrong one is at least legible.
 //   - It does not reach a figure written without commas, as a range, in words,
-//     or in a test file. It is an inventory over ONE written form.
+//     or in a test file. It is an inventory over ONE written form, and about
+//     thirty decimal-magnitude figures in production comments -- "1.67 GB",
+//     "136.34 MB", "about 1.06 MB" -- are outside it, INCLUDING the retracted
+//     sixteenth figure this register itself discusses. A bare 16777374 would
+//     escape too. The trailing word-boundary escape is closed; these are not.
+//   - It does not hold a figure that IS a multiple of eight, so 203,719,320 --
+//     which the register quotes as the admissible member of its own series --
+//     has no file set held here and could go stale at its measurement site.
 //   - It does not check that a quoted figure is a correct MEASUREMENT. Nothing
 //     here re-measures anything; the rule is about admissibility, not accuracy.
 type figKind string
@@ -5480,11 +5487,22 @@ const (
 	// figPlainCount is anything else counted: entries, records, reasons,
 	// rounds, hits, misses, posting lists.
 	figPlainCount figKind = "count"
+	// figRatio is a multiple, not a quantity -- "62,204x the flat gate". The
+	// multiple-of-eight rule is about a byte count and does not reach one.
+	figRatio figKind = "ratio"
 )
 
 // figEntry is what this inventory records about one figure.
 type figEntry struct {
 	kind figKind
+	// basis is true where the figure RECORDS how it was averaged. The rule the
+	// register states has two halves -- a non-multiple of eight is not a single
+	// delta, and one whose averaging basis was never written down cannot be told
+	// from a slip -- and only the second half decides whether a figure is left
+	// standing as unexplained. doc.go says FIFTEEN are in that state; that
+	// number lived in prose alone, so a sixteenth would have passed this test
+	// while the sentence went stale. The split is held below.
+	basis bool
 	// files is every production file whose comments quote the figure, sorted
 	// and comma-joined. THE FILE SET IS HELD, NOT JUST THE FIGURE, and that is
 	// the clause the first draft of this test was missing. Once a figure is
@@ -5501,49 +5519,71 @@ type figEntry struct {
 // figures AND their homes are held exactly: an addition, a removal and a move
 // all fail.
 var figureInventory = map[int]figEntry{
-	1_001:       {figPlainCount, "evidence.go"},       // entries counted against a ceiling
-	1_030:       {figOutputSize, "doc.go,factset.go"}, // a serialized factset carrying a +Inf
-	1_900:       {figAllocCount, "evidence.go"},
-	4_097:       {figPlainCount, "resolution.go"}, // reasons
-	4_782:       {figPlainCount, "doc.go"},        // observation-id posting lists
-	11_930:      {figAllocCount, "evidence.go"},
-	12_298:      {figPlainCount, "doc.go"},      // answers with content
-	17_883:      {figPlainCount, "evidence.go"}, // accessor misses
-	65_671:      {figInputSize, "p3b.go"},       // a ruleset document
-	65_675:      {figOutputSize, "p3b.go"},      // the refusal it produced
-	95_939:      {figAllocCount, "evidence.go"},
-	147_671:     {figAllocBytes, "doc.go"},
-	200_001:     {figPlainCount, "evidence.go"},               // records
-	297_913:     {figInputSize, "resolution.go"},              // reasons, in bytes
-	840_098:     {figOutputSize, "evidence.go,resolution.go"}, // a refusal naming a foreign-session dataset
-	999_975:     {figAllocCount, "factset.go"},
-	1_055_076:   {figAllocBytes, "doc.go"},
-	1_057_073:   {figAllocBytes, "doc.go"},
-	1_999_875:   {figAllocCount, "factset.go"},
-	2_113_586:   {figAllocBytes, "doc.go"},
-	2_113_748:   {figAllocBytes, "doc.go,p3b.go"},
-	2_113_763:   {figAllocBytes, "doc.go"},
-	3_183_766:   {figAllocBytes, "doc.go"},
-	4_240_782:   {figAllocBytes, "doc.go"},
-	5_588_220:   {figPlainCount, "evidence.go"}, // guard hits over the whole suite
-	6_889_790:   {figAllocBytes, "doc.go"},
-	9_120_039:   {figInputSize, "p3b.go"}, // a document that overflows the stack
-	10_485_107:  {figAllocBytes, "doc.go,p3b.go"},
-	13_436_051:  {figAllocBytes, "canonical.go,doc.go,resolution.go"},
-	16_777_374:  {figOutputSize, "canonical.go,p3b.go"}, // an error naming a 16 MiB key
-	16_885_191:  {figAllocBytes, "canonical.go,doc.go,factset.go"},
-	18_301_246:  {figAllocBytes, "doc.go"},
-	18_301_274:  {figAllocBytes, "doc.go"},
-	24_641_243:  {figAllocBytes, "doc.go,evidence.go"},
-	41_942_377:  {figAllocBytes, "doc.go,p3b.go"},
-	50_923_867:  {figAllocBytes, "doc.go,evidence.go"},
-	101_334_414: {figAllocBytes, "doc.go,evidence.go"},
-	167_771_494: {figAllocBytes, "canonical.go,doc.go,p3b.go"},
-	805_306_353: {figInputSize, "p3b.go"}, // a legal document written entirely as escapes
+	1_001:       {figPlainCount, false, "evidence.go"},       // entries counted against a ceiling
+	1_030:       {figOutputSize, false, "doc.go,factset.go"}, // a serialized factset carrying a +Inf
+	1_900:       {figAllocCount, false, "evidence.go"},
+	4_097:       {figPlainCount, false, "resolution.go"}, // reasons
+	4_782:       {figPlainCount, false, "doc.go"},        // observation-id posting lists
+	11_930:      {figAllocCount, false, "evidence.go"},
+	12_298:      {figPlainCount, false, "doc.go"},      // answers with content
+	17_883:      {figPlainCount, false, "evidence.go"}, // accessor misses
+	65_671:      {figInputSize, false, "p3b.go"},       // a ruleset document
+	65_675:      {figOutputSize, false, "p3b.go"},      // the refusal it produced
+	95_939:      {figAllocCount, false, "evidence.go"},
+	62_204:      {figRatio, false, "doc.go,resolution.go"}, // an amplification multiple
+	147_671:     {figAllocBytes, false, "doc.go"},
+	111_087:     {figRatio, false, "doc.go,factset.go"},              // an amplification multiple
+	200_001:     {figPlainCount, false, "evidence.go"},               // records
+	297_913:     {figInputSize, false, "resolution.go"},              // reasons, in bytes
+	840_098:     {figOutputSize, false, "evidence.go,resolution.go"}, // a refusal naming a foreign-session dataset
+	999_975:     {figAllocCount, false, "factset.go"},
+	1_055_076:   {figAllocBytes, true, "doc.go"},
+	1_057_073:   {figAllocBytes, false, "doc.go"},
+	1_999_875:   {figAllocCount, false, "factset.go"},
+	2_113_586:   {figAllocBytes, true, "doc.go"},
+	2_113_748:   {figAllocBytes, false, "doc.go,p3b.go"},
+	2_113_763:   {figAllocBytes, false, "doc.go"},
+	3_183_766:   {figAllocBytes, true, "doc.go"},
+	4_240_782:   {figAllocBytes, true, "doc.go"},
+	5_588_220:   {figPlainCount, false, "evidence.go"}, // guard hits over the whole suite
+	6_889_790:   {figAllocBytes, false, "doc.go"},
+	9_120_039:   {figInputSize, false, "p3b.go"}, // a document that overflows the stack
+	10_485_107:  {figAllocBytes, false, "doc.go,p3b.go"},
+	13_436_051:  {figAllocBytes, false, "canonical.go,doc.go,resolution.go"},
+	16_777_374:  {figOutputSize, false, "canonical.go,p3b.go"}, // an error naming a 16 MiB key
+	16_885_191:  {figAllocBytes, false, "canonical.go,doc.go,factset.go"},
+	18_301_246:  {figAllocBytes, false, "doc.go"},
+	18_301_274:  {figAllocBytes, false, "doc.go"},
+	24_641_243:  {figAllocBytes, false, "doc.go,evidence.go"},
+	41_942_377:  {figAllocBytes, false, "doc.go,p3b.go"},
+	50_923_867:  {figAllocBytes, false, "doc.go,evidence.go"},
+	101_334_414: {figAllocBytes, false, "doc.go,evidence.go"},
+	167_771_494: {figAllocBytes, false, "canonical.go,doc.go,p3b.go"},
+	805_306_353: {figInputSize, false, "p3b.go"}, // a legal document written entirely as escapes
 }
 
 // commaGroupedFigure matches the ONE written form this inventory covers.
-var commaGroupedFigure = regexp.MustCompile(`\b\d{1,3}(?:,\d{3})+\b`)
+//
+// THERE ARE NO WORD BOUNDARIES, and a draft that had them is why this comment
+// exists. A trailing `\b` drops any figure ABUTTING a word character, so
+// "62,204x" in resolution.go and "111,087x" in factset.go were invisible to a
+// scan whose own sentence said it read every one; both happen to be ratios, so
+// nothing was hidden -- but "16,885,191B/op" would have been, and that is an
+// allocation figure the rule reaches. A leading `\b` has the mirror hole.
+// What a boundary was there to do -- stop the TAIL of a longer number matching
+// -- is done exactly by figureStartsHere instead, which RE2 cannot express as a
+// lookbehind.
+var commaGroupedFigure = regexp.MustCompile(`[0-9]{1,3}(?:,[0-9]{3})+`)
+
+// figureStartsHere reports whether a match begins a figure rather than
+// continuing one: the byte before it must not be a digit or a comma.
+func figureStartsHere(text string, at int) bool {
+	if at == 0 {
+		return true
+	}
+	c := text[at-1]
+	return c != ',' && (c < '0' || c > '9')
+}
 
 func TestTheFigureRegisterNamesEveryFigureItMustName(t *testing.T) {
 	entries, err := os.ReadDir(".")
@@ -5568,8 +5608,11 @@ func TestTheFigureRegisterNamesEveryFigureItMustName(t *testing.T) {
 		scanned++
 		for _, g := range f.Comments {
 			for _, cm := range g.List {
-				for _, m := range commaGroupedFigure.FindAllString(cm.Text, -1) {
-					n, err := strconv.Atoi(strings.ReplaceAll(m, ",", ""))
+				for _, loc := range commaGroupedFigure.FindAllStringIndex(cm.Text, -1) {
+					if !figureStartsHere(cm.Text, loc[0]) {
+						continue
+					}
+					n, err := strconv.Atoi(strings.ReplaceAll(cm.Text[loc[0]:loc[1]], ",", ""))
 					if err != nil || n%8 == 0 {
 						continue
 					}
@@ -5614,9 +5657,13 @@ func TestTheFigureRegisterNamesEveryFigureItMustName(t *testing.T) {
 	// THE CLAUSE THE EIGHT FAILED. doc.go states the rule; a figure the rule
 	// reaches that doc.go does not quote is a figure the register cannot have
 	// argued about.
+	unexplained := 0
 	for n, entry := range figureInventory {
 		if entry.kind != figAllocBytes {
 			continue
+		}
+		if !entry.basis {
+			unexplained++
 		}
 		if !inDoc[n] {
 			t.Errorf("%s is an allocation figure that is not a multiple of eight and doc.go does not quote it "+
@@ -5624,7 +5671,24 @@ func TestTheFigureRegisterNamesEveryFigureItMustName(t *testing.T) {
 				withCommas(n), strings.Join(sites[n], ", "))
 		}
 	}
+	// AND THE SPLIT THE REGISTER'S SENTENCE TURNS ON. doc.go says FIFTEEN
+	// figures are in that state -- an allocation in bytes, not a multiple of
+	// eight, and with no averaging basis recorded. That number was prose and
+	// nothing held it: a sixteenth such figure quoted in doc.go would have
+	// satisfied every clause above while the sentence quietly went stale, which
+	// is the same defect this whole test exists for, one level up.
+	if unexplained != figuresWithoutARecordedBasis {
+		t.Errorf("%d allocation figures are not multiples of eight and record no averaging basis, "+
+			"want %d: doc.go's register states that number in words, so move them together",
+			unexplained, figuresWithoutARecordedBasis)
+	}
 }
+
+// figuresWithoutARecordedBasis is how many allocation figures the register
+// leaves standing as unexplained. IT IS A PIN AND NOT A TARGET: it moves when a
+// figure is added, retracted, or given a basis, and doc.go's sentence moves with
+// it.
+const figuresWithoutARecordedBasis = 15
 
 // joinFiles renders the distinct files a figure was found in, sorted, in the
 // form figureInventory records.
@@ -5660,23 +5724,28 @@ func withCommas(n int) string {
 // nothing checked it. canonical.go, doc.go and this file each say the widest
 // witness framing makes thirty-one direct part calls and three helper calls,
 // and doc.go said "an AST census confirms" it. No census existed: the figure
-// was hand-maintained in three places, which is precisely the "second place a
+// was hand-maintained in three files, which is precisely the "second place a
 // future field can be forgotten" the sentence is warning about. The previous
 // wording ("a thirty-five-field framing") was wrong and claimed nothing; the
 // correction was right and claimed a machine. This is the machine.
 //
-// WHAT IT COUNTS. Within every `func frame…(c *canonical, …)` in production: a
-// DIRECT part call is a call on the canonical parameter itself, and a HELPER
-// call is a call to another function handed that same parameter. The
-// conversions inside a part call -- `c.i64(int64(x))`, `c.str(string(x))` --
-// are neither, because the canonical value is not among their arguments.
+// AND ITS SCOPE IS MACHINE-STATED, NOT PROSE-STATED. A first draft counted only
+// top-level funcs named frame..., which is the witness framings -- and "the
+// widest of THESE framings" then rests on a reader knowing which set "these"
+// is. SerializeCommonFactset is wider and the draft could not see it, so the
+// sentence was true and unfalsifiable at once. Both sets are counted now and
+// both maxima are pinned, so the claim names the set it is about.
 //
-// WHAT IT DOES NOT DO. It does not say the widest framing frames every field
-// of its type: that is TestAWitnessTypeCannotGrowAFieldQuietly's job, and the
-// two are independent on purpose. It does not reach SerializeCommonFactset,
-// which is not a `frame…` function and has no length-only width at all -- the
-// figure that sentence once carried, thirty-five, is that function's and not
-// this one's, which is how the error got in.
+// WHAT IT COUNTS. In every function that holds a canonical value -- as a
+// *canonical parameter or as its own local -- a DIRECT part call is a call on
+// that value, and a HELPER call is a call to another function handed it. The
+// conversions inside a part call, c.i64(int64(x)) and c.str(string(x)), are
+// neither: the canonical value is not among their arguments. A loop body counts
+// once, which is why these are call-site counts and not field counts.
+//
+// WHAT IT DOES NOT DO. It does not say a framing frames every field of its
+// type: that is TestAWitnessTypeCannotGrowAFieldQuietly's job, and the two are
+// independent on purpose.
 func TestTheWidestFramingIsTheShapeTheRegisterStates(t *testing.T) {
 	entries, err := os.ReadDir(".")
 	if err != nil {
@@ -5699,15 +5768,21 @@ func TestTheWidestFramingIsTheShapeTheRegisterStates(t *testing.T) {
 		}
 		for _, d := range f.Decls {
 			fd, ok := d.(*ast.FuncDecl)
-			if !ok || fd.Recv != nil || fd.Body == nil || !strings.HasPrefix(fd.Name.Name, "frame") {
+			if !ok || fd.Body == nil {
 				continue
 			}
-			recv := canonicalParamOf(fd)
+			// THE PRIMITIVES THEMSELVES ARE NOT FRAMINGS. A method ON
+			// *canonical -- str, i64, count -- writes parts by definition and
+			// would otherwise dominate the maximum with its own internals.
+			if fd.Recv != nil {
+				continue
+			}
+			recv := canonicalHolderOf(fd)
 			if recv == "" {
 				continue
 			}
-			var s shape
-			s.where = fmt.Sprintf("%s:%d", name, fset.Position(fd.Pos()).Line)
+			var sh shape
+			sh.where = fmt.Sprintf("%s:%d", name, fset.Position(fd.Pos()).Line)
 			ast.Inspect(fd.Body, func(n ast.Node) bool {
 				call, ok := n.(*ast.CallExpr)
 				if !ok {
@@ -5715,77 +5790,157 @@ func TestTheWidestFramingIsTheShapeTheRegisterStates(t *testing.T) {
 				}
 				switch fun := call.Fun.(type) {
 				case *ast.SelectorExpr:
-					if id, ok := fun.X.(*ast.Ident); ok && id.Name == recv {
-						s.direct++
+					// A READER IS NOT A PART WRITE. bytes, digest, framedLen and
+					// grow are calls ON the canonical that write no part, and
+					// counting them inflated SerializeCommonFactset by its own
+					// `return c.bytes()` -- 36 where doc.go says 35. The widest
+					// witness framing happens to call none of them, so the
+					// inflation was invisible where it was checked and real
+					// where it was not.
+					if id, ok := fun.X.(*ast.Ident); ok && id.Name == recv &&
+						!canonicalReaders[fun.Sel.Name] {
+						sh.direct++
 					}
 				case *ast.Ident:
 					for _, a := range call.Args {
-						if id, ok := a.(*ast.Ident); ok && id.Name == recv {
-							s.helper++
-							break
+						switch x := a.(type) {
+						case *ast.Ident:
+							if x.Name == recv {
+								sh.helper++
+							}
+						case *ast.UnaryExpr:
+							if id, ok := x.X.(*ast.Ident); ok && x.Op == token.AND && id.Name == recv {
+								sh.helper++
+							}
 						}
 					}
 				}
 				return true
 			})
-			shapes[fd.Name.Name] = s
+			shapes[fd.Name.Name] = sh
 		}
 	}
-	// THE WALK MUST HAVE REACHED THE FRAMINGS, or every answer below is
-	// vacuously true.
-	if len(shapes) < 7 {
-		t.Fatalf("found only %d frame… functions taking a *canonical; the walk is not reaching them", len(shapes))
+	// THE WALK MUST HAVE REACHED THEM, or every answer below is vacuously true.
+	if len(shapes) < 10 {
+		t.Fatalf("found only %d functions holding a canonical; the walk is not reaching them", len(shapes))
 	}
-	// NAMES ARE SORTED BEFORE THE MAXIMUM IS TAKEN, so a tie resolves the same
+	// NAMES ARE SORTED BEFORE EACH MAXIMUM IS TAKEN, so a tie resolves the same
 	// way on every run rather than however the map happened to iterate.
 	names := make([]string, 0, len(shapes))
 	for name := range shapes {
 		names = append(names, name)
 	}
 	sort.Strings(names)
-	var widest string
-	for _, name := range names {
-		s := shapes[name]
-		if widest == "" || s.direct+s.helper > shapes[widest].direct+shapes[widest].helper {
-			widest = name
+	widest := func(only func(string) bool) (string, shape) {
+		best := ""
+		for _, name := range names {
+			if !only(name) {
+				continue
+			}
+			if best == "" || shapes[name].direct+shapes[name].helper > shapes[best].direct+shapes[best].helper {
+				best = name
+			}
 		}
+		return best, shapes[best]
 	}
-	got := shapes[widest]
-	const wantDirect, wantHelper = 31, 3
-	const wantName = "frameP3bResult"
-	if widest != wantName || got.direct != wantDirect || got.helper != wantHelper {
-		var all []string
-		for name, s := range shapes {
-			all = append(all, fmt.Sprintf("%s=%d+%d", name, s.direct, s.helper))
+	all := func() string {
+		var out []string
+		for _, name := range names {
+			out = append(out, fmt.Sprintf("%s=%d+%d", name, shapes[name].direct, shapes[name].helper))
 		}
-		sort.Strings(all)
-		t.Fatalf("the widest framing is %s at %s with %d direct part calls and %d helper calls; "+
-			"canonical.go, doc.go and this file state %s at %d and %d. All framings: %s",
-			widest, got.where, got.direct, got.helper, wantName, wantDirect, wantHelper, strings.Join(all, " "))
+		return strings.Join(out, " ")
+	}
+	isWitnessFraming := func(name string) bool { return strings.HasPrefix(name, "frame") }
+
+	// THE CLAIM THE THREE FILES MAKE, about the witness framings.
+	name, got := widest(isWitnessFraming)
+	if name != widestWitnessFraming || got.direct != widestWitnessDirect || got.helper != widestWitnessHelper {
+		t.Errorf("the widest WITNESS framing is %s at %s with %d direct part calls and %d helper calls; "+
+			"canonical.go, doc.go and this file state %s at %d and %d. All: %s",
+			name, got.where, got.direct, got.helper,
+			widestWitnessFraming, widestWitnessDirect, widestWitnessHelper, all())
+	}
+	// AND THE SET THE CLAIM IS NOT ABOUT, pinned so "these framings" cannot
+	// quietly come to mean all of them. doc.go says thirty-five matches only
+	// SerializeCommonFactset, which has no length-only width at all; that is a
+	// statement about this number.
+	name, got = widest(func(string) bool { return true })
+	if name != widestFramingOverall || got.direct != widestOverallDirect || got.helper != widestOverallHelper {
+		t.Errorf("the widest framing of ANY kind is %s at %s with %d direct part calls and %d helper calls; "+
+			"this file states %s at %d and %d. All: %s",
+			name, got.where, got.direct, got.helper,
+			widestFramingOverall, widestOverallDirect, widestOverallHelper, all())
+	}
+	if isWitnessFraming(widestFramingOverall) {
+		t.Errorf("%s is pinned as the widest framing overall and is also a witness framing; "+
+			"the two pins exist because the sets differ", widestFramingOverall)
 	}
 }
 
-// canonicalParamOf returns the name the function gives its *canonical
-// parameter, or "" if it takes none. The name is read rather than assumed:
-// a framing that spells it anything other than `c` is still a framing.
-func canonicalParamOf(fd *ast.FuncDecl) string {
-	if fd.Type.Params == nil {
-		return ""
+// canonicalReaders are the methods on a canonical that write no part, so a
+// call to one is not a part call however it is spelled.
+var canonicalReaders = map[string]bool{
+	"bytes": true, "digest": true, "framedLen": true, "grow": true,
+}
+
+// The two maxima, pinned. RAISE THEM WITH THE CODE, and treat either moving on
+// its own as the finding it is: the witness pair is quoted in canonical.go and
+// doc.go, and the overall pair is what keeps "the widest of these framings"
+// from being read as a claim about the package.
+const (
+	widestWitnessFraming = "frameP3bResult"
+	widestWitnessDirect  = 31
+	widestWitnessHelper  = 3
+
+	widestFramingOverall = "SerializeCommonFactset"
+	widestOverallDirect  = 35
+	widestOverallHelper  = 3
+)
+
+// canonicalHolderOf returns the name a function gives the canonical value it
+// writes through -- a *canonical parameter, or a local declared as `var c
+// canonical` or `c := canonical{...}`. A framing that builds its own buffer is
+// still a framing, and the first draft of this census, which looked only at
+// parameters, could not see the widest one in the package.
+func canonicalHolderOf(fd *ast.FuncDecl) string {
+	if fd.Type.Params != nil {
+		for _, p := range fd.Type.Params.List {
+			star, ok := p.Type.(*ast.StarExpr)
+			if !ok {
+				continue
+			}
+			if id, ok := star.X.(*ast.Ident); ok && id.Name == "canonical" && len(p.Names) == 1 {
+				return p.Names[0].Name
+			}
+		}
 	}
-	for _, p := range fd.Type.Params.List {
-		star, ok := p.Type.(*ast.StarExpr)
-		if !ok {
-			continue
+	found := ""
+	ast.Inspect(fd.Body, func(n ast.Node) bool {
+		if found != "" {
+			return false
 		}
-		id, ok := star.X.(*ast.Ident)
-		if !ok || id.Name != "canonical" {
-			continue
+		switch x := n.(type) {
+		case *ast.ValueSpec:
+			if id, ok := x.Type.(*ast.Ident); ok && id.Name == "canonical" && len(x.Names) == 1 {
+				found = x.Names[0].Name
+			}
+		case *ast.AssignStmt:
+			if len(x.Lhs) != 1 || len(x.Rhs) != 1 {
+				return true
+			}
+			lit, ok := x.Rhs[0].(*ast.CompositeLit)
+			if !ok {
+				return true
+			}
+			if id, ok := lit.Type.(*ast.Ident); ok && id.Name == "canonical" {
+				if nm, ok := x.Lhs[0].(*ast.Ident); ok {
+					found = nm.Name
+				}
+			}
 		}
-		if len(p.Names) == 1 {
-			return p.Names[0].Name
-		}
-	}
-	return ""
+		return true
+	})
+	return found
 }
 
 // SIGNED ZERO AND A NaN PAYLOAD ARE WHERE THE BIT RENDERING EARNS ITS KEEP,

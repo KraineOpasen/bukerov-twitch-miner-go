@@ -186,8 +186,11 @@ func (r VerifiedP3bRuleset) ConfigCopy() (predictioneval.OrderedRulesConfig, err
 // was recorded with it, so nothing can say whether it was a reading or a slip.
 // doc.go's register names the fifteen figures that are in that state and are
 // left standing; this one is not among them, because it was retracted rather
-// than left standing, and TestTheFigureRegisterNamesEveryFigureItMustName holds
-// that list to the tree rather than to a sentence. Closing
+// than left standing. TestTheFigureRegisterNamesEveryFigureItMustName holds
+// that list to the tree rather than to a sentence -- the figures, the files
+// each is quoted in, and the count of fifteen itself. What it does NOT reach is
+// this figure, which is written as a magnitude and not as a comma-grouped
+// integer: the retraction is prose, and only a reader enforces it. Closing
 // that did NOT require sealing the identity fields, and they stay exported
 // because a result carries them.
 //

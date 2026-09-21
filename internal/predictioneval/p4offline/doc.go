@@ -764,12 +764,29 @@
 //     scans every comma-grouped integer in every production comment, keeps the
 //     ones that are not multiples of eight, requires each to be classified as
 //     an allocation in bytes, an allocation count, an input size, an output
-//     size or a plain count, and requires every figure of the FIRST kind to be
-//     quoted here. It fails on an addition and on a removal alike, so this
-//     paragraph cannot fall behind the tree again. What it cannot check is
-//     whether a classification is HONEST -- calling an allocation figure a
-//     count moves it out of this register's reach, and only a reader of the
-//     sentence around it will catch that.
+//     size, a ratio or a plain count, and requires every figure of the FIRST
+//     kind to be quoted here. It holds the FILE SET per figure, not just the
+//     figure, so a figure edited at its measurement site and left standing in
+//     this register fails rather than going quietly stale. It holds the split
+//     this paragraph turns on too: FIFTEEN is a pinned count of the allocation
+//     figures that record no averaging basis, so a sixteenth moves the number
+//     and the sentence together. It fails on an addition and on a removal
+//     alike.
+//     AND "EVERY COMMA-GROUPED INTEGER" IS EXACT, which took a correction: a
+//     first scan anchored the pattern on word boundaries, which silently
+//     dropped "62,204x" and "111,087x" -- figures abutting a letter -- from a
+//     scan whose own sentence said it read every one. Both were ratios, so
+//     nothing was hidden; "16,885,191B/op" would have been. The boundaries are
+//     gone and a match is required to START a figure instead.
+//     WHAT IT STILL CANNOT DO, listed rather than implied. It cannot check
+//     that a classification is HONEST -- calling an allocation figure a count
+//     moves it out of this register's reach, and only a reader of the sentence
+//     around it will catch that. It reaches ONE WRITTEN FORM, so roughly thirty
+//     decimal-magnitude figures in production comments are outside it --
+//     including "about 1.06 MB", the retracted sixteenth figure this register
+//     itself discusses. And it holds no figure that IS a multiple of eight, so
+//     203,719,320, quoted above as the admissible member of its own series, has
+//     no file set held anywhere.
 //     The ratios hold because three independent measurements
 //     agreed on them to two decimals and they do not depend on the machine.
 //     WHERE THE COST IS, PER STAGE at 512 KiB: sha256Hex is 128 B and FLAT at
@@ -1235,9 +1252,18 @@
 //     the one direction that means "no growth". Both fixed, and the helper that
 //     replaces them says why in its own comment.
 //     THE RULESET SEAM COST 1.0073x the caller's edit before its width existed
-//     -- a one-byte edit against a 1 MiB one, and the one figure in this record
-//     that is a RATIO rather than a byte count, so the multiple-of-eight rule
-//     above does not reach it -- and 0 B/op at both widths after.
+//     -- a one-byte edit against a 1 MiB one -- and 0 B/op at both widths
+//     after. NEITHER FIGURE IS SUBJECT TO THE MULTIPLE-OF-EIGHT RULE, for two
+//     different reasons: the first is a RATIO and not a byte count, and zero is
+//     a multiple of everything.
+//     BOTH OF THIS SENTENCE'S PREVIOUS WORDINGS CLAIMED A UNIQUENESS THEY DID
+//     NOT HAVE, and the second was written to correct the first. It said 0 B/op
+//     was "the one figure here that is not a multiple of anything"; its
+//     replacement said 1.0073x was "the one figure in this record that is a
+//     RATIO". This record also quotes 1.007x, 1.008x, 2.01x and this same
+//     1.0073x again. A correction that repeats the shape of the error it
+//     corrects is the failure this branch keeps finding, and neither figure
+//     needed a uniqueness claim to be admissible in the first place.
 //     Closing it did NOT require sealing the identity fields: the width is
 //     recorded at the mint and compared first, with RulesetID, RawSHA256 and
 //     NativeConfigDigest left exported.
