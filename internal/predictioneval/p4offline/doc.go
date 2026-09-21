@@ -1154,9 +1154,11 @@
 //     IS the hash's job.
 //     THE WIDTH CANNOT DRIFT FROM THE WITNESS because it is not a mirror: the
 //     canonical framer has a LENGTH-ONLY mode and the width is the same framing
-//     function run with bytes switched off. A hand-written mirror of a
-//     thirty-five-field framing is a second place a future field can be
-//     forgotten, and this package has already paid for one of those.
+//     function run with bytes switched off. A hand-written mirror of the widest
+//     of these framings -- thirty-one direct part calls and three helper calls,
+//     the figure canonical.go states and an AST census confirms -- is a second
+//     place a future field can be forgotten, and this package has already paid
+//     for one of those.
 //     TestTheRecordedFramedWidthIsTheWitnessOwn drives both modes over 400
 //     randomized results at both types and over strHexOf, which no result
 //     framing exercises. MEASURED AFTER: 4,048 B/op at one byte and 4,048 at

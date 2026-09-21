@@ -180,7 +180,11 @@ func (r VerifiedP3bRuleset) ConfigCopy() (predictioneval.OrderedRulesConfig, err
 // AN EDITED HANDLE NO LONGER PAYS IT. Widening an identity after verification
 // changes the framed width, which the preflight above compares first, so the
 // edit is refused without being framed: measured 856 B/op at a one-byte edit
-// and 1,057,053 at 1 MiB before the width existed, 0 at both after. Closing
+// and about 1.06 MB at 1 MiB before the width existed, 0 at both after. The
+// second figure is quoted as a magnitude because the exact number recorded for
+// it on the published head is not a multiple of eight and no averaging basis
+// was recorded with it, so nothing can say whether it was a reading or a slip;
+// doc.go names the other figures in that state. Closing
 // that did NOT require sealing the identity fields, and they stay exported
 // because a result carries them.
 //
