@@ -4596,8 +4596,13 @@ func TestTheWidthAndPartsOraclesCannotBeSpelledFromTheFramer(t *testing.T) {
 		}
 	}
 
-	// EXACTLY ONE framingWidthFault MAY EXIST. Zero means the pin below resolves
-	// nothing; two means the one it resolves is not the one checkWidth calls.
+	// EXACTLY ONE framingWidthFault MAY EXIST -- and ZERO is the reachable half.
+	// A previous wording here said "two leave it resolving the wrong one"; two
+	// plain functions of one name in one package DO NOT COMPILE, so that arm
+	// cannot fire in any package that builds. It is kept because the check is
+	// one comparison and an unreachable arm costs nothing, but the defence it
+	// provides is against zero: converting the sole FuncDecl to a var, or an
+	// alias, removes it and this fires.
 	widthFaultDecls := 0
 	widths := 0
 	for _, f := range files {
@@ -4611,11 +4616,18 @@ func TestTheWidthAndPartsOraclesCannotBeSpelledFromTheFramer(t *testing.T) {
 			topLevelFunc := false
 			switch x := n.(type) {
 			case *ast.FuncDecl:
+				// A METHOD IS A FuncDecl TOO, and it cannot shadow anything: a
+				// bare call never resolves to one. Counting it inflated the tally
+				// and failed a package that was fine, and skipping it entirely is
+				// correct rather than merely convenient -- there is nothing for
+				// this clause to say about a method namesake.
+				if x.Recv != nil {
+					return true
+				}
 				declared = append(declared, x.Name)
-				// A FuncDecl IS top level in Go -- a nested function is a
-				// FuncLit, not a declaration -- so this is the genuine helper
-				// and every OTHER declaring position for the same name is a
-				// shadow of it.
+				// A PLAIN FuncDecl IS TOP LEVEL in Go -- a nested function is a
+				// FuncLit, not a declaration -- so this is the genuine helper and
+				// every OTHER declaring position for the same name shadows it.
 				topLevelFunc = true
 			case *ast.ValueSpec:
 				declared = append(declared, x.Names...)
@@ -4656,9 +4668,10 @@ func TestTheWidthAndPartsOraclesCannotBeSpelledFromTheFramer(t *testing.T) {
 						widthFaultDecls++
 						continue
 					}
-					t.Errorf("framingWidthFault at %s is SHADOWED: the width pin resolves it by NAME, so "+
-						"a shadowing declaration makes the comparison return nothing and a width helper "+
-						"that disagrees with its own framing ships green",
+					t.Errorf("framingWidthFault at %s is declared somewhere other than as a plain function: "+
+						"the width pin resolves it by NAME, so any such declaration -- whether it shadows "+
+						"the real one or replaces it -- can make the comparison return nothing while a "+
+						"width helper that disagrees with its own framing ships green",
 						fset.Position(id.Pos()))
 				}
 			}
@@ -4882,8 +4895,9 @@ func TestTheWidthAndPartsOraclesCannotBeSpelledFromTheFramer(t *testing.T) {
 		})
 	}
 	if widthFaultDecls != 1 {
-		t.Errorf("framingWidthFault is declared %d times as a function, want 1: the width pin resolves "+
-			"it by name, so zero leaves the pin resolving nothing and two leave it resolving the wrong one",
+		t.Errorf("framingWidthFault is declared %d times as a plain function, want 1: the width pin "+
+			"resolves it by name, so zero leaves the pin resolving nothing. Two cannot compile, which "+
+			"is why zero is the case this guards",
 			widthFaultDecls)
 	}
 	if compares != 1 {
@@ -6040,14 +6054,25 @@ func TestTheWidestFramingIsTheShapeTheRegisterStates(t *testing.T) {
 	if ow == "" || ohw == "" {
 		t.Fatalf("no spelling for %d or %d", widestOverallDirect, widestOverallHelper)
 	}
+	// THE OVERALL SENTENCE NAMES ITS SUBJECT, and the witness one does not need
+	// to. Both phrases were once "<spelling> direct part calls and three helper
+	// calls", naming nothing -- so if the two maxima's direct counts ever
+	// coincided, the overall clause would be satisfied by the WITNESS sentence
+	// and neither would be held. What kept the sets apart was the separate name
+	// assertion below, not this clause, while the paragraph it guards claimed
+	// this clause did it.
 	phrase := dw + " direct part calls and " + hw + " helper calls"
-	overall := ow + " direct part calls and " + ohw + " helper calls"
-	if !strings.Contains(mustRead(t, "doc.go"), overall) {
+	overall := widestFramingOverall + " makes " + ow + " direct part calls and " + ohw + " helper calls"
+	if strings.Contains(phrase, overall) || strings.Contains(overall, phrase) {
+		t.Fatalf("the two pinned sentences are not distinguishable (%q vs %q): one could satisfy "+
+			"the other's clause", phrase, overall)
+	}
+	if !saysInOneParagraph(t, "doc.go", overall) {
 		t.Errorf("doc.go does not contain %q: the overall maximum is pinned as a constant here and "+
 			"the sentence that names it must move with it", overall)
 	}
 	for _, name := range []string{"canonical.go", "doc.go"} {
-		if !strings.Contains(mustRead(t, name), phrase) {
+		if !saysInOneParagraph(t, name, phrase) {
 			t.Errorf("%s does not contain %q: the census pins the numbers and this clause pins the "+
 				"sentences that quote them, because a figure held in one place and written in two "+
 				"is a figure that drifts", name, phrase)
@@ -6078,19 +6103,63 @@ func constantEmptySlice(sl *ast.SliceExpr) bool {
 	return loOK && hiOK && lo.Kind == token.INT && hi.Kind == token.INT && lo.Value == hi.Value
 }
 
-// mustRead reads a production file the prose clauses hold and FLATTENS it:
-// comment markers and every run of whitespace collapse to one space. A pinned
-// sentence must be held wherever gofmt decides to wrap it, and a check that
-// required the phrase on one line would fail for a reason that has nothing to
-// do with the figure it is guarding.
-func mustRead(t *testing.T, name string) string {
+// flatParagraphs returns each PARAGRAPH of a production file's comments
+// flattened to one line: runs of whitespace collapse to single spaces, so a
+// pinned sentence is held wherever its AUTHOR wrapped it and cannot be matched
+// line by line.
+//
+// NOT "WHEREVER gofmt WRAPS IT", which is what a previous justification said.
+// gofmt does not wrap comment prose at all -- a 194-character line in this
+// file's own comment shape survives it byte-identical -- so that sentence
+// asserted a mechanism that does not exist. The wrapping this defends against
+// is hand-wrapping, which is real and is why the flattening stays.
+//
+// PER PARAGRAPH, NOT PER FILE, and that distinction is the whole of this helper.
+// A first version flattened the WHOLE FILE, so a pinned sentence could be
+// assembled across a paragraph boundary out of two unrelated clauses while the
+// real claim was gone, and the clause still passed. A lane demonstrated it on
+// both pinned sentences, including the one that predates this helper.
+//
+// AND A COMMENT GROUP IS NOT A PARAGRAPH, which the second version got wrong.
+// go/ast splits a group on a line that is not a comment at all; an EMPTY `//`
+// line -- which is how every paragraph break in this package is written -- stays
+// inside the group, and g.Text() hands it back as a blank line in the middle.
+// So grouping alone rejoined exactly the boundary it was meant to respect, and
+// the defeat still passed. The blank lines are what separate paragraphs, so they
+// are what this splits on.
+func flatParagraphs(t *testing.T, name string) []string {
 	t.Helper()
-	b, err := os.ReadFile(name)
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, name, nil, parser.ParseComments|parser.SkipObjectResolution)
 	if err != nil {
-		t.Fatalf("read %s: %v", name, err)
+		t.Fatalf("parse %s: %v", name, err)
 	}
-	flat := strings.ReplaceAll(string(b), "//", " ")
-	return strings.Join(strings.Fields(flat), " ")
+	if len(f.Comments) == 0 {
+		t.Fatalf("%s has no comments; every clause reading it would be vacuous", name)
+	}
+	var out []string
+	for _, g := range f.Comments {
+		for _, para := range strings.Split(g.Text(), "\n\n") {
+			if flat := strings.Join(strings.Fields(para), " "); flat != "" {
+				out = append(out, flat)
+			}
+		}
+	}
+	if len(out) == 0 {
+		t.Fatalf("%s flattened to no paragraphs; every clause reading it would be vacuous", name)
+	}
+	return out
+}
+
+// saysInOneParagraph reports whether any single paragraph carries the sentence.
+func saysInOneParagraph(t *testing.T, name, phrase string) bool {
+	t.Helper()
+	for _, para := range flatParagraphs(t, name) {
+		if strings.Contains(para, phrase) {
+			return true
+		}
+	}
+	return false
 }
 
 // canonicalReaders are the methods on a canonical that write no part, so a
