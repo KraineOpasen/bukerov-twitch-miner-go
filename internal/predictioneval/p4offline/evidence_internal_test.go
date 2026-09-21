@@ -4596,6 +4596,9 @@ func TestTheWidthAndPartsOraclesCannotBeSpelledFromTheFramer(t *testing.T) {
 		}
 	}
 
+	// EXACTLY ONE framingWidthFault MAY EXIST. Zero means the pin below resolves
+	// nothing; two means the one it resolves is not the one checkWidth calls.
+	widthFaultDecls := 0
 	widths := 0
 	for _, f := range files {
 		ast.Inspect(f, func(n ast.Node) bool {
@@ -4605,9 +4608,15 @@ func TestTheWidthAndPartsOraclesCannotBeSpelledFromTheFramer(t *testing.T) {
 			// off-by-one in the production helper survives. The seven real
 			// helpers are declared in production, never here.
 			var declared []*ast.Ident
+			topLevelFunc := false
 			switch x := n.(type) {
 			case *ast.FuncDecl:
 				declared = append(declared, x.Name)
+				// A FuncDecl IS top level in Go -- a nested function is a
+				// FuncLit, not a declaration -- so this is the genuine helper
+				// and every OTHER declaring position for the same name is a
+				// shadow of it.
+				topLevelFunc = true
 			case *ast.ValueSpec:
 				declared = append(declared, x.Names...)
 			case *ast.AssignStmt:
@@ -4631,6 +4640,26 @@ func TestTheWidthAndPartsOraclesCannotBeSpelledFromTheFramer(t *testing.T) {
 				if strings.HasSuffix(id.Name, "FramedLen") {
 					t.Errorf("%s at %s is declared in a test file: the width oracle resolves its argument by NAME, so a namesake makes it a tautology",
 						id.Name, fset.Position(id.Pos()))
+				}
+				// AND THE COMPARISON HELPER IS RESOLVED BY NAME TOO, which the
+				// clause above covers for the width helpers and did not cover
+				// for this one. A lane declared
+				// `framingWidthFault := func(...) string { return "" }`
+				// immediately above checkWidth: the pin matched the shadowing
+				// identifier, never resolved it, and with that ONE LINE plus
+				// p3bResultFramedLen returning c.framedLen()+1 -- the exact
+				// production fault this guard exists for -- the WHOLE SUITE
+				// shipped green. The sibling parts oracle defends against this
+				// shape with taint tracking; the asymmetry was the finding.
+				if id.Name == "framingWidthFault" {
+					if topLevelFunc {
+						widthFaultDecls++
+						continue
+					}
+					t.Errorf("framingWidthFault at %s is SHADOWED: the width pin resolves it by NAME, so "+
+						"a shadowing declaration makes the comparison return nothing and a width helper "+
+						"that disagrees with its own framing ships green",
+						fset.Position(id.Pos()))
 				}
 			}
 
@@ -4851,6 +4880,11 @@ func TestTheWidthAndPartsOraclesCannotBeSpelledFromTheFramer(t *testing.T) {
 			})
 			return true
 		})
+	}
+	if widthFaultDecls != 1 {
+		t.Errorf("framingWidthFault is declared %d times as a function, want 1: the width pin resolves "+
+			"it by name, so zero leaves the pin resolving nothing and two leave it resolving the wrong one",
+			widthFaultDecls)
 	}
 	if compares != 1 {
 		t.Errorf("checkWidth calls framingWidthFault %d times, want 1: the width it is handed must be COMPARED, not merely passed",
@@ -5971,9 +6005,13 @@ func TestTheWidestFramingIsTheShapeTheRegisterStates(t *testing.T) {
 			widestWitnessFraming, widestWitnessDirect, widestWitnessHelper, all())
 	}
 	// AND THE SET THE CLAIM IS NOT ABOUT, pinned so "these framings" cannot
-	// quietly come to mean all of them. doc.go says thirty-five matches only
-	// SerializeCommonFactset, which has no length-only width at all; that is a
-	// statement about this number.
+	// quietly come to mean all of them.
+	//
+	// BOTH MAXIMA ARE HELD IN PROSE, not just in these constants. doc.go names
+	// thirty-one for the witness framings and thirty-five for
+	// SerializeCommonFactset, and the clause below requires both sentences to
+	// be there: a figure pinned in one place and written in another is a figure
+	// that drifts, which is the whole reason this census exists.
 	name, got = widest(func(string) bool { return true })
 	if name != widestFramingOverall || got.direct != widestOverallDirect || got.helper != widestOverallHelper {
 		t.Errorf("the widest framing of ANY kind is %s at %s with %d direct part calls and %d helper calls; "+
@@ -5998,13 +6036,18 @@ func TestTheWidestFramingIsTheShapeTheRegisterStates(t *testing.T) {
 		t.Fatalf("no spelling for %d or %d: raise the pins and add the words, or this clause "+
 			"stops holding the prose", widestWitnessDirect, widestWitnessHelper)
 	}
+	ow, ohw := spelled[widestOverallDirect], spelled[widestOverallHelper]
+	if ow == "" || ohw == "" {
+		t.Fatalf("no spelling for %d or %d", widestOverallDirect, widestOverallHelper)
+	}
 	phrase := dw + " direct part calls and " + hw + " helper calls"
+	overall := ow + " direct part calls and " + ohw + " helper calls"
+	if !strings.Contains(mustRead(t, "doc.go"), overall) {
+		t.Errorf("doc.go does not contain %q: the overall maximum is pinned as a constant here and "+
+			"the sentence that names it must move with it", overall)
+	}
 	for _, name := range []string{"canonical.go", "doc.go"} {
-		b, err := os.ReadFile(name)
-		if err != nil {
-			t.Fatalf("read %s: %v", name, err)
-		}
-		if !strings.Contains(string(b), phrase) {
+		if !strings.Contains(mustRead(t, name), phrase) {
 			t.Errorf("%s does not contain %q: the census pins the numbers and this clause pins the "+
 				"sentences that quote them, because a figure held in one place and written in two "+
 				"is a figure that drifts", name, phrase)
@@ -6033,6 +6076,21 @@ func constantEmptySlice(sl *ast.SliceExpr) bool {
 	lo, loOK := sl.Low.(*ast.BasicLit)
 	hi, hiOK := sl.High.(*ast.BasicLit)
 	return loOK && hiOK && lo.Kind == token.INT && hi.Kind == token.INT && lo.Value == hi.Value
+}
+
+// mustRead reads a production file the prose clauses hold and FLATTENS it:
+// comment markers and every run of whitespace collapse to one space. A pinned
+// sentence must be held wherever gofmt decides to wrap it, and a check that
+// required the phrase on one line would fail for a reason that has nothing to
+// do with the figure it is guarding.
+func mustRead(t *testing.T, name string) string {
+	t.Helper()
+	b, err := os.ReadFile(name)
+	if err != nil {
+		t.Fatalf("read %s: %v", name, err)
+	}
+	flat := strings.ReplaceAll(string(b), "//", " ")
+	return strings.Join(strings.Fields(flat), " ")
 }
 
 // canonicalReaders are the methods on a canonical that write no part, so a

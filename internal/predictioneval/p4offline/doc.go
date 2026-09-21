@@ -1197,6 +1197,13 @@
 //     of these framings -- thirty-one direct part calls and three helper calls,
 //     the figure canonical.go states and TestTheWidestFramingIsTheShapeTheRegisterStates
 //     counts out of the source -- is a second
+//     THIRTY-ONE IS THE WITNESS FRAMINGS' FIGURE AND NOT THE PACKAGE'S.
+//     SerializeCommonFactset makes thirty-five direct part calls and three
+//     helper calls -- wider than any witness framing, and outside the argument
+//     above because it has no length-only width at all, so the width it would
+//     need cannot drift from a witness it does not have. The same census pins
+//     BOTH maxima and holds both sentences to them, so neither number can
+//     drift and neither set can quietly come to mean the other.
 //     place a future field can be forgotten, and this package has already paid
 //     for one of those.
 //     TestTheRecordedFramedWidthIsTheWitnessOwn drives both modes over 400
