@@ -2244,13 +2244,19 @@ func checkEveryFramingWidth(t *testing.T, rng *rand.Rand, round int) map[string]
 		Illegality: strs(rng, text), SkipReason: text()}
 	choice := PolicyChoice{Present: rng.Intn(2) == 0, Index: rng.Intn(8), OutcomeID: text()}
 	fact := func() Int64Fact {
-		// UNKNOWN is a live production value -- derivePayout's refusal arm
-		// sets Stake, Payout and Net to it -- and a fixture pinned to KNOWN
-		// framed one string length every round.
-		p := PresenceKnown
-		if rng.Intn(2) == 0 {
-			p = PresenceUnknown
-		}
+		// THE WHOLE VOCABULARY, not two of its four members. UNKNOWN is a live
+		// production value -- derivePayout's refusal arm sets Stake, Payout and
+		// Net to it -- and a fixture pinned to KNOWN framed one string length
+		// every round. But NOT_REACHED and NOT_APPLICABLE are live too (p2.go
+		// sets NOT_REACHED on a legacy failure, and NotApplicableInt64 is used
+		// at the coverage-only arm and in derivePayout), and drawing only two
+		// members left a framer that maps one in-vocabulary value onto another
+		// invisible: a lane collapsed NOT_REACHED to NOT_APPLICABLE inside
+		// frameFact and the WHOLE SUITE stayed green, with the two facts
+		// framing to the same 40 bytes AND the same width, so the width
+		// pre-check could not see it either. frameFact is reached by SIX
+		// framings, so that is one edit against six witnesses.
+		p := []Presence{PresenceKnown, PresenceUnknown, PresenceNotReached, PresenceNotApplicable}[rng.Intn(4)]
 		// AND THE SIGN IS DRAWN. Every value here was non-negative, so no
 		// framing in this table ever rendered a negative int64 -- and
 		// derivePayout sets Net to -Stake.Value on EVERY LOSE, so the byte
@@ -2877,9 +2883,21 @@ func witnessComparedIn(t *testing.T, dir string) map[string]bool {
 						// of a genuine result and requires ErrResultNotDerived,
 						// and the placement, payout and factset suites carry the
 						// same shape.
-						switch n.(type) {
-						case *ast.SliceExpr, *ast.IndexExpr:
-							return false
+						// A CARRIER SLICED TO NOTHING IS NOT THE CARRIER --
+						// but a carrier sliced to SOMETHING still is. The
+						// first draft skipped EVERY slice and index in a
+						// return, which refused `return digestOfSynthetic(v.A)[:32]`:
+						// a genuine recomputation over the input, truncated,
+						// and correct code. That is the same mistake as the
+						// width pin's, made the same week: a rule written over
+						// the shape in front of it (`w[:0]`) refusing its
+						// honest neighbour. What makes `w[:0]` a laundering
+						// route is that it is CONSTANT, not that it is a slice.
+						if sl, ok := n.(*ast.SliceExpr); ok {
+							id, isIdent := sl.X.(*ast.Ident)
+							if isIdent && carriers[id.Name] && constantEmptySlice(sl) {
+								return false
+							}
 						}
 						if c, ok := n.(*ast.CallExpr); ok && handed(c) {
 							used = true
@@ -3952,10 +3970,10 @@ func framingPartsRound(t *testing.T, rng *rand.Rand, round int) (map[string]bool
 	// kill into a silent survivor. If that edit is ever made, the conditional
 	// framing needs its own row first.
 	fact := func() Int64Fact {
-		p := PresenceKnown
-		if rb() {
-			p = PresenceUnknown
-		}
+		// ALL FOUR MEMBERS. See the sibling fixture for why two was not enough:
+		// a framer collapsing one in-vocabulary Presence onto another survived
+		// the whole suite, at the same width, through six framings.
+		p := []Presence{PresenceKnown, PresenceUnknown, PresenceNotReached, PresenceNotApplicable}[rng.Intn(4)]
 		return Int64Fact{Presence: p, Value: nz(), Reason: text()}
 	}
 	attemptOne := predictioneval.AttemptKey{
@@ -4728,61 +4746,105 @@ func TestTheWidthAndPartsOraclesCannotBeSpelledFromTheFramer(t *testing.T) {
 					}
 					seen[b.String()] = true
 				}
-				// THE ANSWER MUST BE TESTED AGAINST THE EMPTY STRING, and the
-				// branch that fires on a fault must fail. Either spelling of
-				// the honest form satisfies this; `; false` and `; fault == ""`
-				// satisfy neither.
+				// THE ANSWER MUST BE TESTED FOR BEING NON-EMPTY, and the branch
+				// that fires on a fault must fail UNCONDITIONALLY.
+				//
+				// THE FIRST DRAFT DEMANDED ONE SPELLING -- a != against an
+				// empty string literal -- and so refused `if len(fault) != 0`
+				// and `switch { case fault != "": }`, both of which are correct
+				// Go doing exactly the right thing. That is the second time
+				// this guard has been rewritten to stop failing honest code,
+				// and the lesson is the one this package keeps relearning: a
+				// rule written over the spelling in front of it refuses the
+				// neighbour. What matters is that the condition ASKS WHETHER
+				// THERE IS A FAULT, however it is written.
+				//
+				// AND THE FAILURE MUST NOT BE NESTED. A lane put the t.Fatalf
+				// under `if round < 0 {` inside the body; the walk found the
+				// selector somewhere below and was satisfied, while the
+				// production fault the guard exists for -- a width helper
+				// disagreeing with its own framing -- shipped green.
 				name := ""
 				ast.Inspect(as, func(m ast.Node) bool {
+					if x, ok := m.(*ast.AssignStmt); ok &&
+						len(x.Lhs) == 1 && len(x.Rhs) == 1 && x.Rhs[0] == ast.Expr(call) {
+						if id, ok := x.Lhs[0].(*ast.Ident); ok {
+							name = id.Name
+						}
+					}
+					return true
+				})
+				asksForAFault := func(cond ast.Expr) bool {
+					bin, ok := cond.(*ast.BinaryExpr)
+					if !ok {
+						return false
+					}
+					isResult := func(e ast.Expr) bool {
+						if id, ok := e.(*ast.Ident); ok && name != "" && id.Name == name {
+							return true
+						}
+						return e == ast.Expr(call)
+					}
+					isLenOfResult := func(e ast.Expr) bool {
+						c, ok := e.(*ast.CallExpr)
+						if !ok || len(c.Args) != 1 {
+							return false
+						}
+						id, ok := c.Fun.(*ast.Ident)
+						return ok && id.Name == "len" && isResult(c.Args[0])
+					}
+					switch bin.Op {
+					case token.NEQ:
+						// x != "" / "" != x / len(x) != 0 / 0 != len(x)
+						if isResult(bin.X) && isEmptyStringLit(bin.Y) ||
+							isResult(bin.Y) && isEmptyStringLit(bin.X) {
+							return true
+						}
+						return isLenOfResult(bin.X) && isZeroLit(bin.Y) ||
+							isLenOfResult(bin.Y) && isZeroLit(bin.X)
+					case token.GTR:
+						return isLenOfResult(bin.X) && isZeroLit(bin.Y)
+					case token.LSS:
+						return isZeroLit(bin.X) && isLenOfResult(bin.Y)
+					}
+					return false
+				}
+				failsRightHere := func(body []ast.Stmt) bool {
+					for _, st := range body {
+						es, ok := st.(*ast.ExprStmt)
+						if !ok {
+							continue
+						}
+						c, ok := es.X.(*ast.CallExpr)
+						if !ok {
+							continue
+						}
+						if sel, ok := c.Fun.(*ast.SelectorExpr); ok &&
+							(sel.Sel.Name == "Fatalf" || sel.Sel.Name == "Errorf" || sel.Sel.Name == "Fatal") {
+							return true
+						}
+					}
+					return false
+				}
+				tested := false
+				ast.Inspect(as, func(m ast.Node) bool {
 					switch x := m.(type) {
-					case *ast.AssignStmt:
-						if len(x.Lhs) == 1 && len(x.Rhs) == 1 && x.Rhs[0] == ast.Expr(call) {
-							if id, ok := x.Lhs[0].(*ast.Ident); ok {
-								name = id.Name
+					case *ast.IfStmt:
+						if x.Cond != nil && asksForAFault(x.Cond) && failsRightHere(x.Body.List) {
+							tested = true
+						}
+					case *ast.CaseClause:
+						for _, cond := range x.List {
+							if asksForAFault(cond) && failsRightHere(x.Body) {
+								tested = true
 							}
 						}
 					}
 					return true
 				})
-				tested := false
-				ast.Inspect(as, func(m ast.Node) bool {
-					ifs, ok := m.(*ast.IfStmt)
-					if !ok || ifs.Cond == nil {
-						return true
-					}
-					bin, ok := ifs.Cond.(*ast.BinaryExpr)
-					if !ok || bin.Op != token.NEQ {
-						return true
-					}
-					if !isEmptyStringLit(bin.Y) && !isEmptyStringLit(bin.X) {
-						return true
-					}
-					other := bin.X
-					if isEmptyStringLit(bin.X) {
-						other = bin.Y
-					}
-					hit := false
-					if id, ok := other.(*ast.Ident); ok && name != "" && id.Name == name {
-						hit = true
-					}
-					if other == ast.Expr(call) {
-						hit = true
-					}
-					if !hit {
-						return true
-					}
-					ast.Inspect(ifs.Body, func(k ast.Node) bool {
-						if sel, ok := k.(*ast.SelectorExpr); ok &&
-							(sel.Sel.Name == "Fatalf" || sel.Sel.Name == "Errorf" || sel.Sel.Name == "Fatal") {
-							tested = true
-						}
-						return true
-					})
-					return true
-				})
 				if !tested {
-					t.Errorf("framingWidthFault at %s: its answer is never tested against \"\" in a branch that fails, "+
-						"so the comparison decides nothing",
+					t.Errorf("framingWidthFault at %s: its answer is never tested for being non-empty in a "+
+						"branch that fails right there, so the comparison decides nothing",
 						fset.Position(call.Pos()))
 				}
 				return true
@@ -4880,6 +4942,19 @@ func TestTheWidthAndPartsOraclesCannotBeSpelledFromTheFramer(t *testing.T) {
 			// OVER-APPROXIMATION the split removed: a local that merely SHARES
 			// a name with a tainted function is not BOUND FROM one, so it stays
 			// clean, which is the whole reason the two namespaces exist.
+			// AND A NAME BOUND THAT WAY IS RECORDED SEPARATELY. taintedFuncs
+			// starts out holding every function in the package whose body
+			// reaches the framing, which is the right over-approximation for a
+			// CALL but the wrong one for a row mention. What a row must refuse
+			// is a name this function REBOUND from a framer -- and because
+			// namesTaintedFunc is the first arm below, such a name landed in
+			// taintedFuncs and never in tainted, so an ALLOW-LISTED spelling
+			// (`factOf := factPartsFromFramer`) walked past the row check
+			// entirely. With it, two swapped writers in frameFact left the
+			// WHOLE SUITE green, while the same swap unlaundered is caught by
+			// name. The allow-list answers "is this helper permitted"; it
+			// cannot also answer "is this helper still what it was".
+			taintedByBinding := map[string]bool{}
 			namesTaintedFunc := func(e ast.Expr) bool {
 				id, ok := e.(*ast.Ident)
 				if !ok {
@@ -4931,6 +5006,7 @@ func TestTheWidthAndPartsOraclesCannotBeSpelledFromTheFramer(t *testing.T) {
 					switch {
 					case namesTaintedFunc(src):
 						taintedFuncs[name] = true
+						taintedByBinding[name] = true
 					case reachesFramer(src):
 						tainted[name] = true
 					}
@@ -5016,6 +5092,7 @@ func TestTheWidthAndPartsOraclesCannotBeSpelledFromTheFramer(t *testing.T) {
 							switch {
 							case namesTaintedFunc(src):
 								taintedFuncs[name] = true
+								taintedByBinding[name] = true
 							case reachesFramer(src):
 								tainted[name] = true
 							}
@@ -5075,7 +5152,7 @@ func TestTheWidthAndPartsOraclesCannotBeSpelledFromTheFramer(t *testing.T) {
 					}
 					for _, expr := range checkMe {
 						ast.Inspect(expr, func(n ast.Node) bool {
-							if id, ok := n.(*ast.Ident); ok && tainted[id.Name] {
+							if id, ok := n.(*ast.Ident); ok && (tainted[id.Name] || taintedByBinding[id.Name]) {
 								t.Errorf("parts row %d at %s mentions %q, which this function binds from something that reaches the framing: the value list would agree with the framer by construction",
 									rows, fset.Position(row.Pos()), id.Name)
 								return true
@@ -5258,15 +5335,35 @@ func widthArgCore(e ast.Expr) ast.Expr {
 				return e
 			}
 			e = x.Args[0]
-		case *ast.BinaryExpr:
-			if x.Op != token.ADD && x.Op != token.SUB {
+		case *ast.UnaryExpr:
+			// A UNARY PLUS IS NOT A BINARY EXPRESSION, so `+width` printed
+			// differently and meant the same thing.
+			if x.Op != token.ADD {
 				return e
 			}
-			switch {
-			case isZeroLit(x.Y):
-				e = x.X
-			case isZeroLit(x.X) && x.Op == token.ADD:
-				e = x.Y
+			e = x.X
+		case *ast.BinaryExpr:
+			// AND THE IDENTITY IS NOT ONLY ADDITIVE. `width*1` and `width/1`
+			// print differently too, and a lane used the first.
+			switch x.Op {
+			case token.ADD, token.SUB:
+				switch {
+				case isZeroLit(x.Y):
+					e = x.X
+				case isZeroLit(x.X) && x.Op == token.ADD:
+					e = x.Y
+				default:
+					return e
+				}
+			case token.MUL, token.QUO:
+				switch {
+				case isOneLit(x.Y):
+					e = x.X
+				case isOneLit(x.X) && x.Op == token.MUL:
+					e = x.Y
+				default:
+					return e
+				}
 			default:
 				return e
 			}
@@ -5279,6 +5376,11 @@ func widthArgCore(e ast.Expr) ast.Expr {
 func isZeroLit(e ast.Expr) bool {
 	lit, ok := e.(*ast.BasicLit)
 	return ok && lit.Kind == token.INT && lit.Value == "0"
+}
+
+func isOneLit(e ast.Expr) bool {
+	lit, ok := e.(*ast.BasicLit)
+	return ok && lit.Kind == token.INT && lit.Value == "1"
 }
 
 func isEmptyStringLit(e ast.Expr) bool {
@@ -5657,6 +5759,14 @@ func TestTheFigureRegisterNamesEveryFigureItMustName(t *testing.T) {
 	// THE CLAUSE THE EIGHT FAILED. doc.go states the rule; a figure the rule
 	// reaches that doc.go does not quote is a figure the register cannot have
 	// argued about.
+	//
+	// IT IS SUBSUMED FOR EVERY ROW PRESENT TODAY, and saying so is the honest
+	// version. Each figAllocBytes row now carries doc.go in its file set, so
+	// the exact-file-set check above already implies this one for all of them;
+	// what this clause still binds is a FUTURE row -- an allocation figure
+	// added in some other file and classified here without being quoted in the
+	// register. That is the case it was written for, and it is the only one it
+	// now decides.
 	unexplained := 0
 	for n, entry := range figureInventory {
 		if entry.kind != figAllocBytes {
@@ -5875,6 +5985,54 @@ func TestTheWidestFramingIsTheShapeTheRegisterStates(t *testing.T) {
 		t.Errorf("%s is pinned as the widest framing overall and is also a witness framing; "+
 			"the two pins exist because the sets differ", widestFramingOverall)
 	}
+
+	// AND THE PROSE THE CENSUS EXISTS FOR IS HELD TO THE SAME NUMBERS. Pinning
+	// 31 and 3 as Go constants does nothing for the two HAND-WRITTEN copies of
+	// them in canonical.go and doc.go -- a lane rewrote one to "forty-two ...
+	// nine" and the whole suite stayed green. That is this branch's recurring
+	// shape one layer up: the census was built to stop a figure drifting, and
+	// the figure it was built for could still drift in the files that quote it.
+	spelled := map[int]string{3: "three", 31: "thirty-one", 35: "thirty-five"}
+	dw, hw := spelled[widestWitnessDirect], spelled[widestWitnessHelper]
+	if dw == "" || hw == "" {
+		t.Fatalf("no spelling for %d or %d: raise the pins and add the words, or this clause "+
+			"stops holding the prose", widestWitnessDirect, widestWitnessHelper)
+	}
+	phrase := dw + " direct part calls and " + hw + " helper calls"
+	for _, name := range []string{"canonical.go", "doc.go"} {
+		b, err := os.ReadFile(name)
+		if err != nil {
+			t.Fatalf("read %s: %v", name, err)
+		}
+		if !strings.Contains(string(b), phrase) {
+			t.Errorf("%s does not contain %q: the census pins the numbers and this clause pins the "+
+				"sentences that quote them, because a figure held in one place and written in two "+
+				"is a figure that drifts", name, phrase)
+		}
+	}
+}
+
+// constantEmptySlice reports whether a slice expression is empty whatever it
+// slices: `x[:0]`, or `x[k:k]` for one literal k. Those carry none of the
+// value's bytes, so naming a carrier inside one recomputes nothing.
+//
+// WHAT IT DOES NOT CATCH, and the behavioural oracles are why that is
+// tolerable: any other value-destroying expression over a carrier -- a
+// hash of a constant slice of it, a length, a comparison -- still reads as a
+// mention. A witness that returns a constant is caught behaviourally, by
+// result_witness_test.go editing eleven fields of a genuine result and
+// requiring ErrResultNotDerived, and by the placement, payout and factset
+// suites carrying the same shape. This walk is defence in depth, not the gate.
+func constantEmptySlice(sl *ast.SliceExpr) bool {
+	if sl.Slice3 {
+		return false
+	}
+	if isZeroLit(sl.High) {
+		return true
+	}
+	lo, loOK := sl.Low.(*ast.BasicLit)
+	hi, hiOK := sl.High.(*ast.BasicLit)
+	return loOK && hiOK && lo.Kind == token.INT && hi.Kind == token.INT && lo.Value == hi.Value
 }
 
 // canonicalReaders are the methods on a canonical that write no part, so a
@@ -6106,6 +6264,132 @@ var rows = []struct {
 			t.Errorf("fieldIndexOf(%q) = %d, want %d: an embedded field costs the literal an "+
 				"element, so skipping it without advancing shifts every index after it",
 				tc.name, got, tc.want)
+		}
+	}
+}
+
+// THE LENGTH PREFIX IS EIGHT BYTES AND ONLY TWO OF THEM WERE EVER EXERCISED.
+// canonical.lpPrefix writes a big-endian uint64 before every part, and that
+// prefix is what makes the framing self-delimiting -- it is the whole reason
+// two adjacent parts cannot be re-cut into a different pair. But no fixture in
+// this package ever framed a part long enough for byte 2 and above to be
+// non-zero, so zeroing them changed nothing any test could see: a lane zeroed
+// `byte(n>>16)` and the WHOLE SUITE stayed green, then showed two DISTINCT
+// VerifiedP3bRuleset identities of 65,536 bytes framing to the same 65,602
+// bytes under it. A length prefix that drops its high bytes is a framing that
+// is no longer injective, and `RulesetID` is caller-supplied and unbounded --
+// rulesetRawCeiling bounds RawBytes, not the identity -- with a 16 MiB ruleset
+// id quoted two files over as reachable through the exported verifier.
+//
+// THE ORACLE IS INDEPENDENT, which is the point: the expected prefix comes from
+// encoding/binary, not from lpPrefix or from a recorded golden. A prefix
+// checked against itself would agree with any of these mutants.
+//
+// WHAT IT DOES NOT REACH: bytes 4 through 7 need a part of 4 GiB or more. They
+// are unreachable within this process's own memory, so a mutant zeroing one is
+// equivalent over the reachable domain rather than a gap -- stated here because
+// "the test covers the prefix" would otherwise be read as covering all eight.
+func TestTheLengthPrefixRendersEveryByteItCanReach(t *testing.T) {
+	framedPrefix := func(n int) []byte {
+		var c canonical
+		c.str(strings.Repeat("a", n))
+		if len(c.bytes()) < 8 {
+			t.Fatalf("a part of %d bytes framed %d bytes; the case below would be vacuous", n, len(c.bytes()))
+		}
+		return c.bytes()[:8]
+	}
+	// Each length is chosen to put a NON-ZERO in one byte of the prefix that a
+	// shorter part leaves at zero: 1<<8 reaches byte 6, 1<<16 byte 5, 1<<24
+	// byte 4 (counting from the most significant).
+	for _, n := range []int{0, 1, 255, 1 << 8, 1<<16 - 1, 1 << 16, 1<<16 | 1<<8 | 1, 1 << 24} {
+		var want [8]byte
+		binary.BigEndian.PutUint64(want[:], uint64(n))
+		got := framedPrefix(n)
+		if !bytes.Equal(got, want[:]) {
+			t.Errorf("a part of %d bytes is prefixed %x, want %x: the prefix is what makes the "+
+				"framing self-delimiting, so a dropped byte is a framing that is not injective",
+				n, got, want)
+		}
+	}
+	// AND THE CONSEQUENCE, stated as a value rather than as arithmetic: two
+	// identities differing only above the 16-bit boundary must not frame alike.
+	big, bigger := strings.Repeat("a", 1<<16), strings.Repeat("a", 2<<16)
+	var a, b canonical
+	a.str(big)
+	b.str(bigger)
+	if string(a.bytes()[:8]) == string(b.bytes()[:8]) {
+		t.Error("parts of 65,536 and 131,072 bytes carry the same length prefix: two identities " +
+			"differing only in a high length byte would share a witness")
+	}
+	// BOTH MODES MUST STILL AGREE at these widths, which is the property every
+	// other framing in this package is held to.
+	for _, n := range []int{1 << 16, 1 << 24} {
+		l := canonical{lenOnly: true}
+		l.str(strings.Repeat("a", n))
+		var c canonical
+		c.str(strings.Repeat("a", n))
+		if l.framedLen() != len(c.bytes()) {
+			t.Errorf("a part of %d bytes: length-only reports %d, the framing writes %d",
+				n, l.framedLen(), len(c.bytes()))
+		}
+	}
+}
+
+// A CLOSED VOCABULARY NEEDS EVERY MEMBER DIFFERENTIATED, not just one member
+// present. The parts fixtures draw enum-valued fields through text(), which
+// produces arbitrary bytes and so distinguishes any two values -- but three
+// fields are set from a CLOSED vocabulary the fixture never varies, and a lane
+// showed each of them collapsing one in-vocabulary member onto another with the
+// whole suite green, the pinned wire goldens included. A golden pins ONE value
+// per field; it cannot see a framer that maps a second value onto the first.
+//
+//   - FactsetCompleteness at factset.go:587. BuildCommonFactset produces both
+//     PRE_DECISION_EXIT and INCOMPLETE, and both reach SerializeCommonFactset.
+//     Collapsed, two materially different factsets share the FactsetDigest that
+//     every downstream record binds itself to.
+//   - ResolutionOutcome at resolution.go:462. Collapsed, two distinct artifacts
+//     share a ResolutionFactsDigest.
+//
+// THE ORACLE IS A DIFFERENTIAL, not a golden: the two sides are compared with
+// each other, so this pins no bytes and changes none. It asks the only question
+// a golden cannot -- are these two members distinguishable at all.
+//
+// WHAT IT DOES NOT DO: it does not check that a member is rendered as its
+// documented STRING. That is the golden's job, and the golden does it for the
+// one member it carries.
+func TestEveryClosedVocabularyIsDifferentiatedByItsFraming(t *testing.T) {
+	factset := func(c FactsetCompleteness) string {
+		return string(SerializeCommonFactset(CommonFactset{Completeness: c}))
+	}
+	for _, pair := range [][2]FactsetCompleteness{
+		{FactsetComplete, FactsetIncomplete},
+		{FactsetComplete, FactsetPreDecisionExit},
+		{FactsetPreDecisionExit, FactsetIncomplete},
+	} {
+		a, b := factset(pair[0]), factset(pair[1])
+		if len(a) == 0 {
+			t.Fatalf("the factset framing produced nothing; every case here would be vacuous")
+		}
+		if a == b {
+			t.Errorf("Completeness %q and %q serialize identically: two factsets that differ only "+
+				"here would share the digest every downstream record binds to", pair[0], pair[1])
+		}
+	}
+	artifact := func(o ResolutionOutcome) string {
+		return string(SerializeResolutionArtifact(ResolutionArtifact{Outcome: o, WinnerIndex: -1}))
+	}
+	for _, pair := range [][2]ResolutionOutcome{
+		{ResolutionWinnerKnown, ResolutionRefund},
+		{ResolutionWinnerKnown, ResolutionUnknown},
+		{ResolutionRefund, ResolutionUnknown},
+	} {
+		a, b := artifact(pair[0]), artifact(pair[1])
+		if len(a) == 0 {
+			t.Fatalf("the artifact framing produced nothing; every case here would be vacuous")
+		}
+		if a == b {
+			t.Errorf("Outcome %q and %q serialize identically: two artifacts that differ only here "+
+				"would share a ResolutionFactsDigest", pair[0], pair[1])
 		}
 	}
 }
