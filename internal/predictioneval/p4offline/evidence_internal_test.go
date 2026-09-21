@@ -16,6 +16,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/printer"
@@ -25,6 +26,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"runtime"
 	"sort"
 	"strconv"
@@ -2261,16 +2263,24 @@ func checkEveryFramingWidth(t *testing.T, rng *rand.Rand, round int) map[string]
 		}
 		return Int64Fact{Presence: p, Value: v, Reason: text()}
 	}
+	// FIVE OPTIONALS, FIVE BACKINGS -- here as well as in the parts fixture.
+	// This one gave &oi to three of them and &of to two, so it agreed with the
+	// parts fixture's own defect rather than covering it. A swap between two
+	// same-typed optionals does not change the WIDTH, so this fixture could not
+	// catch one either way; distinct backings are kept so that neither fixture
+	// misleads a reader into thinking it does.
 	oi, of := rng.Intn(1<<20), int64(rng.Intn(1<<30))
+	oi2, of2 := rng.Intn(1<<20)+1, int64(rng.Intn(1<<30))+1
+	oi3 := rng.Intn(1<<20) + 2
 
 	fp := FactualPlacement{
 		Attempt: attempt, FactsetDigest: text(), EventID: text(),
 		CutoffPosition: int64(rng.Intn(1 << 30)), TerminalDecision: text(),
 		RecordedChoiceIndex: &oi, RecordedChoiceOutcomeID: text(),
-		RecordedFinalAmount: &of, RecordedTerminalSlot: &oi,
+		RecordedFinalAmount: &of, RecordedTerminalSlot: &oi2,
 		Coherence: text(), StartedOnly: rng.Intn(2) == 0, CallPresent: rng.Intn(2) == 0,
 		CallStartedObservationID: text(), CallStartedPosition: int64(rng.Intn(1 << 30)),
-		Stake: &of, Slot: &oi, Returned: rng.Intn(2) == 0,
+		Stake: &of2, Slot: &oi3, Returned: rng.Intn(2) == 0,
 		LocalReasonOK: rng.Intn(2) == 0, ErrorClass: text() + sentinel,
 	}
 	checkWidth("FactualPlacement", factualPlacementFramedLen(fp), func(c *canonical) { frameFactualPlacement(c, fp) })
@@ -2722,6 +2732,38 @@ func witnessComparedIn(t *testing.T, dir string) map[string]bool {
 	//
 	// BOTH CLAUSES, AND-ED. Replacing the first with the second let
 	// `return frameSynthetic("")` back in: it frames, and reads nothing.
+	// A HELPER THAT FRAMES IS A FRAMING WHATEVER IT IS CALLED. The rule below
+	// keyed on the callee's NAME, so the honest refactor
+	// `return digestOfPlacement(p)` -- which frames exactly as before, one call
+	// deeper -- read as "recomputes nothing" and reported PlacementEvidence as
+	// a type whose witness nothing compares. A guard that fails CORRECT code
+	// costs more than one that misses a defeat: it forbids a refactor that
+	// changes nothing, with no adversary present. The question is whether the
+	// callee REACHES a framing, and that is answered by walking its body.
+	framesInside := map[string]bool{}
+	for pass := 0; pass < 3; pass++ {
+		for _, f := range files {
+			for _, d := range f.Decls {
+				fd, ok := d.(*ast.FuncDecl)
+				if !ok || fd.Body == nil {
+					continue
+				}
+				ast.Inspect(fd.Body, func(n ast.Node) bool {
+					switch x := n.(type) {
+					case *ast.Ident:
+						if x.Name == "canonical" || strings.HasPrefix(x.Name, "frame") {
+							framesInside[fd.Name.Name] = true
+						}
+					case *ast.CallExpr:
+						if id, ok := x.Fun.(*ast.Ident); ok && framesInside[id.Name] {
+							framesInside[fd.Name.Name] = true
+						}
+					}
+					return true
+				})
+			}
+		}
+	}
 	doesNotFrame := map[string]bool{}
 	for _, f := range files {
 		for _, d := range f.Decls {
@@ -2755,7 +2797,8 @@ func witnessComparedIn(t *testing.T, dir string) map[string]bool {
 			carriers := map[string]bool{}
 			handed := func(call *ast.CallExpr) bool {
 				fn, ok := call.Fun.(*ast.Ident)
-				if !ok || (!strings.HasPrefix(fn.Name, "frame") && fn.Name != "canonical") {
+				if !ok || (!strings.HasPrefix(fn.Name, "frame") && fn.Name != "canonical" &&
+					!framesInside[fn.Name]) {
 					return false
 				}
 				hit := false
@@ -2820,6 +2863,24 @@ func witnessComparedIn(t *testing.T, dir string) map[string]bool {
 				}
 				for _, r := range ret.Results {
 					ast.Inspect(r, func(n ast.Node) bool {
+						// A VALUE-DESTROYING OPERATION OVER THE CARRIER IS NOT
+						// THE CARRIER. `return w[:0]` spells the carrier's name
+						// and returns a constant, and the walk counted the
+						// mention. Slices and indexes are not descended into;
+						// `c.digest()`, which is how every honest recomputation
+						// here reaches its return, is a call on the carrier and
+						// is unaffected. This is narrow by construction -- it
+						// closes the two shapes that destroy a value while
+						// naming it, not every such shape -- and the behavioural
+						// oracles are what actually stop a witness that returns
+						// a constant: result_witness_test.go edits eleven fields
+						// of a genuine result and requires ErrResultNotDerived,
+						// and the placement, payout and factset suites carry the
+						// same shape.
+						switch n.(type) {
+						case *ast.SliceExpr, *ast.IndexExpr:
+							return false
+						}
 						if c, ok := n.(*ast.CallExpr); ok && handed(c) {
 							used = true
 						}
@@ -3431,6 +3492,46 @@ func (v comparesFramesAndReadsSeparately) derived() bool {
 	return v.witness != framedConstantThatAlsoReadsWitness(v) && v.framedLen > 0
 }
 
+type comparesViaASlicedCarrier struct {
+	A         string
+	witness   string
+	framedLen int
+}
+
+// It frames the input, binds the carrier, and returns a CONSTANT spelled with
+// the carrier's name. w[:0] is the empty string however w was computed, so
+// every value of this type compares equal and the witness verifies nothing --
+// while a walk that counts a MENTION of the carrier in the return sees a
+// genuine recomputation. Any value-destroying operation over the carrier does
+// the same; this row holds the slice form, which is the one a lane wrote.
+func slicedCarrierWitness(v comparesViaASlicedCarrier) string {
+	w := frameSynthetic(v.A)
+	return w[:0]
+}
+
+func (v comparesViaASlicedCarrier) derived() bool {
+	return v.witness != slicedCarrierWitness(v) && v.framedLen > 0
+}
+
+// AND THE HONEST SHAPE THE SAME REPAIR MUST NOT REFUSE. The framing is one
+// call deeper, behind a helper named nothing in particular -- the refactor the
+// name-keyed rule used to report as "recomputes nothing".
+type comparesViaANamelessHelper struct {
+	A         string
+	witness   string
+	framedLen int
+}
+
+func namelessHelperWitness(v comparesViaANamelessHelper) string {
+	return digestOfSynthetic(v.A)
+}
+
+func digestOfSynthetic(a string) string { return frameSynthetic(a) }
+
+func (v comparesViaANamelessHelper) derived() bool {
+	return v.witness != namelessHelperWitness(v) && v.framedLen > 0
+}
+
 type comparesFramedAndDiscarded struct {
 	A         string
 	witness   string
@@ -3613,13 +3714,13 @@ func (v comparesButDiscardsTheAnswer) derived() bool {
 	if anon != 1 {
 		t.Errorf("the walk saw %d anonymous witness-bearing structs, want 1 (the one inside `nested`)", anon)
 	}
-	if len(withWitness) != 31 {
+	if len(withWitness) != 33 {
 		names := make([]string, 0, len(withWitness))
 		for _, s := range withWitness {
 			names = append(names, s.name)
 		}
 		sort.Strings(names)
-		t.Errorf("the walk saw %d witness-bearing structs, want 31: %v", len(withWitness), names)
+		t.Errorf("the walk saw %d witness-bearing structs, want 33: %v", len(withWitness), names)
 	}
 
 	// AND THE COMPARISON RECOGNIZER NEEDS ITS OWN CONTROL, by the same rule:
@@ -3635,6 +3736,13 @@ func (v comparesButDiscardsTheAnswer) derived() bool {
 	for _, want := range []string{
 		"comparesAgainstACall", "comparesInAPointerMethod", "comparesBehindAnAlwaysTrueOr",
 		"comparesViaAZeroArgReceiverMethod",
+		// AND THE HONEST INDIRECTION, on the positive side because the rule
+		// that missed it was a SPELLING rule: it keyed on the callee's name,
+		// so moving a framing behind a helper named anything else read as
+		// "recomputes nothing" and reported a genuine production witness as
+		// unverified. Without this row the repair has no receipt, and a guard
+		// that fails correct code is a defect that only correct code pays.
+		"comparesViaANamelessHelper",
 	} {
 		if !compared[want] {
 			t.Errorf("the comparison recognizer did not see %s comparing its witness against a recomputation", want)
@@ -3662,6 +3770,9 @@ func (v comparesButDiscardsTheAnswer) derived() bool {
 		"comparesInsideAClosureCalledInline", "comparesAgainstAReadAndDiscardWitness",
 		"comparesAgainstAFramedConstantWitness", "comparesFramesAndReadsSeparately",
 		"comparesFramedAndDiscarded",
+		// And the one a tenth lane wrote: a carrier named in the return and
+		// destroyed in the same expression.
+		"comparesViaASlicedCarrier",
 	} {
 		if compared[notWant] {
 			t.Errorf("the comparison recognizer counted %s, whose witness is never compared against a recomputation", notWant)
@@ -3741,7 +3852,24 @@ func splitFramedParts(t *testing.T, b []byte) []string {
 // for that.
 func framingPartsRound(t *testing.T, rng *rand.Rand, round int) (map[string]bool, map[string][]string, [3]int) {
 	t.Helper()
+	// THE EMPTY STRING IS DRAWN. Every framed string here used to be at least
+	// one byte, so a framer that ELIDED an empty part agreed with the fixture in
+	// all 64 rounds -- and eliding is not a cosmetic change, it breaks
+	// injectivity outright: with it, ("", "x") and ("x", "") both frame to the
+	// single part "x", which is two distinct values sharing a witness. Two
+	// mutants survived the WHOLE SUITE on that, in frameFactualPlacement's
+	// ErrorClass and in frameAction's SkipReason -- and frameAction is a SHARED
+	// helper, so the second reaches six framings.
+	//
+	// ONE DRAW IN EIGHT, not every draw, and the ratio is the point. A field
+	// empty in every round would revive the mutant this fixture's "every framed
+	// field gets a non-zero, distinct value" rule exists to kill: a framer
+	// writing the empty literal in that field's place would agree every time.
+	// Drawn sometimes, it disagrees in seven rounds out of eight.
 	text := func() string {
+		if rng.Intn(8) == 0 {
+			return ""
+		}
 		n := rng.Intn(40) + 1
 		b := make([]byte, n)
 		for i := range b {
@@ -3764,17 +3892,65 @@ func framingPartsRound(t *testing.T, rng *rand.Rand, round int) (map[string]bool
 	// mutants survived the whole suite on that, and one of them was shown to
 	// accept a forged FactualPlacement whose Attempt.CollectorEpoch had been
 	// edited after minting. The step is drawn so a literal cannot agree twice.
-	nz := func() int64 {
+	//
+	// AND IT REACHES PAST INT32. num rises by at most a megabyte per draw and is
+	// reset each round, so no framed integer ever left int32's range and a
+	// framer that TRUNCATED its field to int32 agreed with the table in all 64
+	// rounds -- framePolicyDecision's CollectorEpoch survived the whole suite on
+	// exactly that. One draw in four is lifted past 2^34 so the truncation is
+	// visible. The lift cannot collide with an unlifted draw: num rises by at
+	// most 2^20 per call and a round makes fewer than a hundred, so num stays
+	// below 2^27 and no unlifted value can reach a lifted one.
+	nzStrict := func() int64 {
 		num += 7 + int64(rng.Intn(1<<20))
-		if rng.Intn(2) == 0 {
-			return -num
+		v := num
+		if rng.Intn(4) == 0 {
+			v += 1 << 34
 		}
-		return num
+		if rng.Intn(2) == 0 {
+			return -v
+		}
+		return v
+	}
+	// AND ZERO IS DRAWN, which the "non-zero" rule above had excluded outright
+	// -- and zero is the commonest integer this package actually frames. The
+	// type's own contract at quality.go mandates it: every producer sets Value
+	// to zero beside a non-KNOWN presence, and five sites build a KNOWN fact
+	// whose Value is zero -- Payout on every LOSE, Payout and Net on every
+	// REFUND, and the exact-zero POLICY_SKIP stake. With no zero in the
+	// fixture, a framer that wrote a field ONLY when it was non-zero agreed in
+	// all 64 rounds, and a lane exhibited two materially different
+	// PayoutEvidence values sharing one digest under exactly that mutant: a
+	// framing whose PART COUNT depends on a value is forgeable against any
+	// variable-length neighbour, and PayoutEvidence has one.
+	//
+	// ONE DRAW IN EIGHT, for the reason the empty string is drawn at the same
+	// rate: a field zero in EVERY round would make the mutant that writes the
+	// zero literal in its place agree every time, which is the defect the
+	// non-zero rule was written for. Seven rounds in eight it still disagrees.
+	//
+	// THE FIVE OPTIONAL BACKINGS KEEP THE STRICT DRAW. Their whole purpose is
+	// that a swap between two of them is visible, and two backings that both
+	// drew zero in the same round would be interchangeable in that round.
+	nz := func() int64 {
+		if rng.Intn(8) == 0 {
+			return 0
+		}
+		return nzStrict()
 	}
 	// EVERY FRAMED FIELD GETS A NON-ZERO, DISTINCT VALUE. A field left at its
 	// zero makes the mutant that replaces it with that zero EQUIVALENT for this
 	// fixture, which is how a first build of this table could not see a blanked
 	// bool: the value list and the framer agreed on "false" either way.
+	// PRESENCE AND VALUE ARE DRAWN INDEPENDENTLY, and that is load-bearing in a
+	// way worth naming. It makes the fixture emit {UNKNOWN, non-zero}, which NO
+	// PRODUCER IN THIS PACKAGE CAN BUILD -- quality.go requires a zero Value
+	// beside a non-KNOWN presence -- and that impossible combination is the only
+	// thing that kills a framer writing Value only when the presence is KNOWN,
+	// a change the type's own doc invites. So a later "make the fixture
+	// production-realistic" edit that ties Value to Presence would turn that
+	// kill into a silent survivor. If that edit is ever made, the conditional
+	// framing needs its own row first.
 	fact := func() Int64Fact {
 		p := PresenceKnown
 		if rb() {
@@ -3799,8 +3975,17 @@ func framingPartsRound(t *testing.T, rng *rand.Rand, round int) (map[string]bool
 	choice := PolicyChoice{Present: rb(), Index: int(nz()) % 97, OutcomeID: text()}
 	// DISTINCT BACKING VALUES per optional, so a swap between two of them is
 	// visible; sharing one variable made three of them interchangeable.
-	oi, of := int(nz()), nz()
-	oi2, of2 := int(nz()), nz()
+	//
+	// AND THAT REPAIR WAS APPLIED TO THE AMOUNTS AND NOT TO THE SLOTS, which is
+	// this branch's recurring failure one FIELD over rather than one file over.
+	// FactualPlacement carries five optionals and this fixture gave them four
+	// backings: RecordedTerminalSlot and Slot both pointed at oi2, so a framer
+	// writing one where the other belongs was invisible, and a lane's mutant
+	// doing exactly that survived the whole suite. Five optionals, five
+	// backings; the control that swaps two DISTINCT ones still fails by name.
+	oi, of := int(nzStrict()), nzStrict()
+	oi2, of2 := int(nzStrict()), nzStrict()
+	oi3 := int(nzStrict())
 
 	p2 := P2CaseResult{Policy: text(), FactsetDigest: text(), Action: action, Choice: choice, Stake: fact()}
 	p2.Binding.ContractVersion, p2.Binding.Digest = text(), text()
@@ -3828,7 +4013,7 @@ func framingPartsRound(t *testing.T, rng *rand.Rand, round int) (map[string]bool
 		RecordedFinalAmount: &of, RecordedTerminalSlot: &oi2, Coherence: text(),
 		StartedOnly: rb(), CallPresent: rb(),
 		CallStartedObservationID: text(), CallStartedPosition: nz(),
-		Stake: &of2, Slot: &oi2, Returned: rb(), LocalReasonOK: rb(), ErrorClass: text()}
+		Stake: &of2, Slot: &oi3, Returned: rb(), LocalReasonOK: rb(), ErrorClass: text()}
 	// The absent-optional row is deliberately the OTHER polarity on every bool,
 	// so between the two rows each boolean is framed both ways.
 	fpNil := FactualPlacement{Attempt: attemptOne, FactsetDigest: text(), EventID: text(),
@@ -4498,21 +4683,19 @@ func TestTheWidthAndPartsOraclesCannotBeSpelledFromTheFramer(t *testing.T) {
 				}
 			}
 			ast.Inspect(as, func(n ast.Node) bool {
-				// THE ANSWER MUST REACH A FAILURE, and the three arguments
-				// must be three different expressions. Counting the call
-				// alone accepted `fault := ...; _ = fault` and
-				// `framingWidthFault(name, width, width)`, either of which
-				// lets a width helper that disagrees with its own framing
-				// ship.
-				ifs, ok := n.(*ast.IfStmt)
-				if !ok || ifs.Init == nil {
-					return true
-				}
-				init, ok := ifs.Init.(*ast.AssignStmt)
-				if !ok || len(init.Rhs) != 1 {
-					return true
-				}
-				call, ok := init.Rhs[0].(*ast.CallExpr)
+				// THE CONDITION IS READ, NOT JUST THE INIT -- and the call may
+				// live anywhere in checkWidth. The previous shape required the
+				// call to be an if-statement's INIT and never looked at
+				// ifs.Cond, so `if fault := framingWidthFault(...); false {`
+				// satisfied it; under that spelling a lane shipped
+				// p3bResultFramedLen returning c.framedLen()+1 -- a width
+				// helper that disagrees with its own framing, which is the
+				// exact fault this guard names -- with the WHOLE SUITE GREEN.
+				// It also REFUSED the honest two-line form (`fault := ...`
+				// then `if fault != "" {`), which costs more than the defeat
+				// does: a guard that fails correct code charges a toll with no
+				// adversary present.
+				call, ok := n.(*ast.CallExpr)
 				if !ok {
 					return true
 				}
@@ -4520,15 +4703,23 @@ func TestTheWidthAndPartsOraclesCannotBeSpelledFromTheFramer(t *testing.T) {
 				if !ok || fn.Name != "framingWidthFault" {
 					return true
 				}
+				compares++
 				if len(call.Args) != 3 {
 					t.Errorf("framingWidthFault at %s takes %d arguments, want 3",
 						fset.Position(call.Pos()), len(call.Args))
 					return true
 				}
+				// DISTINCTNESS IS NOT TEXTUAL. `(width)`, `int(width)` and
+				// `width+0` all print differently and mean the same thing, so
+				// the tautology the check exists to stop was one character
+				// away. Parentheses, numeric conversions and a +0/-0 term are
+				// stripped before the comparison; `len(b.bytes())` is NOT a
+				// conversion and survives stripping, which is the case that
+				// matters.
 				seen := map[string]bool{}
 				for _, a := range call.Args {
 					var b bytes.Buffer
-					if err := printer.Fprint(&b, fset, a); err != nil {
+					if err := printer.Fprint(&b, fset, widthArgCore(a)); err != nil {
 						t.Fatalf("print argument: %v", err)
 					}
 					if seen[b.String()] {
@@ -4537,19 +4728,63 @@ func TestTheWidthAndPartsOraclesCannotBeSpelledFromTheFramer(t *testing.T) {
 					}
 					seen[b.String()] = true
 				}
-				fails := false
-				ast.Inspect(ifs.Body, func(n ast.Node) bool {
-					if sel, ok := n.(*ast.SelectorExpr); ok &&
-						(sel.Sel.Name == "Fatalf" || sel.Sel.Name == "Errorf" || sel.Sel.Name == "Fatal") {
-						fails = true
+				// THE ANSWER MUST BE TESTED AGAINST THE EMPTY STRING, and the
+				// branch that fires on a fault must fail. Either spelling of
+				// the honest form satisfies this; `; false` and `; fault == ""`
+				// satisfy neither.
+				name := ""
+				ast.Inspect(as, func(m ast.Node) bool {
+					switch x := m.(type) {
+					case *ast.AssignStmt:
+						if len(x.Lhs) == 1 && len(x.Rhs) == 1 && x.Rhs[0] == ast.Expr(call) {
+							if id, ok := x.Lhs[0].(*ast.Ident); ok {
+								name = id.Name
+							}
+						}
 					}
 					return true
 				})
-				if !fails {
-					t.Errorf("framingWidthFault at %s: its answer reaches no failure, so the comparison decides nothing",
+				tested := false
+				ast.Inspect(as, func(m ast.Node) bool {
+					ifs, ok := m.(*ast.IfStmt)
+					if !ok || ifs.Cond == nil {
+						return true
+					}
+					bin, ok := ifs.Cond.(*ast.BinaryExpr)
+					if !ok || bin.Op != token.NEQ {
+						return true
+					}
+					if !isEmptyStringLit(bin.Y) && !isEmptyStringLit(bin.X) {
+						return true
+					}
+					other := bin.X
+					if isEmptyStringLit(bin.X) {
+						other = bin.Y
+					}
+					hit := false
+					if id, ok := other.(*ast.Ident); ok && name != "" && id.Name == name {
+						hit = true
+					}
+					if other == ast.Expr(call) {
+						hit = true
+					}
+					if !hit {
+						return true
+					}
+					ast.Inspect(ifs.Body, func(k ast.Node) bool {
+						if sel, ok := k.(*ast.SelectorExpr); ok &&
+							(sel.Sel.Name == "Fatalf" || sel.Sel.Name == "Errorf" || sel.Sel.Name == "Fatal") {
+							tested = true
+						}
+						return true
+					})
+					return true
+				})
+				if !tested {
+					t.Errorf("framingWidthFault at %s: its answer is never tested against \"\" in a branch that fails, "+
+						"so the comparison decides nothing",
 						fset.Position(call.Pos()))
 				}
-				compares++
 				return true
 			})
 			return true
@@ -4632,6 +4867,27 @@ func TestTheWidthAndPartsOraclesCannotBeSpelledFromTheFramer(t *testing.T) {
 				})
 				return bad
 			}
+			// A TAINTED FUNCTION BOUND TO A NAME IS STILL A FRAMER, and it
+			// belongs in the FUNCTION namespace and not the value one.
+			// `mk := placementFieldList` binds a framer-reaching function to a
+			// value name: reachesFramer's call arm consults taintedFuncs and
+			// its Ident arm consults tainted, and after the namespace split
+			// NEITHER held mk -- so `plWant := mk(t, pl)` laundered the framer
+			// into a row, and under that laundering a lane swapped two writers
+			// in framePlacementEvidence with the WHOLE SUITE GREEN. That is a
+			// regression this round's own repair introduced.
+			// PUTTING THE NAME IN taintedFuncs CLOSES IT WITHOUT REVIVING THE
+			// OVER-APPROXIMATION the split removed: a local that merely SHARES
+			// a name with a tainted function is not BOUND FROM one, so it stays
+			// clean, which is the whole reason the two namespaces exist.
+			namesTaintedFunc := func(e ast.Expr) bool {
+				id, ok := e.(*ast.Ident)
+				if !ok {
+					return false
+				}
+				return taintedFuncs[id.Name] || id.Name == "canonical" ||
+					id.Name == "splitFramedParts" || strings.HasPrefix(id.Name, "frame")
+			}
 			// AND THE LEFT-HAND SIDE IS ROOTED. `m["k"] = ...`, `box.p = ...`
 			// and `*p = ...` are not Idents, so each laundered the framer into
 			// a row untracked; the root of the expression is what binds.
@@ -4663,15 +4919,20 @@ func TestTheWidthAndPartsOraclesCannotBeSpelledFromTheFramer(t *testing.T) {
 					if name == "" || name == "_" {
 						continue
 					}
+					var src ast.Expr
 					switch {
 					case len(rhs) == 1:
-						if reachesFramer(rhs[0]) {
-							tainted[name] = true
-						}
+						src = rhs[0]
 					case i < len(rhs):
-						if reachesFramer(rhs[i]) {
-							tainted[name] = true
-						}
+						src = rhs[i]
+					default:
+						continue
+					}
+					switch {
+					case namesTaintedFunc(src):
+						taintedFuncs[name] = true
+					case reachesFramer(src):
+						tainted[name] = true
 					}
 				}
 			}
@@ -4726,8 +4987,11 @@ func TestTheWidthAndPartsOraclesCannotBeSpelledFromTheFramer(t *testing.T) {
 					}
 				}
 			}
+			// THE FIXED POINT COUNTS BOTH NAMESPACES. A pass that only grew
+			// taintedFuncs used to look like no progress and stopped the loop
+			// one step before the value it fed.
 			for pass := 0; pass < 4; pass++ {
-				before := len(tainted)
+				before := len(tainted) + len(taintedFuncs)
 				ast.Inspect(fd.Body, bind)
 				for _, ff := range files {
 					ast.Inspect(ff, func(n ast.Node) bool {
@@ -4740,21 +5004,26 @@ func TestTheWidthAndPartsOraclesCannotBeSpelledFromTheFramer(t *testing.T) {
 							if !globals[name] {
 								continue
 							}
+							var src ast.Expr
 							switch {
 							case len(as.Rhs) == 1:
-								if reachesFramer(as.Rhs[0]) {
-									tainted[name] = true
-								}
+								src = as.Rhs[0]
 							case i < len(as.Rhs):
-								if reachesFramer(as.Rhs[i]) {
-									tainted[name] = true
-								}
+								src = as.Rhs[i]
+							default:
+								continue
+							}
+							switch {
+							case namesTaintedFunc(src):
+								taintedFuncs[name] = true
+							case reachesFramer(src):
+								tainted[name] = true
 							}
 						}
 						return true
 					})
 				}
-				if len(tainted) == before {
+				if len(tainted)+len(taintedFuncs) == before {
 					break
 				}
 			}
@@ -4941,9 +5210,23 @@ func TestEverySharedFramingHelperIsSensitiveToEveryFieldItFrames(t *testing.T) {
 	// row can keep its label, borrow another field's two values, still frame
 	// differently and still pass -- which lets the field it NAMES go
 	// uncovered while the table reports 26.
+	// THE KEY IS QUOTED, because framed parts contain NUL: joining two raw byte
+	// strings with a NUL made two different pairs collide into one key, which
+	// is a false POSITIVE waiting to happen as well as a missed duplicate.
+	//
+	// AND WHAT THIS CLAUSE DOES NOT CATCH, recorded rather than left to be
+	// found: it compares the two values BYTE FOR BYTE, so it sees a row that
+	// reuses another row's exact pair and NOT a row relabelled onto a
+	// neighbouring field with fresh literals. Closing that means building each
+	// row from (base, field, valueA, valueB) and setting the field by
+	// reflection so the label cannot drift from the field it names -- a rebuild
+	// of all 26 rows, outside this round's repair scope. The cost today is nil
+	// and that is checked, not assumed: every field in this table is also
+	// value-compared by the parts table, which resolves rows by FIELD, so this
+	// table is a redundancy backstop here and not a sole cover.
 	pairs := map[string]string{}
 	for _, tc := range table {
-		key := bytesOf(tc.a) + "\x00" + bytesOf(tc.b)
+		key := strconv.Quote(bytesOf(tc.a)) + "\x00" + strconv.Quote(bytesOf(tc.b))
 		if first, dup := pairs[key]; dup {
 			t.Errorf("%s drives the same two values as %s: a borrowed pair leaves the field this row names uncovered",
 				tc.field, first)
@@ -4956,6 +5239,52 @@ func TestEverySharedFramingHelperIsSensitiveToEveryFieldItFrames(t *testing.T) {
 // IT IS A PIN AND NOT A TARGET: raise it with a row, and treat a fall as the
 // finding it is.
 const sensitivityRows = 26
+
+// widthArgCore strips the spellings that mean the same value, so the
+// distinctness check above cannot be defeated by punctuation. Parentheses, a
+// numeric conversion and a +0/-0 term are removed; a call like len(b.bytes())
+// is left alone, which is the argument the check actually has to see.
+func widthArgCore(e ast.Expr) ast.Expr {
+	numeric := map[string]bool{"int": true, "int8": true, "int16": true, "int32": true,
+		"int64": true, "uint": true, "uint8": true, "uint16": true, "uint32": true,
+		"uint64": true, "uintptr": true}
+	for {
+		switch x := e.(type) {
+		case *ast.ParenExpr:
+			e = x.X
+		case *ast.CallExpr:
+			id, ok := x.Fun.(*ast.Ident)
+			if !ok || len(x.Args) != 1 || !numeric[id.Name] {
+				return e
+			}
+			e = x.Args[0]
+		case *ast.BinaryExpr:
+			if x.Op != token.ADD && x.Op != token.SUB {
+				return e
+			}
+			switch {
+			case isZeroLit(x.Y):
+				e = x.X
+			case isZeroLit(x.X) && x.Op == token.ADD:
+				e = x.Y
+			default:
+				return e
+			}
+		default:
+			return e
+		}
+	}
+}
+
+func isZeroLit(e ast.Expr) bool {
+	lit, ok := e.(*ast.BasicLit)
+	return ok && lit.Kind == token.INT && lit.Value == "0"
+}
+
+func isEmptyStringLit(e ast.Expr) bool {
+	lit, ok := e.(*ast.BasicLit)
+	return ok && lit.Kind == token.STRING && (lit.Value == `""` || lit.Value == "``")
+}
 
 // framingWidthFault reports why a recorded width disagrees with the bytes its
 // framing wrote, or "" when they agree.
@@ -5094,4 +5423,534 @@ func fieldIndexOf(typ ast.Expr, name string) int {
 		}
 	}
 	return -1
+}
+
+// A REGISTER OF FIGURES WRITTEN IN PROSE STOPS BEING TRUE ONE COMMIT LATER.
+// doc.go states a rule about this package's measured figures -- a single
+// runtime.MemStats.TotalAlloc delta is always a multiple of eight, so a figure
+// that is not one is either an average whose basis was recorded or a number
+// nothing can classify -- and then ENUMERATES the figures in that state. The
+// enumeration was written over the figures in doc.go and read as a statement
+// about the package: eight allocation figures in canonical.go, evidence.go,
+// factset.go, p3b.go and resolution.go were in exactly that state and named
+// nowhere, while a sentence added to p3b.go pointed a reader at the register
+// for "the other figures in that state". That is this branch's recurring
+// failure in its purest form -- an enumeration that was true where it was
+// written and false one file over -- and the package's own answer to it is
+// stated in canonical.go: THE INVENTORY IS DERIVED, NOT WRITTEN.
+//
+// This is that derivation. It scans every comma-grouped integer in every
+// production comment, keeps the ones that are NOT multiples of eight -- the
+// set the rule is about -- and requires each to be CLASSIFIED below. A figure
+// added to a production comment in that form fails this test until someone
+// says what it is.
+//
+// THE CLASSIFICATION IS THE BARRIER, not the inventory. A figure classified
+// figAllocBytes is subject to the rule, so it must be quoted in doc.go, where
+// the rule is stated and each figure's admissibility is argued. That clause is
+// what the eight failed, and it is what keeps the register from falling behind
+// the tree again.
+//
+// WHAT THIS DOES NOT DO, written here because the last four rounds were lost
+// to guards that promised more than they checked:
+//
+//   - It does not check that a classification is CORRECT. Calling an
+//     allocation figure a count moves it out of the register's reach, and only
+//     a reader of the surrounding sentence can catch that. The kinds are named
+//     rather than numbered so that a wrong one is at least legible.
+//   - It does not reach a figure written without commas, as a range, in words,
+//     or in a test file. It is an inventory over ONE written form.
+//   - It does not check that a quoted figure is a correct MEASUREMENT. Nothing
+//     here re-measures anything; the rule is about admissibility, not accuracy.
+type figKind string
+
+const (
+	// figAllocBytes is a measured allocation in BYTES. The multiple-of-eight
+	// rule reaches exactly these, so each one must be quoted in doc.go.
+	figAllocBytes figKind = "allocation bytes"
+	// figAllocCount is a measured allocation COUNT. A raw TotalAlloc delta
+	// does not produce one, so the rule says nothing about it.
+	figAllocCount figKind = "allocation count"
+	// figInputSize is a size the CALLER chose: a document, an identifier, a
+	// field, a declared ceiling.
+	figInputSize figKind = "input size"
+	// figOutputSize is a size this package EMITTED: an error, a refusal, a
+	// serialization.
+	figOutputSize figKind = "output size"
+	// figPlainCount is anything else counted: entries, records, reasons,
+	// rounds, hits, misses, posting lists.
+	figPlainCount figKind = "count"
+)
+
+// figEntry is what this inventory records about one figure.
+type figEntry struct {
+	kind figKind
+	// files is every production file whose comments quote the figure, sorted
+	// and comma-joined. THE FILE SET IS HELD, NOT JUST THE FIGURE, and that is
+	// the clause the first draft of this test was missing. Once a figure is
+	// quoted in doc.go's register, editing it at its MEASUREMENT site leaves it
+	// still quoted -- in the register alone, now describing nothing -- and a
+	// figure-set check passes. That is this branch's own recurring failure
+	// exactly: a correction applied in one file and not its sibling one file
+	// over. Holding the file set fails it.
+	files string
+}
+
+// figureInventory classifies every comma-grouped integer in a production
+// comment that is not a multiple of eight, and records where it is quoted. The
+// figures AND their homes are held exactly: an addition, a removal and a move
+// all fail.
+var figureInventory = map[int]figEntry{
+	1_001:       {figPlainCount, "evidence.go"},       // entries counted against a ceiling
+	1_030:       {figOutputSize, "doc.go,factset.go"}, // a serialized factset carrying a +Inf
+	1_900:       {figAllocCount, "evidence.go"},
+	4_097:       {figPlainCount, "resolution.go"}, // reasons
+	4_782:       {figPlainCount, "doc.go"},        // observation-id posting lists
+	11_930:      {figAllocCount, "evidence.go"},
+	12_298:      {figPlainCount, "doc.go"},      // answers with content
+	17_883:      {figPlainCount, "evidence.go"}, // accessor misses
+	65_671:      {figInputSize, "p3b.go"},       // a ruleset document
+	65_675:      {figOutputSize, "p3b.go"},      // the refusal it produced
+	95_939:      {figAllocCount, "evidence.go"},
+	147_671:     {figAllocBytes, "doc.go"},
+	200_001:     {figPlainCount, "evidence.go"},               // records
+	297_913:     {figInputSize, "resolution.go"},              // reasons, in bytes
+	840_098:     {figOutputSize, "evidence.go,resolution.go"}, // a refusal naming a foreign-session dataset
+	999_975:     {figAllocCount, "factset.go"},
+	1_055_076:   {figAllocBytes, "doc.go"},
+	1_057_073:   {figAllocBytes, "doc.go"},
+	1_999_875:   {figAllocCount, "factset.go"},
+	2_113_586:   {figAllocBytes, "doc.go"},
+	2_113_748:   {figAllocBytes, "doc.go,p3b.go"},
+	2_113_763:   {figAllocBytes, "doc.go"},
+	3_183_766:   {figAllocBytes, "doc.go"},
+	4_240_782:   {figAllocBytes, "doc.go"},
+	5_588_220:   {figPlainCount, "evidence.go"}, // guard hits over the whole suite
+	6_889_790:   {figAllocBytes, "doc.go"},
+	9_120_039:   {figInputSize, "p3b.go"}, // a document that overflows the stack
+	10_485_107:  {figAllocBytes, "doc.go,p3b.go"},
+	13_436_051:  {figAllocBytes, "canonical.go,doc.go,resolution.go"},
+	16_777_374:  {figOutputSize, "canonical.go,p3b.go"}, // an error naming a 16 MiB key
+	16_885_191:  {figAllocBytes, "canonical.go,doc.go,factset.go"},
+	18_301_246:  {figAllocBytes, "doc.go"},
+	18_301_274:  {figAllocBytes, "doc.go"},
+	24_641_243:  {figAllocBytes, "doc.go,evidence.go"},
+	41_942_377:  {figAllocBytes, "doc.go,p3b.go"},
+	50_923_867:  {figAllocBytes, "doc.go,evidence.go"},
+	101_334_414: {figAllocBytes, "doc.go,evidence.go"},
+	167_771_494: {figAllocBytes, "canonical.go,doc.go,p3b.go"},
+	805_306_353: {figInputSize, "p3b.go"}, // a legal document written entirely as escapes
+}
+
+// commaGroupedFigure matches the ONE written form this inventory covers.
+var commaGroupedFigure = regexp.MustCompile(`\b\d{1,3}(?:,\d{3})+\b`)
+
+func TestTheFigureRegisterNamesEveryFigureItMustName(t *testing.T) {
+	entries, err := os.ReadDir(".")
+	if err != nil {
+		t.Fatalf("read package dir: %v", err)
+	}
+	fset := token.NewFileSet()
+	// site -> where each figure was found, so a failure names the line rather
+	// than the number alone.
+	sites := map[int][]string{}
+	inDoc := map[int]bool{}
+	scanned := 0
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		f, err := parser.ParseFile(fset, name, nil, parser.ParseComments|parser.SkipObjectResolution)
+		if err != nil {
+			t.Fatalf("parse %s: %v", name, err)
+		}
+		scanned++
+		for _, g := range f.Comments {
+			for _, cm := range g.List {
+				for _, m := range commaGroupedFigure.FindAllString(cm.Text, -1) {
+					n, err := strconv.Atoi(strings.ReplaceAll(m, ",", ""))
+					if err != nil || n%8 == 0 {
+						continue
+					}
+					line := fset.Position(cm.Pos()).Line
+					sites[n] = append(sites[n], fmt.Sprintf("%s:%d", name, line))
+					if name == "doc.go" {
+						inDoc[n] = true
+					}
+				}
+			}
+		}
+	}
+	// A SCAN THAT READ NOTHING WOULD PASS EVERY CLAUSE BELOW, so the reach is
+	// asserted before the answers are.
+	if scanned < 10 {
+		t.Fatalf("scanned only %d production files; the walk is not reaching the package", scanned)
+	}
+	if len(sites) == 0 {
+		t.Fatal("no comma-grouped figure found in any production comment; the scan is vacuous")
+	}
+
+	for n, where := range sites {
+		if _, ok := figureInventory[n]; !ok {
+			t.Errorf("%s: %s is not a multiple of eight and is not classified in figureInventory; "+
+				"say what it is before quoting it", strings.Join(where, ", "), withCommas(n))
+		}
+	}
+	for n, want := range figureInventory {
+		where, ok := sites[n]
+		if !ok {
+			t.Errorf("figureInventory classifies %s, which no production comment quotes any more; "+
+				"remove the row", withCommas(n))
+			continue
+		}
+		if got := joinFiles(where); got != want.files {
+			t.Errorf("%s is quoted in %s; figureInventory records %s. A figure edited at one of its "+
+				"sites and left standing at another is the defect this clause exists for",
+				withCommas(n), got, want.files)
+		}
+	}
+
+	// THE CLAUSE THE EIGHT FAILED. doc.go states the rule; a figure the rule
+	// reaches that doc.go does not quote is a figure the register cannot have
+	// argued about.
+	for n, entry := range figureInventory {
+		if entry.kind != figAllocBytes {
+			continue
+		}
+		if !inDoc[n] {
+			t.Errorf("%s is an allocation figure that is not a multiple of eight and doc.go does not quote it "+
+				"(found at %s); the register cannot argue a figure it does not name",
+				withCommas(n), strings.Join(sites[n], ", "))
+		}
+	}
+}
+
+// joinFiles renders the distinct files a figure was found in, sorted, in the
+// form figureInventory records.
+func joinFiles(sites []string) string {
+	seen := map[string]bool{}
+	var files []string
+	for _, s := range sites {
+		f := s[:strings.LastIndex(s, ":")]
+		if !seen[f] {
+			seen[f] = true
+			files = append(files, f)
+		}
+	}
+	sort.Strings(files)
+	return strings.Join(files, ",")
+}
+
+// withCommas renders a figure the way the comments do, so a failure can be
+// pasted straight into the register.
+func withCommas(n int) string {
+	s := strconv.Itoa(n)
+	var b strings.Builder
+	for i, r := range s {
+		if i > 0 && (len(s)-i)%3 == 0 {
+			b.WriteByte(',')
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
+}
+
+// THE WIDEST FRAMING'S SHAPE IS COUNTED HERE, because three files state it and
+// nothing checked it. canonical.go, doc.go and this file each say the widest
+// witness framing makes thirty-one direct part calls and three helper calls,
+// and doc.go said "an AST census confirms" it. No census existed: the figure
+// was hand-maintained in three places, which is precisely the "second place a
+// future field can be forgotten" the sentence is warning about. The previous
+// wording ("a thirty-five-field framing") was wrong and claimed nothing; the
+// correction was right and claimed a machine. This is the machine.
+//
+// WHAT IT COUNTS. Within every `func frame…(c *canonical, …)` in production: a
+// DIRECT part call is a call on the canonical parameter itself, and a HELPER
+// call is a call to another function handed that same parameter. The
+// conversions inside a part call -- `c.i64(int64(x))`, `c.str(string(x))` --
+// are neither, because the canonical value is not among their arguments.
+//
+// WHAT IT DOES NOT DO. It does not say the widest framing frames every field
+// of its type: that is TestAWitnessTypeCannotGrowAFieldQuietly's job, and the
+// two are independent on purpose. It does not reach SerializeCommonFactset,
+// which is not a `frame…` function and has no length-only width at all -- the
+// figure that sentence once carried, thirty-five, is that function's and not
+// this one's, which is how the error got in.
+func TestTheWidestFramingIsTheShapeTheRegisterStates(t *testing.T) {
+	entries, err := os.ReadDir(".")
+	if err != nil {
+		t.Fatalf("read package dir: %v", err)
+	}
+	fset := token.NewFileSet()
+	type shape struct {
+		direct, helper int
+		where          string
+	}
+	shapes := map[string]shape{}
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		f, err := parser.ParseFile(fset, name, nil, parser.SkipObjectResolution)
+		if err != nil {
+			t.Fatalf("parse %s: %v", name, err)
+		}
+		for _, d := range f.Decls {
+			fd, ok := d.(*ast.FuncDecl)
+			if !ok || fd.Recv != nil || fd.Body == nil || !strings.HasPrefix(fd.Name.Name, "frame") {
+				continue
+			}
+			recv := canonicalParamOf(fd)
+			if recv == "" {
+				continue
+			}
+			var s shape
+			s.where = fmt.Sprintf("%s:%d", name, fset.Position(fd.Pos()).Line)
+			ast.Inspect(fd.Body, func(n ast.Node) bool {
+				call, ok := n.(*ast.CallExpr)
+				if !ok {
+					return true
+				}
+				switch fun := call.Fun.(type) {
+				case *ast.SelectorExpr:
+					if id, ok := fun.X.(*ast.Ident); ok && id.Name == recv {
+						s.direct++
+					}
+				case *ast.Ident:
+					for _, a := range call.Args {
+						if id, ok := a.(*ast.Ident); ok && id.Name == recv {
+							s.helper++
+							break
+						}
+					}
+				}
+				return true
+			})
+			shapes[fd.Name.Name] = s
+		}
+	}
+	// THE WALK MUST HAVE REACHED THE FRAMINGS, or every answer below is
+	// vacuously true.
+	if len(shapes) < 7 {
+		t.Fatalf("found only %d frame… functions taking a *canonical; the walk is not reaching them", len(shapes))
+	}
+	// NAMES ARE SORTED BEFORE THE MAXIMUM IS TAKEN, so a tie resolves the same
+	// way on every run rather than however the map happened to iterate.
+	names := make([]string, 0, len(shapes))
+	for name := range shapes {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	var widest string
+	for _, name := range names {
+		s := shapes[name]
+		if widest == "" || s.direct+s.helper > shapes[widest].direct+shapes[widest].helper {
+			widest = name
+		}
+	}
+	got := shapes[widest]
+	const wantDirect, wantHelper = 31, 3
+	const wantName = "frameP3bResult"
+	if widest != wantName || got.direct != wantDirect || got.helper != wantHelper {
+		var all []string
+		for name, s := range shapes {
+			all = append(all, fmt.Sprintf("%s=%d+%d", name, s.direct, s.helper))
+		}
+		sort.Strings(all)
+		t.Fatalf("the widest framing is %s at %s with %d direct part calls and %d helper calls; "+
+			"canonical.go, doc.go and this file state %s at %d and %d. All framings: %s",
+			widest, got.where, got.direct, got.helper, wantName, wantDirect, wantHelper, strings.Join(all, " "))
+	}
+}
+
+// canonicalParamOf returns the name the function gives its *canonical
+// parameter, or "" if it takes none. The name is read rather than assumed:
+// a framing that spells it anything other than `c` is still a framing.
+func canonicalParamOf(fd *ast.FuncDecl) string {
+	if fd.Type.Params == nil {
+		return ""
+	}
+	for _, p := range fd.Type.Params.List {
+		star, ok := p.Type.(*ast.StarExpr)
+		if !ok {
+			continue
+		}
+		id, ok := star.X.(*ast.Ident)
+		if !ok || id.Name != "canonical" {
+			continue
+		}
+		if len(p.Names) == 1 {
+			return p.Names[0].Name
+		}
+	}
+	return ""
+}
+
+// SIGNED ZERO AND A NaN PAYLOAD ARE WHERE THE BIT RENDERING EARNS ITS KEEP,
+// and until now nothing drove either. canonical.go renders a float's BITS
+// precisely so that two distinguishable values cannot round together, and
+// doc.go records "±0.0 still frame apart" as a checked property. It was not
+// checked: a lane wrote `c.f64(o.Odds + 0)` -- which collapses -0.0 to +0.0 and
+// quiets a NaN payload, and is otherwise the identity -- and it SURVIVED the
+// whole suite. A wholesale rendering change (FormatFloat instead of the bits)
+// is caught by the factset golden; this one edge is not, because no fixture in
+// the package produces either value.
+//
+// WHAT THIS DOES NOT CLAIM. It does not claim any producer here emits -0.0 or
+// a NaN: VerifyCommonFactset refuses non-finite odds, so the class is reachable
+// through the FRAMER rather than through a verified factset. The rendering is a
+// stated property of the framer, and this is that property's receipt.
+func TestTheFramerKeepsSignedZeroAndNaNPayloadsApart(t *testing.T) {
+	framed := func(v float64) string {
+		var c canonical
+		c.f64(v)
+		return string(c.bytes())
+	}
+	negZero := math.Copysign(0, -1)
+	// A VACUOUS CASE WOULD PASS EVERY ASSERTION BELOW, so each input class is
+	// confirmed to be the class it is named for before it is used.
+	if !math.Signbit(negZero) || math.Signbit(0) {
+		t.Fatal("the fixture did not produce a negative zero; every case below would be vacuous")
+	}
+	if negZero != 0 {
+		t.Fatal("negative zero does not compare equal to zero; this test is about values == cannot tell apart")
+	}
+	if framed(negZero) == framed(0) {
+		t.Error("-0.0 and +0.0 frame identically: the bit rendering exists so that two values " +
+			"== cannot distinguish do not round together in the digest")
+	}
+	// TWO NaNs WITH DIFFERENT PAYLOADS. Every comparison on a NaN is false, so
+	// these are confirmed by their bits and not by ==.
+	a := math.Float64frombits(0x7FF8000000000001)
+	b := math.Float64frombits(0x7FF8000000000002)
+	if !math.IsNaN(a) || !math.IsNaN(b) || math.Float64bits(a) == math.Float64bits(b) {
+		t.Fatal("the fixture did not produce two distinct NaNs; the case below would be vacuous")
+	}
+	if framed(a) == framed(b) {
+		t.Error("two NaNs with different payloads frame identically")
+	}
+	// AND BOTH MODES MUST AGREE ON THE WIDTH for every one of these, which is
+	// what every other framing in this package is held to.
+	for _, v := range []float64{negZero, 0, a, b, math.Inf(1), math.Inf(-1)} {
+		l := canonical{lenOnly: true}
+		l.f64(v)
+		var c canonical
+		c.f64(v)
+		if l.framedLen() != len(c.bytes()) {
+			t.Errorf("f64(%x): length-only reports %d, the framing writes %d bytes",
+				math.Float64bits(v), l.framedLen(), len(c.bytes()))
+		}
+	}
+}
+
+// AND THE FIVE CALL SITES, not just the primitive. The receipt above holds
+// canonical.f64 itself; it does NOT hold the five places this package hands a
+// float to it, and a lane's surviving mutant was at one of those -- c.f64(o.Odds
+// + 0) -- not at the framer. A test that kills a fault at the primitive and
+// leaves it alive one call up is the "repair stops at the gate that was
+// reported" failure this package names in canonical.go, so both are held.
+//
+// THE CLASS IS ACCEPTED INPUT, which is why this is worth a test rather than a
+// note: finiteFloat refuses only Inf and NaN, so a factset carrying a NEGATIVE
+// ZERO verifies, and SerializeCommonFactset is exported and ungated. Two
+// factsets that == cannot tell apart must not share a serialization.
+//
+// NO GOLDEN IS INVOLVED. The two sides are compared against each other, so this
+// adds no pinned bytes and changes none.
+func TestEveryFloatTheFactsetFramesKeepsSignedZeroApart(t *testing.T) {
+	neg := math.Copysign(0, -1)
+	if !math.Signbit(neg) || neg != 0 {
+		t.Fatal("the fixture did not produce a negative zero; every case below would be vacuous")
+	}
+	build := func() CommonFactset {
+		return CommonFactset{
+			Outcomes: []predictioneval.OutcomeInput{{}},
+			Settings: &predictioneval.BetSettingsInput{
+				// FilterCondition is a POINTER and serializeSettings frames its
+				// Value only when it is set, so a nil here would make the fifth
+				// row vacuous rather than failing it.
+				FilterCondition: &predictioneval.SourceFilterCondition{},
+			},
+		}
+	}
+	for _, tc := range []struct {
+		field string
+		set   func(*CommonFactset, float64)
+	}{
+		{"Outcomes[0].PercentageUsers", func(f *CommonFactset, v float64) { f.Outcomes[0].PercentageUsers = v }},
+		{"Outcomes[0].Odds", func(f *CommonFactset, v float64) { f.Outcomes[0].Odds = v }},
+		{"Outcomes[0].OddsPercentage", func(f *CommonFactset, v float64) { f.Outcomes[0].OddsPercentage = v }},
+		{"Settings.Delay", func(f *CommonFactset, v float64) { f.Settings.Delay = v }},
+		{"Settings.FilterCondition.Value", func(f *CommonFactset, v float64) { f.Settings.FilterCondition.Value = v }},
+	} {
+		pos, negf := build(), build()
+		tc.set(&pos, 0)
+		tc.set(&negf, neg)
+		a, b := SerializeCommonFactset(pos), SerializeCommonFactset(negf)
+		if len(a) == 0 || len(b) == 0 {
+			t.Fatalf("%s: the framing produced nothing; the comparison below would be vacuous", tc.field)
+		}
+		if string(a) == string(b) {
+			t.Errorf("%s: +0.0 and -0.0 serialize identically, so this site does not render the bits",
+				tc.field)
+		}
+	}
+}
+
+// fieldIndexOf HAS A CONTROL NOW, because its repair had no receipt. The
+// embedded-field branch it gained -- an embedded field has no name and still
+// costs the literal an element -- is dead against the current source: the row
+// struct it walks has no embedded field, so removing the i++ again left the
+// WHOLE SUITE GREEN. A repair nothing would notice regressing is a repair on
+// trust, and this package's own discipline is a control table per recognizer.
+//
+// The source below is synthetic and carries the construct the repair is for.
+// WHAT IT DOES NOT DO: it does not check any production row; it checks the
+// WALK, over a shape the production rows do not currently have.
+func TestFieldIndexOfCountsAnEmbeddedField(t *testing.T) {
+	const src = `package p
+
+type emb struct{ E int }
+
+var rows = []struct {
+	emb
+	name  string
+	parts int
+	want  []string
+}{}
+`
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, "synthetic.go", src, parser.SkipObjectResolution)
+	if err != nil {
+		t.Fatalf("parse synthetic source: %v", err)
+	}
+	var typ ast.Expr
+	ast.Inspect(f, func(n ast.Node) bool {
+		if lit, ok := n.(*ast.CompositeLit); ok && typ == nil {
+			typ = lit.Type
+		}
+		return true
+	})
+	if typ == nil {
+		t.Fatal("no composite literal in the synthetic source; every case below would be vacuous")
+	}
+	// THE EMBEDDED FIELD IS ELEMENT 0, so every named field sits one later
+	// than its position among the NAMES. That off-by-one is the whole defect.
+	for _, tc := range []struct {
+		name string
+		want int
+	}{
+		{"name", 1},
+		{"parts", 2},
+		{"want", 3},
+		{"absent", -1},
+	} {
+		if got := fieldIndexOf(typ, tc.name); got != tc.want {
+			t.Errorf("fieldIndexOf(%q) = %d, want %d: an embedded field costs the literal an "+
+				"element, so skipping it without advancing shifts every index after it",
+				tc.name, got, tc.want)
+		}
+	}
 }

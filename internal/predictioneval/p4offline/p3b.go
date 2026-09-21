@@ -183,8 +183,11 @@ func (r VerifiedP3bRuleset) ConfigCopy() (predictioneval.OrderedRulesConfig, err
 // and about 1.06 MB at 1 MiB before the width existed, 0 at both after. The
 // second figure is quoted as a magnitude because the exact number recorded for
 // it on the published head is not a multiple of eight and no averaging basis
-// was recorded with it, so nothing can say whether it was a reading or a slip;
-// doc.go names the other figures in that state. Closing
+// was recorded with it, so nothing can say whether it was a reading or a slip.
+// doc.go's register names the fifteen figures that are in that state and are
+// left standing; this one is not among them, because it was retracted rather
+// than left standing, and TestTheFigureRegisterNamesEveryFigureItMustName holds
+// that list to the tree rather than to a sentence. Closing
 // that did NOT require sealing the identity fields, and they stay exported
 // because a result carries them.
 //

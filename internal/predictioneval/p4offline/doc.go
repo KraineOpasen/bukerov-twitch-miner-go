@@ -741,14 +741,36 @@
 //     and the other three are divided by a rep count -- the third and fourth by
 //     the same sixteen, in the same sentence. What is not quoted in these two records is a figure
 //     whose averaging basis was never recorded, because nothing can say which
-//     of the two it is. THAT RULE IS NOT APPLIED THROUGHOUT: seven figures
-//     taken on OTHER heads and quoted elsewhere here -- 147,671 and 2,113,763,
-//     2,113,748, 18,301,274, 18,301,246, 6,889,790, 1,057,073 -- are in exactly
-//     that state, and four of them -- 147,671 and 2,113,763, whose series'
-//     count is given a sentence later, and 18,301,274 and 6,889,790, which
-//     carry theirs directly -- sit beside allocation COUNTS, which a raw delta
-//     does not produce. They are left standing, and named, rather than
-//     deleted on a rule this register applies in one place. The ratios hold because three independent measurements
+//     of the two it is. THAT RULE WAS APPLIED IN ONE FILE AND READ AS A CLAIM
+//     ABOUT THE PACKAGE, which is this branch's recurring failure in its purest
+//     form. A sentence here counted SEVEN figures in that state; seven is how
+//     many doc.go quotes. FIFTEEN are in the package, and all fifteen are named
+//     now. In this register: 147,671 and 2,113,763, 2,113,748, 18,301,274,
+//     18,301,246, 6,889,790, 1,057,073 -- four of which, 147,671 and 2,113,763,
+//     whose series' count is given a sentence later, and 18,301,274 and
+//     6,889,790, which carry theirs directly, sit beside allocation COUNTS,
+//     which a raw delta does not produce. In five OTHER production files, named
+//     nowhere until now: 13,436,051 (canonical.go and resolution.go) and
+//     16,885,191 (canonical.go and factset.go); 10,485,107, 41,942,377 and
+//     167,771,494 (p3b.go, the last also in canonical.go); and 24,641,243,
+//     50,923,867 and 101,334,414 (evidence.go), whose fourth series member,
+//     203,719,320, IS a multiple of eight -- so that one series is three
+//     inadmissible figures beside one admissible one, measured the same way.
+//     All fifteen are left standing, and named, rather than deleted: a figure
+//     deleted for failing this rule takes with it the measurement that showed
+//     the repair was needed.
+//     THE INVENTORY IS DERIVED NOW, NOT WRITTEN, which is what this register
+//     should have done the first time. TestTheFigureRegisterNamesEveryFigureItMustName
+//     scans every comma-grouped integer in every production comment, keeps the
+//     ones that are not multiples of eight, requires each to be classified as
+//     an allocation in bytes, an allocation count, an input size, an output
+//     size or a plain count, and requires every figure of the FIRST kind to be
+//     quoted here. It fails on an addition and on a removal alike, so this
+//     paragraph cannot fall behind the tree again. What it cannot check is
+//     whether a classification is HONEST -- calling an allocation figure a
+//     count moves it out of this register's reach, and only a reader of the
+//     sentence around it will catch that.
+//     The ratios hold because three independent measurements
 //     agreed on them to two decimals and they do not depend on the machine.
 //     WHERE THE COST IS, PER STAGE at 512 KiB: sha256Hex is 128 B and FLAT at
 //     both sizes, so it is not a contributor; json.Decode NEVER RUNS, because
@@ -1156,7 +1178,8 @@
 //     canonical framer has a LENGTH-ONLY mode and the width is the same framing
 //     function run with bytes switched off. A hand-written mirror of the widest
 //     of these framings -- thirty-one direct part calls and three helper calls,
-//     the figure canonical.go states and an AST census confirms -- is a second
+//     the figure canonical.go states and TestTheWidestFramingIsTheShapeTheRegisterStates
+//     counts out of the source -- is a second
 //     place a future field can be forgotten, and this package has already paid
 //     for one of those.
 //     TestTheRecordedFramedWidthIsTheWitnessOwn drives both modes over 400
@@ -1212,8 +1235,9 @@
 //     the one direction that means "no growth". Both fixed, and the helper that
 //     replaces them says why in its own comment.
 //     THE RULESET SEAM COST 1.0073x the caller's edit before its width existed
-//     -- a one-byte edit against a 1 MiB one -- and 0 B/op at both widths
-//     after, which is the one figure here that is not a multiple of anything.
+//     -- a one-byte edit against a 1 MiB one, and the one figure in this record
+//     that is a RATIO rather than a byte count, so the multiple-of-eight rule
+//     above does not reach it -- and 0 B/op at both widths after.
 //     Closing it did NOT require sealing the identity fields: the width is
 //     recorded at the mint and compared first, with RulesetID, RawSHA256 and
 //     NativeConfigDigest left exported.
