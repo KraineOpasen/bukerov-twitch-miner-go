@@ -1,0 +1,8 @@
+{
+  "configId": "p4-synthetic-ruleset-a",
+  "hasDefault": true,
+  "detailed": [
+    {"comparator": "Ge", "rawThresholdPercent": 50.0, "rawAttemptRatePercent": 100.0, "points": {"maxValue": 0, "rawPercent": 10.0}}
+  ],
+  "default": {"rawMinPercent": 95.0, "rawMaxPercent": 100.0, "points": {"maxValue": 0, "rawPercent": 1.0}}
+}
