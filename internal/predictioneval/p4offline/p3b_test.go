@@ -4918,9 +4918,9 @@ func grew(narrow, huge uint64, width int) float64 {
 // and the digests, which have a fixed shape. That closes the entrances named
 // and leaves every other framed field open, which is this branch's recurring
 // failure written as a design. What is checked instead is the TOTAL FRAMED
-// WIDTH, recorded beside the witness when the result is minted: any edit that
-// changes any framed field's length is refused before one byte is copied, and
-// an edit that preserves every length pays exactly what the honest path pays.
+// WIDTH, recorded beside the witness when the result is minted: an edit that
+// changes the total framed width is refused before the framed bytes are copied;
+// an edit that preserves that total still reaches the full framing.
 //
 // DRIFT DEGRADES IT AND CANNOT BREAK IT. If a field is added to the witness and
 // not to the width, the width check simply stops catching edits to that field;
