@@ -5894,9 +5894,9 @@ func withCommas(n int) string {
 // sentence was true and unfalsifiable at once. Both sets are counted now and
 // both maxima are pinned, so the claim names the set it is about.
 //
-// WHAT IT COUNTS. In every function that holds a canonical value -- as a
-// *canonical parameter or as its own local -- a DIRECT part call is a call on
-// that value, and a HELPER call is a call to another function handed it. The
+// WHAT IT COUNTS. In every non-method function that holds a canonical value --
+// as a *canonical parameter or as its own local -- a DIRECT part call is a call
+// on that value, and a HELPER call is a call to another function handed it. The
 // conversions inside a part call, c.i64(int64(x)) and c.str(string(x)), are
 // neither: the canonical value is not among their arguments. A loop body counts
 // once, which is why these are call-site counts and not field counts.
@@ -5929,9 +5929,9 @@ func TestTheWidestFramingIsTheShapeTheRegisterStates(t *testing.T) {
 			if !ok || fd.Body == nil {
 				continue
 			}
-			// THE PRIMITIVES THEMSELVES ARE NOT FRAMINGS. A method ON
-			// *canonical -- str, i64, count -- writes parts by definition and
-			// would otherwise dominate the maximum with its own internals.
+			// THIS CENSUS COVERS NON-METHOD FUNCTIONS ONLY. It skips canonical's
+			// primitive methods and other methods, including EpisodeIdentity.framed;
+			// method-defined framings are outside both maxima asserted here.
 			if fd.Recv != nil {
 				continue
 			}

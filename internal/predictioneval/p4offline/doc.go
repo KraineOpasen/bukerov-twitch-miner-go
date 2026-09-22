@@ -1166,12 +1166,12 @@
 //     3.03x the supplied text; 1,061,568 after, 1.012x. What went is every
 //     framing BEYOND the honest one, which is why the test asserts ONE framing
 //     against a one-byte control rather than a constant.
-//     THE REPORTING LOSS IS REAL. There is no vocabulary to recognize the class
-//     against -- this repository names exactly one class constant, NONE, which
-//     this arm cannot see -- so unlike a policy name it cannot be
-//     carried-when-recognized. It is withheld outright: a caller now learns
-//     that a local error was recorded and how wide its class was, not which
-//     class it was. The status already carries what the verdict turns on.
+//     THE REPORTING LOSS IS REAL. The live producer has a closed error-class
+//     vocabulary, but the offline scorer admits a broader supplied-artifact
+//     domain. Enforcing that vocabulary would change admission. The class is
+//     withheld outright: a caller now learns that a local error was recorded
+//     and how wide its class was, not which class it was. The status already
+//     carries what the verdict turns on.
 //   - AN EDITED RESULT PAID ITS OWN EDIT'S WIDTH TO BE REFUSED, reported by the
 //     same lane at both result types, reproduced, and CLOSED.
 //     derived() short-circuits on a missing witness, which protects a hand-BUILT

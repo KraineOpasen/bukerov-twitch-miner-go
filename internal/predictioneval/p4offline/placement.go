@@ -140,15 +140,15 @@ const (
 	// PlacementReasonLocalErrorClassWithheldPrefix heads the local-error arm's
 	// one reason: the EXTENT of the producer's error class, never the class.
 	//
-	// THE CLASS IS SUPPLIER TEXT WITH NO VOCABULARY TO MATCH IT AGAINST.
-	// placementStatusCoherent admits any class other than NONE whenever the
-	// reason code is not OK, and this repository names exactly one class
-	// constant, so there is no namedPolicy-style recognition available here:
-	// a class either is echoed in full or is not echoed at all. A review lane
-	// measured what echoing it costs -- the artifact copies the class into
-	// Reasons and placementEvidenceWitness then frames that copy, so a
-	// hand-built record turns a fail-closed placement into payload-sized
-	// allocations and payload-sized diagnostic text.
+	// THE OFFLINE CLASS IS SUPPLIER TEXT, EVEN THOUGH THE LIVE PRODUCER'S
+	// VOCABULARY IS CLOSED. placementStatusCoherent admits any class other than
+	// NONE whenever the reason code is not OK. Enforcing the producer vocabulary
+	// would change which supplied artifacts are admitted. This repair preserves
+	// that domain and reports every class by extent. A review lane measured what
+	// echoing it costs -- the artifact copies the class into Reasons and
+	// placementEvidenceWitness then frames that copy, so a hand-built record
+	// turns a fail-closed placement into payload-sized allocations and diagnostic
+	// text.
 	//
 	// SO IT IS NOT ECHOED, AND THE REPORTING LOSS IS REAL AND RECORDED. A
 	// caller reading this reason learns that a local error was recorded and

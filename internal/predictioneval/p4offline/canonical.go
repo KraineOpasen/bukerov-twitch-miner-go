@@ -28,8 +28,8 @@ import (
 // evaluator produced; the answer is a hash comparison, and computing the hash
 // materializes every framed field -- so an edited result used to pay its own
 // edit's width to be refused by one comparison. Recording the framed WIDTH
-// beside the witness turns any length-changing edit into an O(number of fields)
-// refusal.
+// beside the witness turns an edit that changes the TOTAL framed width into an
+// O(number of fields) refusal.
 //
 // THE MODE IS WHY THAT WIDTH CANNOT DRIFT FROM THE WITNESS. The widest of these
 // framings makes thirty-one direct part calls and three helper calls, and a

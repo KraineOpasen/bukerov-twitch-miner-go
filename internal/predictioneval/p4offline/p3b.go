@@ -321,10 +321,9 @@ type P3bCaseResult struct {
 // witness comparison is one string comparison; COMPUTING the witness frames
 // every field, so a caller that copies a genuine result and widens one framed
 // field used to pay that field's own width to be refused. The recorded width
-// refuses any length-changing edit in O(number of fields). An edit that
-// preserves every length still reaches the framing and pays exactly what the
-// honest path pays, which is the floor: distinguishing two values of equal
-// width IS the hash's job.
+// refuses an edit that changes the TOTAL framed width in O(number of fields).
+// An edit that preserves that total still reaches the framing: distinguishing
+// two values of equal total width IS the hash's job.
 func (r P3bCaseResult) derived() bool {
 	return r.witness != "" && r.framedLen > 0 &&
 		r.framedLen == p3bResultFramedLen(r) && r.witness == p3bResultWitness(r)
@@ -357,8 +356,8 @@ func p3bResultWitness(r P3bCaseResult) string {
 
 // p3bResultFramedLen is the width p3bResultWitness frames, computed by the SAME
 // pass with bytes switched off. It is the cheap half of the derivation check:
-// an edit that changes any framed field's length is refused here, before one
-// byte is copied.
+// an edit that changes the TOTAL framed width is refused here, before the
+// framed bytes are copied.
 func p3bResultFramedLen(r P3bCaseResult) int {
 	c := canonical{lenOnly: true}
 	frameP3bResult(&c, r)

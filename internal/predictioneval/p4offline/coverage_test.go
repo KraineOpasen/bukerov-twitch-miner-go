@@ -70,6 +70,9 @@ func TestPreDecisionExitIsCoverageOnly(t *testing.T) {
 		fs.StealthProof != p4offline.StealthProofUnknown || fs.Settings != nil || fs.BalancePresent || fs.OutcomesPresent {
 		t.Fatalf("%+v", fs)
 	}
+	t.Run("wire_format", func(t *testing.T) {
+		checkPreDecisionExitWire(t, fs)
+	})
 	if err := p4offline.VerifyCommonFactset(fs); err != nil {
 		t.Fatalf("a pre-decision factset verifies as what it is: %v", err)
 	}

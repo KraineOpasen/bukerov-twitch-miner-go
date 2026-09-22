@@ -881,10 +881,10 @@ func payoutExtents(p p4offline.PayoutEvidence) string {
 //
 // THE REPAIR IS THE RULE THE REFUSED-DECISION SEAMS ALREADY FOLLOW, applied
 // without an exception: a refusal names the fault and the EXTENT, never the
-// text. There is no vocabulary to recognize the class against -- this
-// repository names exactly one class constant, NONE, which this arm cannot see
-// -- so unlike a policy name the class cannot be carried-when-recognized. It is
-// withheld outright, and the reporting loss is recorded rather than absorbed.
+// text. The live producer has a closed error-class vocabulary, but the offline
+// scorer admits a broader supplied-artifact domain. Enforcing that vocabulary
+// would change admission. The class is withheld outright, and the reporting
+// loss is recorded rather than absorbed.
 //
 // WHAT IS ASSERTED IS A ONE-BYTE CONTROL, not a budget, for the reason
 // obligation D's own test records: a budget is satisfied by shrinking a
@@ -894,9 +894,9 @@ func TestALocalErrorClassIsNamedByItsExtentAndNotEchoed(t *testing.T) {
 		return func(s *synth, env *predictioneval.SourceDecisionEnvelope) {
 			s.placement("r1", "e1", 1, predictioneval.PhaseCallStarted,
 				*env.FinalAmount, *env.ChoiceIndex, "OK", "NONE")
-			// Coherent BY THE PRODUCER'S OWN RULE: the reason code is not OK
-			// and the class is not NONE, so the pair agrees and the record is
-			// admitted. Only the class's WIDTH is the caller's to choose.
+			// Coherent under the OFFLINE SCORER'S RULE: the reason code is not
+			// OK and the class is not NONE, so this supplied record is admitted.
+			// The scorer permits arbitrary classes; this test varies their width.
 			s.placement("r1", "e1", 1, predictioneval.PhaseCallReturned,
 				*env.FinalAmount, *env.ChoiceIndex, "LOCAL_FAILURE", class)
 		}
