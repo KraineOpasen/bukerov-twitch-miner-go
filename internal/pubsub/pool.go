@@ -1084,6 +1084,7 @@ func (p *WebSocketPool) handlePredictionChannel(msg *PubSubMessage, streamer *mo
 
 	// Observe the frame as it arrived, before any decision is taken about it.
 	p.observeChannelEvent(msg, streamer, eventID, eventStatus, eventData)
+	logWinnerCanary(msg, eventStatus, eventData)
 
 	switch msg.Type {
 	case "event-created":
