@@ -25,6 +25,7 @@ import (
 	"io"
 	"log"
 	"log/slog"
+	"maps"
 	"math/rand/v2"
 	"os"
 	"os/exec"
@@ -32,6 +33,7 @@ import (
 	"reflect"
 	"regexp"
 	"runtime"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -108,6 +110,7 @@ const (
 	canaryLogKey      = "winner-canary-test"
 	canaryGlobalsEnv  = "P4_WINNER_CANARY_TEST_GLOBALS"
 	canaryIsolatedEnv = "P4_WINNER_CANARY_TEST_ISOLATED"
+	canaryTimingsEnv  = "P4_WINNER_CANARY_TEST_TIMINGS"
 )
 
 // canaryFrameAttrs is the literal expectation for the ten frame-dependent
@@ -397,7 +400,7 @@ func canaryUseProcessLogger(t *testing.T, h slog.Handler) {
 // go unreported — none of these tests leaves a goroutine running.
 func canaryInFreshProcess(t *testing.T, env ...string) bool {
 	t.Helper()
-	if os.Getenv(canaryIsolatedEnv) == t.Name() {
+	if canaryIsFreshChild(t) {
 		return true
 	}
 	timeout := 5 * time.Minute
@@ -419,6 +422,12 @@ func canaryInFreshProcess(t *testing.T, env ...string) bool {
 		t.Fatalf("the fresh process did not run %s:\n%s", t.Name(), out)
 	}
 	return false
+}
+
+// canaryIsFreshChild reports whether this process is the fresh child that
+// canaryInFreshProcess started for the calling top-level test.
+func canaryIsFreshChild(t *testing.T) bool {
+	return os.Getenv(canaryIsolatedEnv) == t.Name()
 }
 
 // canaryStdoutCapture swaps os.Stdout for a pipe that a goroutine drains for
@@ -1176,459 +1185,574 @@ func canarySet(m map[string]interface{}, key string, v interface{}) map[string]i
 	return m
 }
 
-// TestWinnerCanaryAdmittedFramesAreReadOnlyByFixedKey classifies one admitted
-// frame of every kind of record the canary can produce. Each frame is large
-// wherever the canary has no reason to read: 65,536 extra keys on the event,
-// in every outcome object and in the data envelope and raw message, 1,048,576
-// predictors and 65,536 levels of nesting in every outcome object, and, where a
-// case puts an object or array in place of the winner, the event id, the
-// outcomes, an outcome or an outcome's id, an object of 65,536 keys or an
-// array of 1,048,576 elements. A walk hidden in any branch therefore meets a
-// large value there. The canary reads fixed keys only, so ten classifications
-// must take less than one plain walk over the event's extra keys, the least
-// any enumeration, traversal or recursion would do. Timing sees walks over
-// thousands of entries; one over a few hundred costs about as much as a
-// classification and escapes it. Both sides take the best of several runs, and
-// each subtest logs both timings (go test -v). Each case first checks its
-// record against the literal expectation, so a case that stopped reaching its
-// branch, or a record that depended on what the canary must not read, fails
-// rather than passing on the timing of another kind of record.
-func TestWinnerCanaryAdmittedFramesAreReadOnlyByFixedKey(t *testing.T) {
-	const extra = 1 << 16
-	keys := make([]string, extra)
-	values := make([]interface{}, extra)
-	for i := range keys {
-		keys[i], values[i] = "SENTINEL_KEY_"+strconv.Itoa(i), float64(i)
+// canaryFrame is one frame as the pool hands it to the canary.
+type canaryFrame struct {
+	msg    *PubSubMessage
+	status string
+	event  map[string]interface{}
+}
+
+// canaryParts supplies what a frame holds besides the values the canary reads,
+// so that one table of frame kinds serves oracles that make those parts large
+// and one that has other goroutines write into them.
+type canaryParts struct {
+	// inspected completes an object the canary reads by fixed key: the event
+	// or an outcome.
+	inspected func(map[string]interface{}) map[string]interface{}
+	// object and array stand where the winner, the event id, the outcomes, an
+	// outcome or an outcome's id belongs.
+	object func(map[string]interface{}) map[string]interface{}
+	array  func() []interface{}
+	// predictors and nest are an outcome's predictors and nested object, and
+	// envelope completes the message's data envelope and raw message.
+	predictors func() []interface{}
+	nest       func() map[string]interface{}
+	envelope   func(map[string]interface{}) map[string]interface{}
+}
+
+// canaryFrameKind is one kind of frame: how to build one, and the record the
+// canary must make of it, or that it must make none.
+type canaryFrameKind struct {
+	name  string
+	build func(p canaryParts, n int) canaryFrame
+	want  canaryFrameAttrs
+	none  bool // not a candidate, or refused by a resource bound
+}
+
+// record is the record the canary must make of a frame of this kind, or nil
+// when it must make none.
+func (k canaryFrameKind) record() map[string]interface{} {
+	if k.none {
+		return nil
 	}
-	wide := func(m map[string]interface{}) map[string]interface{} {
-		for i := range keys {
-			m[keys[i]] = values[i]
+	return k.want.values()
+}
+
+// canaryFrameKinds lists a frame of every kind the canary tells apart: one for
+// each record it can make, one for each way a frame is not a candidate and one
+// for each bound that refuses a frame. Frame n has its own ids —
+// synthetic-event-000n and its outcomes' — so frames built for different n
+// share none; the records carry the hash of synthetic-event-0001, the event id
+// of n = 1.
+func canaryFrameKinds() []canaryFrameKind {
+	records := newCanaryKindRecords()
+	absent := canaryAbsentKey{}
+	id := func(n int) string { return fmt.Sprintf("synthetic-event-%04d", n) }
+	a := func(n int) string { return fmt.Sprintf("synthetic-outcome-a-%04d", n) }
+	b := func(n int) string { return fmt.Sprintf("synthetic-outcome-b-%04d", n) }
+	// overlong is 4101 bytes, beyond the 4096-byte bound.
+	overlong := func(n int) string { return fmt.Sprintf("%s-%04d", strings.Repeat("x", 4096), n) }
+	outcome := func(p canaryParts, outcomeID interface{}) map[string]interface{} {
+		return p.inspected(canarySet(map[string]interface{}{"top_predictors": p.predictors(), "SENTINEL_NEST": p.nest()}, "id", outcomeID))
+	}
+	// pair is two outcomes: the first with firstID (none for absent), the
+	// second naming b(n).
+	pair := func(p canaryParts, n int, firstID interface{}) []interface{} {
+		return []interface{}{outcome(p, firstID), outcome(p, b(n))}
+	}
+	// frame is a qualifying frame of a RESOLVED event with the given id,
+	// winner and outcomes.
+	frame := func(p canaryParts, eventID, winner, outcomes interface{}) canaryFrame {
+		event := p.inspected(canaryEvent(eventID, winner, outcomes))
+		msg := canaryEventMsg()
+		msg.Data = p.envelope(map[string]interface{}{"event": event})
+		msg.Message = p.envelope(map[string]interface{}{"type": "MESSAGE"})
+		return canaryFrame{msg: msg, status: "RESOLVED", event: event}
+	}
+	// positive is frame n of the positive kind, before its kind changes it.
+	positive := func(p canaryParts, n int) canaryFrame { return frame(p, id(n), b(n), pair(p, n, a(n))) }
+	// winner and eventID vary one value of the positive frame; outcomes
+	// replaces its outcomes, and first its first outcome's id.
+	winner := func(v func(p canaryParts, n int) interface{}) func(canaryParts, int) canaryFrame {
+		return func(p canaryParts, n int) canaryFrame { return frame(p, id(n), v(p, n), pair(p, n, a(n))) }
+	}
+	eventID := func(v func(p canaryParts, n int) interface{}) func(canaryParts, int) canaryFrame {
+		return func(p canaryParts, n int) canaryFrame { return frame(p, v(p, n), b(n), pair(p, n, a(n))) }
+	}
+	outcomes := func(v func(p canaryParts, n int) interface{}) func(canaryParts, int) canaryFrame {
+		return func(p canaryParts, n int) canaryFrame { return frame(p, id(n), b(n), v(p, n)) }
+	}
+	first := func(v func(p canaryParts, n int) interface{}) func(canaryParts, int) canaryFrame {
+		return outcomes(func(p canaryParts, n int) interface{} { return pair(p, n, v(p, n)) })
+	}
+	value := func(v interface{}) func(canaryParts, int) interface{} {
+		return func(canaryParts, int) interface{} { return v }
+	}
+	of := func(v func(n int) string) func(canaryParts, int) interface{} {
+		return func(_ canaryParts, n int) interface{} { return v(n) }
+	}
+	z := func(n int) string { return fmt.Sprintf("synthetic-outcome-z-%04d", n) }
+	number := func(_ canaryParts, n int) interface{} { return float64(n) }
+	array := func(p canaryParts, _ int) interface{} { return p.array() }
+	// changed is the positive frame with one change made to it.
+	changed := func(change func(f *canaryFrame)) func(canaryParts, int) canaryFrame {
+		return func(p canaryParts, n int) canaryFrame {
+			f := positive(p, n)
+			change(&f)
+			return f
 		}
-		return m
 	}
+	return []canaryFrameKind{
+		{name: "positive", want: records.positive, build: positive},
+		{name: "positive, the first outcome matched", want: records.firstMatched, build: winner(of(a))},
+		{name: "no winner", want: records.noWinner, build: winner(value(absent))},
+		{name: "null winner", want: records.nullWinner, build: winner(value(nil))},
+		{name: "numeric winner", want: records.invalidWinner("number"), build: winner(number)},
+		{name: "boolean winner", want: records.invalidWinner("bool"), build: winner(value(true))},
+		{name: "empty winner", want: records.emptyWinner, build: winner(value(""))},
+		{name: "winner naming no outcome", want: records.unmatched, build: winner(of(z))},
+		{name: "object winner", want: records.invalidWinner("object"),
+			build: winner(func(p canaryParts, n int) interface{} { return p.object(map[string]interface{}{"id": b(n)}) })},
+		{name: "array winner", want: records.invalidWinner("array"), build: winner(array)},
+		{name: "no event id", want: records.noEventID, build: eventID(value(absent))},
+		{name: "null event id", want: records.noEventID, build: eventID(value(nil))},
+		{name: "numeric event id", want: records.noEventID, build: eventID(number)},
+		{name: "empty event id", want: records.noEventID, build: eventID(value(""))},
+		{name: "object event id", want: records.noEventID,
+			build: eventID(func(p canaryParts, n int) interface{} { return p.object(map[string]interface{}{"id": id(n)}) })},
+		{name: "array event id", want: records.noEventID, build: eventID(array)},
+		{name: "no outcomes", want: records.noOutcomes, build: outcomes(value(absent))},
+		{name: "null outcomes", want: records.nullOutcomes, build: outcomes(value(nil))},
+		{name: "object for the outcomes", want: records.invalidOutcomes, build: outcomes(func(p canaryParts, n int) interface{} {
+			return p.object(map[string]interface{}{"0": map[string]interface{}{"id": a(n)}})
+		})},
+		{name: "duplicate outcome id", want: records.invalidVector, build: first(of(b))},
+		{name: "outcome that is an array", want: records.invalidVector, build: outcomes(func(p canaryParts, n int) interface{} {
+			return []interface{}{p.array(), outcome(p, b(n))}
+		})},
+		{name: "outcome with no id", want: records.invalidVector, build: first(value(absent))},
+		{name: "outcome whose id is empty", want: records.invalidVector, build: first(value(""))},
+		{name: "outcome whose id is a number", want: records.invalidVector, build: first(number)},
+		{name: "outcome whose id is an object", want: records.invalidVector,
+			build: first(func(p canaryParts, _ int) interface{} { return p.object(map[string]interface{}{}) })},
+		{name: "outcome whose id is an array", want: records.invalidVector, build: first(array)},
+		{name: "another topic", none: true, build: changed(func(f *canaryFrame) {
+			f.msg.Topic = NewTopic(TopicPredictionsUser, "synthetic-channel-4417")
+		})},
+		{name: "another message type", none: true, build: changed(func(f *canaryFrame) { f.msg.Type = "event-created" })},
+		{name: "an unresolved round", none: true, build: changed(func(f *canaryFrame) {
+			f.status = "ACTIVE"
+			f.event["status"] = "ACTIVE"
+		})},
+		{name: "no event object", none: true, build: changed(func(f *canaryFrame) { f.event = nil })},
+		{name: "no message", none: true, build: changed(func(f *canaryFrame) { f.msg = nil })},
+		{name: "an overlong event id", none: true, build: eventID(of(overlong))},
+		{name: "an overlong winner", none: true, build: winner(of(overlong))},
+		{name: "an overlong outcome id", none: true, build: first(of(overlong))},
+		{name: "more than 64 outcomes", none: true, build: outcomes(func(p canaryParts, n int) interface{} {
+			return slices.Repeat([]interface{}{outcome(p, a(n))}, 65)
+		})},
+	}
+}
+
+// canaryAssertClassified checks the classifier's answer for a frame: the
+// record want, or, for a nil want, a refusal. A classified record has no
+// receive time of its own, so it is given one here.
+func canaryAssertClassified(t *testing.T, want map[string]interface{}, rec winnerCanaryRecord, ok bool) {
+	t.Helper()
+	switch {
+	case ok && want == nil:
+		t.Fatal("the frame was admitted")
+	case !ok && want != nil:
+		t.Fatal("the frame was refused")
+	case ok:
+		now := time.Now()
+		assertCanaryFields(t, canaryFields(t, rec.attrs(now)), want, "synthetic-build", now, now)
+	}
+}
+
+// canaryAssertEmitted checks what was logged during count emissions of a
+// frame: count INFO p4_winner_canary records, each the record want, or, for a
+// nil want, nothing at all.
+func canaryAssertEmitted(t *testing.T, want map[string]interface{}, logged []slog.Record, count int, before, after time.Time) {
+	t.Helper()
+	if want == nil {
+		count = 0
+	}
+	if len(logged) != count {
+		t.Fatalf("the emitter logged %d record(s), want %d", len(logged), count)
+	}
+	for _, r := range logged {
+		if r.Message != "p4_winner_canary" || r.Level != slog.LevelInfo {
+			t.Fatalf("the emitter logged %s %q, want INFO p4_winner_canary", r.Level, r.Message)
+		}
+		assertCanaryFields(t, canaryFields(t, canaryRecordAttrs(r)), want, version.Version, before, after)
+	}
+}
+
+// canaryBestOf times runs calls of f and returns the fastest, so that a run
+// the scheduler or the collector slowed does not decide a comparison.
+func canaryBestOf(runs int, f func()) time.Duration {
+	var best time.Duration
+	for run := 0; run < runs; run++ {
+		started := time.Now()
+		f()
+		if elapsed := time.Since(started); run == 0 || elapsed < best {
+			best = elapsed
+		}
+	}
+	return best
+}
+
+// canaryWalk returns a timing of one plain walk over m's keys, which must
+// number at least want.
+func canaryWalk(t *testing.T, m map[string]interface{}, want int) func() {
+	return func() {
+		visited := 0
+		for range m {
+			visited++
+		}
+		if visited < want {
+			t.Fatalf("the walk visited %d keys, want at least %d", visited, want)
+		}
+	}
+}
+
+// TestWinnerCanaryReadsFramesByFixedKey hands the canary one frame of every
+// kind canaryFrameKinds lists — each record it can make, each way a frame is
+// not a candidate and each bound that refuses one — through the classifier and
+// through the emitter the pool calls. Each frame is large wherever the canary
+// has no reason to read: 65,536 extra keys on the event, in every outcome
+// object, in the data envelope and raw message and in every object standing
+// where the winner, the event id, the outcomes or an outcome's id belongs;
+// 1,048,576 elements in every array standing there and in every outcome's
+// predictors; 65,536 levels of nesting in every outcome. A walk hidden in any
+// branch therefore meets a large value there. The canary reads fixed keys
+// only, so ten classifications, and ten emissions, must each take less than
+// one plain walk over the extra keys, the least any enumeration, traversal or
+// recursion would do. Timing sees walks over thousands of entries; one over a
+// few hundred costs about as much as a call and escapes it. Every timing is
+// the best of several runs, and each subtest logs them (go test -v). Each
+// frame's record, classified and emitted, is first checked against its kind's
+// literal expectation, or that there is none, so a case that stopped reaching
+// its branch, or a record that depended on what the canary must not read,
+// fails rather than passing on the timing of another kind of frame. This test
+// times repeated calls on one frame; TestWinnerCanaryReadsFreshFramesByFixedKey
+// times first ones.
+func TestWinnerCanaryReadsFramesByFixedKey(t *testing.T) {
+	capture := &canaryCapture{level: canaryCaptureAll}
+	canaryUseProcessLogger(t, capture) // its t.Setenv also refuses a parallel test
+	const extra = 1 << 16
+	extraKeys := make(map[string]interface{}, extra)
+	for i := 0; i < extra; i++ {
+		extraKeys["SENTINEL_KEY_"+strconv.Itoa(i)] = float64(i)
+	}
+	// widen gives an object a copy of the extra keys of its own.
+	widen := func(m map[string]interface{}) map[string]interface{} {
+		wide := maps.Clone(extraKeys)
+		maps.Copy(wide, m)
+		return wide
+	}
+	big := slices.Repeat([]interface{}{true}, 1<<20)
 	deep := map[string]interface{}{}
 	for level, m := 0, deep; level < extra; level++ {
 		next := map[string]interface{}{}
 		m["SENTINEL_NEST"] = next
 		m = next
 	}
-	big := make([]interface{}, 1<<20)
-	for i := range big {
-		big[i] = true
+	parts := canaryParts{
+		inspected:  widen,
+		object:     widen,
+		array:      func() []interface{} { return big },
+		predictors: func() []interface{} { return big },
+		nest:       func() map[string]interface{} { return deep },
+		envelope:   widen,
 	}
-	absent := canaryAbsentKey{}
-	object := wide(map[string]interface{}{})
-	msg := canaryEventMsg()
-	msg.Data, msg.Message = object, object
-	// onEvent carries the extra keys on the event itself; each case gives it
-	// the inspected keys of its kind just before it is timed, so the cases
-	// must run one after another.
-	onEvent := wide(canaryEvent(absent, absent, absent))
-	as := func(eventID, winnerValue, outcomes interface{}) func() map[string]interface{} {
-		return func() map[string]interface{} {
-			canarySet(onEvent, "id", eventID)
-			canarySet(onEvent, "winning_outcome_id", winnerValue)
-			return canarySet(onEvent, "outcomes", outcomes)
-		}
-	}
-	const id, a, b = "synthetic-event-0001", "synthetic-outcome-a", "synthetic-outcome-b"
-	// outcome builds an outcome object with the given id (none for absent).
-	outcome := func(outcomeID interface{}) map[string]interface{} {
-		return canarySet(wide(map[string]interface{}{"top_predictors": big, "SENTINEL_NEST": deep}), "id", outcomeID)
-	}
-	outcomeA, outcomeB := outcome(a), outcome(b)
-	pairWith := func(first interface{}) []interface{} { return []interface{}{first, outcomeB} }
-	pair := pairWith(outcomeA)
-	// first is the one first outcome of the cases that vary its id; each such
-	// case sets the id just before it is timed.
-	first := outcome(absent)
-	withFirstID := func(firstID interface{}) func() map[string]interface{} {
-		event := as(id, b, pairWith(first))
-		return func() map[string]interface{} {
-			canarySet(first, "id", firstID)
-			return event()
-		}
-	}
-
-	records := newCanaryKindRecords()
-	for _, tc := range []struct {
-		name  string
-		event func() map[string]interface{}
-		want  canaryFrameAttrs
-	}{
-		{"a positive frame, its first outcome not matched", as(id, b, pair), records.positive},
-		{"a positive frame, its second outcome not matched", as(id, a, pair), records.firstMatched},
-		{"no winner", as(id, absent, pair), records.noWinner},
-		{"a null winner", as(id, nil, pair), records.nullWinner},
-		{"a numeric winner", as(id, 7.0, pair), records.invalidWinner("number")},
-		{"a boolean winner", as(id, true, pair), records.invalidWinner("bool")},
-		{"an empty winner", as(id, "", pair), records.emptyWinner},
-		{"a winner naming no outcome", as(id, "synthetic-outcome-z", pair), records.unmatched},
-		{"an object winner", as(id, object, pair), records.invalidWinner("object")},
-		{"an array winner", as(id, big, pair), records.invalidWinner("array")},
-		{"no event id", as(absent, b, pair), records.noEventID},
-		{"a null event id", as(nil, b, pair), records.noEventID},
-		{"a numeric event id", as(42.0, b, pair), records.noEventID},
-		{"an empty event id", as("", b, pair), records.noEventID},
-		{"an object event id", as(object, b, pair), records.noEventID},
-		{"an array event id", as(big, b, pair), records.noEventID},
-		{"no outcomes", as(id, b, absent), records.noOutcomes},
-		{"null outcomes", as(id, b, nil), records.nullOutcomes},
-		{"an object for the outcomes", as(id, b, object), records.invalidOutcomes},
-		{"a duplicate outcome id", as(id, a, []interface{}{outcomeA, outcomeA}), records.invalidVector},
-		{"an outcome that is an array", as(id, b, pairWith(big)), records.invalidVector},
-		{"an outcome with no id", withFirstID(absent), records.invalidVector},
-		{"an outcome whose id is empty", withFirstID(""), records.invalidVector},
-		{"an outcome whose id is a number", withFirstID(7.0), records.invalidVector},
-		{"an outcome whose id is an object", withFirstID(object), records.invalidVector},
-		{"an outcome whose id is an array", withFirstID(big), records.invalidVector},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			event := tc.event()
+	for _, kind := range canaryFrameKinds() {
+		t.Run(kind.name, func(t *testing.T) {
+			f := kind.build(parts, 1)
+			want := kind.record()
+			rec, ok := classifyWinnerCanary(f.msg, f.status, f.event, "synthetic-build")
+			canaryAssertClassified(t, want, rec, ok)
 			before := time.Now()
-			rec, ok := classifyWinnerCanary(msg, "RESOLVED", event, "synthetic-build")
-			if !ok {
-				t.Fatal("control: the frame must be admitted")
-			}
-			assertCanaryFields(t, canaryClassifiedFields(t, rec), tc.want.values(), "synthetic-build", before, time.Now())
-			var onePass time.Duration
-			for run := 0; run < 3; run++ {
-				started := time.Now()
-				visited := 0
-				for range event {
-					visited++
-				}
-				elapsed := time.Since(started)
-				if visited < extra {
-					t.Fatalf("the walk visited %d keys, want at least %d", visited, extra)
-				}
-				if run == 0 || elapsed < onePass {
-					onePass = elapsed
-				}
-			}
-			var classifying time.Duration
-			for run := 0; run < 5; run++ {
-				started := time.Now()
+			logWinnerCanary(f.msg, f.status, f.event)
+			// Only the canary's records count here: in the main test process, a
+			// client another test left behind can log at any time.
+			logged := slices.DeleteFunc(capture.take(), func(r slog.Record) bool { return r.Message != "p4_winner_canary" })
+			canaryAssertEmitted(t, want, logged, 1, before, time.Now())
+			runtime.GC()
+			onePass := canaryBestOf(3, canaryWalk(t, extraKeys, extra))
+			classifying := canaryBestOf(5, func() {
 				for i := 0; i < 10; i++ {
-					classifyWinnerCanary(msg, "RESOLVED", event, "synthetic-build")
+					classifyWinnerCanary(f.msg, f.status, f.event, "synthetic-build")
 				}
-				elapsed := time.Since(started)
-				if run == 0 || elapsed < classifying {
-					classifying = elapsed
+			})
+			emitting := canaryBestOf(5, func() {
+				for i := 0; i < 10; i++ {
+					logWinnerCanary(f.msg, f.status, f.event)
 				}
-			}
-			t.Logf("ten classifications %v, one walk %v (%.0fx)", classifying, onePass, float64(onePass)/float64(classifying))
+			})
+			capture.take()
+			t.Logf("ten classifications %v, ten emissions %v, one walk %v (%.0fx, %.0fx)", classifying, emitting, onePass,
+				float64(onePass)/float64(classifying), float64(onePass)/float64(emitting))
 			if classifying >= onePass {
-				t.Fatalf("ten classifications took %v, not less than one walk over the event's extra keys (%v): the frame was enumerated or walked", classifying, onePass)
+				t.Errorf("ten classifications took %v, not less than one walk over the extra keys (%v): the frame was enumerated or walked", classifying, onePass)
+			}
+			if emitting >= onePass {
+				t.Errorf("ten emissions took %v, not less than one walk over the extra keys (%v): the frame was enumerated or walked", emitting, onePass)
 			}
 		})
 	}
 }
 
+// canaryFreshTimings is what one fresh process of
+// TestWinnerCanaryReadsFreshFramesByFixedKey reports: its walk over a frame's
+// extra keys, its first call and then one call per kind, in the order
+// canaryFrameKinds lists them.
+type canaryFreshTimings struct {
+	Walk, First time.Duration
+	Calls       []time.Duration
+}
+
 // TestWinnerCanaryReadsFreshFramesByFixedKey times first calls. A canary that
-// walked a frame once and then remembered doing so — by the map's address, an
-// outcome's, the message, an id, the winner, the build label or the frame's
-// size — would hide that walk behind any earlier call, and
-// TestWinnerCanaryAdmittedFramesAreReadOnlyByFixedKey times repeated calls.
-// Here every timed call is the first one on a fresh frame of one kind of
-// record: its own message, maps, ids, winner, build label and size, with extra
-// keys on the event and in its first outcome, and the case's object or array
-// large too. For every kind, the fastest of its three calls must take less
-// than a quarter of one plain walk over a frame's extra keys: a looser bound
-// than ten calls get, since one call is timed alone, yet well below the walk a
-// remembering canary makes on a first call. The heap is collected before
-// anything is timed, so the cost of building the frames does not inflate the
-// walk, and one more fresh frame is classified, untimed, just before the timed
-// calls, so that the first of them is not also the process's first run of the
-// canary's code. Each kind then reports as a subtest: its timing, and every
-// record checked against the kind's literal expectation with the hash of the
-// frame's own event id. It runs in a fresh process: there, no frame was
-// classified before, whereas in a shared one a fresh frame can reuse the
-// address of an earlier test's frame that such a memo already holds. The
-// child's output, logged timings included, is shown only when it fails; with
-// P4_WINNER_CANARY_TEST_ISOLATED set to this test's name, the body runs
-// in-process and go test -v shows them.
+// walked a frame once and then remembered doing so — by the address of a map
+// in it, the message, an id, the winner, the frame's size, the branch the
+// frame takes, or only that it had walked at all — would hide that walk behind
+// any earlier call, and TestWinnerCanaryReadsFramesByFixedKey times repeated
+// calls. Here the body runs in five fresh processes. Each builds one fresh
+// frame of every kind canaryFrameKinds lists — its own message, maps, ids,
+// winner and size, with extra keys on the event, in every outcome and in the
+// case's object, and the case's array large too — and one more positive frame
+// with eight times the extra keys. After a record of the test's own warms the
+// logger (not the canary), the heap is collected and one plain walk over a
+// separate map of the extra keys is timed, each process times the emitter the
+// pool calls, once per frame: first on the wider frame, then on one frame of
+// every kind in a fixed order, so the first call of the process, of every
+// branch and on every frame is timed. For every kind, the fastest of its five
+// calls must take less than a quarter of one walk: a looser bound than
+// repeated calls get, since one call is timed alone, yet well below the walk a
+// remembering canary makes. The first call of a process also runs cold code,
+// so its fastest need only take less than two walks, while walking its frame
+// would take eight. An outcome's predictors and nested object and the message's
+// envelope stay small here; TestWinnerCanaryLeavesUninspectedValuesUnread
+// watches them in every kind of frame. Each process checks every record
+// against its kind's literal expectation, with the hash of the frame's own
+// event id, or that there is none, and reports its timings; each kind then
+// reports as a subtest. With P4_WINNER_CANARY_TEST_ISOLATED set to this test's
+// name, the body runs once in-process and go test -v shows its timings,
+// unjudged.
 func TestWinnerCanaryReadsFreshFramesByFixedKey(t *testing.T) {
-	if !canaryInFreshProcess(t) {
+	const processes = 5
+	kinds := canaryFrameKinds()
+	if !canaryIsFreshChild(t) {
+		dir := t.TempDir()
+		runs := make([]canaryFreshTimings, processes)
+		for p := range runs {
+			path := filepath.Join(dir, strconv.Itoa(p)+".json")
+			canaryInFreshProcess(t, canaryTimingsEnv+"="+path)
+			raw, err := os.ReadFile(path)
+			if err == nil {
+				err = json.Unmarshal(raw, &runs[p])
+			}
+			if err != nil || len(runs[p].Calls) != len(kinds) {
+				t.Fatalf("fresh process %d reported no timings: %v", p, err)
+			}
+		}
+		// best is the largest ratio of a process's walk to one of its calls:
+		// the fastest of the calls, each against its own process's walk.
+		best := func(call func(canaryFreshTimings) time.Duration) float64 {
+			ratio := 0.0
+			for _, run := range runs {
+				ratio = max(ratio, float64(run.Walk)/float64(call(run)))
+			}
+			return ratio
+		}
+		first := best(func(run canaryFreshTimings) time.Duration { return run.First })
+		t.Logf("fastest first call of %d fresh processes: one walk takes %.1fx as long", processes, first)
+		if first <= 0.5 {
+			t.Errorf("the fastest first call of a fresh process took %.2f walks over a frame's extra keys, not less than two: the first frame of a process was walked", 1/first)
+		}
+		for k, kind := range kinds {
+			t.Run(kind.name, func(t *testing.T) {
+				ratio := best(func(run canaryFreshTimings) time.Duration { return run.Calls[k] })
+				t.Logf("fastest first call in %d fresh processes: one walk takes %.0fx as long", processes, ratio)
+				if ratio <= 4 {
+					t.Errorf("the fastest first call on a fresh frame took %.2f of one walk over a frame's extra keys, not less than a quarter: fresh frames were walked", 1/ratio)
+				}
+			})
+		}
 		return
 	}
-	const extra, perKind = 1 << 13, 3
-	// The frames share the extra key strings and values, not a map, id,
-	// message, label or size. Frame n takes the first extra+n of them, so the
-	// 256 spare keys bound the number of frames.
-	keys := make([]string, extra+256)
+	// 12,288 extra keys still fit the map size 8,192 would need (a Go map
+	// fills to 7/8 of its slots), so the longer walk costs no memory. The
+	// frames share the extra key strings and values, not a map, id, message or
+	// size. Frame n takes the first extra+n of them, and the wider frame eight
+	// times the extra keys.
+	const extra = 3 << 12
+	keys := make([]string, 8*extra)
 	values := make([]interface{}, len(keys))
 	for i := range keys {
 		keys[i], values[i] = "SENTINEL_KEY_"+strconv.Itoa(i), float64(i)
 	}
-	wide := func(m map[string]interface{}, n int) map[string]interface{} {
-		for i := 0; i < extra+n; i++ {
-			m[keys[i]] = values[i]
+	// widen returns a map of m's keys and the first width extra keys, sized
+	// for them up front.
+	widen := func(m map[string]interface{}, width int) map[string]interface{} {
+		wide := make(map[string]interface{}, len(m)+width)
+		maps.Copy(wide, m)
+		for i := 0; i < width; i++ {
+			wide[keys[i]] = values[i]
 		}
-		return m
+		return wide
 	}
-	big := func(n int) []interface{} {
-		l := make([]interface{}, 16*extra+n)
-		for i := range l {
-			l[i] = true
+	// parts gives every object of frame n the first width extra keys, and
+	// every array of it 196,608+n elements.
+	parts := func(n, width int) canaryParts {
+		wideObject := func(m map[string]interface{}) map[string]interface{} { return widen(m, width) }
+		return canaryParts{
+			inspected:  wideObject,
+			object:     wideObject,
+			array:      func() []interface{} { return slices.Repeat([]interface{}{true}, 16*extra+n) },
+			predictors: func() []interface{} { return []interface{}{map[string]interface{}{"points": 500.0}} },
+			nest:       func() map[string]interface{} { return map[string]interface{}{} },
+			envelope:   func(m map[string]interface{}) map[string]interface{} { return m },
 		}
-		return l
 	}
-	absent := canaryAbsentKey{}
-	id := func(n int) string { return fmt.Sprintf("synthetic-event-%04d", n) }
-	a := func(n int) string { return fmt.Sprintf("synthetic-outcome-a-%04d", n) }
-	b := func(n int) string { return fmt.Sprintf("synthetic-outcome-b-%04d", n) }
-	// outcomes puts a large first outcome, with the given id (none for
-	// absent), before a small second one naming b(n).
-	outcomes := func(n int, firstID interface{}) []interface{} {
-		return []interface{}{canarySet(wide(map[string]interface{}{}, n), "id", firstID), map[string]interface{}{"id": b(n)}}
-	}
-	records := newCanaryKindRecords()
-	kinds := []struct {
-		name  string
-		event func(n int) map[string]interface{}
-		want  canaryFrameAttrs
-	}{
-		{"positive", func(n int) map[string]interface{} { return canaryEvent(id(n), b(n), outcomes(n, a(n))) }, records.positive},
-		{"positive, the large outcome matched", func(n int) map[string]interface{} {
-			return canaryEvent(id(n), a(n), outcomes(n, a(n)))
-		}, records.firstMatched},
-		{"no winner", func(n int) map[string]interface{} { return canaryEvent(id(n), absent, outcomes(n, a(n))) }, records.noWinner},
-		{"null winner", func(n int) map[string]interface{} { return canaryEvent(id(n), nil, outcomes(n, a(n))) }, records.nullWinner},
-		{"numeric winner", func(n int) map[string]interface{} {
-			return canaryEvent(id(n), float64(n), outcomes(n, a(n)))
-		}, records.invalidWinner("number")},
-		{"boolean winner", func(n int) map[string]interface{} {
-			return canaryEvent(id(n), true, outcomes(n, a(n)))
-		}, records.invalidWinner("bool")},
-		{"empty winner", func(n int) map[string]interface{} { return canaryEvent(id(n), "", outcomes(n, a(n))) }, records.emptyWinner},
-		{"winner naming no outcome", func(n int) map[string]interface{} {
-			return canaryEvent(id(n), fmt.Sprintf("synthetic-outcome-z-%04d", n), outcomes(n, a(n)))
-		}, records.unmatched},
-		{"object winner", func(n int) map[string]interface{} {
-			return canaryEvent(id(n), wide(map[string]interface{}{"id": b(n)}, n), outcomes(n, a(n)))
-		}, records.invalidWinner("object")},
-		{"array winner", func(n int) map[string]interface{} {
-			return canaryEvent(id(n), big(n), outcomes(n, a(n)))
-		}, records.invalidWinner("array")},
-		{"no event id", func(n int) map[string]interface{} { return canaryEvent(absent, b(n), outcomes(n, a(n))) }, records.noEventID},
-		{"null event id", func(n int) map[string]interface{} { return canaryEvent(nil, b(n), outcomes(n, a(n))) }, records.noEventID},
-		{"numeric event id", func(n int) map[string]interface{} {
-			return canaryEvent(float64(n), b(n), outcomes(n, a(n)))
-		}, records.noEventID},
-		{"empty event id", func(n int) map[string]interface{} { return canaryEvent("", b(n), outcomes(n, a(n))) }, records.noEventID},
-		{"object event id", func(n int) map[string]interface{} {
-			return canaryEvent(wide(map[string]interface{}{"id": id(n)}, n), b(n), outcomes(n, a(n)))
-		}, records.noEventID},
-		{"array event id", func(n int) map[string]interface{} {
-			return canaryEvent(big(n), b(n), outcomes(n, a(n)))
-		}, records.noEventID},
-		{"no outcomes", func(n int) map[string]interface{} { return canaryEvent(id(n), b(n), absent) }, records.noOutcomes},
-		{"null outcomes", func(n int) map[string]interface{} { return canaryEvent(id(n), b(n), nil) }, records.nullOutcomes},
-		{"object for the outcomes", func(n int) map[string]interface{} {
-			return canaryEvent(id(n), b(n), wide(map[string]interface{}{"0": map[string]interface{}{"id": a(n)}}, n))
-		}, records.invalidOutcomes},
-		{"duplicate outcome id", func(n int) map[string]interface{} {
-			return canaryEvent(id(n), b(n), outcomes(n, b(n)))
-		}, records.invalidVector},
-		{"outcome that is an array", func(n int) map[string]interface{} {
-			return canaryEvent(id(n), b(n), []interface{}{big(n), map[string]interface{}{"id": b(n)}})
-		}, records.invalidVector},
-		{"outcome with no id", func(n int) map[string]interface{} {
-			return canaryEvent(id(n), b(n), outcomes(n, absent))
-		}, records.invalidVector},
-		{"outcome whose id is empty", func(n int) map[string]interface{} {
-			return canaryEvent(id(n), b(n), outcomes(n, ""))
-		}, records.invalidVector},
-		{"outcome whose id is a number", func(n int) map[string]interface{} {
-			return canaryEvent(id(n), b(n), outcomes(n, float64(n)))
-		}, records.invalidVector},
-		{"outcome whose id is an object", func(n int) map[string]interface{} {
-			return canaryEvent(id(n), b(n), outcomes(n, wide(map[string]interface{}{}, n)))
-		}, records.invalidVector},
-		{"outcome whose id is an array", func(n int) map[string]interface{} {
-			return canaryEvent(id(n), b(n), outcomes(n, big(n)))
-		}, records.invalidVector},
-	}
-	type frame struct {
-		msg   *PubSubMessage
-		event map[string]interface{}
-		build string
-		rec   winnerCanaryRecord
+	// The opening frame is of the first kind, which must be the positive one.
+	if kinds[0].none || kinds[0].want != newCanaryKindRecords().positive {
+		t.Fatalf("the first kind is %q, want the positive one", kinds[0].name)
 	}
 	// Every frame stays alive until the end, so no two share an address.
-	frames := make([][]frame, len(kinds))
+	opening := kinds[0].build(parts(len(kinds), 8*extra), len(kinds))
+	frames := make([]canaryFrame, len(kinds))
 	for k, kind := range kinds {
-		for j := 0; j < perKind; j++ {
-			n := k*perKind + j
-			frames[k] = append(frames[k], frame{msg: canaryEventMsg(), event: wide(kind.event(n), n), build: fmt.Sprintf("synthetic-build-%04d", n)})
-		}
+		frames[k] = kind.build(parts(k, extra+k), k)
 	}
-	n := len(kinds) * perKind
-	warm := frame{msg: canaryEventMsg(), event: wide(kinds[0].event(n), n), build: fmt.Sprintf("synthetic-build-%04d", n)}
-	runtime.GC()
-	var onePass time.Duration
-	for run := 0; run < 3; run++ {
+	walked := widen(map[string]interface{}{}, extra)
+	// Room for every record up front, so keeping one never grows the slice,
+	// and no lock: only this goroutine emits.
+	kept := make([]slog.Record, 0, len(kinds)+2)
+	canaryUseProcessLogger(t, canaryProbeHandler{onRecord: func(r slog.Record) { kept = append(kept, r) }})
+	warmUp := make([]slog.Attr, 0, len(winnerCanaryAttrKeys))
+	for _, key := range winnerCanaryAttrKeys {
+		warmUp = append(warmUp, slog.String(key, "synthetic"))
+	}
+	slog.LogAttrs(context.Background(), slog.LevelInfo, "synthetic warm-up", warmUp...)
+	// emit times one emission and returns it with what it logged.
+	emit := func(f canaryFrame) (time.Duration, []slog.Record) {
+		n := len(kept)
 		started := time.Now()
-		visited := 0
-		for range frames[0][0].event {
-			visited++
-		}
+		logWinnerCanary(f.msg, f.status, f.event)
 		elapsed := time.Since(started)
-		if visited < extra {
-			t.Fatalf("the walk visited %d keys, want at least %d", visited, extra)
-		}
-		if run == 0 || elapsed < onePass {
-			onePass = elapsed
-		}
+		return elapsed, kept[n:]
 	}
-	if _, ok := classifyWinnerCanary(warm.msg, "RESOLVED", warm.event, warm.build); !ok {
-		t.Fatal("control: the untimed fresh frame must be admitted")
-	}
+	runtime.GC()
+	onePass := canaryBestOf(3, canaryWalk(t, walked, extra))
 	before := time.Now()
-	fastest := make([]time.Duration, len(kinds))
-	for j := 0; j < perKind; j++ {
-		for k := range kinds {
-			f := &frames[k][j]
-			started := time.Now()
-			rec, ok := classifyWinnerCanary(f.msg, "RESOLVED", f.event, f.build)
-			elapsed := time.Since(started)
-			if !ok {
-				t.Fatalf("%s: control: every fresh frame must be admitted", kinds[k].name)
-			}
-			f.rec = rec
-			if j == 0 || elapsed < fastest[k] {
-				fastest[k] = elapsed
-			}
-		}
+	firstCall, openingLogged := emit(opening)
+	calls := make([]time.Duration, len(kinds))
+	logged := make([][]slog.Record, len(kinds))
+	for k, f := range frames {
+		calls[k], logged[k] = emit(f)
 	}
+	after := time.Now()
+	t.Logf("first call of the process %v, one walk %v (%.1fx)", firstCall, onePass, float64(onePass)/float64(firstCall))
+	// Each record is its kind's, carrying the hash of the frame's own event
+	// id, which the contract model computes.
+	want := func(kind canaryFrameKind, f canaryFrame) map[string]interface{} {
+		record := kind.record()
+		if record != nil && kind.want.eventKeyHash != "none" {
+			model, _ := referenceWinnerCanary(f.msg.Topic.Type, f.msg.Type, f.status, f.event, version.Version)
+			record["event_key_hash"] = model["event_key_hash"]
+		}
+		return record
+	}
+	canaryAssertEmitted(t, want(kinds[0], opening), openingLogged, 1, before, after)
 	for k, kind := range kinds {
 		t.Run(kind.name, func(t *testing.T) {
-			t.Logf("fastest first classification of %d fresh frames %v, one walk %v (%.0fx)",
-				perKind, fastest[k], onePass, float64(onePass)/float64(fastest[k]))
-			if fastest[k] >= onePass/4 {
-				t.Errorf("the fastest first classification of a fresh frame took %v, not less than a quarter of one walk over a frame's extra keys (%v): fresh frames were walked",
-					fastest[k], onePass)
-			}
-			// Each record is its kind's, carrying the hash of the frame's own
-			// event id, which the contract model computes.
-			for _, f := range frames[k] {
-				want := kind.want.values()
-				if kind.want.eventKeyHash != "none" {
-					model, _ := referenceWinnerCanary(f.msg.Topic.Type, f.msg.Type, "RESOLVED", f.event, f.build)
-					want["event_key_hash"] = model["event_key_hash"]
-				}
-				assertCanaryFields(t, canaryClassifiedFields(t, f.rec), want, f.build, before, time.Now())
-			}
+			t.Logf("first call %v, one walk %v (%.0fx)", calls[k], onePass, float64(onePass)/float64(calls[k]))
+			canaryAssertEmitted(t, want(kind, frames[k]), logged[k], 1, before, after)
 		})
 	}
-}
-
-// canaryPairWith is a two-outcome list: first, then an object whose id is
-// synthetic-outcome-b.
-func canaryPairWith(first interface{}) []interface{} {
-	return []interface{}{first, map[string]interface{}{"id": "synthetic-outcome-b"}}
-}
-
-// TestWinnerCanaryLeavesUninspectedValuesUnread lets other goroutines write
-// into every value of a frame that the canary has no reason to read — an object
-// or array standing where the winner, the event id, the outcomes, an outcome or
-// an outcome's id belong, an outcome's predictors and nested objects, and the
-// message's data envelope and raw message — while the canary classifies that
-// frame. Nothing orders those writes against the classification, so under the
-// race detector (go test -race, as CI and the quality gates run it) a read of
-// what any of those values holds — a map entry or an array element — is a
-// reported data race, however quick; an array's length alone is not, since it
-// sits in the slice header rather than in what the writers write. Without -race
-// this test only checks that every frame is admitted;
-// TestWinnerCanaryAdmittedFramesAreReadOnlyByFixedKey times the same shapes.
-func TestWinnerCanaryLeavesUninspectedValuesUnread(t *testing.T) {
-	intoObject := func(m map[string]interface{}) func() { return func() { m["SENTINEL_WRITE"] = true } }
-	intoList := func(l []interface{}) func() { return func() { l[0] = "SENTINEL_WRITE" } }
-	type frame struct {
-		msg    *PubSubMessage
-		event  map[string]interface{}
-		writes []func()
+	if path := os.Getenv(canaryTimingsEnv); path != "" {
+		raw, err := json.Marshal(canaryFreshTimings{Walk: onePass, First: firstCall, Calls: calls})
+		if err == nil {
+			err = os.WriteFile(path, raw, 0o600)
+		}
+		if err != nil {
+			t.Fatalf("reporting the timings: %v", err)
+		}
 	}
-	for _, tc := range []struct {
-		name     string
-		newFrame func() frame
-	}{
-		{"an object winner", func() frame {
-			w := map[string]interface{}{"id": "synthetic-outcome-b"}
-			return frame{canaryEventMsg(), canaryEvent("synthetic-event-0001", w, canaryPair()), []func(){intoObject(w)}}
-		}},
-		{"an array winner", func() frame {
-			w := []interface{}{"synthetic-outcome-b"}
-			return frame{canaryEventMsg(), canaryEvent("synthetic-event-0001", w, canaryPair()), []func(){intoList(w)}}
-		}},
-		{"an object event id", func() frame {
-			id := map[string]interface{}{"id": "synthetic-event-0001"}
-			return frame{canaryEventMsg(), canaryEvent(id, "synthetic-outcome-b", canaryPair()), []func(){intoObject(id)}}
-		}},
-		{"an array event id", func() frame {
-			id := []interface{}{"synthetic-event-0001"}
-			return frame{canaryEventMsg(), canaryEvent(id, "synthetic-outcome-b", canaryPair()), []func(){intoList(id)}}
-		}},
-		{"an object for the outcomes", func() frame {
-			outcomes := map[string]interface{}{"0": map[string]interface{}{"id": "synthetic-outcome-a"}}
-			return frame{canaryEventMsg(), canaryEvent("synthetic-event-0001", "synthetic-outcome-b", outcomes), []func(){intoObject(outcomes)}}
-		}},
-		{"an outcome that is an array", func() frame {
-			outcome := []interface{}{"synthetic-outcome-a"}
-			return frame{canaryEventMsg(), canaryEvent("synthetic-event-0001", "synthetic-outcome-b", canaryPairWith(outcome)), []func(){intoList(outcome)}}
-		}},
-		{"an outcome whose id is an object", func() frame {
-			id := map[string]interface{}{"id": "synthetic-outcome-a"}
-			return frame{canaryEventMsg(), canaryEvent("synthetic-event-0001", "synthetic-outcome-b",
-				canaryPairWith(map[string]interface{}{"id": id})), []func(){intoObject(id)}}
-		}},
-		{"an outcome whose id is an array", func() frame {
-			id := []interface{}{"synthetic-outcome-a"}
-			return frame{canaryEventMsg(), canaryEvent("synthetic-event-0001", "synthetic-outcome-b",
-				canaryPairWith(map[string]interface{}{"id": id})), []func(){intoList(id)}}
-		}},
-		{"an outcome's predictors and nested object", func() frame {
-			predictors := []interface{}{map[string]interface{}{"points": 500.0}}
-			nested := map[string]interface{}{"SENTINEL_NEST": map[string]interface{}{}}
-			first := map[string]interface{}{"id": "synthetic-outcome-a", "top_predictors": predictors, "SENTINEL_NEST": nested}
-			return frame{canaryEventMsg(), canaryEvent("synthetic-event-0001", "synthetic-outcome-b", canaryPairWith(first)),
-				[]func(){intoList(predictors), intoObject(nested)}}
-		}},
-		{"the data envelope and raw message", func() frame {
-			msg := canaryEventMsg()
-			event := canaryEvent("synthetic-event-0001", "synthetic-outcome-b", canaryPair())
-			msg.Data = map[string]interface{}{"event": event}
-			msg.Message = map[string]interface{}{"type": "event-updated"}
-			return frame{msg, event, []func(){intoObject(msg.Data), intoObject(msg.Message)}}
-		}},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			f := tc.newFrame()
+}
+
+// TestWinnerCanaryLeavesUninspectedValuesUnread builds one frame of every kind
+// canaryFrameKinds lists and lets other goroutines write into every value in
+// it the canary has no reason to read — the message's data envelope and raw
+// message, every outcome's predictors and nested object, and an object or
+// array standing where the winner, the event id, the outcomes, an outcome or an
+// outcome's id belongs — while the canary classifies and emits the frame,
+// twice each. Nothing orders those writes against the canary, so under the
+// race detector (go test -race, as CI and the quality gates run it) reading
+// what any of those values holds — a map entry, the keys of a map in a walk,
+// or an array element — is a reported data race, however quick; an array's
+// length alone is not, since it sits in the slice header rather than in what
+// the writers write. The event and the outcome objects, which the canary does
+// read by key, are left to the timing tests. The test runs in a fresh process,
+// so that no earlier test has already made the canary's first call of the
+// process or of a branch. Each record, classified and emitted, is checked
+// against its kind's literal expectation, or that there is none, so a frame
+// that stopped reaching its case fails; without -race that is all this test
+// checks, and the timing tests take the same kinds of frame.
+func TestWinnerCanaryLeavesUninspectedValuesUnread(t *testing.T) {
+	if !canaryInFreshProcess(t) {
+		return
+	}
+	capture := &canaryCapture{level: canaryCaptureAll}
+	canaryUseProcessLogger(t, capture) // its t.Setenv also refuses a parallel test
+	for _, kind := range canaryFrameKinds() {
+		t.Run(kind.name, func(t *testing.T) {
+			var writes []func()
+			watched := func(m map[string]interface{}) map[string]interface{} {
+				writes = append(writes, func() { m["SENTINEL_WRITE"] = true })
+				return m
+			}
+			list := func() []interface{} {
+				l := []interface{}{"SENTINEL_ELEMENT", "SENTINEL_ELEMENT"}
+				for i := range l {
+					writes = append(writes, func() { l[i] = "SENTINEL_WRITE" })
+				}
+				return l
+			}
+			f := kind.build(canaryParts{
+				inspected:  func(m map[string]interface{}) map[string]interface{} { return m },
+				object:     watched,
+				array:      list,
+				predictors: list,
+				nest:       func() map[string]interface{} { return watched(map[string]interface{}{}) },
+				envelope:   watched,
+			}, 1)
 			var writers sync.WaitGroup
-			for _, write := range f.writes {
+			for _, write := range writes {
 				writers.Add(1)
 				go func() {
 					defer writers.Done()
 					write()
 				}()
 			}
-			_, ok := classifyWinnerCanary(f.msg, "RESOLVED", f.event, "synthetic-build")
-			writers.Wait()
-			if !ok {
-				t.Fatal("control: the frame must be admitted")
+			before := time.Now()
+			var recs [2]winnerCanaryRecord
+			var oks [2]bool
+			for i := range recs {
+				recs[i], oks[i] = classifyWinnerCanary(f.msg, f.status, f.event, "synthetic-build")
+				logWinnerCanary(f.msg, f.status, f.event)
 			}
+			writers.Wait()
+			after := time.Now()
+			want := kind.record()
+			for i := range recs {
+				canaryAssertClassified(t, want, recs[i], oks[i])
+			}
+			canaryAssertEmitted(t, want, capture.take(), len(recs), before, after)
 		})
 	}
 }
 
-// TestWinnerCanaryRecordsFollowTheFrameNotItsAddress changes one event object
-// in place between calls. A canary that kept anything from one call to the
-// next — a record, or a verdict keyed by the map's address, the event id or the
-// frame's size — would answer a later call with what the frame used to say;
-// every record, classified and emitted, must match what the frame says at that
-// moment. It runs in a fresh process, since it counts the records the process
-// logs.
+// TestWinnerCanaryRecordsFollowTheFrameNotItsAddress changes one event object,
+// and then one of its outcome objects, in place between calls. A canary that
+// kept anything from one call to the next — a record, or a verdict keyed by the
+// address of the event or of an outcome, the event id or the frame's size —
+// would answer a later call with what the frame used to say; every record,
+// classified and emitted, must match what the frame says at that moment. It
+// runs in a fresh process, since it counts the records the process logs.
 func TestWinnerCanaryRecordsFollowTheFrameNotItsAddress(t *testing.T) {
 	if !canaryInFreshProcess(t) {
 		return
@@ -1663,6 +1787,9 @@ func TestWinnerCanaryRecordsFollowTheFrameNotItsAddress(t *testing.T) {
 		{"the outcome ids collide", func() {
 			event["outcomes"] = canaryOutcomes("synthetic-outcome-b", "synthetic-outcome-b")
 		}, collided},
+		{"the first outcome's id changes in place", func() {
+			event["outcomes"].([]interface{})[0].(map[string]interface{})["id"] = "synthetic-outcome-a"
+		}, positive0003},
 	} {
 		step.change()
 		before := time.Now()
