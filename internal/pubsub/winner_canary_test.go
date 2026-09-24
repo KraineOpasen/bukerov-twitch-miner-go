@@ -1136,6 +1136,7 @@ func TestWinnerCanaryRefusesOverlongIDsUncompared(t *testing.T) {
 type canaryKindRecords struct {
 	positive, firstMatched, noWinner, nullWinner, emptyWinner, unmatched canaryFrameAttrs
 	noEventID, invalidVector, noOutcomes, nullOutcomes, invalidOutcomes  canaryFrameAttrs
+	singleOutcome, emptyOutcomes                                         canaryFrameAttrs
 }
 
 func newCanaryKindRecords() canaryKindRecords {
@@ -1157,6 +1158,10 @@ func newCanaryKindRecords() canaryKindRecords {
 	k.invalidVector = k.positive
 	k.invalidVector.outcomeIDsValid = false
 	k.invalidVector.winnerMatchCount, k.invalidVector.winnerIndex, k.invalidVector.result = -1, -1, canaryMalformed
+	k.singleOutcome = k.invalidVector
+	k.singleOutcome.outcomeCount = 1
+	k.emptyOutcomes = k.invalidVector
+	k.emptyOutcomes.outcomeCount = 0
 	k.noOutcomes = k.invalidVector
 	k.noOutcomes.outcomesPresence, k.noOutcomes.outcomeCount = "ABSENT_ON_WIRE", -1
 	k.nullOutcomes = k.noOutcomes
@@ -1208,6 +1213,9 @@ type canaryParts struct {
 	predictors func() []interface{}
 	nest       func() map[string]interface{}
 	envelope   func(map[string]interface{}) map[string]interface{}
+	// overlong is frame n's value beyond the 4096-byte bound where a refused
+	// frame's event id, winner or outcome id belongs.
+	overlong func(n int) string
 }
 
 // canaryFrameKind is one kind of frame: how to build one, and the record the
@@ -1229,19 +1237,23 @@ func (k canaryFrameKind) record() map[string]interface{} {
 }
 
 // canaryFrameKinds lists a frame of every kind the canary tells apart: one for
-// each record it can make, one for each way a frame is not a candidate and one
-// for each bound that refuses a frame. Frame n has its own ids —
-// synthetic-event-000n and its outcomes' — so frames built for different n
-// share none; the records carry the hash of synthetic-event-0001, the event id
-// of n = 1.
+// each branch it can take on the fields of a decoded frame — the winner, the
+// event id, the outcomes, how many there are (fewer than two is a branch of
+// its own) and each outcome's id — one for each way a frame is not a candidate
+// and one for each bound that refuses a frame. Two branches are not kinds of
+// frame: the build label's bound, since the label is no part of a frame
+// (TestWinnerCanaryRefusalTouchesNothing refuses a long one), and a value of a
+// type json.Unmarshal never produces, which no frame the pool decodes holds
+// (TestWinnerCanaryNonJSONValuesAreClassifiedNotFormatted). Frame n has its
+// own ids — synthetic-event-000n and its outcomes' — so frames built for
+// different n share none; the records carry the hash of synthetic-event-0001,
+// the event id of n = 1.
 func canaryFrameKinds() []canaryFrameKind {
 	records := newCanaryKindRecords()
 	absent := canaryAbsentKey{}
 	id := func(n int) string { return fmt.Sprintf("synthetic-event-%04d", n) }
 	a := func(n int) string { return fmt.Sprintf("synthetic-outcome-a-%04d", n) }
 	b := func(n int) string { return fmt.Sprintf("synthetic-outcome-b-%04d", n) }
-	// overlong is 4101 bytes, beyond the 4096-byte bound.
-	overlong := func(n int) string { return fmt.Sprintf("%s-%04d", strings.Repeat("x", 4096), n) }
 	outcome := func(p canaryParts, outcomeID interface{}) map[string]interface{} {
 		return p.inspected(canarySet(map[string]interface{}{"top_predictors": p.predictors(), "SENTINEL_NEST": p.nest()}, "id", outcomeID))
 	}
@@ -1284,6 +1296,7 @@ func canaryFrameKinds() []canaryFrameKind {
 	z := func(n int) string { return fmt.Sprintf("synthetic-outcome-z-%04d", n) }
 	number := func(_ canaryParts, n int) interface{} { return float64(n) }
 	array := func(p canaryParts, _ int) interface{} { return p.array() }
+	overlong := func(p canaryParts, n int) interface{} { return p.overlong(n) }
 	// changed is the positive frame with one change made to it.
 	changed := func(change func(f *canaryFrame)) func(canaryParts, int) canaryFrame {
 		return func(p canaryParts, n int) canaryFrame {
@@ -1326,6 +1339,10 @@ func canaryFrameKinds() []canaryFrameKind {
 		{name: "outcome whose id is an object", want: records.invalidVector,
 			build: first(func(p canaryParts, _ int) interface{} { return p.object(map[string]interface{}{}) })},
 		{name: "outcome whose id is an array", want: records.invalidVector, build: first(array)},
+		{name: "a single outcome", want: records.singleOutcome, build: outcomes(func(p canaryParts, n int) interface{} {
+			return []interface{}{outcome(p, b(n))}
+		})},
+		{name: "empty outcomes", want: records.emptyOutcomes, build: outcomes(value([]interface{}{}))},
 		{name: "another topic", none: true, build: changed(func(f *canaryFrame) {
 			f.msg.Topic = NewTopic(TopicPredictionsUser, "synthetic-channel-4417")
 		})},
@@ -1336,9 +1353,9 @@ func canaryFrameKinds() []canaryFrameKind {
 		})},
 		{name: "no event object", none: true, build: changed(func(f *canaryFrame) { f.event = nil })},
 		{name: "no message", none: true, build: changed(func(f *canaryFrame) { f.msg = nil })},
-		{name: "an overlong event id", none: true, build: eventID(of(overlong))},
-		{name: "an overlong winner", none: true, build: winner(of(overlong))},
-		{name: "an overlong outcome id", none: true, build: first(of(overlong))},
+		{name: "an overlong event id", none: true, build: eventID(overlong)},
+		{name: "an overlong winner", none: true, build: winner(overlong)},
+		{name: "an overlong outcome id", none: true, build: first(overlong)},
 		{name: "more than 64 outcomes", none: true, build: outcomes(func(p canaryParts, n int) interface{} {
 			return slices.Repeat([]interface{}{outcome(p, a(n))}, 65)
 		})},
@@ -1409,26 +1426,30 @@ func canaryWalk(t *testing.T, m map[string]interface{}, want int) func() {
 }
 
 // TestWinnerCanaryReadsFramesByFixedKey hands the canary one frame of every
-// kind canaryFrameKinds lists — each record it can make, each way a frame is
+// kind canaryFrameKinds lists — each branch it can take, each way a frame is
 // not a candidate and each bound that refuses one — through the classifier and
 // through the emitter the pool calls. Each frame is large wherever the canary
 // has no reason to read: 65,536 extra keys on the event, in every outcome
 // object, in the data envelope and raw message and in every object standing
 // where the winner, the event id, the outcomes or an outcome's id belongs;
 // 1,048,576 elements in every array standing there and in every outcome's
-// predictors; 65,536 levels of nesting in every outcome. A walk hidden in any
-// branch therefore meets a large value there. The canary reads fixed keys
-// only, so ten classifications, and ten emissions, must each take less than
-// one plain walk over the extra keys, the least any enumeration, traversal or
-// recursion would do. Timing sees walks over thousands of entries; one over a
-// few hundred costs about as much as a call and escapes it. Every timing is
-// the best of several runs, and each subtest logs them (go test -v). Each
-// frame's record, classified and emitted, is first checked against its kind's
-// literal expectation, or that there is none, so a case that stopped reaching
-// its branch, or a record that depended on what the canary must not read,
-// fails rather than passing on the timing of another kind of frame. This test
-// times repeated calls on one frame; TestWinnerCanaryReadsFreshFramesByFixedKey
-// times first ones.
+// predictors; 65,536 levels of nesting in every outcome; and a 1 MiB title on
+// the event and on every outcome, and a 1 MiB value where a refused frame is
+// beyond its bound. A walk hidden in any branch therefore meets a large value
+// there, and so does a scan of a string the canary has no reason to read, or of
+// one it has not yet admitted. The canary reads fixed keys only, so ten
+// classifications, and ten emissions, must each take less than one plain walk
+// over the extra keys, the least any enumeration, traversal or recursion would
+// do. Timing sees walks over a thousand entries or more; one over a few hundred
+// costs about as much as a call and escapes it. Ten scans of a 1 MiB string a
+// byte at a time take longer than the walk; a vectorised library scan of one
+// may not. Every timing is the best of several runs, and each subtest logs them
+// (go test -v). Each frame's record, classified and emitted, is first checked
+// against its kind's literal expectation, or that there is none, so a case that
+// stopped reaching its branch, or a record that depended on what the canary
+// must not read, fails rather than passing on the timing of another kind of
+// frame. This test times repeated calls on one frame;
+// TestWinnerCanaryReadsFreshFramesByFixedKey times first ones.
 func TestWinnerCanaryReadsFramesByFixedKey(t *testing.T) {
 	capture := &canaryCapture{level: canaryCaptureAll}
 	canaryUseProcessLogger(t, capture) // its t.Setenv also refuses a parallel test
@@ -1444,6 +1465,7 @@ func TestWinnerCanaryReadsFramesByFixedKey(t *testing.T) {
 		return wide
 	}
 	big := slices.Repeat([]interface{}{true}, 1<<20)
+	title := strings.Repeat("x", 1<<20)
 	deep := map[string]interface{}{}
 	for level, m := 0, deep; level < extra; level++ {
 		next := map[string]interface{}{}
@@ -1451,12 +1473,13 @@ func TestWinnerCanaryReadsFramesByFixedKey(t *testing.T) {
 		m = next
 	}
 	parts := canaryParts{
-		inspected:  widen,
+		inspected:  func(m map[string]interface{}) map[string]interface{} { m["title"] = title; return widen(m) },
 		object:     widen,
 		array:      func() []interface{} { return big },
 		predictors: func() []interface{} { return big },
 		nest:       func() map[string]interface{} { return deep },
 		envelope:   widen,
+		overlong:   func(n int) string { return title + fmt.Sprintf("-%04d", n) },
 	}
 	for _, kind := range canaryFrameKinds() {
 		t.Run(kind.name, func(t *testing.T) {
@@ -1512,7 +1535,8 @@ type canaryFreshTimings struct {
 // calls. Here the body runs in five fresh processes. Each builds one fresh
 // frame of every kind canaryFrameKinds lists — its own message, maps, ids,
 // winner and size, with extra keys on the event, in every outcome and in the
-// case's object, and the case's array large too — and one more positive frame
+// case's object, the case's array large too, and its titles and a refused
+// frame's over-bound value 196,613 bytes long — and one more positive frame
 // with eight times the extra keys. After a record of the test's own warms the
 // logger (not the canary), the heap is collected and one plain walk over a
 // separate map of the extra keys is timed, each process times the emitter the
@@ -1594,17 +1618,26 @@ func TestWinnerCanaryReadsFreshFramesByFixedKey(t *testing.T) {
 		}
 		return wide
 	}
-	// parts gives every object of frame n the first width extra keys, and
-	// every array of it 196,608+n elements.
+	// frameText is frame n's title or over-bound value: 196,613 bytes, a new
+	// string on every call.
+	pad := strings.Repeat("x", 16*extra)
+	frameText := func(n int) string { return pad + fmt.Sprintf("-%04d", n) }
+	// parts gives every object of frame n the first width extra keys, every
+	// array of it 196,608+n elements, and frameText(n) for its titles and its
+	// over-bound value.
 	parts := func(n, width int) canaryParts {
 		wideObject := func(m map[string]interface{}) map[string]interface{} { return widen(m, width) }
 		return canaryParts{
-			inspected:  wideObject,
+			inspected: func(m map[string]interface{}) map[string]interface{} {
+				m["title"] = frameText(n)
+				return wideObject(m)
+			},
 			object:     wideObject,
 			array:      func() []interface{} { return slices.Repeat([]interface{}{true}, 16*extra+n) },
 			predictors: func() []interface{} { return []interface{}{map[string]interface{}{"points": 500.0}} },
 			nest:       func() map[string]interface{} { return map[string]interface{}{} },
 			envelope:   func(m map[string]interface{}) map[string]interface{} { return m },
+			overlong:   frameText,
 		}
 	}
 	// The opening frame is of the first kind, which must be the positive one.
@@ -1691,7 +1724,8 @@ func TestWinnerCanaryReadsFreshFramesByFixedKey(t *testing.T) {
 // process or of a branch. Each record, classified and emitted, is checked
 // against its kind's literal expectation, or that there is none, so a frame
 // that stopped reaching its case fails; without -race that is all this test
-// checks, and the timing tests take the same kinds of frame.
+// checks, and the timing tests take the same kinds of frame, with the strings
+// in them, which no goroutine can write into, made long.
 func TestWinnerCanaryLeavesUninspectedValuesUnread(t *testing.T) {
 	if !canaryInFreshProcess(t) {
 		return
@@ -1713,12 +1747,13 @@ func TestWinnerCanaryLeavesUninspectedValuesUnread(t *testing.T) {
 				return l
 			}
 			f := kind.build(canaryParts{
-				inspected:  func(m map[string]interface{}) map[string]interface{} { return m },
+				inspected:  func(m map[string]interface{}) map[string]interface{} { m["title"] = "SENTINEL-TITLE-3b8f"; return m },
 				object:     watched,
 				array:      list,
 				predictors: list,
 				nest:       func() map[string]interface{} { return watched(map[string]interface{}{}) },
 				envelope:   watched,
+				overlong:   func(n int) string { return strings.Repeat("x", 4096) + fmt.Sprintf("-%04d", n) },
 			}, 1)
 			var writers sync.WaitGroup
 			for _, write := range writes {
