@@ -1121,13 +1121,13 @@ func TestWinnerCanaryRefusesOverlongIDsUncompared(t *testing.T) {
 }
 
 // TestWinnerCanaryAdmittedFramesAreReadOnlyByFixedKey classifies admitted frames
-// that carry 65,536 extra keys — on the event, in an object winner, in the
-// matched outcome, in the message's data envelope and raw message — an outcome
-// nesting 65,536 levels deep, or a 1,048,576-element array as the winner or as
-// an outcome's predictors. The canary reads fixed keys only, so ten
-// classifications must take less than one plain walk over those keys, levels
-// or elements, the least any enumeration, traversal or recursion would do. Both
-// sides take the best of several runs.
+// that carry 65,536 extra keys, a 1,048,576-element array or 65,536 levels of
+// nesting in the place each case names: on the event itself, once for each kind
+// of record, or in a value the canary has no reason to read. The canary reads
+// fixed keys only, so ten classifications must take less than one plain walk
+// over those keys, elements or levels, the least any enumeration, traversal or
+// recursion would do. Both sides take the best of several runs, and each
+// subtest logs both timings (go test -v).
 func TestWinnerCanaryAdmittedFramesAreReadOnlyByFixedKey(t *testing.T) {
 	const extra = 1 << 16
 	wide := func(m map[string]interface{}) map[string]interface{} {
@@ -1171,12 +1171,28 @@ func TestWinnerCanaryAdmittedFramesAreReadOnlyByFixedKey(t *testing.T) {
 		}
 		return n
 	}
-	pairWith := func(first map[string]interface{}) []interface{} {
-		return []interface{}{first, map[string]interface{}{"id": "synthetic-outcome-b"}}
+	// onEvent carries the extra keys on the event itself; each as(...) case
+	// gives it the inspected keys of one kind of record just before it is timed,
+	// so every kind is timed over the same 65,536 keys.
+	absent := canaryAbsentKey{}
+	onEvent := wide(canaryEvent(absent, absent, absent))
+	as := func(id, winnerValue, outcomes interface{}) func() map[string]interface{} {
+		return func() map[string]interface{} {
+			for _, key := range []string{"id", "winning_outcome_id", "outcomes"} {
+				delete(onEvent, key)
+			}
+			for key, v := range canaryEvent(id, winnerValue, outcomes) {
+				onEvent[key] = v
+			}
+			return onEvent
+		}
 	}
-	onEvent := wide(canaryEvent("synthetic-event-0001", "synthetic-outcome-b", canaryPair()))
+	frame := func(event map[string]interface{}) func() map[string]interface{} {
+		return func() map[string]interface{} { return event }
+	}
 	winner := wide(map[string]interface{}{"id": "synthetic-outcome-b"})
 	outcome := wide(map[string]interface{}{"id": "synthetic-outcome-a"})
+	object := wide(map[string]interface{}{})
 	msg := canaryEventMsg()
 	// The canary never reads a message's data envelope or raw message, so only
 	// their size matters here; the wide maps above serve as both.
@@ -1186,22 +1202,48 @@ func TestWinnerCanaryAdmittedFramesAreReadOnlyByFixedKey(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
 		msg   *PubSubMessage
-		event map[string]interface{}
+		event func() map[string]interface{}
 		walk  func() int
 	}{
-		{"65,536 unknown keys on the event", msg, onEvent, countKeys(onEvent)},
-		{"an object winner with 65,536 keys", msg, canaryEvent("synthetic-event-0001", winner, canaryPair()), countKeys(winner)},
-		{"the matched outcome with 65,536 keys", msg, canaryEvent("synthetic-event-0001", "synthetic-outcome-a", pairWith(outcome)), countKeys(outcome)},
+		{"65,536 keys on a positive event", msg, as("synthetic-event-0001", "synthetic-outcome-b", canaryPair()), countKeys(onEvent)},
+		{"65,536 keys on an event with no winner", msg, as("synthetic-event-0001", absent, canaryPair()), countKeys(onEvent)},
+		{"65,536 keys on an event with a null winner", msg, as("synthetic-event-0001", nil, canaryPair()), countKeys(onEvent)},
+		{"65,536 keys on an event with a numeric winner", msg, as("synthetic-event-0001", 7.0, canaryPair()), countKeys(onEvent)},
+		{"65,536 keys on an event with an empty winner", msg, as("synthetic-event-0001", "", canaryPair()), countKeys(onEvent)},
+		{"65,536 keys on an event whose winner names no outcome", msg,
+			as("synthetic-event-0001", "synthetic-outcome-z", canaryPair()), countKeys(onEvent)},
+		{"65,536 keys on an event with no id", msg, as(absent, "synthetic-outcome-b", canaryPair()), countKeys(onEvent)},
+		{"65,536 keys on an event with a numeric id", msg, as(42.0, "synthetic-outcome-b", canaryPair()), countKeys(onEvent)},
+		{"65,536 keys on an event with an empty id", msg, as("", "synthetic-outcome-b", canaryPair()), countKeys(onEvent)},
+		{"65,536 keys on an event with no outcomes", msg, as("synthetic-event-0001", "synthetic-outcome-b", absent), countKeys(onEvent)},
+		{"65,536 keys on an event with a duplicate outcome id", msg, as("synthetic-event-0001", "synthetic-outcome-a",
+			canaryOutcomes("synthetic-outcome-a", "synthetic-outcome-a")), countKeys(onEvent)},
+		{"an object winner with 65,536 keys", msg, frame(canaryEvent("synthetic-event-0001", winner, canaryPair())), countKeys(winner)},
+		{"the matched outcome with 65,536 keys", msg,
+			frame(canaryEvent("synthetic-event-0001", "synthetic-outcome-a", canaryPairWith(outcome))), countKeys(outcome)},
+		{"a non-matching outcome with 65,536 keys", msg,
+			frame(canaryEvent("synthetic-event-0001", "synthetic-outcome-b", canaryPairWith(outcome))), countKeys(outcome)},
+		{"a duplicate outcome with 65,536 keys", msg, frame(canaryEvent("synthetic-event-0001", "synthetic-outcome-a",
+			[]interface{}{outcome, map[string]interface{}{"id": "synthetic-outcome-a"}})), countKeys(outcome)},
 		{"a data envelope and a raw message of 65,536 keys each", envelope,
-			canaryEvent("synthetic-event-0001", "synthetic-outcome-b", canaryPair()), countKeys(onEvent)},
-		{"an outcome nesting 65,536 levels deep", msg, canaryEvent("synthetic-event-0001", "synthetic-outcome-b",
-			pairWith(map[string]interface{}{"id": "synthetic-outcome-a", "SENTINEL_NEST": deep})), levels},
-		{"an array winner of 1,048,576 elements", msg, canaryEvent("synthetic-event-0001", big, canaryPair()), elements},
-		{"an outcome with 1,048,576 predictors", msg, canaryEvent("synthetic-event-0001", "synthetic-outcome-b",
-			pairWith(map[string]interface{}{"id": "synthetic-outcome-a", "top_predictors": big})), elements},
+			frame(canaryEvent("synthetic-event-0001", "synthetic-outcome-b", canaryPair())), countKeys(onEvent)},
+		{"an object of 65,536 keys for the outcomes", msg,
+			frame(canaryEvent("synthetic-event-0001", "synthetic-outcome-b", object)), countKeys(object)},
+		{"an object of 65,536 keys for the event id", msg, frame(canaryEvent(object, "synthetic-outcome-b", canaryPair())), countKeys(object)},
+		{"an outcome whose id is an object of 65,536 keys", msg, frame(canaryEvent("synthetic-event-0001", "synthetic-outcome-b",
+			canaryPairWith(map[string]interface{}{"id": object}))), countKeys(object)},
+		{"an outcome nesting 65,536 levels deep", msg, frame(canaryEvent("synthetic-event-0001", "synthetic-outcome-b",
+			canaryPairWith(map[string]interface{}{"id": "synthetic-outcome-a", "SENTINEL_NEST": deep}))), levels},
+		{"an array winner of 1,048,576 elements", msg, frame(canaryEvent("synthetic-event-0001", big, canaryPair())), elements},
+		{"an array of 1,048,576 elements for the event id", msg, frame(canaryEvent(big, "synthetic-outcome-b", canaryPair())), elements},
+		{"an outcome with 1,048,576 predictors", msg, frame(canaryEvent("synthetic-event-0001", "synthetic-outcome-b",
+			canaryPairWith(map[string]interface{}{"id": "synthetic-outcome-a", "top_predictors": big}))), elements},
+		{"an outcome that is itself a 1,048,576-element array", msg,
+			frame(canaryEvent("synthetic-event-0001", "synthetic-outcome-b", canaryPairWith(big))), elements},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if _, ok := classifyWinnerCanary(tc.msg, "RESOLVED", tc.event, "synthetic-build"); !ok {
+			event := tc.event()
+			if _, ok := classifyWinnerCanary(tc.msg, "RESOLVED", event, "synthetic-build"); !ok {
 				t.Fatal("control: the frame must be admitted")
 			}
 			var onePass time.Duration
@@ -1220,16 +1262,214 @@ func TestWinnerCanaryAdmittedFramesAreReadOnlyByFixedKey(t *testing.T) {
 			for run := 0; run < 5; run++ {
 				started := time.Now()
 				for i := 0; i < 10; i++ {
-					classifyWinnerCanary(tc.msg, "RESOLVED", tc.event, "synthetic-build")
+					classifyWinnerCanary(tc.msg, "RESOLVED", event, "synthetic-build")
 				}
 				elapsed := time.Since(started)
 				if run == 0 || elapsed < classifying {
 					classifying = elapsed
 				}
 			}
+			t.Logf("ten classifications %v, one walk %v (%.0fx)", classifying, onePass, float64(onePass)/float64(classifying))
 			if classifying >= onePass {
-				t.Fatalf("ten classifications took %v, not less than one walk over the extra keys (%v): the frame was enumerated or walked", classifying, onePass)
+				t.Fatalf("ten classifications took %v, not less than one walk over the extra keys, elements or levels (%v): the frame was enumerated or walked", classifying, onePass)
 			}
+		})
+	}
+}
+
+// canaryPairWith is a two-outcome list: first, then an object whose id is
+// synthetic-outcome-b.
+func canaryPairWith(first interface{}) []interface{} {
+	return []interface{}{first, map[string]interface{}{"id": "synthetic-outcome-b"}}
+}
+
+// TestWinnerCanaryReadsFreshFramesByFixedKey times first calls. A canary that
+// walked a frame once and then remembered doing so — by the map's address, the
+// event id or the frame's size — would hide that walk behind any earlier call on
+// the same frame, and TestWinnerCanaryAdmittedFramesAreReadOnlyByFixedKey times
+// repeated calls. Here every timed call is the first one on a fresh frame with
+// its own id and size, so the fastest of ten such calls must still take less
+// than a quarter of one plain walk over one frame's extra keys. It runs in a
+// fresh process: there, no frame was classified before, whereas in a shared one
+// a fresh frame can reuse the address of an earlier test's frame that such a
+// memo already holds. The child's output, logged timings included, is shown
+// only when it fails; with P4_WINNER_CANARY_TEST_ISOLATED set to this test's
+// name, the body runs in-process and go test -v shows them.
+func TestWinnerCanaryReadsFreshFramesByFixedKey(t *testing.T) {
+	if !canaryInFreshProcess(t) {
+		return
+	}
+	const extra, frames = 1 << 16, 10
+	fresh := make([]map[string]interface{}, frames)
+	for f := range fresh {
+		event := canaryEvent(fmt.Sprintf("synthetic-event-%04d", 101+f), "synthetic-outcome-b", canaryPair())
+		for i := 0; i < extra+f; i++ {
+			event["SENTINEL_KEY_"+strconv.Itoa(i)] = float64(i)
+		}
+		fresh[f] = event
+	}
+	var onePass time.Duration
+	for run := 0; run < 3; run++ {
+		started := time.Now()
+		visited := 0
+		for range fresh[0] {
+			visited++
+		}
+		elapsed := time.Since(started)
+		if visited < extra {
+			t.Fatalf("the walk visited %d keys, want at least %d", visited, extra)
+		}
+		if run == 0 || elapsed < onePass {
+			onePass = elapsed
+		}
+	}
+	msg := canaryEventMsg()
+	var fastest time.Duration
+	for f, event := range fresh {
+		started := time.Now()
+		_, ok := classifyWinnerCanary(msg, "RESOLVED", event, "synthetic-build")
+		elapsed := time.Since(started)
+		if !ok {
+			t.Fatal("control: every fresh frame must be admitted")
+		}
+		if f == 0 || elapsed < fastest {
+			fastest = elapsed
+		}
+	}
+	t.Logf("fastest first classification of %d fresh frames %v, one walk %v (%.0fx)", frames, fastest, onePass, float64(onePass)/float64(fastest))
+	if fastest >= onePass/4 {
+		t.Fatalf("the fastest first classification of a fresh frame took %v, not less than a quarter of one walk over its extra keys (%v): fresh frames were walked", fastest, onePass)
+	}
+}
+
+// TestWinnerCanaryLeavesUninspectedValuesUnread lets other goroutines write
+// into every value of a frame that the canary has no reason to read — an object
+// or array standing where the winner, the event id, the outcomes, an outcome or
+// an outcome's id belong, an outcome's predictors and nested objects, and the
+// message's data envelope and raw message — while the canary classifies that
+// frame. Nothing orders those writes against the classification, so under the
+// race detector (go test -race, as CI and the quality gates run it) a read of
+// any of those values is a reported data race, however quick. Without -race
+// this test only checks that every frame is admitted;
+// TestWinnerCanaryAdmittedFramesAreReadOnlyByFixedKey times the same shapes.
+func TestWinnerCanaryLeavesUninspectedValuesUnread(t *testing.T) {
+	intoObject := func(m map[string]interface{}) func() { return func() { m["SENTINEL_WRITE"] = true } }
+	intoList := func(l []interface{}) func() { return func() { l[0] = "SENTINEL_WRITE" } }
+	type frame struct {
+		msg    *PubSubMessage
+		event  map[string]interface{}
+		writes []func()
+	}
+	for _, tc := range []struct {
+		name     string
+		newFrame func() frame
+	}{
+		{"an object winner", func() frame {
+			w := map[string]interface{}{"id": "synthetic-outcome-b"}
+			return frame{canaryEventMsg(), canaryEvent("synthetic-event-0001", w, canaryPair()), []func(){intoObject(w)}}
+		}},
+		{"an array winner", func() frame {
+			w := []interface{}{"synthetic-outcome-b"}
+			return frame{canaryEventMsg(), canaryEvent("synthetic-event-0001", w, canaryPair()), []func(){intoList(w)}}
+		}},
+		{"an object event id", func() frame {
+			id := map[string]interface{}{"id": "synthetic-event-0001"}
+			return frame{canaryEventMsg(), canaryEvent(id, "synthetic-outcome-b", canaryPair()), []func(){intoObject(id)}}
+		}},
+		{"an array event id", func() frame {
+			id := []interface{}{"synthetic-event-0001"}
+			return frame{canaryEventMsg(), canaryEvent(id, "synthetic-outcome-b", canaryPair()), []func(){intoList(id)}}
+		}},
+		{"an object for the outcomes", func() frame {
+			outcomes := map[string]interface{}{"0": map[string]interface{}{"id": "synthetic-outcome-a"}}
+			return frame{canaryEventMsg(), canaryEvent("synthetic-event-0001", "synthetic-outcome-b", outcomes), []func(){intoObject(outcomes)}}
+		}},
+		{"an outcome that is an array", func() frame {
+			outcome := []interface{}{"synthetic-outcome-a"}
+			return frame{canaryEventMsg(), canaryEvent("synthetic-event-0001", "synthetic-outcome-b", canaryPairWith(outcome)), []func(){intoList(outcome)}}
+		}},
+		{"an outcome whose id is an object", func() frame {
+			id := map[string]interface{}{"id": "synthetic-outcome-a"}
+			return frame{canaryEventMsg(), canaryEvent("synthetic-event-0001", "synthetic-outcome-b",
+				canaryPairWith(map[string]interface{}{"id": id})), []func(){intoObject(id)}}
+		}},
+		{"an outcome's predictors and nested object", func() frame {
+			predictors := []interface{}{map[string]interface{}{"points": 500.0}}
+			nested := map[string]interface{}{"SENTINEL_NEST": map[string]interface{}{}}
+			first := map[string]interface{}{"id": "synthetic-outcome-a", "top_predictors": predictors, "SENTINEL_NEST": nested}
+			return frame{canaryEventMsg(), canaryEvent("synthetic-event-0001", "synthetic-outcome-b", canaryPairWith(first)),
+				[]func(){intoList(predictors), intoObject(nested)}}
+		}},
+		{"the data envelope and raw message", func() frame {
+			msg := canaryEventMsg()
+			event := canaryEvent("synthetic-event-0001", "synthetic-outcome-b", canaryPair())
+			msg.Data = map[string]interface{}{"event": event}
+			msg.Message = map[string]interface{}{"type": "event-updated"}
+			return frame{msg, event, []func(){intoObject(msg.Data), intoObject(msg.Message)}}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := tc.newFrame()
+			var writers sync.WaitGroup
+			for _, write := range f.writes {
+				writers.Add(1)
+				go func() {
+					defer writers.Done()
+					write()
+				}()
+			}
+			_, ok := classifyWinnerCanary(f.msg, "RESOLVED", f.event, "synthetic-build")
+			writers.Wait()
+			if !ok {
+				t.Fatal("control: the frame must be admitted")
+			}
+		})
+	}
+}
+
+// TestWinnerCanaryRecordsFollowTheFrameNotItsAddress changes one event object
+// in place between calls. A canary that kept anything from one call to the
+// next — a record, or a verdict keyed by the map's address, the event id or the
+// frame's size — would answer a later call with what the frame used to say;
+// every record must match what the frame says at that moment.
+func TestWinnerCanaryRecordsFollowTheFrameNotItsAddress(t *testing.T) {
+	firstMatched := canaryPositive0001
+	firstMatched.winnerIndex = 0
+	noWinner := canaryUntracked0003
+	noWinner.eventKeyHash = canaryHash0001
+	positive0003 := canaryPositive0001
+	positive0003.eventKeyHash = canaryHash0003
+	collided := canaryFrameAttrs{
+		winnerPresence: "PRESENT", winnerJSONType: "string", outcomesPresence: "PRESENT",
+		outcomeCount: 2, outcomeIDsValid: false, winnerMatchCount: -1, winnerIndex: -1,
+		eventKeyHash: canaryHash0003, result: canaryMalformed,
+	}
+	msg := canaryEventMsg()
+	event := canaryEvent("synthetic-event-0001", "synthetic-outcome-b", canaryPair())
+	for _, step := range []struct {
+		name   string
+		change func()
+		want   canaryFrameAttrs
+	}{
+		{"as built", func() {}, canaryPositive0001},
+		{"the winner names the first outcome", func() { event["winning_outcome_id"] = "synthetic-outcome-a" }, firstMatched},
+		{"the winner is gone", func() { delete(event, "winning_outcome_id") }, noWinner},
+		{"another event names the second outcome", func() {
+			event["id"] = "synthetic-event-0003"
+			event["winning_outcome_id"] = "synthetic-outcome-b"
+		}, positive0003},
+		{"the outcome ids collide", func() {
+			event["outcomes"] = canaryOutcomes("synthetic-outcome-b", "synthetic-outcome-b")
+		}, collided},
+	} {
+		step.change()
+		before := time.Now()
+		rec, ok := classifyWinnerCanary(msg, "RESOLVED", event, "synthetic-build")
+		if !ok {
+			t.Fatalf("%s: the frame was refused", step.name)
+		}
+		t.Run(step.name, func(t *testing.T) {
+			assertCanaryFields(t, canaryClassifiedFields(t, rec), step.want.values(), "synthetic-build", before, time.Now())
 		})
 	}
 }
