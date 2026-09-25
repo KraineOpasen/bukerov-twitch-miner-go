@@ -691,9 +691,16 @@ func admitCanaryRound(p *WebSocketPool, s *models.Streamer, eventID string) {
 }
 
 // canaryEventMsg is the envelope the classifier sees for a qualifying topic and
-// message type.
+// message type, made the way the application makes one: parsed off the wire,
+// then stamped with the provenance a connection gives every frame it delivers,
+// so that each of its fields is set as a delivered frame's is.
 func canaryEventMsg() *PubSubMessage {
-	return &PubSubMessage{Topic: NewTopic(TopicPredictionsChannel, "synthetic-channel-4417"), Type: "event-updated"}
+	msg, err := ParsePubSubMessage(&WSData{Topic: "predictions-channel-v1.synthetic-channel-4417",
+		Message: `{"type":"event-updated","data":{"timestamp":"2026-09-23T12:10:00Z"}}`})
+	if err != nil {
+		panic(err) // a constant frame the parser accepts
+	}
+	return canaryStampConnection(msg)
 }
 
 // canaryAbsentKey marks an event key that is left off the frame entirely.
@@ -1242,8 +1249,9 @@ func (k canaryFrameKind) record() map[string]interface{} {
 // its own) and each outcome's id — one for each way a frame is not a candidate
 // and one for each bound that refuses a frame. Two branches are not kinds of
 // frame: the build label's bound, since the label is no part of a frame
-// (TestWinnerCanaryRefusalTouchesNothing refuses a long one), and a value of a
-// type json.Unmarshal never produces, which no frame the pool decodes holds
+// (TestWinnerCanaryReadsFramesByFixedKey refuses a frame of every kind with a
+// long one), and a value of a type json.Unmarshal never produces, which no
+// frame the pool decodes holds
 // (TestWinnerCanaryNonJSONValuesAreClassifiedNotFormatted). Frame n has its
 // own ids — synthetic-event-000n and its outcomes' — so frames built for
 // different n share none; the records carry the hash of synthetic-event-0001,
@@ -1428,27 +1436,29 @@ func canaryWalk(t *testing.T, m map[string]interface{}, want int) func() {
 // TestWinnerCanaryReadsFramesByFixedKey hands the canary one frame of every
 // kind canaryFrameKinds lists — each branch it can take, each way a frame is
 // not a candidate and each bound that refuses one — through the classifier and
-// through the emitter the pool calls. Each frame is large wherever the canary
-// has no reason to read: 65,536 extra keys on the event, in every outcome
-// object, in the data envelope and raw message and in every object standing
-// where the winner, the event id, the outcomes or an outcome's id belongs;
-// 1,048,576 elements in every array standing there and in every outcome's
-// predictors; 65,536 levels of nesting in every outcome; and a 1 MiB title on
-// the event and on every outcome, and a 1 MiB value where a refused frame is
-// beyond its bound. A walk hidden in any branch therefore meets a large value
-// there, and so does a scan of a string the canary has no reason to read, or of
-// one it has not yet admitted. The canary reads fixed keys only, so ten
-// classifications, and ten emissions, must each take less than one plain walk
-// over the extra keys, the least any enumeration, traversal or recursion would
-// do. Timing sees walks over a thousand entries or more; one over a few hundred
-// costs about as much as a call and escapes it. Ten scans of a 1 MiB string a
-// byte at a time take longer than the walk; a vectorised library scan of one
-// may not. Every timing is the best of several runs, and each subtest logs them
-// (go test -v). Each frame's record, classified and emitted, is first checked
-// against its kind's literal expectation, or that there is none, so a case that
-// stopped reaching its branch, or a record that depended on what the canary
-// must not read, fails rather than passing on the timing of another kind of
-// frame. This test times repeated calls on one frame;
+// through the emitter the pool calls, and through the classifier once more with
+// a build label beyond its bound, which refuses a frame of any kind. Each frame
+// is large wherever the canary has no reason to read: 65,536 extra keys on the
+// event, in every outcome object, in the data envelope and raw message and in
+// every object standing where the winner, the event id, the outcomes or an
+// outcome's id belongs; 1,048,576 elements in every array standing there and in
+// every outcome's predictors; 65,536 levels of nesting in every outcome; and a
+// 32 MiB title on the event and on every outcome, which is the long build label
+// too, and a 32 MiB value where a refused frame is beyond its bound. A walk
+// hidden in any branch therefore meets a large value there, and so does a scan
+// of a string the canary has no reason to read, or of one it has not yet
+// admitted. The canary reads fixed keys only, so ten classifications, ten
+// emissions and ten refusals for the long build label must each take less
+// than one plain walk over the extra keys, the least any enumeration,
+// traversal or recursion would do. Timing sees walks over a thousand entries
+// or more; one over a few hundred costs about as much as a call and escapes
+// it. Ten scans of a 32 MiB string take longer than the walk, even with a
+// vectorised library call. Every timing is the best of several runs, and each
+// subtest logs them (go test -v). Each frame's record, classified and emitted,
+// is first checked against its kind's literal expectation, or that there is
+// none, so a case that stopped reaching its branch, or a record that depended
+// on what the canary must not read, fails rather than passing on the timing of
+// another kind of frame. This test times repeated calls on one frame;
 // TestWinnerCanaryReadsFreshFramesByFixedKey times first ones.
 func TestWinnerCanaryReadsFramesByFixedKey(t *testing.T) {
 	capture := &canaryCapture{level: canaryCaptureAll}
@@ -1465,7 +1475,9 @@ func TestWinnerCanaryReadsFramesByFixedKey(t *testing.T) {
 		return wide
 	}
 	big := slices.Repeat([]interface{}{true}, 1<<20)
-	title := strings.Repeat("x", 1<<20)
+	// long is every title, the build label beyond its bound and, with frame
+	// n's suffix, a refused frame's over-bound value.
+	long := strings.Repeat("x", 1<<25)
 	deep := map[string]interface{}{}
 	for level, m := 0, deep; level < extra; level++ {
 		next := map[string]interface{}{}
@@ -1473,13 +1485,13 @@ func TestWinnerCanaryReadsFramesByFixedKey(t *testing.T) {
 		m = next
 	}
 	parts := canaryParts{
-		inspected:  func(m map[string]interface{}) map[string]interface{} { m["title"] = title; return widen(m) },
+		inspected:  func(m map[string]interface{}) map[string]interface{} { m["title"] = long; return widen(m) },
 		object:     widen,
 		array:      func() []interface{} { return big },
 		predictors: func() []interface{} { return big },
 		nest:       func() map[string]interface{} { return deep },
 		envelope:   widen,
-		overlong:   func(n int) string { return title + fmt.Sprintf("-%04d", n) },
+		overlong:   func(n int) string { return long + fmt.Sprintf("-%04d", n) },
 	}
 	for _, kind := range canaryFrameKinds() {
 		t.Run(kind.name, func(t *testing.T) {
@@ -1487,6 +1499,9 @@ func TestWinnerCanaryReadsFramesByFixedKey(t *testing.T) {
 			want := kind.record()
 			rec, ok := classifyWinnerCanary(f.msg, f.status, f.event, "synthetic-build")
 			canaryAssertClassified(t, want, rec, ok)
+			if _, ok := classifyWinnerCanary(f.msg, f.status, f.event, long); ok {
+				t.Error("the frame was admitted with a build label beyond its bound")
+			}
 			before := time.Now()
 			logWinnerCanary(f.msg, f.status, f.event)
 			// Only the canary's records count here: in the main test process, a
@@ -1505,14 +1520,23 @@ func TestWinnerCanaryReadsFramesByFixedKey(t *testing.T) {
 					logWinnerCanary(f.msg, f.status, f.event)
 				}
 			})
+			refusing := canaryBestOf(5, func() {
+				for i := 0; i < 10; i++ {
+					classifyWinnerCanary(f.msg, f.status, f.event, long)
+				}
+			})
 			capture.take()
-			t.Logf("ten classifications %v, ten emissions %v, one walk %v (%.0fx, %.0fx)", classifying, emitting, onePass,
-				float64(onePass)/float64(classifying), float64(onePass)/float64(emitting))
+			t.Logf("ten classifications %v, ten emissions %v, ten refusals for the long build label %v, one walk %v (%.0fx, %.0fx, %.0fx)",
+				classifying, emitting, refusing, onePass, float64(onePass)/float64(classifying),
+				float64(onePass)/float64(emitting), float64(onePass)/float64(refusing))
 			if classifying >= onePass {
 				t.Errorf("ten classifications took %v, not less than one walk over the extra keys (%v): the frame was enumerated or walked", classifying, onePass)
 			}
 			if emitting >= onePass {
 				t.Errorf("ten emissions took %v, not less than one walk over the extra keys (%v): the frame was enumerated or walked", emitting, onePass)
+			}
+			if refusing >= onePass {
+				t.Errorf("ten refusals for the long build label took %v, not less than one walk over the extra keys (%v): the frame was enumerated or walked", refusing, onePass)
 			}
 		})
 	}
@@ -1545,16 +1569,18 @@ type canaryFreshTimings struct {
 // branch and on every frame is timed. For every kind, the fastest of its five
 // calls must take less than a quarter of one walk: a looser bound than
 // repeated calls get, since one call is timed alone, yet well below the walk a
-// remembering canary makes. The first call of a process also runs cold code,
-// so its fastest need only take less than two walks, while walking its frame
-// would take eight. An outcome's predictors and nested object and the message's
-// envelope stay small here; TestWinnerCanaryLeavesUninspectedValuesUnread
-// watches them in every kind of frame. Each process checks every record
-// against its kind's literal expectation, with the hash of the frame's own
-// event id, or that there is none, and reports its timings; each kind then
-// reports as a subtest. With P4_WINNER_CANARY_TEST_ISOLATED set to this test's
-// name, the body runs once in-process and go test -v shows its timings,
-// unjudged.
+// remembering canary makes. A vectorised library scan of a 196,613-byte string
+// costs about that quarter, so one made only on a frame's first call may
+// escape; TestWinnerCanaryReadsFramesByFixedKey catches one made on every
+// call. The first call of a process also runs cold code, so its fastest need
+// only take less than two walks, while walking its frame would take eight. An
+// outcome's predictors and nested object and the message's envelope stay small
+// here; TestWinnerCanaryLeavesUninspectedValuesUnread watches them in every
+// kind of frame. Each process checks every record against its kind's literal
+// expectation, with the hash of the frame's own event id, or that there is
+// none, and reports its timings; each kind then reports as a subtest. With
+// P4_WINNER_CANARY_TEST_ISOLATED set to this test's name, the body runs once
+// in-process and go test -v shows its timings, unjudged.
 func TestWinnerCanaryReadsFreshFramesByFixedKey(t *testing.T) {
 	const processes = 5
 	kinds := canaryFrameKinds()
