@@ -789,12 +789,10 @@ func canaryPair() []interface{} {
 	return canaryOutcomes("synthetic-outcome-a", "synthetic-outcome-b")
 }
 
-// canaryLiveEvent is event with more keys of the kinds a live
-// predictions-channel event could carry besides those the canary reads:
-// times, now, and objects about who created, locked and ended the round. The
-// names and values are synthetic, not a record of what Twitch sends, and only
-// give the frame more keys, of more value types.
-// event's own keys win.
+// canaryLiveEvent is event with more keys besides those the canary reads: a
+// channel id, times (all now), a number and objects. The names and values are
+// synthetic, not a record of what Twitch sends; they only give the frame more
+// keys, of more value types. event's own keys win.
 func canaryLiveEvent(event map[string]interface{}) map[string]interface{} {
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	by := func() map[string]interface{} {
@@ -807,9 +805,8 @@ func canaryLiveEvent(event map[string]interface{}) map[string]interface{} {
 	return live
 }
 
-// canaryLiveOutcome is outcome with more keys of the kinds a live outcome
-// could carry besides those the canary reads, synthetic as canaryLiveEvent's
-// are; outcome's own keys win.
+// canaryLiveOutcome is outcome with more keys besides those the canary reads,
+// synthetic as canaryLiveEvent's are; outcome's own keys win.
 func canaryLiveOutcome(outcome map[string]interface{}) map[string]interface{} {
 	live := map[string]interface{}{"color": "BLUE", "total_points": 5000.0, "total_users": 7.0,
 		"top_predictors": []interface{}{}, "badge": map[string]interface{}{"version": "blue-1", "set_id": "predictions"}}
@@ -1143,6 +1140,64 @@ func TestWinnerCanaryResourceAdmission(t *testing.T) {
 			}
 			canaryAssertClassified(t, tc.want.values(), rec, ok, build)
 		})
+	}
+}
+
+// TestWinnerCanaryJudgesEveryOutcomeOfALongVector classifies admitted vectors
+// of seven and of sixty-four outcomes. A flawless vector whose winner names
+// the outcome at each position in turn is a positive at that index. A vector
+// with one flaw at each position in turn — a null outcome, an outcome with no
+// id, an empty id, an id repeating the first outcome's or the previous
+// outcome's — is malformed whatever the winner (here the flawless vector's
+// second id, wherever the flaw falls), since a vector is valid only when every
+// outcome is an object with a nonempty id and no two ids are equal.
+func TestWinnerCanaryJudgesEveryOutcomeOfALongVector(t *testing.T) {
+	ids := make([]interface{}, 64)
+	for i := range ids {
+		ids[i] = fmt.Sprintf("synthetic-outcome-%02d", i)
+	}
+	records := newCanaryKindRecords()
+	judge := func(t *testing.T, winner interface{}, outcomes []interface{}, want canaryFrameAttrs) {
+		t.Helper()
+		event := canaryEvent("synthetic-event-0001", winner, outcomes)
+		rec, ok, p := canaryClassifyCatching(canaryEventMsg(), "RESOLVED", event, "synthetic-build")
+		if p != nil {
+			t.Fatalf("the classifier panicked: %v", p)
+		}
+		canaryAssertClassified(t, want.values(), rec, ok, "synthetic-build")
+	}
+	type flaw struct {
+		name    string
+		outcome interface{}
+	}
+	for _, n := range []int{7, 64} {
+		invalid := records.invalidVector
+		invalid.outcomeCount = int64(n)
+		for at := 0; at < n; at++ {
+			t.Run(fmt.Sprintf("%d outcomes, outcome %d the winner", n, at+1), func(t *testing.T) {
+				positive := records.positive
+				positive.outcomeCount, positive.winnerIndex = int64(n), int64(at)
+				judge(t, ids[at], canaryOutcomes(ids[:n]...), positive)
+			})
+			flaws := []flaw{
+				{"null", nil},
+				{"with no id", map[string]interface{}{"title": "SENTINEL-OUTCOME-TITLE"}},
+				{"with an empty id", map[string]interface{}{"id": ""}},
+			}
+			if at >= 1 {
+				flaws = append(flaws, flaw{"repeating the first", map[string]interface{}{"id": ids[0]}})
+			}
+			if at >= 2 {
+				flaws = append(flaws, flaw{"repeating the previous", map[string]interface{}{"id": ids[at-1]}})
+			}
+			for _, f := range flaws {
+				t.Run(fmt.Sprintf("%d outcomes, outcome %d %s", n, at+1, f.name), func(t *testing.T) {
+					outcomes := canaryOutcomes(ids[:n]...)
+					outcomes[at] = f.outcome
+					judge(t, ids[1], outcomes, invalid)
+				})
+			}
+		}
 	}
 }
 
@@ -2460,14 +2515,15 @@ func TestWinnerCanaryRealHandlerEmitsForEveryQualifyingFrame(t *testing.T) {
 // emission order shows. What this cannot see is left to winner_canary.go's
 // source, which takes no lock and keeps no package state, goroutine or
 // channel: a lock both emissions can hold at once (sync.RWMutex's RLock), one
-// the second emission does not take, a timed wait the second emission gives
-// up sooner than canaryAwaitEmission looks, a spin, or a wait on I/O. A second
-// emission that neither returns nor parks in the canary within a minute is
-// reported by a watchdog as TIMEOUT / HARNESS_FAILURE, never as a verdict. The
-// frames are sequential — a concurrent handler could hold the pool lock
-// legitimately — and the first frame whose handling panics ends them, since
-// the dispatcher may have panicked holding a lock the next frame would wait
-// for.
+// the second emission does not take, a lock or channel the second emission
+// waits on outside the module's code (a log.Logger's mutex, say), a timed wait
+// the second emission gives up before canaryAwaitEmission looks again, a spin,
+// or a wait on I/O. A second emission that neither returns nor parks in the
+// canary within a minute is reported by a watchdog as TIMEOUT /
+// HARNESS_FAILURE, never as a verdict. The frames are sequential — a
+// concurrent handler could hold the pool lock legitimately — and the first
+// frame whose handling panics ends them, since the dispatcher may have
+// panicked holding a lock the next frame would wait for.
 func TestWinnerCanaryEmitsInPlaceWithNoLockHeld(t *testing.T) {
 	p, sink := observedPool(t, &fakePlacer{})
 	s := newTestStreamer(100000)
@@ -2597,11 +2653,11 @@ func canarySecondEmission(done chan<- struct{}, panicked *interface{}) {
 // canaryAwaitEmission waits until canarySecondEmission has returned (returned)
 // or its goroutine is parked inside the canary (canaryParkedInCanary; reason is
 // its wait reason), which only something held across the first emission can
-// cause. It looks every 10 ms. The first emission is inside this call, so
+// cause. It looks at most every 10 ms, and less often when reading the
+// goroutines' stacks takes longer. The first emission is inside this call, so
 // what it holds stays held and a second emission waiting for it stays parked;
-// only a wait the second emission gives up in less than that pace can end
-// between two looks and go unseen. A watchdog ends the wait after a minute
-// with neither.
+// only a wait the second emission gives up before the next look can go unseen.
+// A watchdog ends the wait after a minute with neither.
 func canaryAwaitEmission(done <-chan struct{}) (reason string, returned bool) {
 	watchdog := time.After(time.Minute)
 	pace := time.NewTicker(10 * time.Millisecond)
@@ -3330,8 +3386,10 @@ func canaryReachable[T any](ps []weak.Pointer[T]) int {
 // the raw message, the data envelope, the event, each outcome and an object
 // winner — and the bytes of every id and winner string. Each frame must first
 // yield its number of records, so a frame that stopped reaching its branch
-// fails. A copy of a string would not show here; that no call leaves state
-// behind for the next is what the repeated and concurrent emission tests show.
+// fails. A copy of a string would not show here, nor would state a call
+// leaves behind that changes no record: the repeated and concurrent emission
+// tests show state that changes one, and the rest is left to winner_canary.go's
+// source, which keeps no package state.
 func TestWinnerCanaryRetainsNothingAfterTheCall(t *testing.T) {
 	capture := &canaryCapture{level: slog.LevelInfo}
 	canaryUseProcessLogger(t, capture)
@@ -3556,12 +3614,14 @@ func canaryGeneratedOutcome(r *rand.Rand, id interface{}) map[string]interface{}
 
 // genCanaryFrame draws one frame from a distribution concentrated on the
 // candidate path and on every boundary the contract names. The envelope —
-// topic, message type, status, build label — is perturbed rarely and
-// independently; then half of the frames start as a well-formed round that
-// receives at most one perturbation of its event, so a positive result is
-// common rather than a rarity, and the other half draw every field from its
-// boundary values, where each value the canary reads — the event id, the
-// winner, the outcomes, an outcome and an outcome's id — takes every JSON type.
+// topic (every other topic type, and the candidate's upper-cased, with a
+// trailing space, or empty), message type, status, build label — is perturbed
+// rarely and independently; then half of the frames start as a well-formed
+// round of up to 64 outcomes that receives at most one perturbation of its
+// event, so a positive result is common rather than a rarity, and the other
+// half draw every field from its boundary values, where each value the canary
+// reads — the event id, the winner, the outcomes, an outcome and an outcome's
+// id — takes every JSON type.
 func genCanaryFrame(r *rand.Rand) (topic TopicType, msgType, status string, event map[string]interface{}, build string) {
 	pick := func(options ...interface{}) interface{} { return options[r.IntN(len(options))] }
 	idPool := []string{"synthetic-outcome-a", "synthetic-outcome-b", "synthetic-outcome-c", "synthetic-outcome-d",
@@ -3570,7 +3630,9 @@ func genCanaryFrame(r *rand.Rand) (topic TopicType, msgType, status string, even
 
 	topic = TopicPredictionsChannel
 	if r.IntN(12) == 0 {
-		topic = pick(TopicPredictionsUser, TopicRaid).(TopicType)
+		topic = pick(TopicCommunityPointsUser, TopicPredictionsUser, TopicVideoPlaybackByID, TopicRaid,
+			TopicCommunityMomentsChannel, TopicCommunityPointsChannel,
+			TopicType("PREDICTIONS-CHANNEL-V1"), TopicType("predictions-channel-v1 "), TopicType("")).(TopicType)
 	}
 	msgType = "event-updated"
 	if r.IntN(12) == 0 {
@@ -3592,13 +3654,20 @@ func genCanaryFrame(r *rand.Rand) (topic TopicType, msgType, status string, even
 	}
 
 	if r.IntN(2) == 0 {
+		// Two to six outcomes or, one time in three, seven to sixty-four, so
+		// that the winner, an invalid outcome and a repeated id each come at
+		// every position of a vector the contract admits.
 		n := 2 + r.IntN(5)
-		perm := r.Perm(len(idPool))
+		if r.IntN(3) == 0 {
+			n = 7 + r.IntN(58)
+		}
+		perm := r.Perm(64)
+		name := func(i int) string { return fmt.Sprintf("synthetic-outcome-%02d", perm[i]) }
 		list := make([]interface{}, n)
 		for i := range list {
-			list[i] = canaryGeneratedOutcome(r, idPool[perm[i]])
+			list[i] = canaryGeneratedOutcome(r, name(i))
 		}
-		event = canaryEvent("synthetic-event-0001", idPool[perm[r.IntN(n)]], list)
+		event = canaryEvent("synthetic-event-0001", name(r.IntN(n)), list)
 		switch r.IntN(6) {
 		case 0:
 			event["winning_outcome_id"] = pick(nil, "", " ", "synthetic-outcome-z", float64(1), long+"!")
@@ -3607,7 +3676,8 @@ func genCanaryFrame(r *rand.Rand) (topic TopicType, msgType, status string, even
 		case 2:
 			list[r.IntN(n)] = pick(nil, "synthetic-outcome-a", false, float64(3), map[string]interface{}{"id": pick(nil, "", float64(1), true, long+"!")})
 		case 3:
-			list[r.IntN(n)] = canaryGeneratedOutcome(r, list[0].(map[string]interface{})["id"])
+			later := 1 + r.IntN(n-1) // repeats the id of an outcome anywhere before it
+			list[later] = canaryGeneratedOutcome(r, name(r.IntN(later)))
 		case 4:
 			event["id"] = pick(nil, "", " ", float64(7), true, []interface{}{"synthetic-event-0001"}, strings.Repeat("e", 4097))
 		}
@@ -4057,8 +4127,8 @@ func BenchmarkWinnerCanaryFirstCallOnFreshFrames(b *testing.B) {
 // canaryBenchInFreshProcess runs the calling sub-benchmark once more, in a
 // child process of its own that reports its timings in a file of its own, and
 // returns them. As canaryInFreshProcess's children do, the child runs with the
-// parent's current GOMAXPROCS and a watchdog deadline, which is reported as
-// TIMEOUT / HARNESS_FAILURE.
+// parent's current GOMAXPROCS; its watchdog deadline is a fixed five minutes,
+// and hitting it is reported as TIMEOUT / HARNESS_FAILURE.
 func canaryBenchInFreshProcess(b *testing.B) canaryFreshTimings {
 	b.Helper()
 	path := filepath.Join(b.TempDir(), "timings.json")
