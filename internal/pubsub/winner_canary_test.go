@@ -855,11 +855,11 @@ func canaryLiveOutcome(outcome map[string]interface{}) map[string]interface{} {
 // followed by the shape's suffix.
 type canaryShape struct{ live bool }
 
-// canaryShapes are the two shapes, live first.
+// canaryShapes are the two shapes, the live-shaped one first.
 var canaryShapes = []canaryShape{{live: true}, {live: false}}
 
 // suffix follows the name of a subtest of a frame of the shape: nothing for a
-// live frame, ", minimal" for a minimal one.
+// live-shaped frame, ", minimal" for a minimal one.
 func (s canaryShape) suffix() string {
 	if s.live {
 		return ""
@@ -867,8 +867,8 @@ func (s canaryShape) suffix() string {
 	return ", minimal"
 }
 
-// event is event of the shape: with the keys of a live one if the shape has
-// them.
+// event is event of the shape: with the keys of a live-shaped one if the
+// shape has them.
 func (s canaryShape) event(event map[string]interface{}) map[string]interface{} {
 	if s.live {
 		return canaryLiveEvent(event)
@@ -876,8 +876,8 @@ func (s canaryShape) event(event map[string]interface{}) map[string]interface{} 
 	return event
 }
 
-// outcome is outcome of the shape: with the keys of a live one if the shape
-// has them.
+// outcome is outcome of the shape: with the keys of a live-shaped one if the
+// shape has them.
 func (s canaryShape) outcome(outcome map[string]interface{}) map[string]interface{} {
 	if s.live {
 		return canaryLiveOutcome(outcome)
@@ -988,8 +988,8 @@ func TestWinnerCanaryFixturesThroughHandlePredictionChannel(t *testing.T) {
 			records++
 		}
 	}
-	if len(cases) != 69 || records != 46 {
-		t.Fatalf("loaded %d fixture cases (%d with a record), want 69 (46)", len(cases), records)
+	if len(cases) != 70 || records != 47 {
+		t.Fatalf("loaded %d fixture cases (%d with a record), want 70 (47)", len(cases), records)
 	}
 	if !canaryInFreshProcess(t) {
 		return
@@ -1175,9 +1175,13 @@ func TestWinnerCanaryResourceAdmission(t *testing.T) {
 // TestWinnerCanaryJudgesEveryOutcomeOfALongVector classifies admitted vectors
 // of every length the contract admits, from two outcomes to sixty-four, one
 // subtest per length. A flawless vector whose winner names the outcome at each
-// position in turn is a positive at that index. A vector with one flaw at each
-// position in turn — a null outcome, an outcome with no id, an empty id, an id
-// repeating the first outcome's or the previous outcome's — is malformed
+// position in turn is a positive at that index, also when the event id is that
+// outcome's id or a losing outcome's (the next one, so that every position
+// takes both turns); one whose winner names none of its outcomes matches
+// nothing and is malformed, here with an event id equal to that winner. The
+// record hashes the event id, whatever it equals. A vector with one flaw at
+// each position in turn — a null outcome, an outcome with no id, an empty id,
+// an id repeating the first outcome's or the previous outcome's — is malformed
 // whatever the winner (here the flawless vector's second id, wherever the flaw
 // falls), since a vector is valid only when every outcome is an object with a
 // nonempty id and no two ids are equal. A failure names the vector it judged
@@ -1188,14 +1192,17 @@ func TestWinnerCanaryJudgesEveryOutcomeOfALongVector(t *testing.T) {
 		ids[i] = fmt.Sprintf("synthetic-outcome-%02d", i)
 	}
 	records := newCanaryKindRecords()
-	judge := func(t *testing.T, at int, what string, winner interface{}, outcomes []interface{}, want canaryFrameAttrs) {
+	// eventID is the event id of every vector but the unmatched one, whose
+	// event id and winner are otherEventID; the records hash them as
+	// canaryHash0001 and canaryHash0002.
+	const eventID, otherEventID = "synthetic-event-0001", "synthetic-event-0002"
+	judge := func(t *testing.T, event map[string]interface{}, want canaryFrameAttrs, format string, args ...interface{}) {
 		t.Helper()
 		defer func() {
 			if t.Failed() {
-				t.Logf("the vector judged: outcome %d %s", at+1, what)
+				t.Logf("the vector judged: %s", fmt.Sprintf(format, args...))
 			}
 		}()
-		event := canaryEvent("synthetic-event-0001", winner, outcomes)
 		rec, ok, p := canaryClassifyCatching(canaryEventMsg(), "RESOLVED", event, "synthetic-build")
 		if p != nil {
 			t.Fatalf("the classifier panicked: %v", p)
@@ -1216,7 +1223,18 @@ func TestWinnerCanaryJudgesEveryOutcomeOfALongVector(t *testing.T) {
 			for at := 0; at < n; at++ {
 				positive := records.positive
 				positive.outcomeCount, positive.winnerIndex = int64(n), int64(at)
-				judge(t, at, "the winner", ids[at], canaryOutcomes(ids[:n]...), positive)
+				judge(t, canaryEvent(eventID, ids[at], canaryOutcomes(ids[:n]...)), positive,
+					"outcome %d the winner", at+1)
+				// The event id is the winner's id, then a losing outcome's.
+				named := slices.Clone(ids[:n])
+				named[at] = eventID
+				judge(t, canaryEvent(eventID, eventID, canaryOutcomes(named...)), positive,
+					"outcome %d the winner, its id the event id", at+1)
+				losing := (at + 1) % n
+				named = slices.Clone(ids[:n])
+				named[losing] = eventID
+				judge(t, canaryEvent(eventID, ids[at], canaryOutcomes(named...)), positive,
+					"outcome %d the winner, outcome %d's id the event id", at+1, losing+1)
 				flaws := []flaw{
 					{"null", nil},
 					{"with no id", map[string]interface{}{"title": "SENTINEL-OUTCOME-TITLE"}},
@@ -1231,9 +1249,13 @@ func TestWinnerCanaryJudgesEveryOutcomeOfALongVector(t *testing.T) {
 				for _, f := range flaws {
 					outcomes := canaryOutcomes(ids[:n]...)
 					outcomes[at] = f.outcome
-					judge(t, at, f.name, ids[1], outcomes, invalid)
+					judge(t, canaryEvent(eventID, ids[1], outcomes), invalid, "outcome %d %s", at+1, f.name)
 				}
 			}
+			unmatched := records.unmatched
+			unmatched.outcomeCount, unmatched.eventKeyHash = int64(n), canaryHash0002
+			judge(t, canaryEvent(otherEventID, otherEventID, canaryOutcomes(ids[:n]...)), unmatched,
+				"a winner naming none of the outcomes, the event id equal to it")
 		})
 	}
 }
@@ -1472,10 +1494,10 @@ func (k canaryFrameKind) record() map[string]interface{} {
 // value of a type json.Unmarshal never produces, which no frame the pool
 // decodes holds (TestWinnerCanaryNonJSONValuesAreClassifiedNotFormatted).
 // Every frame is on its own topic and message type, and every kind comes in
-// both shapes (canaryShape): first each live, then each again minimal, named
-// with ", minimal". Frame n has its own ids — synthetic-event-000n and its
-// outcomes' — so frames built for different n share none; the records carry
-// the hash of synthetic-event-0001, the event id of n = 1.
+// both shapes (canaryShape): first each live-shaped, then each again minimal,
+// named with ", minimal". Frame n has its own ids — synthetic-event-000n and
+// its outcomes' — so frames built for different n share none; the records
+// carry the hash of synthetic-event-0001, the event id of n = 1.
 func canaryFrameKinds() []canaryFrameKind {
 	var kinds []canaryFrameKind
 	for _, shape := range canaryShapes {
@@ -2556,12 +2578,14 @@ func TestWinnerCanaryRealHandlerEmitsForEveryQualifyingFrame(t *testing.T) {
 // channel the second emission waits on outside the module's code (a
 // log.Logger's mutex, say), a wait in the module's code whose stack frames a
 // //line directive attributes to a test file, a timed wait the second emission
-// gives up before canaryAwaitEmission looks again, a spin, or a wait on I/O. A
-// second emission that neither returns nor parks in the canary within a minute
-// is reported by a watchdog as TIMEOUT / HARNESS_FAILURE, never as a verdict.
-// The frames are sequential — a concurrent handler could hold the pool lock
-// legitimately — and the first frame whose handling panics ends them, since the
-// dispatcher may have panicked holding a lock the next frame would wait for.
+// gives up before canaryAwaitEmission looks again, a sleep between retries, a
+// spin, a wait on I/O, or any other park canaryParkedInCanary does not
+// recognize. A second emission that neither returns nor parks in the canary
+// within a minute is reported by a watchdog as TIMEOUT / HARNESS_FAILURE, never
+// as a verdict. The frames are sequential — a concurrent handler could hold the
+// pool lock legitimately — and the first frame whose handling panics ends them,
+// since the dispatcher may have panicked holding a lock the next frame would
+// wait for.
 func TestWinnerCanaryEmitsInPlaceWithNoLockHeld(t *testing.T) {
 	p, sink := observedPool(t, &fakePlacer{})
 	s := newTestStreamer(100000)
@@ -2693,9 +2717,11 @@ func canarySecondEmission(done chan<- struct{}, panicked *interface{}) {
 // its wait reason), which only something held across the first emission can
 // cause. It looks at most every 10 ms, and less often when reading the
 // goroutines' stacks takes longer. The first emission is inside this call, so
-// what it holds stays held and a second emission waiting for it stays parked;
-// only a wait the second emission gives up before the next look can go unseen.
-// A watchdog ends the wait after a minute with neither.
+// what it holds stays held and a second emission waiting for it stays parked.
+// A park goes unseen when canaryParkedInCanary does not recognize it — a sleep
+// between retries, whose wait reason is sleep, say — and so does a wait the
+// second emission gives up before the next look. A watchdog ends the wait
+// after a minute with neither.
 func canaryAwaitEmission(done <-chan struct{}) (reason string, returned bool) {
 	watchdog := time.After(time.Minute)
 	pace := time.NewTicker(10 * time.Millisecond)

@@ -1,5 +1,5 @@
 {
-  "description": "Synthetic RESOLVED frames varying the event id. A missing, null, non-string or empty id makes the frame MALFORMED_IN_THIS_EVENT with event_key_hash none even when the winner is absent or null, while every other attribute still follows its own rule. A nonempty id is usable as sent, a single space or surrounding spaces and capitals included, and is hashed byte for byte, even when it equals one of the outcomes' ids, the winner's or another's. An event carrying nothing but its status is recorded too. Hand-written; not Twitch captures.",
+  "description": "Synthetic RESOLVED frames varying the event id. A missing, null, non-string or empty id makes the frame MALFORMED_IN_THIS_EVENT with event_key_hash none even when the winner is absent or null, while every other attribute still follows its own rule. A nonempty id is usable as sent, a single space or surrounding spaces and capitals included, and is hashed byte for byte, even when it equals one of the outcomes' ids, the winner's or another's, or a winner that names none of them. An event carrying nothing but its status is recorded too. Hand-written; not Twitch captures.",
   "cases": [
     {
       "name": "event id missing, otherwise a positive frame",
@@ -377,6 +377,40 @@
         "winner_index": 1,
         "event_key_hash": "sha256:2db2a9211723e2774697bc7fde1f24abfe48ff3a92e890e74762c8cda65eebe0",
         "result": "WINNER_FIELD_OBSERVED"
+      }
+    },
+    {
+      "name": "event id equal to a winner that names none of the outcomes",
+      "topic": "predictions-channel-v1.synthetic-channel-4417",
+      "message": {
+        "type": "event-updated",
+        "data": {
+          "timestamp": "2026-09-23T12:05:47Z",
+          "event": {
+            "id": "synthetic-event-0002",
+            "outcomes": [
+              {"id": "synthetic-outcome-a"},
+              {"id": "synthetic-outcome-b"},
+              {"id": "synthetic-outcome-c"}
+            ],
+            "status": "RESOLVED",
+            "title": "SENTINEL-TITLE-3b8f",
+            "winning_outcome_id": "synthetic-event-0002"
+          }
+        }
+      },
+      "record": true,
+      "want": {
+        "winner_field_presence": "PRESENT",
+        "winner_field_json_type": "string",
+        "winner_value_empty": false,
+        "outcomes_presence": "PRESENT",
+        "outcome_count": 3,
+        "outcome_ids_valid": true,
+        "winner_match_count": 0,
+        "winner_index": -1,
+        "event_key_hash": "sha256:481637c78b6ee02a5ddc5b1d461679a7b21427e07e25ad9cfaad9e23cf6de903",
+        "result": "MALFORMED_IN_THIS_EVENT"
       }
     },
     {
