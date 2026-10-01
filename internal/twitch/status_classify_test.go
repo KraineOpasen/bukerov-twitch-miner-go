@@ -6,8 +6,10 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"sync/atomic"
 	"testing"
 
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/auth"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/models"
 )
 
@@ -105,6 +107,15 @@ func TestUnauthorizedClassifiesUnknown(t *testing.T) {
 		w.WriteHeader(http.StatusUnauthorized)
 		_, _ = w.Write([]byte(`{"error":"Unauthorized"}`))
 	})
+	// Deterministic, network-free recovery. Left nil, the 401 reaches the real
+	// auth.Recover, whose device-code request targets the production OAuth host:
+	// newTestClient redirects only the GQL endpoint. A transient failure keeps the
+	// request on ErrUnauthorized without escalating to the operator reauth path.
+	var recoveries atomic.Int64
+	c.recoverFn = func(uint64) (auth.Snapshot, error) {
+		recoveries.Add(1)
+		return auth.Snapshot{}, auth.ErrAuthTransient
+	}
 	s := newTestStreamer("unauth")
 	_, err := c.GetStreamInfo(context.Background(), s)
 	status, reason := classifyCheck(err)
@@ -113,5 +124,8 @@ func TestUnauthorizedClassifiesUnknown(t *testing.T) {
 	}
 	if reason != models.ReasonUnauthorized {
 		t.Errorf("reason = %q, want unauthorized", reason)
+	}
+	if n := recoveries.Load(); n != 1 {
+		t.Errorf("credential recovery attempts = %d, want exactly 1 for one rejected request", n)
 	}
 }
