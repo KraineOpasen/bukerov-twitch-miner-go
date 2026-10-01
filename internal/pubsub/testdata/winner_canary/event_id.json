@@ -1,0 +1,317 @@
+{
+  "description": "Synthetic RESOLVED frames varying the event id. A missing, null, non-string or empty id makes the frame MALFORMED_IN_THIS_EVENT with event_key_hash none even when the winner is absent or null, while every other attribute still follows its own rule. A nonempty id is usable as sent, a single space or surrounding spaces and capitals included, and is hashed byte for byte. Hand-written; not Twitch captures.",
+  "cases": [
+    {
+      "name": "event id missing, otherwise a positive frame",
+      "topic": "predictions-channel-v1.synthetic-channel-4417",
+      "message": {
+        "type": "event-updated",
+        "data": {
+          "timestamp": "2026-09-23T12:05:00Z",
+          "event": {
+            "outcomes": [
+              {"id": "synthetic-outcome-a"},
+              {"id": "synthetic-outcome-b"}
+            ],
+            "status": "RESOLVED",
+            "title": "SENTINEL-TITLE-3b8f",
+            "winning_outcome_id": "synthetic-outcome-b"
+          }
+        }
+      },
+      "record": true,
+      "want": {
+        "winner_field_presence": "PRESENT",
+        "winner_field_json_type": "string",
+        "winner_value_empty": false,
+        "outcomes_presence": "PRESENT",
+        "outcome_count": 2,
+        "outcome_ids_valid": true,
+        "winner_match_count": 1,
+        "winner_index": 1,
+        "event_key_hash": "none",
+        "result": "MALFORMED_IN_THIS_EVENT"
+      }
+    },
+    {
+      "name": "event id missing and winner absent",
+      "topic": "predictions-channel-v1.synthetic-channel-4417",
+      "message": {
+        "type": "event-updated",
+        "data": {
+          "timestamp": "2026-09-23T12:05:05Z",
+          "event": {
+            "outcomes": [
+              {"id": "synthetic-outcome-a"},
+              {"id": "synthetic-outcome-b"}
+            ],
+            "status": "RESOLVED"
+          }
+        }
+      },
+      "record": true,
+      "want": {
+        "winner_field_presence": "ABSENT_ON_WIRE",
+        "winner_field_json_type": "absent",
+        "winner_value_empty": false,
+        "outcomes_presence": "PRESENT",
+        "outcome_count": 2,
+        "outcome_ids_valid": true,
+        "winner_match_count": -1,
+        "winner_index": -1,
+        "event_key_hash": "none",
+        "result": "MALFORMED_IN_THIS_EVENT"
+      }
+    },
+    {
+      "name": "event id missing and winner null",
+      "topic": "predictions-channel-v1.synthetic-channel-4417",
+      "message": {
+        "type": "event-updated",
+        "data": {
+          "timestamp": "2026-09-23T12:05:10Z",
+          "event": {
+            "outcomes": [
+              {"id": "synthetic-outcome-a"},
+              {"id": "synthetic-outcome-b"}
+            ],
+            "status": "RESOLVED",
+            "winning_outcome_id": null
+          }
+        }
+      },
+      "record": true,
+      "want": {
+        "winner_field_presence": "NULL_ON_WIRE",
+        "winner_field_json_type": "null",
+        "winner_value_empty": false,
+        "outcomes_presence": "PRESENT",
+        "outcome_count": 2,
+        "outcome_ids_valid": true,
+        "winner_match_count": -1,
+        "winner_index": -1,
+        "event_key_hash": "none",
+        "result": "MALFORMED_IN_THIS_EVENT"
+      }
+    },
+    {
+      "name": "event id explicitly null",
+      "topic": "predictions-channel-v1.synthetic-channel-4417",
+      "message": {
+        "type": "event-updated",
+        "data": {
+          "timestamp": "2026-09-23T12:05:15Z",
+          "event": {
+            "id": null,
+            "outcomes": [
+              {"id": "synthetic-outcome-a"},
+              {"id": "synthetic-outcome-b"}
+            ],
+            "status": "RESOLVED",
+            "winning_outcome_id": "synthetic-outcome-a"
+          }
+        }
+      },
+      "record": true,
+      "want": {
+        "winner_field_presence": "PRESENT",
+        "winner_field_json_type": "string",
+        "winner_value_empty": false,
+        "outcomes_presence": "PRESENT",
+        "outcome_count": 2,
+        "outcome_ids_valid": true,
+        "winner_match_count": 1,
+        "winner_index": 0,
+        "event_key_hash": "none",
+        "result": "MALFORMED_IN_THIS_EVENT"
+      }
+    },
+    {
+      "name": "event id is a number",
+      "topic": "predictions-channel-v1.synthetic-channel-4417",
+      "message": {
+        "type": "event-updated",
+        "data": {
+          "timestamp": "2026-09-23T12:05:20Z",
+          "event": {
+            "id": 1,
+            "outcomes": [
+              {"id": "synthetic-outcome-a"},
+              {"id": "synthetic-outcome-b"}
+            ],
+            "status": "RESOLVED",
+            "winning_outcome_id": "synthetic-outcome-b"
+          }
+        }
+      },
+      "record": true,
+      "want": {
+        "winner_field_presence": "PRESENT",
+        "winner_field_json_type": "string",
+        "winner_value_empty": false,
+        "outcomes_presence": "PRESENT",
+        "outcome_count": 2,
+        "outcome_ids_valid": true,
+        "winner_match_count": 1,
+        "winner_index": 1,
+        "event_key_hash": "none",
+        "result": "MALFORMED_IN_THIS_EVENT"
+      }
+    },
+    {
+      "name": "event id is an object",
+      "topic": "predictions-channel-v1.synthetic-channel-4417",
+      "message": {
+        "type": "event-updated",
+        "data": {
+          "timestamp": "2026-09-23T12:05:25Z",
+          "event": {
+            "id": {"id": "synthetic-event-0001"},
+            "outcomes": [
+              {"id": "synthetic-outcome-a"},
+              {"id": "synthetic-outcome-b"}
+            ],
+            "status": "RESOLVED",
+            "winning_outcome_id": "synthetic-outcome-b"
+          }
+        }
+      },
+      "record": true,
+      "want": {
+        "winner_field_presence": "PRESENT",
+        "winner_field_json_type": "string",
+        "winner_value_empty": false,
+        "outcomes_presence": "PRESENT",
+        "outcome_count": 2,
+        "outcome_ids_valid": true,
+        "winner_match_count": 1,
+        "winner_index": 1,
+        "event_key_hash": "none",
+        "result": "MALFORMED_IN_THIS_EVENT"
+      }
+    },
+    {
+      "name": "event id is the empty string",
+      "topic": "predictions-channel-v1.synthetic-channel-4417",
+      "message": {
+        "type": "event-updated",
+        "data": {
+          "timestamp": "2026-09-23T12:05:30Z",
+          "event": {
+            "id": "",
+            "outcomes": [
+              {"id": "synthetic-outcome-a"},
+              {"id": "synthetic-outcome-b"}
+            ],
+            "status": "RESOLVED",
+            "winning_outcome_id": "synthetic-outcome-b"
+          }
+        }
+      },
+      "record": true,
+      "want": {
+        "winner_field_presence": "PRESENT",
+        "winner_field_json_type": "string",
+        "winner_value_empty": false,
+        "outcomes_presence": "PRESENT",
+        "outcome_count": 2,
+        "outcome_ids_valid": true,
+        "winner_match_count": 1,
+        "winner_index": 1,
+        "event_key_hash": "none",
+        "result": "MALFORMED_IN_THIS_EVENT"
+      }
+    },
+    {
+      "name": "event id is a single space, which is not empty and is hashed as sent",
+      "topic": "predictions-channel-v1.synthetic-channel-4417",
+      "message": {
+        "type": "event-updated",
+        "data": {
+          "timestamp": "2026-09-23T12:05:32Z",
+          "event": {
+            "id": " ",
+            "outcomes": [
+              {"id": "synthetic-outcome-a"},
+              {"id": "synthetic-outcome-b"}
+            ],
+            "status": "RESOLVED",
+            "winning_outcome_id": "synthetic-outcome-b"
+          }
+        }
+      },
+      "record": true,
+      "want": {
+        "winner_field_presence": "PRESENT",
+        "winner_field_json_type": "string",
+        "winner_value_empty": false,
+        "outcomes_presence": "PRESENT",
+        "outcome_count": 2,
+        "outcome_ids_valid": true,
+        "winner_match_count": 1,
+        "winner_index": 1,
+        "event_key_hash": "sha256:58d3a394292d9ce97fd08bd97ae46dd7a0813356fca8859b4aa7e7e28b19b1cf",
+        "result": "WINNER_FIELD_OBSERVED"
+      }
+    },
+    {
+      "name": "event id is hashed with its surrounding spaces and letter case",
+      "topic": "predictions-channel-v1.synthetic-channel-4417",
+      "message": {
+        "type": "event-updated",
+        "data": {
+          "timestamp": "2026-09-23T12:05:33Z",
+          "event": {
+            "id": " Synthetic-Event-0005 ",
+            "outcomes": [
+              {"id": "synthetic-outcome-a"},
+              {"id": "synthetic-outcome-b"}
+            ],
+            "status": "RESOLVED",
+            "winning_outcome_id": "synthetic-outcome-a"
+          }
+        }
+      },
+      "record": true,
+      "want": {
+        "winner_field_presence": "PRESENT",
+        "winner_field_json_type": "string",
+        "winner_value_empty": false,
+        "outcomes_presence": "PRESENT",
+        "outcome_count": 2,
+        "outcome_ids_valid": true,
+        "winner_match_count": 1,
+        "winner_index": 0,
+        "event_key_hash": "sha256:66e3b3a3adc36bf71bddd61f231796e3abf1cd0555273fcae4db605f3218ee0d",
+        "result": "WINNER_FIELD_OBSERVED"
+      }
+    },
+    {
+      "name": "event id empty and winner absent",
+      "topic": "predictions-channel-v1.synthetic-channel-4417",
+      "message": {
+        "type": "event-updated",
+        "data": {
+          "timestamp": "2026-09-23T12:05:35Z",
+          "event": {
+            "id": "",
+            "status": "RESOLVED"
+          }
+        }
+      },
+      "record": true,
+      "want": {
+        "winner_field_presence": "ABSENT_ON_WIRE",
+        "winner_field_json_type": "absent",
+        "winner_value_empty": false,
+        "outcomes_presence": "ABSENT_ON_WIRE",
+        "outcome_count": -1,
+        "outcome_ids_valid": false,
+        "winner_match_count": -1,
+        "winner_index": -1,
+        "event_key_hash": "none",
+        "result": "MALFORMED_IN_THIS_EVENT"
+      }
+    }
+  ]
+}
