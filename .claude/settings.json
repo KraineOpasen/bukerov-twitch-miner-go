@@ -35,7 +35,7 @@
       "Bash(git push *)", "Bash(git -* push)", "Bash(git -* push *)",
       "Bash(git -* send-pack)", "Bash(git -* send-pack *)",
       "Bash(git update-ref*)", "Bash(git -* update-ref*)", "Bash(git symbolic-ref*)", "Bash(git -* symbolic-ref*)", "Bash(git filter-branch*)", "Bash(git -* filter-branch*)",
-      "Bash(*.claude/settings*.json*)", "Bash(*.git*)", "Bash(*CLAUDE.md*)",
+      "Bash(*.claude*)", "Bash(*.git*)", "Bash(*CLAUDE.md*)",
       "Bash(gh -*)", "Bash(gh pr -*)", "Bash(gh release -*)", "Bash(gh workflow -*)",
       "Bash(gh run -*)", "Bash(gh secret -*)", "Bash(gh variable -*)", "Bash(gh repo -*)",
       "Bash(git rebase *)", "Bash(git merge *)", "Bash(git cherry-pick *)", "Bash(git reset *)", "Bash(git tag *)", "Bash(git * tag *)",
