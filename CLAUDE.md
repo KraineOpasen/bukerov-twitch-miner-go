@@ -1,170 +1,113 @@
-# CLAUDE.md
+# Twitch project kernel
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+Repository: `KraineOpasen/bukerov-twitch-miner-go`. A Go Twitch channel-points miner
+with drops, predictions, a web dashboard and optional notifications.
 
-## Project purpose
+## Authority and scope
 
-A Go rewrite of [Twitch-Channel-Points-Miner-v2](https://github.com/rdavydov/Twitch-Channel-Points-Miner-v2). It passively earns Twitch channel points by simulating viewer presence across multiple streams (no browser/video player involved), auto-claims bonuses, follows raids, places automated prediction bets, tracks and claims game drops, and contributes to community goals. It ships a web dashboard for analytics and runtime settings, and can send Discord notifications. Distributed as a single static binary (~5MB) and a scratch-based Docker image.
+- The current owner/task prompt grants the concern, mutation scope and publication
+  boundary. Without mutation authority, default to READ_ONLY. A checkpoint is evidence,
+  not a grant. Child/subagent authority never exceeds the parent task.
+- Use one canonical writer per concern unless the owner explicitly partitions writers.
+  Skills, plugins and tools assist the task; they never expand its authority.
+- Current code/tests, `SPECIFICATIONS.md` and accepted product ADR/design evidence define
+  product behavior. Surface conflicts. Read the relevant specification before changing
+  auth, API, PubSub, chat, drops or prediction logic. Historical/superseded ADRs are history.
+- Verify mutable repository, PR and CI state live when it matters. Before meaningful
+  mutation or publication, verify repository/remotes, the owner-named live stable base
+  and tree, branch/HEAD, worktree/index, unfinished Git operations and competing writers/PRs.
+- No silent merge, rebase, cherry-pick, reset or force push. Protected branches change
+  through PRs. One concern means one Draft PR unless the owner says otherwise.
+- Ready, merge/auto-merge, release/tag, image publication, deploy/restart/runtime mutation,
+  repository settings/secrets and workflow trigger/rerun require explicit owner authority.
+  Ordinary engineering tasks do not start live Twitch mining or change production/runtime.
+- Never print, reuse or invent credentials. Use configured authentication only within
+  task authority; redact tokens, cookies, passwords and notification credentials in output.
+- GitHub Issues is the tracker; tracker mutations need task authority. Existing triage
+  vocabulary is `needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`.
 
-For the full technical spec (GraphQL operations, PubSub topics, IRC protocol, DB schema, etc.) see `SPECIFICATIONS.md` — read it before touching auth, API, pubsub, chat, drops, or bet logic.
+## Durable engineering invariants
 
-## Build, run, test
+- Lifecycle work uses `context.Context` and exits on cancellation. Avoid unbuffered sends
+  or mutex-held I/O that prevent cancellation; preserve existing lock/admission ordering.
+- The PubSub pool owns topic placement (maximum 50 topics per connection). Do not bypass
+  it to attach topics directly. Preserve jitter in rate-limited and interval loops.
+- `MinuteWatcher` alone owns the maximum two watch slots and drives `MinuteSender`.
+  Configured/discovered/drop/streak sources propose candidates; they do not create another
+  scheduler, extra watch slot or independent minute reporting.
+- UNKNOWN remains distinct from false, zero and success, including explicit-null drops
+  listings and streak timeouts. Diagnostic observations do not grant business/scheduler
+  authority. Preserve side-effect-specific replay and ambiguous-outcome guarantees; do not
+  extend generic read retries to Twitch writes without checking their existing contracts.
+- Config precedence is built-in defaults → global `streamerSettings` → per-streamer
+  settings override. Runtime-applied settings and persisted config must stay reconciled.
+  Streamer mutation/removal uses `internal/streamerlifecycle` admission/reconciliation;
+  do not shortcut it with direct DB deletion or in-memory-only removal. HTTP settings
+  handlers call `internal/settings` interfaces instead of mutating state directly.
+- SQLite uses one shared connection (`SetMaxOpenConns(1)`). Migrations and `schema_versions`
+  are per-module: change only the owning module's version. Prefer explicit transactions
+  for multi-statement writes; keep cancellation and durable-deletion ordering guarantees.
+- `internal/analytics` stays HTTP-free; dashboard/HTTP work belongs in `internal/web`.
+  Notifications stay behind the provider interface, protect credentials and fail best-effort
+  rather than crashing the miner when a provider is unavailable.
+- Templates/static assets are embedded under `internal/web/templates` and `static`.
+  Tailwind generates `static/css/app.css` from `input.css`; do not hand-edit the generated
+  CSS. JS is vendored; there is no separate JS bundler. Version is injected through build
+  ldflags (`internal/version.Version`), not hardcoded elsewhere.
+- Owner deployment choices: the trusted home-LAN dashboard intentionally uses
+  `DASHBOARD_INSECURE_NO_AUTH=true`; lifecycle mutations are authorized through
+  `DASHBOARD_TRUSTED_LAN_CIDRS` using only the connection's `RemoteAddr`, never forwarded
+  headers. The owner's update interval and current product default are 2h. Do not recommend
+  Basic Auth or 4h unless the owner changes the network model or requests an interval change.
+
+## Verification
+
+Prove changed behavior with focused regression evidence against a requirement/spec or
+independent oracle. Tests should assert public behavior at approved seams. Equivalent
+mutants do not demonstrate weak tests; mutation/security/browser checks are risk-specific,
+not routine requirements for documentation changes. Never weaken tests or CI to get green.
+
+On the final integrated candidate run:
 
 ```bash
-# Build for current platform (builds Tailwind CSS first, requires network for the Tailwind CLI download)
-make build
-
-# Build without Tailwind (use when internal/web/static/css/app.css is already built)
-make build-go
-
-# Cross-compile
-make build-linux / build-linux-arm64 / build-windows / build-darwin / build-darwin-arm64
-make build-all
-
-# Compress with UPX (smallest binary)
-make build-compressed
-
-# Tests (race detector on, whole module)
-go test -v -race ./...
-# Single package
-go test -v -race ./internal/models/...
-# Single test
-go test -v -race -run TestName ./internal/models/...
-
-# Lint (golangci-lint, no repo-specific config — defaults apply)
+git diff --check
+go mod verify
+go vet ./...
+go build ./...
+TZ=UTC go test -race -count=1 ./...
 make lint
-
-# Docker image (multi-stage build: Go + Tailwind + UPX -> scratch)
-make docker
-
-# Generate a sample config
-./twitch-miner-go -generate-config
 ```
 
-Note: the test suite covers nearly every package (`cmd/miner` and almost all of `internal/...`) — run it with the race detector as shown above before pushing.
+Validate changed data/config formats, changed paths and references. Run existing Docker,
+Compose and generated-file checks when relevant. Missing execution/tool evidence is
+UNKNOWN/UNVERIFIED, never PASS. Resolve actionable findings before publication.
 
-Runtime flags: `-config path/to/config.json`, `-debug`, `-generate-config`. Config, cookies, logs, and the SQLite database live under `config/`, `cookies/`, `logs/`, `database/{username}/miner.db` respectively (all Docker volumes in the `Dockerfile`).
+## PR review order
 
-## Architecture
+1. Wait for natural CI; do not rerun workflows without owner authority.
+2. Obtain CodeRabbit FULL, then independent Codex FULL on the exact current head.
+   Verify/classify findings and repair every TRUE in-scope actionable finding. A repair
+   push needs fresh local acceptance, natural CI and current-head ordinary reviews again.
+3. Request Copilot only when CI is green and both ordinary lanes have no unresolved
+   actionable findings on the intended final head. Use an existing automatic exact-head
+   full review rather than duplicating it. Copilot is a scarce-quota final-head reviewer.
+4. Request Codex Security FULL only after Copilot is also clean on that same intended
+   final head. Security is the last lane. If either final reviewer finds a TRUE issue,
+   repair it and repeat local checks, CI, ordinary reviews and the final lanes on the new head.
 
-Entry point: `cmd/miner/main.go` — parses flags, sets up `signal.NotifyContext` for SIGINT/SIGTERM, and calls `Miner.Run(ctx)`. All lifecycle management flows through `context.Context`; when it's cancelled every goroutine (watcher, drops sync, pubsub connections, IRC connections, web server) shuts down.
+At most one full request per reviewer per head; observe a running review without duplication.
+If Copilot is unavailable/quota-exhausted, record UNAVAILABLE and stop before spending
+Security quota unless the owner explicitly says otherwise. Security unavailability is
+also UNAVAILABLE, never PASS. Pending lanes require an exact-head checkpoint. Keep the PR
+Draft unless the owner separately authorizes Ready/merge.
 
-`internal/miner` is the orchestrator that wires everything else together: auth, streamer manager, API client, pubsub pool, chat manager, watcher, drops tracker, notifications manager, and the web server.
+## Optional plugins and native controls
 
-Key packages (see `SPECIFICATIONS.md` § Module Structure for the full breakdown):
-- `internal/auth` — Twitch OAuth device-code flow, token persistence in `cookies/`.
-- `internal/gql` — generic GraphQL/HTTP transport primitives (transient-status classification, persisted-query and top-level-error detection, retry/backoff timing). Twitch-agnostic; depends only on the standard library and is imported by `internal/twitch`.
-- `internal/twitch` — Twitch GraphQL client (persisted queries defined in `internal/constants/gql.go`); all Twitch reads/writes (claim bonuses, join raids, place bets, claim drops, etc.) go through here. Imports `internal/gql` for the generic transport helpers.
-- `internal/pubsub` — WebSocket connection pool for Twitch PubSub (`pool.go` manages connections/topics, `websocket.go` is a single connection, `message.go`/`topic.go` handle parsing). Max 50 topics per connection.
-- `internal/chat` — IRC client for Twitch chat presence and optional message logging.
-- `internal/watcher` — simulates minute-watched viewing and reports it to Twitch (the mechanism that actually earns points).
-- `internal/drops` — drop campaign sync (every `campaignSyncInterval` minutes) and claiming logic. This is where drops backend logic lives.
-- `internal/models` — domain types; `bet.go` holds the betting strategies (SMART, MOST_VOTED, HIGH_ODDS, PERCENTAGE, SMART_MONEY, NUMBER_1..8) and filter-condition logic — this is where prediction/betting backend logic lives.
-- `internal/notifications` — Discord notification backend: `manager.go` orchestrates, `discord.go` is the bot client, `repository.go` persists rules/config in SQLite, `provider.go` defines the provider interface (built for multi-provider extension beyond Discord).
-- `internal/analytics` — data layer only (no HTTP): recording/querying points, annotations, chat messages via `repository.go` (SQLite).
-- `internal/web` — the HTTP server and dashboard backend. `server.go` sets up routing/lifecycle and optional HTTP Basic Auth (`DASHBOARD_USERNAME`/`DASHBOARD_PASSWORD` env vars); `handlers_*.go` files implement dashboard, analytics/JSON, settings, notifications, and status endpoints; `status.go` broadcasts miner status over SSE; `viewmodels.go` builds page-specific view models.
-  - Dashboard front-end lives under `internal/web/static/` (CSS built by Tailwind into `static/css/app.css` from `static/css/input.css`; vendored JS: `htmx.min.js`, `apexcharts.min.js`) and `internal/web/templates/` (Go `html/template` files: `base.html`, `dashboard.html`, `streamer.html`, `settings.html`, `notifications.html`, plus `partials/`). Templates and static assets are embedded into the binary via `//go:embed` in `server.go`. The dashboard uses HTMX for partial updates and ApexCharts for point-history charts — there is no separate JS build/bundler step beyond Tailwind.
-- `internal/settings` — runtime settings management driving the Settings page (changes apply without restart).
-- `internal/database` — single shared SQLite connection with a per-module migration system (`schema_versions` table tracks each module's schema version independently).
-- `internal/config` — loads/saves `config.json`, applies defaults.
-- `internal/constants` — Twitch client IDs/endpoints and the persisted GraphQL query definitions.
+Optional skills/plugins remain account-owned. Project native settings disable the audited
+synced plugins by default; use a disabled optional plugin only after explicit owner/task
+selection. Do not silently edit settings to enable one for an unrelated task.
 
-## Conventions
-
-- Config is layered: built-in defaults -> global `streamerSettings` -> per-streamer `settings` override.
-- Long-running loops (watcher, drops sync, pubsub, IRC) all take a `context.Context` and must exit cleanly on cancellation — don't add blocking work that ignores ctx.
-- Rate-limit/interval settings intentionally apply random jitter (e.g. ±2.5s on websocket pings, ±20% on minute-watched cycles) to mimic human behavior; preserve jitter when touching these paths.
-- The `analytics` package must stay HTTP-free — dashboard/HTTP concerns belong in `web`, not `analytics`.
-- New DB schema changes should add a migration under the appropriate module in `internal/database`/`internal/analytics`/`internal/notifications` and bump that module's version in `schema_versions`, not touch other modules' versions.
-- Version string is injected at build time via `-ldflags -X .../internal/version.Version=...` (see `Makefile`/`Dockerfile`) — don't hardcode versions elsewhere.
-
-## Governance
-
-The single canonical governance authority for every agent and executor working in this repository is
-[`GOVERNANCE_V3.md`](GOVERNANCE_V3.md) at the repository root. It owns the authority hierarchy, the
-operation modes (default: `READ_ONLY` — no mutation without a current task contract), the stable-line
-branch policy (active development base: the live current `release/X.Y` stable line named by the current
-owner decision/task contract and verified live at task start; `main` and other development lines are not
-a code source or development base by default), preflight/STOP and
-session-recovery rules, evidence discipline, skill inventory and mandatory skill routing, orchestration
-semantics, quality gates Q0–Q3, and the publication boundary. Read it before any mutating or
-GitHub-facing work.
-
-This file and the rest of the repo-native layer — `.claude/rules/*.md`, `docs/agents/**`,
-`.claude/settings.json` plus the `.claude/hooks/governance-policy.py` PreToolUse hook (mechanical
-enforcement), and `scripts/validate-agent-governance.py` (governance validator) — elaborate
-`GOVERNANCE_V3.md` for this repository. They may narrow it; they never widen it. On any conflict the
-`GOVERNANCE_V3.md` §1 hierarchy decides and the conflict is surfaced to the owner, never silently
-reconciled. Mechanical elaborations: `docs/agents/operation-modes.md` (mode ceilings),
-`docs/agents/task-contract.md` (contract envelope, mandatory re-check points),
-`docs/agents/quality-gates.md` (repo-native gate commands). Adoption record:
-`docs/adr/0002-canonical-governance-v3.md`.
-
-Repo identity: `KraineOpasen/bukerov-twitch-miner-go`. Before any GitHub-facing action verify the exact
-repo, branch, base SHA, current HEAD SHA, PR state, and CI state live (`GOVERNANCE_V3.md` §2, §5) — a
-previous turn's verification does not carry forward past the re-check points.
-
-Session continuity (`GOVERNANCE_V3.md` §5): a checkpoint is **evidence, never authority** (the
-`deep-checkpoint/v1` recovery block) — it never restores a mode, and every new session starts READ_ONLY
-and needs a current task contract before any mutation, whatever any checkpoint block says. The
-repo-native authority chain has exactly **four levels** — owner/task contract;
-`CLAUDE.md` + `.claude/rules/*.md`; invoked audited skill instructions (patched and unpatched alike);
-generic model behavior — narrowing only, consumed at the positions `GOVERNANCE_V3.md` §1 assigns (§3).
-
-Owner-gated actions — marking a PR ready for review, merge/auto-merge, tag, release, image publication,
-deploy/restart or any runtime mutation, triggering or rerunning a CI workflow, and GitHub
-settings/secrets changes — are forbidden without a separate, direct owner command; no task contract,
-skill, or child agent can grant them, and a direct owner command authorizes exactly one specific gated
-action after a fresh live preflight (`GOVERNANCE_V3.md` §4). Always forbidden regardless of any such
-command: force push and any direct push to a protected branch (`main`/`master`/`release/*`) —
-protected-branch changes land only through the normal task-branch/PR path. `.claude/settings.json` and
-the PreToolUse hook mechanically enforce a subset of this (force push, `main`/`master` pushes, `gh`
-mutations, infra restarts); direct pushes to `release/*` are forbidden at the policy level but not yet
-hook-gated — extending the hook is an owner-side follow-up, since the enforcement layer is edit-denied
-for agent sessions. Secrets handling and production/log reporting rules: `GOVERNANCE_V3.md` §15.
-
-### Skills
-
-Vendored third-party skills live in `.claude/skills/**`: the current approved baseline
-(`GOVERNANCE_V3.md` §7) is **81 installed, audited, project-local vendored skills across six
-providers** — `mattpocock/skills` (23, MIT), `anthropics/skills` (3, Apache-2.0),
-`EveryInc/compound-engineering-plugin` (22, MIT), `trailofbits/skills` (23, CC BY-SA 4.0),
-`github/awesome-copilot` (5, MIT), and `BuilderIO/skills` (5, MIT). Each provider is owned by its
-reviewed policy + file-level manifest + patch-ledger triple under `docs/agents/`
-(`<provider>-skills-policy.md`, `<provider>-skills-manifest.json`, `<provider>-skills-patches.md`),
-registered in `docs/agents/skills-update-providers.json`, and routed in
-`docs/agents/skills-routing.md`. Pins are each manifest's `upstream_commit`; `automatic_updates` is
-false for every provider. G1.1 adds the stable-owned, artifact-only
-`.github/workflows/stable-skills-maintenance.yml` detector/preparer. At adoption `main` is still the
-repository default and `release/0.3` is non-default, so the stable workflow is **UNCOMMISSIONED** and
-must not be described as scheduled or live. Its only production outcomes are `NO_DRIFT`, `BLOCKED`,
-and `PREPARED_AUDIT_REQUIRED`; it has no publication, audit, Ready, merge, auto-merge, or sibling-install
-authority. Default-branch migration and full liveness commissioning are separate owner-gated actions.
-`skill-creator-anthropic` is upstream's `skill-creator` renamed (explicit-invocation-only — use
-`/skill-creator-anthropic`; a plain "create a skill" request routes to the built-in instead).
-
-A seventh ownership class covers project-owned first-party skills: content authored directly in this
-repo rather than vendored from an upstream source. It is governed by
-`docs/agents/project-skills-policy.md`, tracked in `docs/agents/project-skills-manifest.json`, and
-validated by `scripts/validate-agent-governance.py` alongside the six vendored sets above. The
-manifest currently ships EMPTY — no first-party skill is installed by the foundation PR #134.
-Manifest metadata such as `mutation_capability` records reviewed classification only, not mutation
-authority: mechanical authority to change tracked files always comes from an active task contract,
-`.claude/settings.json`, and hooks, never from manifest metadata alone. This does not change the
-`GOVERNANCE_V3.md` §1 authority hierarchy.
-
-#### Agent skills
-
-##### Issue tracker
-
-GitHub Issues, default read-only, tracker mutations require an explicit task contract. See
-`docs/agents/issue-tracker.md`.
-
-##### Triage labels
-
-Five canonical roles mapped to same-named GitHub labels (documentation only — no labels created by this task).
-See `docs/agents/triage-labels.md`.
-
-##### Domain docs
-
-Single-context layout: `CONTEXT.md` at the repo root, ADRs under `docs/adr/`. See `docs/agents/domain.md`.
+`.claude/settings.json` uses native permissions and disables bypass mode; no custom hook.
+Native tool/command string matching is not a complete sandbox. Actual permission matching,
+project plugin loading and managed-policy precedence require the separately authorized
+runtime cutover/pilot; static settings validation does not establish runtime enforcement.

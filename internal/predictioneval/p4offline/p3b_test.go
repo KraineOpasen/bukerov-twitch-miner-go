@@ -4073,8 +4073,8 @@ func TestNoP3bRulesetCarryingTextItCannotExpressIsVerified(t *testing.T) {
 	// when someone adds a string to this artifact or to a type it nests. No test
 	// adds or removes such a field, so `!=` and `<` behave identically over the
 	// suite's reachable domain and a mutation swapping them SURVIVES -- recorded
-	// here rather than counted as a weak test, per the equivalence clause in
-	// docs/agents/quality-gates.md. A review lane verified the guard trips for a
+	// here rather than counted as a weak test: equivalent mutants are not evidence
+	// of weak protection. A review lane verified the guard trips for a
 	// new string on P3bRuleset, OrderedRulesConfig, OrderedRule, OrderedRulesDefault
 	// and OrderedRulesPoints, which is the property it exists for.
 	//
