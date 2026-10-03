@@ -1,6 +1,8 @@
 {
   "permissions": {
     "deny": [
+      "Bash(git push)", "Bash(git push origin)",
+      "Bash(git push * HEAD)", "Bash(git push * HEAD *)", "Bash(git push * @)", "Bash(git push * @ *)",
       "Bash(git push --force*)", "Bash(git push -f*)", "Bash(git push * --force*)", "Bash(git push * -f*)",
       "Bash(git * push --force*)", "Bash(git * push * --force*)", "Bash(git * push -f*)", "Bash(git * push * -f*)",
       "Bash(git push *--tags*)", "Bash(git push *refs/tags/*)", "Bash(git * push *--tags*)", "Bash(git * push *refs/tags/*)",
@@ -16,9 +18,10 @@
       "Bash(git * push * refs/heads/main)", "Bash(git * push * refs/heads/main *)", "Bash(git * push * refs/heads/master)", "Bash(git * push * refs/heads/master *)",
       "Bash(git push *release/*)", "Bash(git * push *release/*)",
       "Bash(gh pr merge*)", "Bash(gh pr ready*)", "Bash(gh pr edit * --ready*)",
-      "Bash(gh release create*)", "Bash(gh release edit*)", "Bash(gh release delete*)", "Bash(gh release upload*)",
+      "Bash(gh release create*)", "Bash(gh release new*)", "Bash(gh release edit*)", "Bash(gh release delete*)", "Bash(gh release upload*)",
       "Bash(gh workflow run*)", "Bash(gh workflow enable*)", "Bash(gh workflow disable*)", "Bash(gh run rerun*)",
-      "Bash(gh secret set *)", "Bash(gh secret delete *)", "Bash(gh variable set *)", "Bash(gh variable delete *)", "Bash(gh repo edit *)", "Bash(gh repo delete *)", "Bash(gh repo rename *)",
+      "Bash(gh secret set *)", "Bash(gh secret delete *)", "Bash(gh secret remove *)", "Bash(gh variable set *)", "Bash(gh variable delete *)", "Bash(gh variable remove *)", "Bash(gh repo edit *)", "Bash(gh repo delete *)", "Bash(gh repo rename *)",
+      "Bash(gh repo edit)", "Bash(gh repo delete)", "Bash(gh repo rename)",
       "Bash(ssh *)", "Bash(scp *)", "Bash(rsync *)", "Bash(sudo *)", "Bash(doas *)", "Bash(kubectl apply *)", "Bash(kubectl delete *)", "Bash(kubectl rollout *)",
       "Bash(docker compose up*)", "Bash(docker compose down*)", "Bash(docker compose restart*)", "Bash(docker-compose up*)", "Bash(docker-compose down*)", "Bash(docker-compose restart*)",
       "Bash(docker restart *)", "Bash(systemctl restart *)", "Bash(systemctl stop *)", "Bash(systemctl start *)",
@@ -27,6 +30,9 @@
       "mcp__github__push_files", "mcp__github__create_or_update_file", "mcp__github__delete_file"
     ],
     "ask": [
+      "Bash(git push *)", "Bash(git -* push)", "Bash(git -* push *)",
+      "Bash(gh -*)", "Bash(gh pr -*)", "Bash(gh release -*)", "Bash(gh workflow -*)",
+      "Bash(gh run -*)", "Bash(gh secret -*)", "Bash(gh variable -*)", "Bash(gh repo -*)",
       "Bash(git rebase *)", "Bash(git merge *)", "Bash(git cherry-pick *)", "Bash(git reset *)", "Bash(git tag *)", "Bash(git * tag *)",
       "Bash(git rebase)", "Bash(git merge)", "Bash(git reset)",
       "Bash(gh api *--method*)", "Bash(gh api *-X*)", "Bash(gh api *-f*)", "Bash(gh api *-F*)", "Bash(gh api *--input*)",
