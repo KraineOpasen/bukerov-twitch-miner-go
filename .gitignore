@@ -42,9 +42,8 @@ coverage.txt
 # Debug
 __debug_bin*
 
-# Claude Code local files (governance v2)
+# Claude Code local files
 .claude/settings.local.json
 CLAUDE.local.md
 .scratch/
-.claude/scheduled_tasks.lock
 __pycache__/

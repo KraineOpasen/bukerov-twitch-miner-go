@@ -1,11 +1,16 @@
 # ADR-0001: Agent governance v2
 
-- **Status**: Superseded by [ADR-0002](0002-canonical-governance-v3.md) — `GOVERNANCE_V3.md` at the repo
-  root is now the single canonical governance authority; this ADR remains the historical record of the v2
-  foundation and of the mechanical layer it introduced.
+- **Status**: Superseded / historical; retired by the minimal project kernel migration (2026-10-03).
 - **Date**: 2026-07-26
 
-## Context
+This record describes the historical decision on the date above. Its authority, paths,
+inventory and future plans are not current instructions. The owner-approved migration
+on 2026-10-03 replaced this framework with [CLAUDE.md](../../CLAUDE.md) and native
+[project settings](../../.claude/settings.json). Deleted-file names below refer to the
+[pre-migration snapshot](https://github.com/KraineOpasen/bukerov-twitch-miner-go/tree/01c42876568deb6787ddcaaddaca6a8bf6b1f7f4);
+immutable links preserve the former rationale, not an active dependency.
+
+## Historical context
 
 Agent-assisted development on this repo (Claude Code sessions, potentially several agents in one task) needed
 explicit guardrails: a default-safe operating posture, a way to grant more capability deliberately and
@@ -16,7 +21,7 @@ Without this, agents could plausibly commit or push on `main`, mutate the GitHub
 asked, or pull in unreviewed third-party skill instructions that assume capabilities (auto-commit, auto-publish
 to a tracker) this project doesn't want granted by default.
 
-## Decision
+## Historical decision
 
 Adopt governance v2:
 
@@ -34,7 +39,7 @@ Adopt governance v2:
   `domain.md`, `triage-labels.md`) rather than delegated to the excluded `setup-matt-pocock-skills` skill,
   which otherwise would have had standing permission to rewrite this repo's `CLAUDE.md`.
 
-## Consequences
+## Historical consequences
 
 - Agents default to read-only; doing more requires an explicit, narrowly-scoped contract.
 - A hook blocks known-dangerous command shapes (force push, push to main, `gh` mutations, etc.) even if a
@@ -44,9 +49,15 @@ Adopt governance v2:
 - Future skill or policy changes go through the same review discipline: minimal, marked patches, not silent
   edits to vendored content.
 
-## Links
+## Historical sources
 
 - `CLAUDE.md` — `## Claude Code Governance (v2)` section
 - `docs/agents/operation-modes.md`, `task-contract.md`, `quality-gates.md`
 - `docs/agents/mattpocock-skills-policy.md`, `mattpocock-skills-manifest.json`, `mattpocock-skills-patches.md`
 - `.claude/settings.json`, `.claude/hooks/governance-policy.py`
+
+Pinned historical source bytes:
+
+- [GOVERNANCE_V3.md](https://github.com/KraineOpasen/bukerov-twitch-miner-go/blob/01c42876568deb6787ddcaaddaca6a8bf6b1f7f4/GOVERNANCE_V3.md)
+- [.claude/hooks/governance-policy.py](https://github.com/KraineOpasen/bukerov-twitch-miner-go/blob/01c42876568deb6787ddcaaddaca6a8bf6b1f7f4/.claude/hooks/governance-policy.py)
+- [docs/agents/operation-modes.md](https://github.com/KraineOpasen/bukerov-twitch-miner-go/blob/01c42876568deb6787ddcaaddaca6a8bf6b1f7f4/docs/agents/operation-modes.md)

@@ -609,7 +609,7 @@ func (d *DropsTracker) SkipLedgerEnabled() bool {
 // Reconcile / Snapshot) may hold the process's single SQLite connection when
 // derived from the tracker's own lifecycle context via skipLedgerCtx, so a
 // cancelled/shutting-down miner (or a hung DB) can never block behind it
-// indefinitely (concurrency.md: no blocking work that ignores ctx). Package
+// indefinitely (CLAUDE.md: honor lifecycle cancellation). Package
 // variable so tests can shrink it.
 var skipLedgerOpTimeout = 15 * time.Second
 

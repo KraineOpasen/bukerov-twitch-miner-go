@@ -1,11 +1,18 @@
 # ADR-0002: Canonical Governance v3 (`GOVERNANCE_V3.md`)
 
-- **Status**: Accepted
+- **Status**: Superseded / historical; retired by the minimal project kernel migration (2026-10-03).
 - **Date**: 2026-08-24
 - **Supersedes**: [ADR-0001](0001-agent-governance-v2.md) as the active governance authority (ADR-0001
   remains the historical record of the v2 foundation)
 
-## Context
+This record describes the historical decision on the date above. Its authority, paths,
+inventory and future plans are not current instructions. The owner-approved migration
+on 2026-10-03 replaced this framework with [CLAUDE.md](../../CLAUDE.md) and native
+[project settings](../../.claude/settings.json). Deleted-file names below refer to the
+[pre-migration snapshot](https://github.com/KraineOpasen/bukerov-twitch-miner-go/tree/01c42876568deb6787ddcaaddaca6a8bf6b1f7f4);
+immutable links preserve the former rationale, not an active dependency.
+
+## Historical context
 
 The v2 governance layer (ADR-0001) was authored when `main` was the only development line and the
 repo-native documents carried the authority declarations themselves (the `CLAUDE.md` precedence chain,
@@ -15,7 +22,7 @@ policy (`release/X.Y` lines, `release/0.1` active) under which `main` is no long
 authority. Keeping several partially overlapping authority declarations invites drift and conflicting
 precedence claims.
 
-## Decision
+## Historical decision
 
 Install the owner-approved canonical Governance v3 document, byte-for-byte, as `GOVERNANCE_V3.md` at the
 repository root, and make it the single canonical governance owner:
@@ -35,7 +42,7 @@ repository root, and make it the single canonical governance owner:
 - **Mechanical consistency** — `scripts/validate-agent-governance.py` requires `GOVERNANCE_V3.md` to
   exist; the enforcement hook/settings layer is unchanged (its denials all remain consistent with §4).
 
-## Consequences
+## Historical consequences
 
 - Exactly one active governance authority; repo-native docs defer to it instead of restating it.
 - The installed skill set is unchanged by this adoption — no skill added or removed; upstream pins and
@@ -61,10 +68,16 @@ governance-drift finding §7 itself requires to be surfaced; aligning the stable
 revising §7) is a separate owner-approved task — never a side effect of this installation (§1, §2:
 content is not transplanted between development lines as a side effect of other work).
 
-## Links
+## Historical sources
 
 - `GOVERNANCE_V3.md` (repo root) — canonical governance, rev 3.1
 - `CLAUDE.md` — `## Governance` pointer section
 - `docs/agents/operation-modes.md`, `docs/agents/task-contract.md`, `docs/agents/quality-gates.md` —
   amended elaborations
 - `docs/adr/0001-agent-governance-v2.md` — superseded v2 foundation record
+
+Pinned historical source bytes:
+
+- [GOVERNANCE_V3.md](https://github.com/KraineOpasen/bukerov-twitch-miner-go/blob/01c42876568deb6787ddcaaddaca6a8bf6b1f7f4/GOVERNANCE_V3.md)
+- [.claude/hooks/governance-policy.py](https://github.com/KraineOpasen/bukerov-twitch-miner-go/blob/01c42876568deb6787ddcaaddaca6a8bf6b1f7f4/.claude/hooks/governance-policy.py)
+- [docs/agents/operation-modes.md](https://github.com/KraineOpasen/bukerov-twitch-miner-go/blob/01c42876568deb6787ddcaaddaca6a8bf6b1f7f4/docs/agents/operation-modes.md)
