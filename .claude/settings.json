@@ -50,6 +50,17 @@
       "mcp__github__push_files", "mcp__github__create_or_update_file", "mcp__github__delete_file"
     ],
     "ask": [
+      "Bash(*=*)", "Bash(*git* -c *)", "Bash(*git* '-c' *)",
+      "Bash(*git* \"-c\" *)", "Bash(*git* --config-env*)", "Bash(*git* '--config-env*)",
+      "Bash(*git* \"--config-env*)", "Bash(time*)", "Bash('time'*)",
+      "Bash(\"time\"*)", "Bash(*/time*)", "Bash(stdbuf*)",
+      "Bash('stdbuf'*)", "Bash(\"stdbuf\"*)", "Bash(*/stdbuf*)",
+      "Bash(builtin*)", "Bash('builtin'*)", "Bash(\"builtin\"*)",
+      "Bash(*/builtin*)", "Bash(git *-* reset)", "Bash(git *-* reset *)",
+      "Bash(git *-* rebase)", "Bash(git *-* rebase *)", "Bash(git *-* merge)",
+      "Bash(git *-* merge *)", "Bash(git *-* cherry-pick)", "Bash(git *-* cherry-pick *)",
+      "Bash(git *-* revert)", "Bash(git *-* revert *)", "Bash(git cherry-pick)",
+      "Bash(git revert)", "Bash(git revert *)",
       "Bash(gh pr update-branch)", "Bash(gh pr update-branch *)",
       "Bash(git config)", "Bash(git config *)", "Bash(git -* config)", "Bash(git -* config *)", "Bash(gh issue -*)", "Bash(gh issue create)",
       "Bash(gh issue create *)", "Bash(gh issue new)", "Bash(gh issue new *)", "Bash(gh issue comment)", "Bash(gh issue comment *)", "Bash(gh issue edit)",
