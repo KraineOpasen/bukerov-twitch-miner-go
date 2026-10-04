@@ -50,6 +50,7 @@
       "mcp__github__push_files", "mcp__github__create_or_update_file", "mcp__github__delete_file"
     ],
     "ask": [
+      "Bash(gh pr update-branch)", "Bash(gh pr update-branch *)",
       "Bash(git config)", "Bash(git config *)", "Bash(git -* config)", "Bash(git -* config *)", "Bash(gh issue -*)", "Bash(gh issue create)",
       "Bash(gh issue create *)", "Bash(gh issue new)", "Bash(gh issue new *)", "Bash(gh issue comment)", "Bash(gh issue comment *)", "Bash(gh issue edit)",
       "Bash(gh issue edit *)", "Bash(gh issue close)", "Bash(gh issue close *)", "Bash(gh issue reopen)", "Bash(gh issue reopen *)", "Bash(gh issue delete)",
