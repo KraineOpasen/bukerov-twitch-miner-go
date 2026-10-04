@@ -782,7 +782,7 @@ func suppressedDrops(campaigns []*models.Campaign, snap *skipSnapshot) []Suppres
 // for the same composite. It never mutates any campaign -- read-only over
 // candidates, writes only to the ledger.
 //
-// ctx is honored (concurrency.md: no blocking work that ignores ctx) --
+// ctx is honored (CLAUDE.md: honor lifecycle cancellation) --
 // db.WithTx holds db.mu.RLock and the process's single SQLite connection
 // (SetMaxOpenConns(1)) for the whole transaction, and every other DB user
 // blocks behind that lock/connection until it releases, so a caller-bound or

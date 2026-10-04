@@ -1,13 +1,20 @@
 # ADR-0003: Stable-native deterministic skill-update foundation
 
-- **Status**: Accepted
+- **Status**: Superseded / historical; retired by the minimal project kernel migration (2026-10-03).
 - **Date**: 2026-08-27
 - **Scope**: G1.1 only
 - **Supersedes**: donor `docs/adr/0003-automated-skill-update-candidates.md` from
   `main@9c2c11030dd34c34bd7812e5a18bfe52d897b2a7`; this stable adaptation replaces its
   default-branch control assumptions without importing donor authority
 
-## Context
+This record describes the historical decision on the date above. Its authority, paths,
+inventory and future plans are not current instructions. The owner-approved migration
+on 2026-10-03 replaced this framework with [CLAUDE.md](../../CLAUDE.md) and native
+[project settings](../../.claude/settings.json). Deleted-file names below refer to the
+[pre-migration snapshot](https://github.com/KraineOpasen/bukerov-twitch-miner-go/tree/01c42876568deb6787ddcaaddaca6a8bf6b1f7f4);
+immutable links preserve the former rationale, not an active dependency.
+
+## Historical context
 
 The repository's audited skills authority is the live stable line, currently `release/0.3`: 81 vendored
 skills from six providers, with each provider's policy, file-level manifest, and patch ledger owning its
@@ -21,7 +28,7 @@ write permissions, mutation identity, liveness, review, and promotion decisions 
 commissioned. The foundation therefore has to move the deterministic detector/preparer boundary onto
 stable without pretending that later autonomous stages already exist.
 
-## Decision
+## Historical decision
 
 Adopt a new stable-only workflow at `.github/workflows/stable-skills-maintenance.yml` and the bounded
 deterministic engine under `scripts/skill_updates/`. `main` is donor data only; the stable policies,
@@ -55,7 +62,7 @@ At adoption, `main` remains the live default and `release/0.3` remains non-defau
 recorded as **UNCOMMISSIONED**, full maintenance liveness as **UNAVAILABLE**, and the external heartbeat
 as **UNCOMMISSIONED**. A detector-only success cannot establish a healthy future control plane.
 
-## Consequences
+## Historical consequences
 
 - Stable owns reproducible drift detection and candidate preparation without changing audited skill
   bytes, pins, routing, provider authority, or product behaviour.
@@ -81,11 +88,16 @@ as **UNCOMMISSIONED**. A detector-only success cannot establish a healthy future
 - **Treat detector success as commissioning:** it reports a partial mechanism as full-control-plane
   health and hides absent reviewer/publisher/heartbeat stages.
 
-## Links
+## Historical sources
 
-- [`docs/agents/skills-update-automation.md`](../agents/skills-update-automation.md)
-- [`docs/agents/skills-routing.md`](../agents/skills-routing.md)
-- [`docs/agents/skills-maintenance/policy.json`](../agents/skills-maintenance/policy.json)
-- [`docs/agents/skills-maintenance/control-plane.json`](../agents/skills-maintenance/control-plane.json)
-- [`docs/agents/skills-maintenance/legacy-quarantine.json`](../agents/skills-maintenance/legacy-quarantine.json)
-- [`docs/agents/skills-maintenance/external-dependencies.json`](../agents/skills-maintenance/external-dependencies.json)
+- [`docs/agents/skills-update-automation.md`](https://github.com/KraineOpasen/bukerov-twitch-miner-go/blob/01c42876568deb6787ddcaaddaca6a8bf6b1f7f4/docs/agents/skills-update-automation.md)
+- [`docs/agents/skills-routing.md`](https://github.com/KraineOpasen/bukerov-twitch-miner-go/blob/01c42876568deb6787ddcaaddaca6a8bf6b1f7f4/docs/agents/skills-routing.md)
+- [`docs/agents/skills-maintenance/policy.json`](https://github.com/KraineOpasen/bukerov-twitch-miner-go/blob/01c42876568deb6787ddcaaddaca6a8bf6b1f7f4/docs/agents/skills-maintenance/policy.json)
+- [`docs/agents/skills-maintenance/control-plane.json`](https://github.com/KraineOpasen/bukerov-twitch-miner-go/blob/01c42876568deb6787ddcaaddaca6a8bf6b1f7f4/docs/agents/skills-maintenance/control-plane.json)
+- [`docs/agents/skills-maintenance/legacy-quarantine.json`](https://github.com/KraineOpasen/bukerov-twitch-miner-go/blob/01c42876568deb6787ddcaaddaca6a8bf6b1f7f4/docs/agents/skills-maintenance/legacy-quarantine.json)
+- [`docs/agents/skills-maintenance/external-dependencies.json`](https://github.com/KraineOpasen/bukerov-twitch-miner-go/blob/01c42876568deb6787ddcaaddaca6a8bf6b1f7f4/docs/agents/skills-maintenance/external-dependencies.json)
+
+Pinned historical source bytes:
+
+- [.github/workflows/stable-skills-maintenance.yml](https://github.com/KraineOpasen/bukerov-twitch-miner-go/blob/01c42876568deb6787ddcaaddaca6a8bf6b1f7f4/.github/workflows/stable-skills-maintenance.yml)
+- [scripts/skill_updates/runtime.py](https://github.com/KraineOpasen/bukerov-twitch-miner-go/blob/01c42876568deb6787ddcaaddaca6a8bf6b1f7f4/scripts/skill_updates/runtime.py)
