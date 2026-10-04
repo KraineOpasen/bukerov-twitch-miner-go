@@ -47,9 +47,11 @@
       "Edit(.claude/settings.json)", "Write(.claude/settings.json)", "Edit(.claude/settings.local.json)", "Write(.claude/settings.local.json)", "Edit(.git/**)", "Write(.git/**)",
       "Edit(~/.*)", "Write(~/.*)", "Edit(~/.*/**)", "Write(~/.*/**)",
       "mcp__github__merge_pull_request", "mcp__github__enable_pr_auto_merge", "mcp__github__actions_run_trigger", "mcp__github__create_repository", "mcp__github__fork_repository", "mcp__github__run_secret_scanning",
+      "mcp__github__delete_repository",
       "mcp__github__push_files", "mcp__github__create_or_update_file", "mcp__github__delete_file"
     ],
     "ask": [
+      "Bash(*$*)", "Bash(*`*)",
       "Bash(*=*)", "Bash(*git* -c *)", "Bash(*git* '-c' *)",
       "Bash(*git* \"-c\" *)", "Bash(*git* --config-env*)", "Bash(*git* '--config-env*)",
       "Bash(*git* \"--config-env*)", "Bash(time*)", "Bash('time'*)",
@@ -102,6 +104,7 @@
       "Bash(git rebase)", "Bash(git merge)", "Bash(git reset)",
       "Bash(gh api *--method*)", "Bash(gh api *-X*)", "Bash(gh api *-f*)", "Bash(gh api *-F*)", "Bash(gh api *--input*)",
       "mcp__github__issue_write", "mcp__github__sub_issue_write", "mcp__github__pull_request_review_write", "mcp__github__update_pull_request",
+      "mcp__github__update_pull_request_branch", "mcp__github__update_pull_request_draft_state", "mcp__github__create_pull_request",
       "Edit(CLAUDE.md)", "Write(CLAUDE.md)", "Edit(.github/workflows/**)", "Write(.github/workflows/**)"
     ],
     "disableBypassPermissionsMode": "disable"
