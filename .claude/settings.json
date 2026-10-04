@@ -1,6 +1,8 @@
 {
   "permissions": {
     "deny": [
+      "Bash(*--dangerously-skip-permissions*)", "Bash(*--allow-dangerously-skip-permissions*)",
+      "Bash(*--permission-mode*bypassPermissions*)", "Bash(*--inherit-permission-mode*bypassPermissions*)",
       "Bash(bash)", "Bash(bash *)", "Bash(/*/bash)", "Bash(/*/bash *)",
       "Bash('bash')", "Bash('bash' *)", "Bash('/*/bash')", "Bash('/*/bash' *)",
       "Bash(\"bash\")", "Bash(\"bash\" *)", "Bash(\"/*/bash\")", "Bash(\"/*/bash\" *)",
@@ -51,6 +53,7 @@
       "mcp__github__push_files", "mcp__github__create_or_update_file", "mcp__github__delete_file"
     ],
     "ask": [
+      "Bash(*'*)", "Bash(*\"*)", "Bash(*\\\\\\\\*)",
       "Bash(*$*)", "Bash(*`*)",
       "Bash(*=*)", "Bash(*git* -c *)", "Bash(*git* '-c' *)",
       "Bash(*git* \"-c\" *)", "Bash(*git* --config-env*)", "Bash(*git* '--config-env*)",
