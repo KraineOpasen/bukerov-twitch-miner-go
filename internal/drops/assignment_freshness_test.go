@@ -624,41 +624,67 @@ func TestFreshnessChangedPublicationKeepsLedgerFailOpen(t *testing.T) {
 }
 
 // LS5: a successful observation rejected by the captured-revision guard runs
-// no assignment pass and records no observation.
+// no assignment pass at all and records no observation. The wired-ledger case
+// matters because the refresh would read the ledger before its own revision
+// fence: entering it after a rejection would cost a SQLite read and, with a
+// failing ledger, misreport the stale rejection as a held pass.
 func TestFreshnessStaleObservationRunsNoAssignmentPass(t *testing.T) {
-	now := time.Now()
-	d, s, _ := continuitySetup(&now)
-	client := &fakeDropsClient{}
-	d.client = client
-	setAvailability(s, true, []string{"camp-1"}, now)
-	d.updateStreamerCampaigns()
-	generation := d.BrokerCampaignSnapshot().Generation
+	for _, mode := range []string{"no-ledger", "failed-wired-ledger"} {
+		t.Run(mode, func(t *testing.T) {
+			now := time.Now()
+			d, s, _ := continuitySetup(&now)
+			client := &fakeDropsClient{}
+			d.client = client
+			var db *database.DB
+			if mode == "failed-wired-ledger" {
+				var ledger *SkipLedger
+				ledger, db = openFreshnessLedger(t)
+				d.skipLedger = ledger
+			}
+			setAvailability(s, true, []string{"camp-1"}, now)
+			d.updateStreamerCampaigns()
+			generation := d.BrokerCampaignSnapshot().Generation
+			if db != nil {
+				if err := db.Close(); err != nil {
+					t.Fatalf("close ledger db: %v", err)
+				}
+			}
+			h := installPauseOnMessage(t, "")
 
-	gate := client.armInventoryGate(unchangedCamp1Inventory(), nil)
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		d.syncProgress()
-	}()
-	<-gate.entered
-	// A newer publication lands (its own re-point not yet run) and the
-	// channel becomes authoritatively empty.
-	d.mu.Lock()
-	d.campaigns = append([]*models.Campaign(nil), d.campaigns...)
-	d.bumpRevisionLocked(updateSourceFullSync)
-	d.mu.Unlock()
-	setAvailability(s, true, nil, now)
-	close(gate.release)
-	<-done
+			gate := client.armInventoryGate(unchangedCamp1Inventory(), nil)
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				d.syncProgress()
+			}()
+			select {
+			case <-gate.entered:
+			case <-time.After(5 * time.Second):
+				t.Fatal("the light sync never requested Inventory")
+			}
+			// A newer publication lands (its own re-point not yet run) and the
+			// channel becomes authoritatively empty.
+			d.mu.Lock()
+			d.campaigns = append([]*models.Campaign(nil), d.campaigns...)
+			d.bumpRevisionLocked(updateSourceFullSync)
+			d.mu.Unlock()
+			setAvailability(s, true, nil, now)
+			close(gate.release)
+			<-done
 
-	if st := d.SyncStatus(); st.ProgressRuns != 0 || !st.ProgressLastSyncAt.IsZero() {
-		t.Fatalf("a rejected stale observation must not be recorded, got runs=%d at=%v", st.ProgressRuns, st.ProgressLastSyncAt)
-	}
-	if g := d.BrokerCampaignSnapshot().Generation; g != generation {
-		t.Fatalf("a rejected stale observation must not publish broker views: %d -> %d", generation, g)
-	}
-	if !hasAssignment(s) {
-		t.Fatal("a rejected stale observation must not re-point streamers")
+			if st := d.SyncStatus(); st.ProgressRuns != 0 || !st.ProgressLastSyncAt.IsZero() {
+				t.Fatalf("a rejected stale observation must not be recorded, got runs=%d at=%v", st.ProgressRuns, st.ProgressLastSyncAt)
+			}
+			if g := d.BrokerCampaignSnapshot().Generation; g != generation {
+				t.Fatalf("a rejected stale observation must not publish broker views: %d -> %d", generation, g)
+			}
+			if !hasAssignment(s) {
+				t.Fatal("a rejected stale observation must not re-point streamers")
+			}
+			if h.loggedContaining("Drops assignment refresh") {
+				t.Fatalf("a rejected stale observation must not enter the assignment refresh, got %v", h.records)
+			}
+		})
 	}
 }
 
@@ -693,6 +719,17 @@ func (h *pauseOnMessage) Handle(_ context.Context, r slog.Record) error {
 
 func (h *pauseOnMessage) WithAttrs([]slog.Attr) slog.Handler { return h }
 func (h *pauseOnMessage) WithGroup(string) slog.Handler      { return h }
+
+func (h *pauseOnMessage) loggedContaining(substr string) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for _, r := range h.records {
+		if strings.Contains(r, substr) {
+			return true
+		}
+	}
+	return false
+}
 
 func (h *pauseOnMessage) logged(prefix string) bool {
 	h.mu.Lock()
