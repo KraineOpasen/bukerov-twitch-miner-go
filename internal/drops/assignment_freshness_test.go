@@ -476,7 +476,7 @@ func TestFreshnessFailedReadReevaluatesNewerPool(t *testing.T) {
 		defer close(done)
 		d.syncProgress()
 	}()
-	<-gate.entered
+	waitForGate(t, gate)
 
 	// A full sync publishes a newer pool (camp-1 ended, camp-2 discovered)
 	// and re-points the streamer while the light sync's request is blocked.
@@ -767,6 +767,17 @@ func refreshParkedOnLogMu() bool {
 		}
 	}
 	return false
+}
+
+// waitForGate waits, bounded, until the light sync reaches its gated
+// Inventory request.
+func waitForGate(t *testing.T, gate *inventoryGate) {
+	t.Helper()
+	select {
+	case <-gate.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the light sync never requested Inventory")
+	}
 }
 
 // waitForPause waits, bounded, until the pass running in the background
@@ -1097,7 +1108,7 @@ func TestFreshnessGenerationFenceKeepsNewerSameRevisionPublication(t *testing.T)
 		defer close(done)
 		d.syncProgress()
 	}()
-	<-gate.entered
+	waitForGate(t, gate)
 	revision := d.Revision()
 	d.UpdateRewardSkips(models.NewRewardSkips([]string{models.NormalizeRewardKey("g1", "R")}))
 	d.updateStreamerCampaigns() // same campaign Revision, newer skip input
@@ -1132,7 +1143,7 @@ func TestFreshnessConcurrentSameRevisionRefreshesKeepNewest(t *testing.T) {
 		defer close(done)
 		d.syncProgress() // pass A: captured before the Skip rule
 	}()
-	<-gate.entered
+	waitForGate(t, gate)
 	d.UpdateRewardSkips(models.NewRewardSkips([]string{models.NormalizeRewardKey("g1", "R")}))
 	d.syncProgress() // pass B: newer inputs, applies first
 	if hasAssignment(s) {

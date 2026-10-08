@@ -136,3 +136,67 @@ func TestSameBrokerViewsRejectsAmbiguousIdentities(t *testing.T) {
 		t.Fatal("a source with a nil drop cannot be matched unambiguously")
 	}
 }
+
+// The refresh's Revision+Generation fence and its no-churn decision are made
+// UNDER the assignment serialization: a same-Revision pass that owns logMu
+// while the refresh is parked on it (here applying a new operator Skip, the
+// body of updateStreamerCampaigns after it acquires logMu) wins, and the
+// refresh -- whose inputs predate that publication -- is discarded instead of
+// republishing its stale views and re-assigning the skipped campaign.
+func TestFreshnessFenceEvaluatedUnderSerialization(t *testing.T) {
+	now := time.Now()
+	d, s, _ := continuitySetup(&now)
+	d.client = clientFor(freshnessResponses()[0])
+	setAvailability(s, true, []string{"camp-1"}, now)
+	d.updateStreamerCampaigns()
+	revision := d.Revision()
+
+	d.logMu.Lock()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		d.syncProgress() // captures Revision, Generation and the old skips; parks on logMu
+	}()
+	deadline := time.Now().Add(5 * time.Second)
+	for !refreshParkedOnLogMu() {
+		if time.Now().After(deadline) {
+			d.logMu.Unlock()
+			<-done
+			t.Fatal("the refresh never parked on the assignment serialization")
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	skips := models.NewRewardSkips([]string{models.NormalizeRewardKey("g1", "R")})
+	d.UpdateRewardSkips(skips)
+	d.mu.RLock()
+	campaigns, streamers := d.campaigns, d.streamers
+	d.mu.RUnlock()
+	views := buildBrokerViews(campaigns, nil, skips)
+	d.mu.Lock()
+	d.publishBrokerViewsLocked(views, d.revision)
+	d.mu.Unlock()
+	d.assignStreamersLocked(streamers, campaigns, views, false)
+	newer := d.BrokerCampaignSnapshot().Generation
+	d.logMu.Unlock()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the refresh did not finish after the serialization was released")
+	}
+
+	if d.Revision() != revision {
+		t.Fatalf("precondition: one shared campaign Revision, got %d -> %d", revision, d.Revision())
+	}
+	if hasAssignment(s) {
+		t.Fatalf("the refresh overwrote a same-Revision publication made while it waited for admission, got %v", assignedIDs(s))
+	}
+	if g := d.BrokerCampaignSnapshot().Generation; g != newer {
+		t.Fatalf("the stale refresh must not publish: %d -> %d", newer, g)
+	}
+	for _, c := range d.BrokerCampaignSnapshot().Campaigns {
+		if c.ID == "camp-1" {
+			t.Fatal("the published broker views must keep withholding the newly skipped campaign")
+		}
+	}
+}
