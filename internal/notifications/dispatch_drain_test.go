@@ -241,16 +241,14 @@ func TestStopReturnsDespiteHungDispatch(t *testing.T) {
 	// registered after newDrainTestManager's t.TempDir, so it runs first
 	// (LIFO) and covers an early t.Fatal; the normal path joins at the end.
 	var releaseOnce sync.Once
-	release := func() (closed bool) {
-		releaseOnce.Do(func() {
-			close(fake.release)
-			closed = true
-		})
-		return closed
-	}
+	release := func() { releaseOnce.Do(func() { close(fake.release) }) }
+	bodyJoined := false
 	t.Cleanup(func() {
-		earlyExit := release()
-		if waitDispatchDrained(t, m) && earlyExit {
+		if bodyJoined {
+			return
+		}
+		release()
+		if waitDispatchDrained(t, m) {
 			t.Log("released and joined the hung dispatch writer after an early exit")
 		}
 	})
@@ -281,9 +279,11 @@ func TestStopReturnsDespiteHungDispatch(t *testing.T) {
 	}
 
 	// Unblock the writer Stop left behind and join it, so it has exited
-	// (its point_rules UPDATE done) before the body returns.
+	// (its point_rules UPDATE returned) before the body returns. A timed-out
+	// join has already failed the test, so the cleanup does not wait again.
 	release()
 	waitDispatchDrained(t, m)
+	bodyJoined = true
 }
 
 // waitDispatchDrained waits until every admitted dispatch goroutine of m has
