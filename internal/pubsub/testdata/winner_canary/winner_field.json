@@ -1,0 +1,357 @@
+{
+  "description": "Synthetic RESOLVED frames with a valid event id and a valid two-outcome id vector, varying only winning_outcome_id: absent, null, empty, wrong JSON types and strings that match no outcome byte for byte. Hand-written; not Twitch captures.",
+  "cases": [
+    {
+      "name": "winner absent on the wire",
+      "topic": "predictions-channel-v1.synthetic-channel-4417",
+      "message": {
+        "type": "event-updated",
+        "data": {
+          "timestamp": "2026-09-23T12:02:00Z",
+          "event": {
+            "id": "synthetic-event-0001",
+            "outcomes": [
+              {"id": "synthetic-outcome-a", "title": "SENTINEL-OUTCOME-TITLE-A"},
+              {"id": "synthetic-outcome-b", "title": "SENTINEL-OUTCOME-TITLE-B"}
+            ],
+            "status": "RESOLVED",
+            "title": "SENTINEL-TITLE-3b8f"
+          }
+        }
+      },
+      "record": true,
+      "want": {
+        "winner_field_presence": "ABSENT_ON_WIRE",
+        "winner_field_json_type": "absent",
+        "winner_value_empty": false,
+        "outcomes_presence": "PRESENT",
+        "outcome_count": 2,
+        "outcome_ids_valid": true,
+        "winner_match_count": -1,
+        "winner_index": -1,
+        "event_key_hash": "sha256:b691aded51cd9b59dc0a2634ee71304714dda4419daad8d965158fa75767c08d",
+        "result": "NOT_OBSERVED_IN_THIS_EVENT"
+      }
+    },
+    {
+      "name": "winner explicitly null",
+      "topic": "predictions-channel-v1.synthetic-channel-4417",
+      "message": {
+        "type": "event-updated",
+        "data": {
+          "timestamp": "2026-09-23T12:02:05Z",
+          "event": {
+            "id": "synthetic-event-0001",
+            "outcomes": [
+              {"id": "synthetic-outcome-a", "title": "SENTINEL-OUTCOME-TITLE-A"},
+              {"id": "synthetic-outcome-b", "title": "SENTINEL-OUTCOME-TITLE-B"}
+            ],
+            "status": "RESOLVED",
+            "winning_outcome_id": null
+          }
+        }
+      },
+      "record": true,
+      "want": {
+        "winner_field_presence": "NULL_ON_WIRE",
+        "winner_field_json_type": "null",
+        "winner_value_empty": false,
+        "outcomes_presence": "PRESENT",
+        "outcome_count": 2,
+        "outcome_ids_valid": true,
+        "winner_match_count": -1,
+        "winner_index": -1,
+        "event_key_hash": "sha256:b691aded51cd9b59dc0a2634ee71304714dda4419daad8d965158fa75767c08d",
+        "result": "NOT_OBSERVED_IN_THIS_EVENT"
+      }
+    },
+    {
+      "name": "winner is the empty string",
+      "topic": "predictions-channel-v1.synthetic-channel-4417",
+      "message": {
+        "type": "event-updated",
+        "data": {
+          "timestamp": "2026-09-23T12:02:10Z",
+          "event": {
+            "id": "synthetic-event-0001",
+            "outcomes": [
+              {"id": "synthetic-outcome-a"},
+              {"id": "synthetic-outcome-b"}
+            ],
+            "status": "RESOLVED",
+            "winning_outcome_id": ""
+          }
+        }
+      },
+      "record": true,
+      "want": {
+        "winner_field_presence": "PRESENT",
+        "winner_field_json_type": "string",
+        "winner_value_empty": true,
+        "outcomes_presence": "PRESENT",
+        "outcome_count": 2,
+        "outcome_ids_valid": true,
+        "winner_match_count": -1,
+        "winner_index": -1,
+        "event_key_hash": "sha256:b691aded51cd9b59dc0a2634ee71304714dda4419daad8d965158fa75767c08d",
+        "result": "MALFORMED_IN_THIS_EVENT"
+      }
+    },
+    {
+      "name": "winner is a single space, which is not empty and matches nothing",
+      "topic": "predictions-channel-v1.synthetic-channel-4417",
+      "message": {
+        "type": "event-updated",
+        "data": {
+          "timestamp": "2026-09-23T12:02:12Z",
+          "event": {
+            "id": "synthetic-event-0001",
+            "outcomes": [
+              {"id": "synthetic-outcome-a"},
+              {"id": "synthetic-outcome-b"}
+            ],
+            "status": "RESOLVED",
+            "winning_outcome_id": " "
+          }
+        }
+      },
+      "record": true,
+      "want": {
+        "winner_field_presence": "PRESENT",
+        "winner_field_json_type": "string",
+        "winner_value_empty": false,
+        "outcomes_presence": "PRESENT",
+        "outcome_count": 2,
+        "outcome_ids_valid": true,
+        "winner_match_count": 0,
+        "winner_index": -1,
+        "event_key_hash": "sha256:b691aded51cd9b59dc0a2634ee71304714dda4419daad8d965158fa75767c08d",
+        "result": "MALFORMED_IN_THIS_EVENT"
+      }
+    },
+    {
+      "name": "winner is a number",
+      "topic": "predictions-channel-v1.synthetic-channel-4417",
+      "message": {
+        "type": "event-updated",
+        "data": {
+          "timestamp": "2026-09-23T12:02:15Z",
+          "event": {
+            "id": "synthetic-event-0001",
+            "outcomes": [
+              {"id": "synthetic-outcome-a"},
+              {"id": "synthetic-outcome-b"}
+            ],
+            "status": "RESOLVED",
+            "winning_outcome_id": 1
+          }
+        }
+      },
+      "record": true,
+      "want": {
+        "winner_field_presence": "INVALID",
+        "winner_field_json_type": "number",
+        "winner_value_empty": false,
+        "outcomes_presence": "PRESENT",
+        "outcome_count": 2,
+        "outcome_ids_valid": true,
+        "winner_match_count": -1,
+        "winner_index": -1,
+        "event_key_hash": "sha256:b691aded51cd9b59dc0a2634ee71304714dda4419daad8d965158fa75767c08d",
+        "result": "MALFORMED_IN_THIS_EVENT"
+      }
+    },
+    {
+      "name": "winner is a boolean",
+      "topic": "predictions-channel-v1.synthetic-channel-4417",
+      "message": {
+        "type": "event-updated",
+        "data": {
+          "timestamp": "2026-09-23T12:02:20Z",
+          "event": {
+            "id": "synthetic-event-0001",
+            "outcomes": [
+              {"id": "synthetic-outcome-a"},
+              {"id": "synthetic-outcome-b"}
+            ],
+            "status": "RESOLVED",
+            "winning_outcome_id": false
+          }
+        }
+      },
+      "record": true,
+      "want": {
+        "winner_field_presence": "INVALID",
+        "winner_field_json_type": "bool",
+        "winner_value_empty": false,
+        "outcomes_presence": "PRESENT",
+        "outcome_count": 2,
+        "outcome_ids_valid": true,
+        "winner_match_count": -1,
+        "winner_index": -1,
+        "event_key_hash": "sha256:b691aded51cd9b59dc0a2634ee71304714dda4419daad8d965158fa75767c08d",
+        "result": "MALFORMED_IN_THIS_EVENT"
+      }
+    },
+    {
+      "name": "winner is an object carrying a matching id",
+      "topic": "predictions-channel-v1.synthetic-channel-4417",
+      "message": {
+        "type": "event-updated",
+        "data": {
+          "timestamp": "2026-09-23T12:02:25Z",
+          "event": {
+            "id": "synthetic-event-0001",
+            "outcomes": [
+              {"id": "synthetic-outcome-a"},
+              {"id": "synthetic-outcome-b"}
+            ],
+            "status": "RESOLVED",
+            "winning_outcome_id": {"id": "synthetic-outcome-b", "SENTINEL_WINNER_KEY_c4d2": "SENTINEL-WINNER-VALUE-c4d2", "access_token": "SENTINEL-SECRET-winner-5e0a"}
+          }
+        }
+      },
+      "record": true,
+      "want": {
+        "winner_field_presence": "INVALID",
+        "winner_field_json_type": "object",
+        "winner_value_empty": false,
+        "outcomes_presence": "PRESENT",
+        "outcome_count": 2,
+        "outcome_ids_valid": true,
+        "winner_match_count": -1,
+        "winner_index": -1,
+        "event_key_hash": "sha256:b691aded51cd9b59dc0a2634ee71304714dda4419daad8d965158fa75767c08d",
+        "result": "MALFORMED_IN_THIS_EVENT"
+      }
+    },
+    {
+      "name": "winner is an array holding a matching id",
+      "topic": "predictions-channel-v1.synthetic-channel-4417",
+      "message": {
+        "type": "event-updated",
+        "data": {
+          "timestamp": "2026-09-23T12:02:30Z",
+          "event": {
+            "id": "synthetic-event-0001",
+            "outcomes": [
+              {"id": "synthetic-outcome-a"},
+              {"id": "synthetic-outcome-b"}
+            ],
+            "status": "RESOLVED",
+            "winning_outcome_id": ["synthetic-outcome-b"]
+          }
+        }
+      },
+      "record": true,
+      "want": {
+        "winner_field_presence": "INVALID",
+        "winner_field_json_type": "array",
+        "winner_value_empty": false,
+        "outcomes_presence": "PRESENT",
+        "outcome_count": 2,
+        "outcome_ids_valid": true,
+        "winner_match_count": -1,
+        "winner_index": -1,
+        "event_key_hash": "sha256:b691aded51cd9b59dc0a2634ee71304714dda4419daad8d965158fa75767c08d",
+        "result": "MALFORMED_IN_THIS_EVENT"
+      }
+    },
+    {
+      "name": "winner names no same-frame outcome",
+      "topic": "predictions-channel-v1.synthetic-channel-4417",
+      "message": {
+        "type": "event-updated",
+        "data": {
+          "timestamp": "2026-09-23T12:02:35Z",
+          "event": {
+            "id": "synthetic-event-0001",
+            "outcomes": [
+              {"id": "synthetic-outcome-a"},
+              {"id": "synthetic-outcome-b"}
+            ],
+            "status": "RESOLVED",
+            "winning_outcome_id": "synthetic-outcome-z"
+          }
+        }
+      },
+      "record": true,
+      "want": {
+        "winner_field_presence": "PRESENT",
+        "winner_field_json_type": "string",
+        "winner_value_empty": false,
+        "outcomes_presence": "PRESENT",
+        "outcome_count": 2,
+        "outcome_ids_valid": true,
+        "winner_match_count": 0,
+        "winner_index": -1,
+        "event_key_hash": "sha256:b691aded51cd9b59dc0a2634ee71304714dda4419daad8d965158fa75767c08d",
+        "result": "MALFORMED_IN_THIS_EVENT"
+      }
+    },
+    {
+      "name": "winner differs from an outcome id only in letter case",
+      "topic": "predictions-channel-v1.synthetic-channel-4417",
+      "message": {
+        "type": "event-updated",
+        "data": {
+          "timestamp": "2026-09-23T12:02:40Z",
+          "event": {
+            "id": "synthetic-event-0001",
+            "outcomes": [
+              {"id": "synthetic-outcome-a"},
+              {"id": "synthetic-outcome-b"}
+            ],
+            "status": "RESOLVED",
+            "winning_outcome_id": "SYNTHETIC-OUTCOME-B"
+          }
+        }
+      },
+      "record": true,
+      "want": {
+        "winner_field_presence": "PRESENT",
+        "winner_field_json_type": "string",
+        "winner_value_empty": false,
+        "outcomes_presence": "PRESENT",
+        "outcome_count": 2,
+        "outcome_ids_valid": true,
+        "winner_match_count": 0,
+        "winner_index": -1,
+        "event_key_hash": "sha256:b691aded51cd9b59dc0a2634ee71304714dda4419daad8d965158fa75767c08d",
+        "result": "MALFORMED_IN_THIS_EVENT"
+      }
+    },
+    {
+      "name": "winner differs from an outcome id only by surrounding space",
+      "topic": "predictions-channel-v1.synthetic-channel-4417",
+      "message": {
+        "type": "event-updated",
+        "data": {
+          "timestamp": "2026-09-23T12:02:45Z",
+          "event": {
+            "id": "synthetic-event-0001",
+            "outcomes": [
+              {"id": "synthetic-outcome-a"},
+              {"id": "synthetic-outcome-b"}
+            ],
+            "status": "RESOLVED",
+            "winning_outcome_id": " synthetic-outcome-b "
+          }
+        }
+      },
+      "record": true,
+      "want": {
+        "winner_field_presence": "PRESENT",
+        "winner_field_json_type": "string",
+        "winner_value_empty": false,
+        "outcomes_presence": "PRESENT",
+        "outcome_count": 2,
+        "outcome_ids_valid": true,
+        "winner_match_count": 0,
+        "winner_index": -1,
+        "event_key_hash": "sha256:b691aded51cd9b59dc0a2634ee71304714dda4419daad8d965158fa75767c08d",
+        "result": "MALFORMED_IN_THIS_EVENT"
+      }
+    }
+  ]
+}
