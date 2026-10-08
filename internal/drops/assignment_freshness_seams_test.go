@@ -118,6 +118,10 @@ func TestSameBrokerViewsRejectsAmbiguousIdentities(t *testing.T) {
 	if sameBrokerViews(views(src.Clone()), views(), views(src)) {
 		t.Fatal("a withheld campaign is a semantic change")
 	}
+	other := &models.Campaign{ID: "other", Drops: []*models.Drop{drop("a", 1), drop("b", 2)}}
+	if sameBrokerViews(views(src.Clone()), views(other.Clone()), views(src, other)) {
+		t.Fatal("a different campaign at the same position is a semantic change, even with the same drop IDs")
+	}
 
 	dupDrops := &models.Campaign{ID: "c", Drops: []*models.Drop{drop("a", 1), drop("a", 50)}}
 	first, second := dupDrops.Clone(), dupDrops.Clone()

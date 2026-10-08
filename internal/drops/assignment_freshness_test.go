@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log/slog"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -742,6 +743,22 @@ func (h *pauseOnMessage) logged(prefix string) bool {
 	return false
 }
 
+// refreshParkedOnLogMu reports whether some goroutine is inside
+// refreshAssignments and blocked acquiring a sync.Mutex past view building,
+// i.e. parked on the assignment serialization (logMu).
+func refreshParkedOnLogMu() bool {
+	buf := make([]byte, 1<<20)
+	n := runtime.Stack(buf, true)
+	for _, g := range strings.Split(string(buf[:n]), "\n\n") {
+		if strings.Contains(g, "(*DropsTracker).refreshAssignments") &&
+			strings.Contains(g, "sync.(*Mutex).Lock") &&
+			!strings.Contains(g, "buildBrokerViews") {
+			return true
+		}
+	}
+	return false
+}
+
 // waitForPause waits, bounded, until the pass running in the background
 // reaches h's pause point. A pass that finishes without reaching it, or never
 // reaches it, fails the test instead of hanging the package.
@@ -952,7 +969,8 @@ func TestFreshnessAlreadyCancelledStartsNothing(t *testing.T) {
 }
 
 // Cancellation while the pass waits for assignment serialization: the
-// admission re-check under logMu rejects it.
+// cancellation lands only once the refresh is parked on logMu, so only the
+// admission re-check UNDER that serialization can observe it.
 func TestFreshnessCancelledWhileWaitingForAdmission(t *testing.T) {
 	now := time.Now()
 	d, s, _ := continuitySetup(&now)
@@ -975,9 +993,22 @@ func TestFreshnessCancelledWhileWaitingForAdmission(t *testing.T) {
 	waitForPause(t, h, done) // the refresh started and is building its views
 	d.logMu.Lock()
 	close(h.release)
+	deadline := time.Now().Add(5 * time.Second)
+	for !refreshParkedOnLogMu() {
+		if time.Now().After(deadline) {
+			d.logMu.Unlock()
+			<-done
+			t.Fatal("the refresh never parked on the assignment serialization")
+		}
+		time.Sleep(time.Millisecond)
+	}
 	cancel()
 	d.logMu.Unlock()
-	<-done
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the pass did not finish after admission was released")
+	}
 
 	if !hasAssignment(s) {
 		t.Fatal("a pass cancelled before admission must not apply")
