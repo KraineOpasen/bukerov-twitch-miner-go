@@ -161,10 +161,13 @@ type DropsTracker struct {
 	campaigns []*models.Campaign
 
 	// brokerCampaigns is the atomically published, skip-ledger-filtered view of
-	// campaigns used by updateStreamerCampaigns. Discovery reads this view rather
-	// than d.campaigns so it cannot bypass a durable ghost-skip decision or perform
-	// its own ledger I/O. The slice is replaced (never reused) after the campaign
-	// revision fence; campaign objects are immutable published views.
+	// campaigns used by the assignment passes (updateStreamerCampaigns and the
+	// F-D2 refreshAssignments). Discovery reads this view rather than
+	// d.campaigns so it cannot bypass a durable ghost-skip decision or perform
+	// its own ledger I/O. The slice is replaced (never reused) after the
+	// assignment fences, and Generation advances on every replacement; a
+	// refresh whose views are semantically unchanged keeps the published slice
+	// and Generation. Campaign objects are immutable published views.
 	brokerCampaigns  []*models.Campaign
 	brokerGeneration uint64
 	brokerRevision   uint64
@@ -180,7 +183,10 @@ type DropsTracker struct {
 	// no-op (see skipledger.go's file-level doc comment). Set once at wiring
 	// time before the loops start, exactly like catalog; nil (or any read/
 	// write failure against it) is a permanent no-op that fails OPEN -- every
-	// candidate stays farmable, exactly as before this feature existed.
+	// candidate stays farmable, exactly as before this feature existed. The one
+	// exception is the F-D2 no-change refresh (refreshAssignments): a failed
+	// snapshot read there abandons that pass and keeps the previously published
+	// assignments instead of republishing them unfiltered.
 	skipLedger *SkipLedger
 
 	// rewardSkips is the operator's effective farming-exclusion decision
@@ -295,10 +301,11 @@ type DropsTracker struct {
 	// spammed into a request storm; guarded by mu.
 	lastManualSyncAt time.Time
 
-	// logMu guards the assignment/progress de-dup state below. Both the full
-	// campaign sync (loop) and the lightweight progress sync (progressLoop) call
-	// updateStreamerCampaigns from separate goroutines, so the maps it reads and
-	// rewrites must not be touched concurrently.
+	// logMu guards the assignment/progress de-dup state below and serializes
+	// every assignment pass. Both the full campaign sync (loop) and the
+	// lightweight progress sync (progressLoop) run assignment passes
+	// (updateStreamerCampaigns, refreshAssignments) from separate goroutines,
+	// so the maps they read and rewrite must not be touched concurrently.
 	logMu sync.Mutex
 	// loggedRestrictedAssignments remembers which channel-restricted assignments
 	// (keyed by streamer+campaign) have already been announced at INFO, so the
@@ -517,7 +524,7 @@ func (d *DropsTracker) Campaigns() []*models.Campaign {
 }
 
 // BrokerCampaigns returns a snapshot of the exact skip-ledger-filtered campaign
-// views most recently accepted by updateStreamerCampaigns' revision fence. It
+// views most recently accepted by an assignment pass's fences. It
 // performs no database or network I/O. The returned slice is independent of the
 // tracker's published slice; the immutable campaign objects are shared.
 func (d *DropsTracker) BrokerCampaigns() []*models.Campaign {
@@ -1010,7 +1017,7 @@ func (d *DropsTracker) progressLoop() {
 		case <-d.resync:
 			timer.Stop()
 		}
-		d.syncProgress()
+		d.syncProgressWithContext(ctx)
 	}
 }
 
@@ -1048,11 +1055,32 @@ func (d *DropsTracker) progressSyncInterval() time.Duration {
 // watched minute). It never discovers new campaigns or claims drops --
 // discovery, claiming, and blacklist/claim-history filtering stay with the full
 // sync.
+//
+// syncProgress runs one pass under the tracker's current lifecycle context
+// (nil before Start, e.g. a direct test seam). progressLoop instead passes the
+// context it captured at its own start, so a pass of an old loop generation
+// never borrows a replacement generation's live context.
 func (d *DropsTracker) syncProgress() {
+	d.mu.RLock()
+	ctx := d.ctx
+	d.mu.RUnlock()
+	d.syncProgressWithContext(ctx)
+}
+
+// syncProgressWithContext is syncProgress bound to the lifecycle context ctx
+// of the calling pass (nil means no lifecycle is attached). ctx gates only the
+// F-D2 assignment refresh below; the Inventory read, the observation
+// bookkeeping and the changed-progress publication keep their historical
+// behaviour.
+func (d *DropsTracker) syncProgressWithContext(ctx context.Context) {
 	d.mu.RLock()
 	existing := make([]*models.Campaign, len(d.campaigns))
 	copy(existing, d.campaigns)
 	capturedRevision := d.revision
+	// The assignment inputs are captured in the same critical section as the
+	// revision, so an admitted no-change observation re-evaluates exactly the
+	// pool (and broker generation) it was judged against.
+	assignment := d.captureAssignmentInputsLocked()
 	d.mu.RUnlock()
 
 	// Nothing tracked yet: the full sync hasn't populated the campaign pool, so
@@ -1071,6 +1099,13 @@ func (d *DropsTracker) syncProgress() {
 		// the health center and the progress watchdog can tell the two apart.
 		d.recordProgressSync(err)
 		slog.Debug("Drops progress sync failed: could not read inventory", "error", err)
+		// F-D2 (LS4): the failure supplies no campaign, availability or
+		// progress authority, but channel availability and the evaluator clock
+		// keep moving. Re-evaluate the CURRENT published pool under a fresh
+		// capture and its own fences -- never the pre-request snapshot, which a
+		// full sync may have superseded while the request was in flight, and
+		// never as if this failure had observed that pool.
+		d.refreshAssignments(ctx, d.currentAssignmentInputs())
 		return
 	}
 
@@ -1108,7 +1143,15 @@ func (d *DropsTracker) syncProgress() {
 		// this counts as a completed observation reporting zero progress — unless
 		// the pool this snapshot was captured against has since been superseded by
 		// a full sync (see publishProgressObservation).
-		d.publishProgressObservation(capturedRevision, nil, exact, unknown, authorityErr)
+		//
+		// F-D2: an admitted observation (LS2 explicit valid-empty array, or LS3
+		// missing/null/wrong-type list with its authority error preserved)
+		// published nothing, but assignment inputs may have moved; let the
+		// existing rules reconsider the unchanged pool. A rejected stale
+		// observation (LS5) runs no assignment pass.
+		if d.publishProgressObservation(capturedRevision, nil, exact, unknown, authorityErr) {
+			d.refreshAssignments(ctx, assignment)
+		}
 		return
 	}
 
@@ -1163,7 +1206,13 @@ func (d *DropsTracker) syncProgress() {
 		// The inventory read completed and nothing moved — "checked and
 		// unchanged" is exactly the observation the progress watchdog counts
 		// stalls with (again subject to the same staleness guard).
-		d.publishProgressObservation(capturedRevision, nil, exact, unknown, authorityErr)
+		//
+		// F-D2: unchanged progress (LS2, or LS3 when an exact-authority error
+		// was preserved) does not mean unchanged assignment inputs; reconsider
+		// the pool only once the observation itself was admitted.
+		if d.publishProgressObservation(capturedRevision, nil, exact, unknown, authorityErr) {
+			d.refreshAssignments(ctx, assignment)
+		}
 		return
 	}
 
@@ -1258,9 +1307,11 @@ func exactProgressFromInventory(inProgress []interface{}) (map[progressTuple]int
 
 // progressDiffers reports whether the drop set, watched-minute progress, or
 // HasPreconditionsMet state changed between the pre- and post-refresh campaign,
-// so syncProgress only republishes -- and re-points streamers -- when one of
-// those fields actually moved. Compared by drop ID so it is independent of
-// ordering or of drops ClearClaimedDrops removed on the refreshed copy.
+// so syncProgress only republishes the pool -- and runs the historical
+// re-point -- when one of those fields actually moved; an unchanged result is
+// handled by the assignment refresh (refreshAssignments) instead. Compared by
+// drop ID so it is independent of ordering or of drops ClearClaimedDrops
+// removed on the refreshed copy.
 // HasPreconditionsMet is compared semantically as a tri-state: nil, explicit
 // false, and explicit true are distinct, while equal values remain equal even
 // when their pointers differ.
@@ -1583,7 +1634,11 @@ func (d *DropsTracker) syncCampaignsLocked() {
 	d.recordSync(dashboardCount, recovered, len(campaigns), filteredByBlacklist, filteredByGame, listingUnavailable, time.Since(start), nil)
 
 	// An unpublished pool (unavailable listing, no fresh evidence) left the
-	// campaign set untouched, so streamer assignments are already current.
+	// campaign set untouched, so this sync does not re-point. Any assignment
+	// input that moved meanwhile -- availability, grace, windows, or skip-ledger
+	// evidence this sync's claim sweep or inventory observation recorded -- is
+	// picked up by the next light-sync assignment refresh (refreshAssignments)
+	// or the next publishing sync.
 	if publishPool {
 		d.updateStreamerCampaigns()
 	}
@@ -2810,6 +2865,12 @@ func availabilityLabel(a eligibility.Availability) string {
 	}
 }
 
+// updateStreamerCampaigns is the historical assignment owner run after every
+// full-sync and changed light-sync publication (LS1). Its behaviour is
+// unchanged by F-D2: it always republishes the broker views (advancing their
+// Generation), re-points every confirmed-online streamer, and fails OPEN on a
+// failed skip-ledger read. The F-D2 no-change refresh (refreshAssignments)
+// shares its view-building and per-streamer evaluation.
 func (d *DropsTracker) updateStreamerCampaigns() {
 	// Snapshot the streamer list together with the campaigns: it can be
 	// replaced at runtime by UpdateStreamers, and this runs on both sync
@@ -2839,30 +2900,7 @@ func (d *DropsTracker) updateStreamerCampaigns() {
 	// value is immutable), mirroring the skip-ledger snapshot above.
 	skips := d.currentRewardSkips()
 
-	// Build each campaign's broker-facing view ONCE per sync (not once per
-	// streamer below): brokerView depends only on the campaign + snapshot,
-	// never on which streamer is being evaluated, so computing it here avoids
-	// len(streamers) * len(campaigns) redundant clones. d.campaigns, the
-	// catalog, and every published *models.Campaign stay untouched -- only
-	// these views (Campaign.Clone() when a ledger is wired) are filtered
-	// (INVARIANT 11). A campaign whose broker-facing CURRENT drop carries an
-	// operator Skip rule is withheld from assignment entirely, so it never
-	// becomes a farming target on any streamer and a stale assignment is
-	// cleared by the same SetCampaigns pass that maintains the others; the
-	// tracked pool itself stays unfiltered (the reward stays observable).
-	views := make([]*models.Campaign, 0, len(campaigns))
-	for _, campaign := range campaigns {
-		view := brokerView(campaign, snap)
-		if len(view.Drops) == 0 {
-			continue
-		}
-		if drop := view.CurrentDrop(); drop != nil && skips.SkipsReward(campaignGameID(view), drop.Name) {
-			slog.Debug("Drop campaign not assigned: reward skipped by operator rule",
-				"campaign", view.Name, "campaignID", view.ID, "drop", drop.Name)
-			continue
-		}
-		views = append(views, view)
-	}
+	views := buildBrokerViews(campaigns, snap, skips)
 
 	// All assignment/progress logging shares the de-dup maps below, so serialize
 	// it against a concurrent updateStreamerCampaigns from the other sync
@@ -2883,18 +2921,282 @@ func (d *DropsTracker) updateStreamerCampaigns() {
 			"capturedRevision", capturedRevision, "currentRevision", currentRevision)
 		return
 	}
-	// Publish the exact views this accepted assignment pass will use. Allocate a
-	// fresh slice so readers holding an older BrokerCampaigns result can never see
-	// its elements rewritten by a later pass. This happens under the revision
-	// check's same lock, making the view and its source revision one atomic fact.
+	// Publish the exact views this accepted assignment pass will use. This
+	// happens under the revision check's same lock, making the view and its
+	// source revision one atomic fact.
+	d.publishBrokerViewsLocked(views, capturedRevision)
+	d.mu.Unlock()
+
+	d.assignStreamersLocked(streamers, campaigns, views, false)
+}
+
+// buildBrokerViews builds each campaign's broker-facing view ONCE per pass (not
+// once per streamer): brokerView depends only on the campaign + snapshot,
+// never on which streamer is being evaluated, so computing it here avoids
+// len(streamers) * len(campaigns) redundant clones. campaigns, the catalog, and
+// every published *models.Campaign stay untouched -- only these views
+// (Campaign.Clone() when a snapshot is loaded) are filtered (INVARIANT 11). A
+// campaign whose broker-facing CURRENT drop carries an operator Skip rule is
+// withheld from assignment entirely, so it never becomes a farming target on
+// any streamer and a stale assignment is cleared by the same SetCampaigns pass
+// that maintains the others; the tracked pool itself stays unfiltered (the
+// reward stays observable). It performs no I/O and takes no lock.
+func buildBrokerViews(campaigns []*models.Campaign, snap *skipSnapshot, skips *models.RewardSkips) []*models.Campaign {
+	views := make([]*models.Campaign, 0, len(campaigns))
+	for _, campaign := range campaigns {
+		view := brokerView(campaign, snap)
+		if len(view.Drops) == 0 {
+			continue
+		}
+		if drop := view.CurrentDrop(); drop != nil && skips.SkipsReward(campaignGameID(view), drop.Name) {
+			slog.Debug("Drop campaign not assigned: reward skipped by operator rule",
+				"campaign", view.Name, "campaignID", view.ID, "drop", drop.Name)
+			continue
+		}
+		views = append(views, view)
+	}
+	return views
+}
+
+// publishBrokerViewsLocked publishes views as the broker-facing campaigns of
+// pool revision, advancing the publication Generation (never to zero).
+// Allocate a fresh slice so readers holding an older snapshot can never see
+// its elements rewritten by a later pass. Callers hold logMu and d.mu (write)
+// and have passed their own fences.
+func (d *DropsTracker) publishBrokerViewsLocked(views []*models.Campaign, revision uint64) {
 	d.brokerCampaigns = append([]*models.Campaign(nil), views...)
-	d.brokerRevision = capturedRevision
+	d.brokerRevision = revision
 	d.brokerGeneration++
 	if d.brokerGeneration == 0 {
 		d.brokerGeneration++
 	}
+}
+
+// assignmentInputs is one coherent capture, taken under d.mu, of the inputs an
+// F-D2 assignment refresh evaluates besides live per-streamer state: the
+// published pool and its revision, the broker-view Generation the refresh may
+// replace, the roster, and the operator's (immutable) farming exclusions.
+// Channel availability, the previous assignment and the evaluator clock are
+// read live under logMu, exactly as in updateStreamerCampaigns.
+type assignmentInputs struct {
+	campaigns  []*models.Campaign
+	streamers  []*models.Streamer
+	revision   uint64
+	generation uint64
+	skips      *models.RewardSkips
+}
+
+// captureAssignmentInputsLocked snapshots assignmentInputs. Caller holds d.mu
+// (read or write).
+func (d *DropsTracker) captureAssignmentInputsLocked() assignmentInputs {
+	return assignmentInputs{
+		campaigns:  d.campaigns,
+		streamers:  d.streamers,
+		revision:   d.revision,
+		generation: d.brokerGeneration,
+		skips:      d.rewardSkips,
+	}
+}
+
+func (d *DropsTracker) currentAssignmentInputs() assignmentInputs {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	return d.captureAssignmentInputsLocked()
+}
+
+// lifecycleCancelled reports whether ctx belongs to a cancelled lifecycle. A
+// nil ctx (no lifecycle attached, e.g. a direct test seam) is never cancelled.
+func lifecycleCancelled(ctx context.Context) bool {
+	return ctx != nil && ctx.Err() != nil
+}
+
+// refreshAssignments is the F-D2 assignment-freshness pass. It runs after a
+// light sync that published no changed tracked state: an admitted unchanged or
+// explicitly valid-empty observation (LS2), an admitted observation carrying
+// an exact-authority error (LS3), or an Inventory acquisition failure (LS4).
+// Independent channel availability, the UNKNOWN continuity grace, and the
+// evaluator clock against campaign/reward windows all change without watched
+// minutes changing, so the existing eligibility/continuity rules are re-applied
+// to the already-tracked pool in. The Inventory result is never used as data:
+// no campaign is discovered, no progress is backfilled, and nothing infers
+// Known-empty availability. Known+Yes may therefore retain, create or reinstate
+// an assignment for an already-tracked eligible campaign, Known+No or an
+// expired window removes it, and UNKNOWN only retains within the bounded grace.
+//
+// It differs from updateStreamerCampaigns in four bounded ways:
+//
+//   - HOLD_NEW_PASS: an unusable WIRED skip-ledger snapshot (failed, cancelled
+//     or timed out) abandons this pass entirely -- previous broker views
+//     (pointers and Generation) and assignments stay as published until a
+//     later pass loads a usable snapshot. A nil (not wired) ledger is not a
+//     failed read and keeps its fail-open no-filter behaviour.
+//   - No churn: when the views are semantically identical to the published
+//     views of the same pool revision, the published views (and Generation) are
+//     kept, and a streamer whose evaluated assignment is element-for-element
+//     identical to its current one is not re-set.
+//   - Fences: besides the revision fence, the broker Generation captured with
+//     in must be unchanged under logMu, so this pass never overwrites a
+//     publication made after its inputs were captured (progress Revision alone
+//     does not order skip or broker-view changes).
+//   - Cancellation: nothing starts (no ledger read) when ctx is already
+//     cancelled; a cancellation during the ledger read abandons that read
+//     (it is bounded by ctx); and the admission re-checks ctx under logMu
+//     and d.mu, after the ledger read and both lock waits, together with the
+//     fences. Cancellation observed at or before that admission adds no
+//     broker publication or SetCampaigns; a pass already admitted completes
+//     its in-memory re-point (no I/O follows admission).
+//
+// It runs at most once per light sync, i.e. on the progress-sync cadence plus
+// on-demand triggers (watched-minute reports and the progress watchdog), and
+// adds one skip-ledger Snapshot read per pass when a ledger is wired. It never
+// retries and starts no goroutine or timer.
+func (d *DropsTracker) refreshAssignments(ctx context.Context, in assignmentInputs) {
+	if lifecycleCancelled(ctx) {
+		slog.Debug("Drops assignment refresh not started: tracker lifecycle cancelled")
+		return
+	}
+
+	var snap *skipSnapshot
+	if d.skipLedger != nil {
+		base := ctx
+		if base == nil {
+			base = context.Background()
+		}
+		ledgerCtx, cancel := context.WithTimeout(base, skipLedgerOpTimeout)
+		s, err := d.skipLedger.Snapshot(ledgerCtx)
+		cancel()
+		if err != nil {
+			if lifecycleCancelled(ctx) {
+				slog.Debug("Drops assignment refresh abandoned: tracker lifecycle cancelled during skip ledger read")
+				return
+			}
+			slog.Warn("Drops assignment refresh deferred: skip ledger snapshot unavailable; keeping current assignments until a later pass",
+				"error", err)
+			return
+		}
+		snap = s
+	}
+
+	views := buildBrokerViews(in.campaigns, snap, in.skips)
+
+	d.logMu.Lock()
+	defer d.logMu.Unlock()
+
+	// Admission: after every blocking step of this pass (ledger read, logMu
+	// and d.mu waits), cancellation and the Revision+Generation fence are
+	// judged together under both locks, immediately before publication.
+	d.mu.Lock()
+	if lifecycleCancelled(ctx) {
+		d.mu.Unlock()
+		slog.Debug("Drops assignment refresh abandoned: tracker lifecycle cancelled before admission")
+		return
+	}
+	if d.revision != in.revision || d.brokerGeneration != in.generation {
+		currentRevision, currentGeneration := d.revision, d.brokerGeneration
+		d.mu.Unlock()
+		slog.Debug("Drops assignment refresh: discarding stale pass; a newer publication landed",
+			"capturedRevision", in.revision, "currentRevision", currentRevision,
+			"capturedGeneration", in.generation, "currentGeneration", currentGeneration)
+		return
+	}
+	if d.brokerRevision == in.revision && sameBrokerViews(d.brokerCampaigns, views, in.campaigns) {
+		// Semantically unchanged: keep evaluating against the published
+		// objects so unchanged streamer assignments compare pointer-equal.
+		views = d.brokerCampaigns
+	} else {
+		d.publishBrokerViewsLocked(views, in.revision)
+	}
 	d.mu.Unlock()
 
+	d.assignStreamersLocked(in.streamers, in.campaigns, views, true)
+}
+
+// sameBrokerViews reports whether fresh broker views, built from pool (the
+// very pool revision the published views were built from), are semantically
+// identical to published. Under that precondition both sides derive from the
+// SAME immutable source campaign objects, and brokerView plus the Skip filter
+// vary only which campaigns are kept and which of each campaign's drops
+// survive; every other field is copied from the shared source. Equality
+// therefore requires the same campaigns at the same positions with the same
+// surviving drops in the same order. A campaign ID or drop ID that is not
+// unique in the pool cannot be matched unambiguously and counts as changed.
+func sameBrokerViews(published, fresh, pool []*models.Campaign) bool {
+	if len(published) != len(fresh) {
+		return false
+	}
+	sources := make(map[string]*models.Campaign, len(pool))
+	for _, campaign := range pool {
+		if campaign == nil {
+			return false
+		}
+		if _, duplicate := sources[campaign.ID]; duplicate {
+			return false
+		}
+		sources[campaign.ID] = campaign
+	}
+	for i, view := range fresh {
+		prev := published[i]
+		if prev == view {
+			continue
+		}
+		if prev == nil || view == nil || prev.ID != view.ID {
+			return false
+		}
+		source, ok := sources[view.ID]
+		if !ok || !uniqueDropIDs(source.Drops) || !sameDropIDs(prev.Drops, view.Drops) {
+			return false
+		}
+	}
+	return true
+}
+
+func uniqueDropIDs(drops []*models.Drop) bool {
+	seen := make(map[string]struct{}, len(drops))
+	for _, drop := range drops {
+		if drop == nil {
+			return false
+		}
+		if _, duplicate := seen[drop.ID]; duplicate {
+			return false
+		}
+		seen[drop.ID] = struct{}{}
+	}
+	return true
+}
+
+func sameDropIDs(a, b []*models.Drop) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] == nil || b[i] == nil || a[i].ID != b[i].ID {
+			return false
+		}
+	}
+	return true
+}
+
+func sameCampaignPointers(a, b []*models.Campaign) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// assignStreamersLocked re-points every confirmed-online, drops-enabled
+// streamer at its eligible subset of views and maintains the assignment/
+// progress log de-dup state. Callers hold logMu and have already accepted (and,
+// where applicable, published) views for campaigns. When keepUnchanged is true
+// (the F-D2 refresh) a streamer whose evaluated assignment is
+// element-for-element identical to its current one is not re-set; the log
+// de-dup state is still rebuilt from the full evaluation, exactly as for the
+// historical pass.
+func (d *DropsTracker) assignStreamersLocked(streamers []*models.Streamer, campaigns, views []*models.Campaign, keepUnchanged bool) {
 	if d.loggedRestrictedAssignments == nil {
 		d.loggedRestrictedAssignments = make(map[string]struct{})
 	}
@@ -2937,8 +3239,9 @@ func (d *DropsTracker) updateStreamerCampaigns() {
 		// eligible assignment but must never create a NEW one (a stale ID is never
 		// silently promoted to a fresh authoritative Yes), and only until the
 		// continuity grace expires.
+		current := streamer.Stream.GetCampaigns()
 		prevAssigned := make(map[string]struct{})
-		for _, c := range streamer.Stream.GetCampaigns() {
+		for _, c := range current {
 			prevAssigned[c.ID] = struct{}{}
 		}
 		availSnap, unknownGraceExpired := streamer.Stream.CampaignAvailabilitySnapshotAt(ev.Clock.Now())
@@ -2991,6 +3294,9 @@ func (d *DropsTracker) updateStreamerCampaigns() {
 			}
 		}
 
+		if keepUnchanged && sameCampaignPointers(current, streamerCampaigns) {
+			continue
+		}
 		streamer.Stream.SetCampaigns(streamerCampaigns)
 	}
 

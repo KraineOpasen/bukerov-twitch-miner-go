@@ -1130,14 +1130,22 @@ Drop
        accept / E2 already-claimed — see "Drop Skip Ledger" below)
 
 5. Broker-Facing Assignment (updateStreamerCampaigns — every full AND
-   lightweight sync that publishes; a sync that leaves the published pool
-   untouched — an UNKNOWN dashboard listing with no fresh inventory evidence,
-   or a no-change light sync — skips it, since assignments are already
-   current)
+   lightweight sync that publishes; a full sync that leaves the published
+   pool untouched — an UNKNOWN dashboard listing with no fresh inventory
+   evidence — skips it, because it publishes no pool change; any assignment
+   input that moved meanwhile, including skip-ledger evidence that sync's
+   own claim sweep or inventory observation recorded, is picked up by the
+   next light-sync assignment refresh (or the next publishing sync). A
+   lightweight sync that publishes no change instead runs the bounded
+   assignment refresh (refreshAssignments) — see "Assignment refresh after
+   a no-change light sync" — because channel availability, the UNKNOWN
+   continuity grace and campaign/reward windows move without watched
+   minutes)
    └── Filter each campaign's drops against the skip ledger (Decide) before a
        streamer may be assigned it, on a CLONE only — the tracked pool itself
        (Campaigns(), the catalog, every published Campaign) always stays the
-       unfiltered set
+       unfiltered set (the refresh publishes nothing when a wired ledger
+       snapshot is unusable; updateStreamerCampaigns keeps failing open)
 ```
 
 ### Full campaign-discovery scheduling
@@ -1177,9 +1185,13 @@ Progress sync (dropProgressSyncInterval, or on demand)
    │   clone it, refresh currentMinutesWatched and, when explicitly reported as
    │   Boolean, hasPreconditionsMet from the inventory `self` data; drop
    │   claimed/out-of-window drops
-   └── Republish the campaign pool (fresh objects, swapped under lock so the
-       Drops page and directory discovery keep reading immutable published
-       campaigns) only when tracked publication state changed semantically
+   ├── Republish the campaign pool (fresh objects, swapped under lock so the
+   │   Drops page and directory discovery keep reading immutable published
+   │   campaigns) only when tracked publication state changed semantically,
+   │   then re-point streamers (updateStreamerCampaigns)
+   └── Otherwise re-evaluate broker-facing assignments of the unchanged pool
+       (assignment refresh — see "Assignment refresh after a no-change light
+       sync"); the pool, Revision and UpdateSource are not republished
 ```
 
 It never discovers new campaigns, claims Drops, or owns the full-sync campaign
@@ -1239,6 +1251,94 @@ current by then. Progress can legitimately decrease after a valid Twitch
 observation (no local monotonic-max rule), and this guard does not change
 that — it only ensures a response is judged against the pool it was actually
 taken from.
+
+#### Assignment refresh after a no-change light sync
+
+Assignment inputs change without watched minutes changing: independent
+channel availability can become authoritative Known+No (including Known
+with an empty list), an UNKNOWN availability can reach
+`models.CampaignAvailabilityGrace`, and the evaluator clock can pass a
+campaign deadline or a reward window (for example a campaign-only deadline
+over date-less inventory rewards). A light sync that publishes no changed
+tracked state therefore still lets the assignment owner reconsider the
+already-tracked pool (`refreshAssignments`), applying the ordinary
+eligibility and continuity rules of `updateStreamerCampaigns` unchanged:
+
+| Row | Light-sync outcome | Assignment behaviour |
+|---|---|---|
+| LS0 | No tracked campaigns | No `Inventory` call and no assignment work. |
+| LS1 | Accepted changed tracked state | Historical publication and `updateStreamerCampaigns` re-point, unchanged. |
+| LS2 | Admitted no-change observation with usable exact authority (unchanged list, campaign absent, explicit valid-empty array) | Refresh of the pool and broker Generation captured together with the observation's `Revision`. |
+| LS3 | Admitted no-change observation carrying an exact-authority error (missing, null or wrong-type list, unusable entries, partial GraphQL data) | The same refresh; the successful-acquisition versus authority-error bookkeeping is unchanged. |
+| LS4 | `Inventory` acquisition failure, GraphQL/transport error, or nil response | `recordProgressSync(err)` unchanged, then a refresh of the CURRENT published pool under a fresh capture. |
+| LS5 | Successful observation rejected by the captured-revision guard | Nothing recorded and no refresh. |
+| LS6 | Lifecycle cancellation observed at a refresh boundary | Cancelled before it starts: no ledger read. Cancelled during its ledger read: that read is abandoned. Cancelled at or before admission: no broker publication or `SetCampaigns`. |
+| LS7 | Wired skip-ledger snapshot unusable (failed, cancelled or timed out) | HOLD: the refresh is abandoned and the published broker views (pointers and Generation) and assignments stay as they are; observation bookkeeping is unaffected. |
+
+- **Existing rules, never Inventory data** (owner decision
+  NORMAL_EXISTING_RULES). The refresh never discovers a campaign, backfills
+  progress, infers Known-empty availability, or turns an error into a
+  success. Independent Known+Yes may retain, create or reinstate an
+  assignment for an already-tracked eligible campaign; Known+No or an
+  expired/infeasible window removes it; UNKNOWN never creates one and only
+  retains it within the bounded grace measured from the first UNKNOWN.
+  Offline and unknown-liveness streamers keep their assignment untouched.
+- **HOLD only for the refresh** (owner decision HOLD_NEW_PASS). A nil (never
+  wired) ledger is not a failed read and keeps its no-filter behaviour.
+  `updateStreamerCampaigns` (full sync and LS1) keeps failing open on a
+  failed ledger read. A held refresh is logged at WARN, distinctly from an
+  `Inventory` failure, and does not count as a completed freshness pass.
+- **No churn.** When the freshly built broker views are semantically
+  identical to the views published for the same pool `Revision` (the same
+  campaigns with the same surviving drops), the published views and their
+  Generation are kept, and a streamer whose evaluated assignment is
+  element-for-element identical to its current one is not re-set. A real
+  change publishes through the same owner: new broker views advance
+  Generation (with `SourceRevision` equal to the current `Revision`), and
+  changed assignments are re-set. The refresh never touches the campaign
+  pool, `Revision`, `BackendUpdatedAt`, `UpdateSource` or any progress
+  observation.
+- **Fences.** The refresh is serialized with every re-point pass and is
+  admitted only while both the campaign `Revision` and the broker Generation
+  it captured are still current, so a same-`Revision` publication made after
+  its inputs were captured (a full-sync re-point applying a new Skip rule, or
+  a newer refresh) is never overwritten. The LS4 refresh captures the pool
+  only after the failed read, so a full sync that landed meanwhile is
+  re-evaluated without being reported as observed. The historical re-point
+  (`updateStreamerCampaigns`) keeps its revision-only fence and reads its
+  ledger snapshot before taking the serialization, so it can still publish
+  after — and replace — a newer same-`Revision` refresh publication built
+  from a newer snapshot or Skip set. Its result is exactly what would be
+  published without the refresh (never staler) and lasts until the next
+  admitted refresh, about one light-sync interval later, or, while
+  refreshes are held by an unusable ledger, until the ledger recovers or the
+  next historical pass.
+- **Cancellation.** The refresh is bound to the lifecycle context of its own
+  light-sync pass, never a replacement generation's. If that context is
+  already cancelled the refresh starts nothing, so no ledger read happens; a
+  cancellation during the ledger read abandons that read, which is bounded
+  by the same context. At admission — under the assignment serialization
+  and the tracker state lock, after the ledger read and both lock waits,
+  together with the `Revision`/Generation fence — the context is checked
+  again, and cancellation observed at or before admission adds no broker
+  publication or `SetCampaigns`. An admitted refresh completes its
+  in-memory re-point (no I/O follows admission). The `Inventory` read, the
+  observation bookkeeping and LS1 are unchanged.
+- **Cost.** At most one refresh per light sync — the
+  `dropProgressSyncInterval` cadence plus on-demand triggers (watched-minute
+  reports and the progress watchdog's recovery and provisional-lease
+  triggers) — with one skip-ledger `Snapshot` read per refresh when a
+  ledger is wired. No retry,
+  forced full sync, timer, goroutine or scheduler is added.
+
+Freshness limit: an assignment invalidated by availability, the UNKNOWN
+grace or a deadline is removed by the next LS2/LS3/LS4 refresh that is
+admitted (not stale, not cancelled) and, when a ledger is wired, reads a
+usable snapshot. A held, cancelled, stale or blocked pass is not such a
+pass, so there is no hard freshness bound: with healthy reads the delay is
+about one light-sync interval (2 minutes by default), and a later
+successful full sync also re-points. Neither cadence is a guaranteed upper
+bound while requests fail or block.
 
 ### Dashboard-listing authority (explicit null is UNKNOWN, never authoritative zero)
 
