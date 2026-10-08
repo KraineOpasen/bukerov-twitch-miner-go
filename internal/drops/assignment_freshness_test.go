@@ -754,15 +754,29 @@ func (h *pauseOnMessage) logged(prefix string) bool {
 }
 
 // refreshParkedOnLogMu reports whether some goroutine is inside
-// refreshAssignments and blocked acquiring a sync.Mutex past view building,
-// i.e. parked on the assignment serialization (logMu).
+// refreshAssignments and blocked acquiring a plain sync.Mutex past view
+// building, i.e. parked on the assignment serialization (logMu).
 func refreshParkedOnLogMu() bool {
+	return refreshParkedOn(func(g string) bool {
+		return strings.Contains(g, "sync.(*Mutex).Lock") && !strings.Contains(g, "sync.(*RWMutex).Lock")
+	})
+}
+
+// refreshParkedOnStateLock reports whether some goroutine is inside
+// refreshAssignments and blocked acquiring the tracker state lock (d.mu, a
+// sync.RWMutex) past view building.
+func refreshParkedOnStateLock() bool {
+	return refreshParkedOn(func(g string) bool {
+		return strings.Contains(g, "sync.(*RWMutex).Lock")
+	})
+}
+
+func refreshParkedOn(blockedOn func(goroutine string) bool) bool {
 	buf := make([]byte, 1<<20)
 	n := runtime.Stack(buf, true)
 	for _, g := range strings.Split(string(buf[:n]), "\n\n") {
 		if strings.Contains(g, "(*DropsTracker).refreshAssignments") &&
-			strings.Contains(g, "sync.(*Mutex).Lock") &&
-			!strings.Contains(g, "buildBrokerViews") {
+			!strings.Contains(g, "buildBrokerViews") && blockedOn(g) {
 			return true
 		}
 	}
@@ -1085,6 +1099,53 @@ func TestFreshnessCancelledWhileWaitingForAdmission(t *testing.T) {
 	}
 	if g := d.BrokerCampaignSnapshot().Generation; g != generation {
 		t.Fatalf("a pass cancelled before admission must not publish: %d -> %d", generation, g)
+	}
+	if !h.logged(logRefreshCancelledAdmit) {
+		t.Fatalf("expected the admission-boundary cancellation, got %v", h.records)
+	}
+}
+
+// Cancellation while the refresh, already holding the assignment
+// serialization, waits for the tracker state lock (d.mu): admission judges
+// cancellation under d.mu together with the fences, so the pass is still
+// rejected before any broker publication or SetCampaigns.
+func TestFreshnessCancelledWhileWaitingForStateLock(t *testing.T) {
+	d, s, _, generation := cancellationFixture(t, false)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	setLifecycle(d, ctx)
+	h := installPauseOnMessage(t, logOperatorSkipWithheld)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		d.syncProgress()
+	}()
+	waitForPause(t, h, done) // capture and observation are done; building views
+	d.mu.Lock()
+	close(h.release)
+	deadline := time.Now().Add(5 * time.Second)
+	for !refreshParkedOnStateLock() {
+		if time.Now().After(deadline) {
+			d.mu.Unlock()
+			<-done
+			t.Fatal("the refresh never parked on the tracker state lock")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	cancel()
+	d.mu.Unlock()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the pass did not finish after the state lock was released")
+	}
+
+	if !hasAssignment(s) {
+		t.Fatal("a pass cancelled while waiting for the state lock must not apply")
+	}
+	if g := d.BrokerCampaignSnapshot().Generation; g != generation {
+		t.Fatalf("a pass cancelled while waiting for the state lock must not publish: %d -> %d", generation, g)
 	}
 	if !h.logged(logRefreshCancelledAdmit) {
 		t.Fatalf("expected the admission-boundary cancellation, got %v", h.records)

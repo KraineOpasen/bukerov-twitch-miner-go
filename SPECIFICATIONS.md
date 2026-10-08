@@ -1304,10 +1304,11 @@ eligibility and continuity rules of `updateStreamerCampaigns` unchanged:
   re-evaluated without being reported as observed.
 - **Cancellation.** The refresh is bound to the lifecycle context of its own
   light-sync pass, never a replacement generation's. It starts nothing when
-  that context is already cancelled, and re-checks it under the assignment
-  serialization after the ledger read and the lock wait; cancellation
-  observed at or before that admission adds no ledger read, broker
-  publication or `SetCampaigns`. An admitted refresh completes its in-memory
+  that context is already cancelled, and re-checks it at admission — under
+  the assignment serialization and the tracker state lock, after the ledger
+  read and both lock waits, together with the `Revision`/Generation fence;
+  cancellation observed at or before that admission adds no ledger read,
+  broker publication or `SetCampaigns`. An admitted refresh completes its in-memory
   re-point (no I/O follows admission). The `Inventory` read, the observation
   bookkeeping and LS1 are unchanged.
 - **Cost.** At most one refresh per light sync — the

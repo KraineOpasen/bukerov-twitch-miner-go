@@ -3033,10 +3033,11 @@ func lifecycleCancelled(ctx context.Context) bool {
 //     publication made after its inputs were captured (progress Revision alone
 //     does not order skip or broker-view changes).
 //   - Cancellation: nothing starts when ctx is already cancelled, and the
-//     admission under logMu re-checks it after the ledger read and the logMu
-//     wait. Cancellation observed at or before that admission adds no ledger
-//     read, broker publication or SetCampaigns; a pass already admitted
-//     completes its in-memory re-point (no I/O follows admission).
+//     admission re-checks it under logMu and d.mu, after the ledger read and
+//     both lock waits, together with the fences. Cancellation observed at or
+//     before that admission adds no ledger read, broker publication or
+//     SetCampaigns; a pass already admitted completes its in-memory re-point
+//     (no I/O follows admission).
 //
 // It runs at most once per light sync, i.e. on the progress-sync cadence plus
 // watched-minute triggers, and adds one skip-ledger Snapshot read per pass
@@ -3073,12 +3074,15 @@ func (d *DropsTracker) refreshAssignments(ctx context.Context, in assignmentInpu
 	d.logMu.Lock()
 	defer d.logMu.Unlock()
 
+	// Admission: after every blocking step of this pass (ledger read, logMu
+	// and d.mu waits), cancellation and the Revision+Generation fence are
+	// judged together under both locks, immediately before publication.
+	d.mu.Lock()
 	if lifecycleCancelled(ctx) {
+		d.mu.Unlock()
 		slog.Debug("Drops assignment refresh abandoned: tracker lifecycle cancelled before admission")
 		return
 	}
-
-	d.mu.Lock()
 	if d.revision != in.revision || d.brokerGeneration != in.generation {
 		currentRevision, currentGeneration := d.revision, d.brokerGeneration
 		d.mu.Unlock()
