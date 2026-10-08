@@ -639,14 +639,14 @@ func TestFreshnessStaleObservationRunsNoAssignmentPass(t *testing.T) {
 		{"list-null", inventoryWithRawList(nil, true)}, // empty-list call site, authority error
 	}
 	for _, resp := range responses {
-		for _, mode := range []string{"no-ledger", "failed-wired-ledger"} {
+		for _, mode := range []string{"no-ledger", "failed-wired-ledger", "held-wired-ledger"} {
 			t.Run(resp.name+"/"+mode, func(t *testing.T) {
 				now := time.Now()
 				d, s, _ := continuitySetup(&now)
 				client := &fakeDropsClient{}
 				d.client = client
 				var db *database.DB
-				if mode == "failed-wired-ledger" {
+				if mode != "no-ledger" {
 					var ledger *SkipLedger
 					ledger, db = openFreshnessLedger(t)
 					d.skipLedger = ledger
@@ -654,10 +654,21 @@ func TestFreshnessStaleObservationRunsNoAssignmentPass(t *testing.T) {
 				setAvailability(s, true, []string{"camp-1"}, now)
 				d.updateStreamerCampaigns()
 				generation := d.BrokerCampaignSnapshot().Generation
-				if db != nil {
+				var waits int64
+				switch mode {
+				case "failed-wired-ledger":
 					if err := db.Close(); err != nil {
 						t.Fatalf("close ledger db: %v", err)
 					}
+				case "held-wired-ledger":
+					// Any ledger read would now wait for the only connection
+					// (and time out quickly), which db.Stats().WaitCount records
+					// independently of any log text.
+					prevTimeout := skipLedgerOpTimeout
+					skipLedgerOpTimeout = 200 * time.Millisecond
+					t.Cleanup(func() { skipLedgerOpTimeout = prevTimeout })
+					t.Cleanup(holdLedgerConnection(t, db))
+					waits = db.Stats().WaitCount
 				}
 				h := installPauseOnMessage(t, "")
 
@@ -690,6 +701,9 @@ func TestFreshnessStaleObservationRunsNoAssignmentPass(t *testing.T) {
 				}
 				if !hasAssignment(s) {
 					t.Fatal("a rejected stale observation must not re-point streamers")
+				}
+				if mode == "held-wired-ledger" && db.Stats().WaitCount != waits {
+					t.Fatalf("a rejected stale observation must not read the ledger: WaitCount %d -> %d", waits, db.Stats().WaitCount)
 				}
 				if h.loggedContaining("Drops assignment refresh") {
 					t.Fatalf("a rejected stale observation must not enter the assignment refresh, got %v", h.records)
@@ -1012,6 +1026,7 @@ func TestFreshnessCancellationFixturePublishesWhenLive(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			d, s, _, generation := cancellationFixture(t, withLedger)
 			setLifecycle(d, context.Background())
+			tracked := d.SyncStatus()
 
 			d.syncProgress()
 
@@ -1026,6 +1041,12 @@ func TestFreshnessCancellationFixturePublishesWhenLive(t *testing.T) {
 			}
 			if hasAssignment(s) {
 				t.Fatal("control: a live refresh must clear the assignment")
+			}
+			// Even a publishing refresh never republishes the tracked pool.
+			if st := d.SyncStatus(); st.Revision != tracked.Revision || st.UpdateSource != tracked.UpdateSource ||
+				!st.BackendUpdatedAt.Equal(tracked.BackendUpdatedAt) {
+				t.Fatalf("a publishing refresh must leave Revision/UpdateSource/BackendUpdatedAt untouched: before=%v/%q/%v after=%v/%q/%v",
+					tracked.Revision, tracked.UpdateSource, tracked.BackendUpdatedAt, st.Revision, st.UpdateSource, st.BackendUpdatedAt)
 			}
 		})
 	}
@@ -1149,6 +1170,106 @@ func TestFreshnessCancelledWhileWaitingForStateLock(t *testing.T) {
 	}
 	if !h.logged(logRefreshCancelledAdmit) {
 		t.Fatalf("expected the admission-boundary cancellation, got %v", h.records)
+	}
+}
+
+// The no-churn decision is made per streamer: with two confirmed-online
+// streamers, an unchanged one is not re-set while an invalidated one is
+// cleared in the same refresh, whatever their roster order.
+func TestFreshnessPerStreamerNoChurnAndRemoval(t *testing.T) {
+	for _, unchangedFirst := range []bool{true, false} {
+		name := "invalidated-first"
+		if unchangedFirst {
+			name = "unchanged-first"
+		}
+		t.Run(name, func(t *testing.T) {
+			now := time.Now()
+			d, kept, _ := continuitySetup(&now)
+			cleared := models.NewStreamer("streamer-b", models.StreamerSettings{ClaimDrops: true})
+			cleared.ChannelID = "chan-2"
+			cleared.SetConfirmedOnline()
+			cleared.Stream.Game = &models.Game{ID: "g1", Name: "Game"}
+			if unchangedFirst {
+				d.streamers = []*models.Streamer{kept, cleared}
+			} else {
+				d.streamers = []*models.Streamer{cleared, kept}
+			}
+			d.client = clientFor(freshnessResponses()[0])
+			setAvailability(kept, true, []string{"camp-1"}, now)
+			setAvailability(cleared, true, []string{"camp-1"}, now)
+			d.updateStreamerCampaigns()
+			if !hasAssignment(kept) || !hasAssignment(cleared) {
+				t.Fatal("precondition: both streamers should be assigned camp-1")
+			}
+			generation := d.BrokerCampaignSnapshot().Generation
+			assigned := kept.Stream.GetCampaigns()
+			kept.Stream.BroadcastID = "broadcast-2" // a re-set would re-stamp this broadcast
+			setAvailability(cleared, true, nil, now)
+
+			d.syncProgress()
+
+			if hasAssignment(cleared) {
+				t.Fatalf("the invalidated streamer must be cleared, got %v", assignedIDs(cleared))
+			}
+			if got := kept.Stream.GetCampaigns(); len(got) != 1 || got[0] != assigned[0] {
+				t.Fatalf("the unchanged streamer must keep its assignment untouched, got %v", got)
+			}
+			if kept.Stream.ProvisionalDropSnapshot().HasConfirmedCampaign("camp-1") {
+				t.Fatal("the unchanged streamer must not be re-set (SetCampaigns re-stamped its broadcast fact)")
+			}
+			if g := d.BrokerCampaignSnapshot().Generation; g != generation {
+				t.Fatalf("an unchanged broker view must not be republished: %d -> %d", generation, g)
+			}
+		})
+	}
+}
+
+// HOLD_NEW_PASS from views FILTERED by a usable ledger: when the wired ledger
+// then fails, the no-change refresh (LS2, LS3 and LS4 alike) keeps the
+// filtered views and never revives the suppressed campaign, although Known+Yes
+// availability would assign it if the views were republished unfiltered.
+func TestFreshnessHoldKeepsLedgerFilteredViews(t *testing.T) {
+	rows := []lightSyncResponse{freshnessResponses()[0], freshnessResponses()[3], freshnessResponses()[9]}
+	for _, resp := range rows {
+		t.Run(resp.row+"/"+resp.name, func(t *testing.T) {
+			now := time.Now()
+			d, s, _ := continuitySetup(&now)
+			ledger, db := openFreshnessLedger(t)
+			must(t, ledger.Observe(context.Background(), skipEvidence{
+				class: evidenceClaimAccepted, gameID: "g1", campaignID: "camp-1", dropID: "d1",
+			}))
+			d.skipLedger = ledger
+			d.client = clientFor(resp)
+			setAvailability(s, true, []string{"camp-1"}, now)
+			d.updateStreamerCampaigns()
+			before := d.BrokerCampaignSnapshot()
+			for _, c := range before.Campaigns {
+				if c.ID == "camp-1" {
+					t.Fatal("precondition: the usable ledger must filter camp-1 out of the published views")
+				}
+			}
+			if hasAssignment(s) {
+				t.Fatal("precondition: the suppressed campaign must not be assigned")
+			}
+			if err := db.Close(); err != nil {
+				t.Fatalf("close ledger db: %v", err)
+			}
+
+			d.syncProgress()
+
+			after := d.BrokerCampaignSnapshot()
+			if after.Generation != before.Generation || len(after.Campaigns) != len(before.Campaigns) {
+				t.Fatalf("%s: a failed wired ledger must not republish broker views: before=%+v after=%+v", resp.row, before, after)
+			}
+			for _, c := range after.Campaigns {
+				if c.ID == "camp-1" {
+					t.Fatalf("%s: the held refresh revived the ledger-suppressed campaign in the broker views", resp.row)
+				}
+			}
+			if hasAssignment(s) {
+				t.Fatalf("%s: the held refresh assigned the ledger-suppressed campaign, got %v", resp.row, assignedIDs(s))
+			}
+		})
 	}
 }
 

@@ -1307,9 +1307,11 @@ func exactProgressFromInventory(inProgress []interface{}) (map[progressTuple]int
 
 // progressDiffers reports whether the drop set, watched-minute progress, or
 // HasPreconditionsMet state changed between the pre- and post-refresh campaign,
-// so syncProgress only republishes -- and re-points streamers -- when one of
-// those fields actually moved. Compared by drop ID so it is independent of
-// ordering or of drops ClearClaimedDrops removed on the refreshed copy.
+// so syncProgress only republishes the pool -- and runs the historical
+// re-point -- when one of those fields actually moved; an unchanged result is
+// handled by the assignment refresh (refreshAssignments) instead. Compared by
+// drop ID so it is independent of ordering or of drops ClearClaimedDrops
+// removed on the refreshed copy.
 // HasPreconditionsMet is compared semantically as a tri-state: nil, explicit
 // false, and explicit true are distinct, while equal values remain equal even
 // when their pointers differ.
@@ -1632,7 +1634,9 @@ func (d *DropsTracker) syncCampaignsLocked() {
 	d.recordSync(dashboardCount, recovered, len(campaigns), filteredByBlacklist, filteredByGame, listingUnavailable, time.Since(start), nil)
 
 	// An unpublished pool (unavailable listing, no fresh evidence) left the
-	// campaign set untouched, so streamer assignments are already current.
+	// campaign set untouched, so this sync has no assignment input of its own
+	// to apply; availability, grace and window changes are picked up by the
+	// next light-sync assignment refresh (refreshAssignments).
 	if publishPool {
 		d.updateStreamerCampaigns()
 	}
@@ -3032,16 +3036,18 @@ func lifecycleCancelled(ctx context.Context) bool {
 //     in must be unchanged under logMu, so this pass never overwrites a
 //     publication made after its inputs were captured (progress Revision alone
 //     does not order skip or broker-view changes).
-//   - Cancellation: nothing starts when ctx is already cancelled, and the
-//     admission re-checks it under logMu and d.mu, after the ledger read and
-//     both lock waits, together with the fences. Cancellation observed at or
-//     before that admission adds no ledger read, broker publication or
-//     SetCampaigns; a pass already admitted completes its in-memory re-point
-//     (no I/O follows admission).
+//   - Cancellation: nothing starts (no ledger read) when ctx is already
+//     cancelled; a cancellation during the ledger read abandons that read
+//     (it is bounded by ctx); and the admission re-checks ctx under logMu
+//     and d.mu, after the ledger read and both lock waits, together with the
+//     fences. Cancellation observed at or before that admission adds no
+//     broker publication or SetCampaigns; a pass already admitted completes
+//     its in-memory re-point (no I/O follows admission).
 //
 // It runs at most once per light sync, i.e. on the progress-sync cadence plus
-// watched-minute triggers, and adds one skip-ledger Snapshot read per pass
-// when a ledger is wired. It never retries and starts no goroutine or timer.
+// on-demand triggers (watched-minute reports and the progress watchdog), and
+// adds one skip-ledger Snapshot read per pass when a ledger is wired. It never
+// retries and starts no goroutine or timer.
 func (d *DropsTracker) refreshAssignments(ctx context.Context, in assignmentInputs) {
 	if lifecycleCancelled(ctx) {
 		slog.Debug("Drops assignment refresh not started: tracker lifecycle cancelled")
