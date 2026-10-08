@@ -1132,10 +1132,11 @@ Drop
 5. Broker-Facing Assignment (updateStreamerCampaigns — every full AND
    lightweight sync that publishes; a full sync that leaves the published
    pool untouched — an UNKNOWN dashboard listing with no fresh inventory
-   evidence — skips it, because it changed no assignment input of its own;
-   inputs that moved meanwhile are picked up by the next light-sync
-   assignment refresh. A lightweight sync that publishes no change instead
-   runs the bounded
+   evidence — skips it, because it publishes no pool change; any assignment
+   input that moved meanwhile, including skip-ledger evidence that sync's
+   own claim sweep or inventory observation recorded, is picked up by the
+   next light-sync assignment refresh (or the next publishing sync). A
+   lightweight sync that publishes no change instead runs the bounded
    assignment refresh (refreshAssignments) — see "Assignment refresh after
    a no-change light sync" — because channel availability, the UNKNOWN
    continuity grace and campaign/reward windows move without watched

@@ -1634,9 +1634,11 @@ func (d *DropsTracker) syncCampaignsLocked() {
 	d.recordSync(dashboardCount, recovered, len(campaigns), filteredByBlacklist, filteredByGame, listingUnavailable, time.Since(start), nil)
 
 	// An unpublished pool (unavailable listing, no fresh evidence) left the
-	// campaign set untouched, so this sync has no assignment input of its own
-	// to apply; availability, grace and window changes are picked up by the
-	// next light-sync assignment refresh (refreshAssignments).
+	// campaign set untouched, so this sync does not re-point. Any assignment
+	// input that moved meanwhile -- availability, grace, windows, or skip-ledger
+	// evidence this sync's claim sweep or inventory observation recorded -- is
+	// picked up by the next light-sync assignment refresh (refreshAssignments)
+	// or the next publishing sync.
 	if publishPool {
 		d.updateStreamerCampaigns()
 	}
