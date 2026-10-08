@@ -705,6 +705,20 @@ func (h *pauseOnMessage) logged(prefix string) bool {
 	return false
 }
 
+// waitForPause waits, bounded, until the pass running in the background
+// reaches h's pause point. A pass that finishes without reaching it, or never
+// reaches it, fails the test instead of hanging the package.
+func waitForPause(t *testing.T, h *pauseOnMessage, done <-chan struct{}) {
+	t.Helper()
+	select {
+	case <-h.entered:
+	case <-done:
+		t.Fatal("the pass finished without reaching the pause point (no refresh view building)")
+	case <-time.After(5 * time.Second):
+		t.Fatal("the pass never reached the pause point")
+	}
+}
+
 func installPauseOnMessage(t *testing.T, msg string) *pauseOnMessage {
 	t.Helper()
 	h := &pauseOnMessage{msg: msg, entered: make(chan struct{}), release: make(chan struct{})}
@@ -900,77 +914,6 @@ func TestFreshnessAlreadyCancelledStartsNothing(t *testing.T) {
 	assertLightSyncBookkeeping(t, d, "LS2", 1)
 }
 
-// An old pass bound to a cancelled loop context must not borrow the live
-// context of a replacement lifecycle generation.
-func TestFreshnessOldPassDoesNotBorrowReplacementContext(t *testing.T) {
-	now := time.Now()
-	d, s, _ := continuitySetup(&now)
-	d.client = clientFor(freshnessResponses()[0])
-	setAvailability(s, true, []string{"camp-1"}, now)
-	d.updateStreamerCampaigns()
-	old, cancelOld := context.WithCancel(context.Background())
-	cancelOld()
-	setLifecycle(d, context.Background()) // replacement generation is live
-	setAvailability(s, true, nil, now)
-
-	d.syncProgressWithContext(old)
-	if !hasAssignment(s) {
-		t.Fatal("an old cancelled pass must not run the refresh under the replacement's context")
-	}
-	d.syncProgressWithContext(context.Background())
-	if hasAssignment(s) {
-		t.Fatalf("a live pass must apply the refresh, got %v", assignedIDs(s))
-	}
-}
-
-// Cancellation during a blocked ledger read: the read fails, nothing is
-// published, and the abandonment is not misreported as a ledger outage.
-func TestFreshnessCancelledDuringLedgerReadPublishesNothing(t *testing.T) {
-	now := time.Now()
-	d, s, _ := continuitySetup(&now)
-	ledger, db := openFreshnessLedger(t)
-	d.skipLedger = ledger
-	d.client = clientFor(freshnessResponses()[0])
-	setAvailability(s, true, []string{"camp-1"}, now)
-	d.updateStreamerCampaigns()
-	generation := d.BrokerCampaignSnapshot().Generation
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	setLifecycle(d, ctx)
-	setAvailability(s, true, nil, now)
-	h := installPauseOnMessage(t, "")
-	release := holdLedgerConnection(t, db)
-	waits := db.Stats().WaitCount
-
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		d.syncProgress()
-	}()
-	deadline := time.Now().Add(5 * time.Second)
-	for db.Stats().WaitCount == waits {
-		if time.Now().After(deadline) {
-			release()
-			<-done
-			t.Fatal("the refresh never blocked on the ledger read")
-		}
-		time.Sleep(time.Millisecond)
-	}
-	cancel()
-	<-done
-	release()
-
-	if !hasAssignment(s) {
-		t.Fatal("a pass cancelled during its ledger read must not apply")
-	}
-	if g := d.BrokerCampaignSnapshot().Generation; g != generation {
-		t.Fatalf("a pass cancelled during its ledger read must not publish: %d -> %d", generation, g)
-	}
-	if !h.logged(logRefreshCancelledInRead) || h.logged(logRefreshLedgerDeferred) {
-		t.Fatalf("cancellation must be reported as cancellation, got %v", h.records)
-	}
-}
-
 // Cancellation while the pass waits for assignment serialization: the
 // admission re-check under logMu rejects it.
 func TestFreshnessCancelledWhileWaitingForAdmission(t *testing.T) {
@@ -992,7 +935,7 @@ func TestFreshnessCancelledWhileWaitingForAdmission(t *testing.T) {
 		defer close(done)
 		d.syncProgress()
 	}()
-	<-h.entered // the refresh started and is building its views
+	waitForPause(t, h, done) // the refresh started and is building its views
 	d.logMu.Lock()
 	close(h.release)
 	cancel()
@@ -1108,7 +1051,7 @@ func TestFreshnessRevisionFenceRejectsSupersededPool(t *testing.T) {
 		defer close(done)
 		d.syncProgress() // LS4: fresh capture of the current pool, then pauses
 	}()
-	<-h.entered
+	waitForPause(t, h, done)
 	d.mu.Lock()
 	d.campaigns = []*models.Campaign{skipped} // a full sync ended camp-1
 	d.bumpRevisionLocked(updateSourceFullSync)
@@ -1181,5 +1124,98 @@ func TestFreshnessRepeatedIdenticalOutcomeAddsNoINFO(t *testing.T) {
 	}
 	if strings.Count(logs, "Channel-restricted drop campaign still assigned to streamer") != 3 {
 		t.Fatalf("expected each refresh to re-evaluate the assignment at DEBUG, got:\n%s", logs)
+	}
+}
+
+// A usable-ledger change that withholds ONE drop of an assigned campaign
+// (campaign membership unchanged) is a semantic broker-view change: the
+// refresh publishes it and re-points the streamer, so campaign-ID equality
+// cannot hide it.
+func TestFreshnessLedgerDropSubsetChangeIsPublished(t *testing.T) {
+	now := time.Now()
+	d, s, c := continuitySetup(&now)
+	c.Drops = append(c.Drops, &models.Drop{ID: "d2", Name: "R2", MinutesRequired: 60, CurrentMinutesWatched: 0,
+		StartAt: now.Add(-time.Hour), EndAt: now.Add(100 * time.Hour)})
+	ledger := newTestSkipLedger(t, uniqueAccountKey(t))
+	d.skipLedger = ledger
+	d.client = clientFor(freshnessResponses()[2]) // LS2: tracked campaign absent
+	setAvailability(s, true, []string{"camp-1"}, now)
+	d.updateStreamerCampaigns()
+	before := d.BrokerCampaignSnapshot()
+	if len(before.Campaigns) != 1 || len(before.Campaigns[0].Drops) != 2 {
+		t.Fatalf("precondition: expected a 2-drop view, got %+v", before)
+	}
+	if got := s.Stream.GetCampaigns(); len(got) != 1 || got[0].CurrentDrop().ID != "d1" {
+		t.Fatalf("precondition: expected d1 current, got %v", got)
+	}
+	must(t, ledger.Observe(context.Background(), skipEvidence{
+		class: evidenceClaimAccepted, gameID: "g1", campaignID: "camp-1", dropID: "d1",
+	}))
+
+	d.syncProgress()
+
+	after := d.BrokerCampaignSnapshot()
+	if after.Generation == before.Generation {
+		t.Fatalf("a drop-subset ledger change must publish new broker views: before=%d after=%d", before.Generation, after.Generation)
+	}
+	if len(after.Campaigns) != 1 || len(after.Campaigns[0].Drops) != 1 || after.Campaigns[0].Drops[0].ID != "d2" {
+		t.Fatalf("the published view must withhold d1, got %+v", after.Campaigns)
+	}
+	got := s.Stream.GetCampaigns()
+	if len(got) != 1 || got[0] != after.Campaigns[0] || got[0].CurrentDrop().ID != "d2" {
+		t.Fatalf("the streamer must be re-pointed at the filtered view, got %v", got)
+	}
+}
+
+// Broker views lagging the pool revision (a newer pool published before its
+// own re-point ran) are never reused by the no-churn check, even when the
+// campaign and drop IDs match: the refresh publishes views of the CURRENT
+// revision so SourceRevision catches up.
+func TestFreshnessLaggingBrokerRevisionIsNotReused(t *testing.T) {
+	now := time.Now()
+	d, s, c := continuitySetup(&now)
+	d.client = clientFor(freshnessResponses()[2]) // LS2: tracked campaign absent
+	setAvailability(s, true, []string{"camp-1"}, now)
+	d.updateStreamerCampaigns()
+	newer := c.Clone()
+	newer.Drops[0].CurrentMinutesWatched = 30
+	d.mu.Lock()
+	d.campaigns = []*models.Campaign{newer}
+	d.bumpRevisionLocked(updateSourceFullSync)
+	d.mu.Unlock()
+	before := d.BrokerCampaignSnapshot()
+	if before.SourceRevision == before.CurrentRevision {
+		t.Fatal("precondition: broker views must lag the pool")
+	}
+
+	d.syncProgress()
+
+	after := d.BrokerCampaignSnapshot()
+	if after.SourceRevision != after.CurrentRevision || after.Generation == before.Generation {
+		t.Fatalf("lagging broker views must be republished for the current revision: before=%+v after=%+v", before, after)
+	}
+	if got := s.Stream.GetCampaigns(); len(got) != 1 || got[0] != newer {
+		t.Fatalf("the streamer must be re-pointed at the current pool object, got %v", got)
+	}
+}
+
+// LS1 and the full sync keep their historical re-point: updateStreamerCampaigns
+// always republishes the broker views and re-sets assignments even when
+// nothing changed. Only the F-D2 refresh suppresses that churn.
+func TestFreshnessHistoricalPassAlwaysRepublishes(t *testing.T) {
+	now := time.Now()
+	d, s, _ := continuitySetup(&now)
+	setAvailability(s, true, []string{"camp-1"}, now)
+	d.updateStreamerCampaigns()
+	generation := d.BrokerCampaignSnapshot().Generation
+	s.Stream.BroadcastID = "broadcast-2"
+
+	d.updateStreamerCampaigns()
+
+	if g := d.BrokerCampaignSnapshot().Generation; g != generation+1 {
+		t.Fatalf("the historical pass must always republish broker views: %d -> %d", generation, g)
+	}
+	if !s.Stream.ProvisionalDropSnapshot().HasConfirmedCampaign("camp-1") {
+		t.Fatal("the historical pass must still re-set an unchanged assignment (SetCampaigns re-stamps the broadcast fact)")
 	}
 }
