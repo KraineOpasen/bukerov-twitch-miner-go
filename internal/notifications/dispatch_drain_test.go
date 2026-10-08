@@ -37,10 +37,10 @@ func newBlockingDiscord() *blockingDiscord {
 	}
 }
 
-func (b *blockingDiscord) Connect(context.Context) error   { return nil }
-func (b *blockingDiscord) Disconnect() error               { return nil }
-func (b *blockingDiscord) UpdateConfig(_, _ string)        {}
-func (b *blockingDiscord) IsConnected() bool               { return true }
+func (b *blockingDiscord) Connect(context.Context) error { return nil }
+func (b *blockingDiscord) Disconnect() error             { return nil }
+func (b *blockingDiscord) UpdateConfig(_, _ string)      {}
+func (b *blockingDiscord) IsConnected() bool             { return true }
 func (b *blockingDiscord) GetChannels(context.Context, bool) ([]Channel, error) {
 	return nil, nil
 }
@@ -230,9 +230,28 @@ func TestStopReturnsDespiteHungDispatch(t *testing.T) {
 	dispatchDrainTimeout = 100 * time.Millisecond
 	defer func() { dispatchDrainTimeout = old }()
 
-	fake := newBlockingDiscord() // release never closed: the send hangs forever
+	fake := newBlockingDiscord() // released only at the end: the send hangs until then
 	rule := &PointRule{Streamer: "streamerx", Threshold: 100}
 	m := newDrainTestManager(t, fake, rule)
+
+	// The hung writer outlives Stop by design, and once released it persists
+	// point_rule.triggered into drain.db under t.TempDir. It must have exited
+	// before that directory is removed, or its SQLite files can reappear
+	// while RemoveAll runs ("directory not empty"). This cleanup is
+	// registered after newDrainTestManager's t.TempDir, so it runs first
+	// (LIFO) and covers an early t.Fatal; the normal path joins at the end.
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(fake.release) }) }
+	bodyJoined := false
+	t.Cleanup(func() {
+		if bodyJoined {
+			return
+		}
+		release()
+		if waitDispatchDrained(t, m) {
+			t.Log("released and joined the hung dispatch writer after an early exit")
+		}
+	})
 
 	crossThreshold(m, "streamerx", 100)
 	<-fake.sendStarted
@@ -259,8 +278,33 @@ func TestStopReturnsDespiteHungDispatch(t *testing.T) {
 		t.Fatal("Stop blocked far beyond the drain timeout — hung-writer protection missing")
 	}
 
-	// Unblock the leaked goroutine so the race detector sees it exit cleanly.
-	close(fake.release)
+	// Unblock the writer Stop left behind and join it, so it has exited
+	// (its point_rules UPDATE returned) before the body returns. A timed-out
+	// join has already failed the test, so the cleanup does not wait again.
+	release()
+	waitDispatchDrained(t, m)
+	bodyJoined = true
+}
+
+// waitDispatchDrained waits until every admitted dispatch goroutine of m has
+// returned, bounded so a writer that never exits fails the test instead of
+// hanging it. It holds no Manager lock: a dispatch goroutine may take mu.
+// Concurrent dispatchWG.Wait calls (Stop's drain may still be parked in one)
+// are allowed.
+func waitDispatchDrained(t *testing.T, m *Manager) bool {
+	t.Helper()
+	done := make(chan struct{})
+	go func() {
+		m.dispatchWG.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return true
+	case <-time.After(5 * time.Second):
+		t.Errorf("admitted dispatch writer still running 5s after its release; it can write into t.TempDir while cleanup removes it")
+		return false
+	}
 }
 
 // TestStopCancelsInFlightSend proves the cancel-before-wait ordering: a
