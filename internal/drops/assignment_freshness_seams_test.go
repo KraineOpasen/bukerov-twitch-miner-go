@@ -39,21 +39,14 @@ func TestFreshnessOldPassDoesNotBorrowReplacementContext(t *testing.T) {
 // Cancellation of the pass's own context during a blocked ledger read, while
 // the tracker's (replacement) lifecycle context stays live: the read is
 // abandoned promptly -- it does not keep waiting on the single SQLite
-// connection -- nothing is published, and the abandonment is not misreported
-// as a ledger outage.
+// connection -- nothing is published (the fixture carries a pending
+// broker-view change), and the abandonment is not misreported as a ledger
+// outage.
 func TestFreshnessCancelledDuringLedgerReadPublishesNothing(t *testing.T) {
-	now := time.Now()
-	d, s, _ := continuitySetup(&now)
-	ledger, db := openFreshnessLedger(t)
-	d.skipLedger = ledger
-	d.client = clientFor(freshnessResponses()[0])
-	setAvailability(s, true, []string{"camp-1"}, now)
-	d.updateStreamerCampaigns()
-	generation := d.BrokerCampaignSnapshot().Generation
+	d, s, db, generation := cancellationFixture(t, true)
 	setLifecycle(d, context.Background())
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	setAvailability(s, true, nil, now)
 	h := installPauseOnMessage(t, "")
 	release := holdLedgerConnection(t, db)
 	waits := db.Stats().WaitCount

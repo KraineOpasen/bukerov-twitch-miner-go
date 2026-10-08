@@ -630,62 +630,72 @@ func TestFreshnessChangedPublicationKeepsLedgerFailOpen(t *testing.T) {
 // fence: entering it after a rejection would cost a SQLite read and, with a
 // failing ledger, misreport the stale rejection as a held pass.
 func TestFreshnessStaleObservationRunsNoAssignmentPass(t *testing.T) {
-	for _, mode := range []string{"no-ledger", "failed-wired-ledger"} {
-		t.Run(mode, func(t *testing.T) {
-			now := time.Now()
-			d, s, _ := continuitySetup(&now)
-			client := &fakeDropsClient{}
-			d.client = client
-			var db *database.DB
-			if mode == "failed-wired-ledger" {
-				var ledger *SkipLedger
-				ledger, db = openFreshnessLedger(t)
-				d.skipLedger = ledger
-			}
-			setAvailability(s, true, []string{"camp-1"}, now)
-			d.updateStreamerCampaigns()
-			generation := d.BrokerCampaignSnapshot().Generation
-			if db != nil {
-				if err := db.Close(); err != nil {
-					t.Fatalf("close ledger db: %v", err)
+	responses := []struct {
+		name      string
+		inventory map[string]interface{}
+	}{
+		{"unchanged", unchangedCamp1Inventory()},       // unchanged-progress call site
+		{"valid-empty", inventoryWithInProgress()},     // empty-list call site
+		{"list-null", inventoryWithRawList(nil, true)}, // empty-list call site, authority error
+	}
+	for _, resp := range responses {
+		for _, mode := range []string{"no-ledger", "failed-wired-ledger"} {
+			t.Run(resp.name+"/"+mode, func(t *testing.T) {
+				now := time.Now()
+				d, s, _ := continuitySetup(&now)
+				client := &fakeDropsClient{}
+				d.client = client
+				var db *database.DB
+				if mode == "failed-wired-ledger" {
+					var ledger *SkipLedger
+					ledger, db = openFreshnessLedger(t)
+					d.skipLedger = ledger
 				}
-			}
-			h := installPauseOnMessage(t, "")
+				setAvailability(s, true, []string{"camp-1"}, now)
+				d.updateStreamerCampaigns()
+				generation := d.BrokerCampaignSnapshot().Generation
+				if db != nil {
+					if err := db.Close(); err != nil {
+						t.Fatalf("close ledger db: %v", err)
+					}
+				}
+				h := installPauseOnMessage(t, "")
 
-			gate := client.armInventoryGate(unchangedCamp1Inventory(), nil)
-			done := make(chan struct{})
-			go func() {
-				defer close(done)
-				d.syncProgress()
-			}()
-			select {
-			case <-gate.entered:
-			case <-time.After(5 * time.Second):
-				t.Fatal("the light sync never requested Inventory")
-			}
-			// A newer publication lands (its own re-point not yet run) and the
-			// channel becomes authoritatively empty.
-			d.mu.Lock()
-			d.campaigns = append([]*models.Campaign(nil), d.campaigns...)
-			d.bumpRevisionLocked(updateSourceFullSync)
-			d.mu.Unlock()
-			setAvailability(s, true, nil, now)
-			close(gate.release)
-			<-done
+				gate := client.armInventoryGate(resp.inventory, nil)
+				done := make(chan struct{})
+				go func() {
+					defer close(done)
+					d.syncProgress()
+				}()
+				select {
+				case <-gate.entered:
+				case <-time.After(5 * time.Second):
+					t.Fatal("the light sync never requested Inventory")
+				}
+				// A newer publication lands (its own re-point not yet run) and the
+				// channel becomes authoritatively empty.
+				d.mu.Lock()
+				d.campaigns = append([]*models.Campaign(nil), d.campaigns...)
+				d.bumpRevisionLocked(updateSourceFullSync)
+				d.mu.Unlock()
+				setAvailability(s, true, nil, now)
+				close(gate.release)
+				<-done
 
-			if st := d.SyncStatus(); st.ProgressRuns != 0 || !st.ProgressLastSyncAt.IsZero() {
-				t.Fatalf("a rejected stale observation must not be recorded, got runs=%d at=%v", st.ProgressRuns, st.ProgressLastSyncAt)
-			}
-			if g := d.BrokerCampaignSnapshot().Generation; g != generation {
-				t.Fatalf("a rejected stale observation must not publish broker views: %d -> %d", generation, g)
-			}
-			if !hasAssignment(s) {
-				t.Fatal("a rejected stale observation must not re-point streamers")
-			}
-			if h.loggedContaining("Drops assignment refresh") {
-				t.Fatalf("a rejected stale observation must not enter the assignment refresh, got %v", h.records)
-			}
-		})
+				if st := d.SyncStatus(); st.ProgressRuns != 0 || !st.ProgressLastSyncAt.IsZero() {
+					t.Fatalf("a rejected stale observation must not be recorded, got runs=%d at=%v", st.ProgressRuns, st.ProgressLastSyncAt)
+				}
+				if g := d.BrokerCampaignSnapshot().Generation; g != generation {
+					t.Fatalf("a rejected stale observation must not publish broker views: %d -> %d", generation, g)
+				}
+				if !hasAssignment(s) {
+					t.Fatal("a rejected stale observation must not re-point streamers")
+				}
+				if h.loggedContaining("Drops assignment refresh") {
+					t.Fatalf("a rejected stale observation must not enter the assignment refresh, got %v", h.records)
+				}
+			})
+		}
 	}
 }
 
@@ -933,22 +943,77 @@ func TestFreshnessFailedWiredLedgerHoldsNilLedgerApplies(t *testing.T) {
 	}
 }
 
+// cancellationFixture prepares an assigned camp-1 (plus an operator-skipped
+// camp-skip whose withholding is logged during view building) and then two
+// pending changes a live refresh would apply: authoritative Known-empty
+// availability (clears the assignment) and a new operator Skip on camp-1's
+// current reward (removes camp-1 from the broker views, so the refresh would
+// publish Generation+1). Cancellation tests prove neither happens;
+// TestFreshnessCancellationFixturePublishesWhenLive is the live control.
+func cancellationFixture(t *testing.T, withLedger bool) (*DropsTracker, *models.Streamer, *database.DB, uint64) {
+	t.Helper()
+	now := time.Now()
+	d, s, _ := continuitySetup(&now)
+	addOperatorSkippedCampaign(d, now)
+	var db *database.DB
+	if withLedger {
+		var ledger *SkipLedger
+		ledger, db = openFreshnessLedger(t)
+		d.skipLedger = ledger
+	}
+	d.client = clientFor(freshnessResponses()[0])
+	setAvailability(s, true, []string{"camp-1"}, now)
+	d.updateStreamerCampaigns()
+	if !hasAssignment(s) {
+		t.Fatal("precondition: initial assignment missing")
+	}
+	generation := d.BrokerCampaignSnapshot().Generation
+	setAvailability(s, true, nil, now)
+	d.UpdateRewardSkips(models.NewRewardSkips([]string{
+		models.NormalizeRewardKey("g1", "S"), models.NormalizeRewardKey("g1", "R"),
+	}))
+	return d, s, db, generation
+}
+
+// Live control for the cancellation tests: the same fixture with a live
+// lifecycle publishes the pending broker-view change and clears the
+// assignment, so their "nothing published" assertions are not vacuous.
+func TestFreshnessCancellationFixturePublishesWhenLive(t *testing.T) {
+	for _, withLedger := range []bool{false, true} {
+		name := "no-ledger"
+		if withLedger {
+			name = "private-ledger"
+		}
+		t.Run(name, func(t *testing.T) {
+			d, s, _, generation := cancellationFixture(t, withLedger)
+			setLifecycle(d, context.Background())
+
+			d.syncProgress()
+
+			after := d.BrokerCampaignSnapshot()
+			if after.Generation == generation {
+				t.Fatal("control: a live refresh must publish the pending broker-view change")
+			}
+			for _, c := range after.Campaigns {
+				if c.ID == "camp-1" {
+					t.Fatal("control: the published views must withhold the newly skipped campaign")
+				}
+			}
+			if hasAssignment(s) {
+				t.Fatal("control: a live refresh must clear the assignment")
+			}
+		})
+	}
+}
+
 // Cancellation already visible: the refresh starts nothing (no ledger read,
 // no publication, no SetCampaigns); the historical observation is unchanged.
 func TestFreshnessAlreadyCancelledStartsNothing(t *testing.T) {
-	now := time.Now()
-	d, s, _ := continuitySetup(&now)
-	ledger, _ := openFreshnessLedger(t)
-	d.skipLedger = ledger
-	client := clientFor(freshnessResponses()[0])
-	d.client = client
-	setAvailability(s, true, []string{"camp-1"}, now)
-	d.updateStreamerCampaigns()
-	generation := d.BrokerCampaignSnapshot().Generation
+	d, s, _, generation := cancellationFixture(t, true)
+	client := d.client.(*countingInventoryClient)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	setLifecycle(d, ctx)
-	setAvailability(s, true, nil, now)
 	h := installPauseOnMessage(t, "")
 
 	d.syncProgress()
@@ -970,19 +1035,13 @@ func TestFreshnessAlreadyCancelledStartsNothing(t *testing.T) {
 
 // Cancellation while the pass waits for assignment serialization: the
 // cancellation lands only once the refresh is parked on logMu, so only the
-// admission re-check UNDER that serialization can observe it.
+// admission re-check UNDER that serialization can observe it, and it must do
+// so before any broker publication or SetCampaigns.
 func TestFreshnessCancelledWhileWaitingForAdmission(t *testing.T) {
-	now := time.Now()
-	d, s, _ := continuitySetup(&now)
-	addOperatorSkippedCampaign(d, now)
-	d.client = clientFor(freshnessResponses()[0])
-	setAvailability(s, true, []string{"camp-1"}, now)
-	d.updateStreamerCampaigns()
-	generation := d.BrokerCampaignSnapshot().Generation
+	d, s, _, generation := cancellationFixture(t, false)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	setLifecycle(d, ctx)
-	setAvailability(s, true, nil, now)
 	h := installPauseOnMessage(t, logOperatorSkipWithheld)
 
 	done := make(chan struct{})
