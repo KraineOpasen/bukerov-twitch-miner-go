@@ -23,10 +23,15 @@ import (
 // fixtures: which channels are admitted, under which reason class, who is left
 // waiting and why, and that one channel never holds two slots.
 //
-// It is written to compile and pass UNCHANGED on the pre-change tree as well as
-// on this one. That is the whole point: the committed-ordinary-residence work
-// may change WHICH ordinary channel keeps a contested seat over time, and it may
-// change nothing else. Every case below is therefore built so the admission
+// It was written to compile and pass UNCHANGED on the tree before the
+// committed-ordinary-residence work as well as on the tree with it. That was the
+// whole point: the residence work may change WHICH ordinary channel keeps a
+// contested seat over time, and it may change nothing else. One later admission
+// change is deliberate and pinned here instead of hidden: owner rule PA-B1 lets
+// two configured channel-restricted drops hold BOTH seats. The row that pinned
+// the old single-seat answer now pins the PA-B1 answer, so on a tree without
+// PA-B1 that row fails, and an unrestricted twin pins that ordinary active drops
+// still share a single boost seat. Every case below is built so the admission
 // answer is unique — the strong contenders and the reason classes are fully
 // determined by the fixture, and no case depends on which ordinary competitor
 // wins an ordinary tie-break, because that is precisely the decision D1 is
@@ -158,8 +163,10 @@ func admissionPursuingStreak(s *models.Streamer) {
 }
 
 // TestAdmissionEquivalenceMatrix is the differential oracle. Every expectation
-// below is the behaviour of the EXISTING admission policy; this test is run
-// against both the pre-change and the post-change tree and must be identical.
+// below is the behaviour of the EXISTING admission policy, including owner rule
+// PA-B1. PA-B1 re-pinned one row and added its unrestricted twin; every other
+// expectation is unchanged by it, and without PA-B1 only the re-pinned row
+// differs.
 func TestAdmissionEquivalenceMatrix(t *testing.T) {
 	cases := []struct {
 		name  string
@@ -180,16 +187,31 @@ func TestAdmissionEquivalenceMatrix(t *testing.T) {
 			want: "slots=[streamera:fair_rotation streamerd:restricted_drop] waiting=[]",
 		},
 		{
-			// TWO configured strong candidates still cannot exceed the cap, and
-			// only ONE off-pair boost is admitted per tick.
-			name: "two configured strong candidates cannot take both seats",
+			// Owner rule PA-B1: TWO configured channel-restricted drops take BOTH
+			// seats, because each campaign progresses only on that exact channel.
+			// They still cannot exceed the cap. Before PA-B1 only one off-pair
+			// boost was admitted here and streamera kept a fair-rotation seat.
+			name: "two configured restricted drops take both seats",
 			size: 4,
 			build: func(t *testing.T, w *MinuteWatcher, by map[string]*models.Streamer, store *WatchTimeStore) {
 				admissionDrop(by["streamerc"], true)
 				admissionDrop(by["streamerd"], true)
 				admissionSeed(t, store, map[string]float64{"streamerc": 80, "streamerd": 90})
 			},
-			want: "slots=[streamera:fair_rotation streamerc:restricted_drop] waiting=[]",
+			want: "slots=[streamerc:restricted_drop streamerd:restricted_drop] waiting=[]",
+		},
+		{
+			// Twin of the PA-B1 row with two UNRESTRICTED active drops: PA-B1
+			// covers channel-restricted Drops only, so they still share the
+			// single off-pair boost seat and the other seat stays fair rotation.
+			name: "two configured unrestricted drops keep a single boost seat",
+			size: 4,
+			build: func(t *testing.T, w *MinuteWatcher, by map[string]*models.Streamer, store *WatchTimeStore) {
+				admissionDrop(by["streamerc"], false)
+				admissionDrop(by["streamerd"], false)
+				admissionSeed(t, store, map[string]float64{"streamerc": 80, "streamerd": 90})
+			},
+			want: "slots=[streamera:fair_rotation streamerc:active_drop] waiting=[]",
 		},
 		{
 			// A zero-minute pending streak has not begun: it carries no
