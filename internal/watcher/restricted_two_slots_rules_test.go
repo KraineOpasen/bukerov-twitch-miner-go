@@ -555,10 +555,14 @@ func TestRestrictedAdmissionVictimOrderAcrossTwoOpenSeats(t *testing.T) {
 		firstVictim      string
 		secondVictim     string
 		wantFirstSeat    string // the channel that ends in streamera's seat
+		equalDeficit     bool   // both base seats equally owed
+		recent           string // the base seat watched more recently, if any
 	}{
 		{name: "resident seat kept longer", residentA: true, firstVictim: "streamerb", secondVictim: "streamera", wantFirstSeat: "streamerd"},
 		{name: "deficit alone", residentA: false, firstVictim: "streamera", secondVictim: "streamerb", wantFirstSeat: "streamerc"},
 		{name: "residence elapsed", residentA: true, residenceElapsed: true, firstVictim: "streamera", secondVictim: "streamerb", wantFirstSeat: "streamerc"},
+		{name: "recency at equal deficit, streamera more recent", equalDeficit: true, recent: "streamera", firstVictim: "streamera", secondVictim: "streamerb", wantFirstSeat: "streamerc"},
+		{name: "recency at equal deficit, streamerb more recent", equalDeficit: true, recent: "streamerb", firstVictim: "streamerb", secondVictim: "streamera", wantFirstSeat: "streamerd"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -569,6 +573,19 @@ func TestRestrictedAdmissionVictimOrderAcrossTwoOpenSeats(t *testing.T) {
 			now := time.Now()
 			f.w.rotation.deficitMinutes = map[string]float64{
 				"streamera": 30, "streamerb": 20, "streamerc": 70, "streamerd": 80,
+			}
+			if tc.equalDeficit {
+				f.w.rotation.deficitMinutes["streamera"] = 20
+			}
+			if tc.recent != "" {
+				older := "streamera"
+				if tc.recent == older {
+					older = "streamerb"
+				}
+				f.w.rotation.lastWatched = map[int]time.Time{
+					restrictedIndex(t, f.w, tc.recent): now.Add(-time.Minute),
+					restrictedIndex(t, f.w, older):     now.Add(-10 * time.Minute),
+				}
 			}
 			if tc.residentA {
 				f.w.rotation.committedCohort = map[string]string{
@@ -766,6 +783,50 @@ func TestRestrictedPairAgainstDiscoveryContender(t *testing.T) {
 				if len(waiting) != 1 || waiting[0].Channel != tc.waiting || waiting[0].ReasonCode != ReasonLowerPriority {
 					t.Fatalf("tick %d: waiting=%+v, want only %s waiting as lower priority", tick, waiting, tc.waiting)
 				}
+			}
+		})
+	}
+}
+
+// R2, recency at equal deficit, unit level: of two waiting channel-restricted
+// drops that are equally owed, the one watched longer ago takes the open seat.
+// Without a watch-time store every deficit ties, so this order decides the
+// admission in the pipeline as well.
+func TestRestrictedAdmissionOrdersEqualDeficitByRecency(t *testing.T) {
+	cases := []struct {
+		name   string
+		recent string
+		want   string
+	}{
+		{name: "streamerd watched more recently", recent: "streamerd", want: "streamere"},
+		{name: "streamere watched more recently", recent: "streamere", want: "streamerd"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newResidenceFixture(t, 5)
+			byLogin := streamersByLogin(f.w.streamers)
+			for _, login := range []string{"streamerc", "streamerd", "streamere"} {
+				makeDropCandidate(byLogin[login], true)
+			}
+			now := time.Now()
+			f.w.rotation.deficitMinutes = map[string]float64{
+				"streamera": 10, "streamerb": 20, "streamerc": 70, "streamerd": 80, "streamere": 80,
+			}
+			older := "streamerd"
+			if tc.recent == older {
+				older = "streamere"
+			}
+			f.w.rotation.lastWatched = map[int]time.Time{
+				restrictedIndex(t, f.w, tc.recent): now.Add(-time.Minute),
+				restrictedIndex(t, f.w, older):     now.Add(-10 * time.Minute),
+			}
+			online := []int{0, 1, 2, 3, 4}
+			a, c := restrictedIndex(t, f.w, "streamera"), restrictedIndex(t, f.w, "streamerc")
+
+			got := f.w.admitRestrictedDrops([2]int{a, c}, [2]int{a, c}, online, now)
+
+			if want := [2]int{restrictedIndex(t, f.w, tc.want), c}; got != want {
+				t.Fatalf("pair=%v, want %v: the one watched longer ago takes streamera's seat", got, want)
 			}
 		})
 	}

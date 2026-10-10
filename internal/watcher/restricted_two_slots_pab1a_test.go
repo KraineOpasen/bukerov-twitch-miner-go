@@ -12,8 +12,10 @@ import (
 
 // Owner rule PA-B1a: the second seat goes to a channel with channel-restricted
 // Drops only when it brings restricted Drops work that the restricted channel in
-// the other seat does not already carry, so a channel whose restricted
-// campaigns the other seat already carries never takes the second seat. Most
+// the other seat does not already carry at the step that admits it, so a
+// channel whose restricted campaigns the other seat then carries never takes
+// that seat (a later step can still seat beside it a channel carrying all of
+// its work). Most
 // cases drive the real processWatching pipeline on the same fixture as
 // restricted_two_slots_test.go and read the published BrokerSnapshot and debug
 // decisions as the oracle; the unit-level cases drive admitRestrictedDrops, or
@@ -658,11 +660,18 @@ func TestRestrictedAdmissionCanSeatChannelLaterCarriedByItsPartner(t *testing.T)
 		for login, want := range map[string]string{
 			"streamerd": "admitted beside another channel-restricted drop, displacing streamera",
 			"streamere": "admitted beside another channel-restricted drop, displacing streamerc",
-			"streamerc": "displaced by channel-restricted drop streamere; streamerd already farms its channel-restricted campaigns",
 		} {
 			if reason := decisionReason(f.w, login); !strings.Contains(reason, want) {
 				t.Fatalf("tick %d: %s reason=%q, want %q", tick, login, reason, want)
 			}
+		}
+		// Both seated channels carry streamerc's campaign and are online, so
+		// either may be named.
+		reason := decisionReason(f.w, "streamerc")
+		carried := strings.Contains(reason, "; streamerd already farms its channel-restricted campaigns") ||
+			strings.Contains(reason, "; streamere already farms its channel-restricted campaigns")
+		if !strings.Contains(reason, "displaced by channel-restricted drop streamere; ") || !carried {
+			t.Fatalf("tick %d: streamerc reason=%q, want its admitter and an online carrier", tick, reason)
 		}
 	}
 }
@@ -1360,15 +1369,19 @@ func TestRestrictedWaitingReasonWhenAssignmentChangedMidEvaluation(t *testing.T)
 // Property, unit level: over random assignments of restricted campaigns,
 // random statuses (confirmed online, retained UNKNOWN, confirmed offline),
 // stale assignments with drop claiming switched off, game-wide campaigns,
-// random starting pairs and, in some cases, a fair base pair that the single
-// boost changed in one seat (its victim noted with the boost's reason), the
+// random starting pairs, coarse persisted deficits with random recency,
+// Campaign Policy classes and in-progress streaks, and, in some cases, a fair
+// base pair that the single boost changed in one seat (its victim noted with
+// the boost's reason), the
 // admission keeps its invariants: the two seats stay
 // distinct and come from the starting pair or the qualifying channels; every
 // displaced restricted occupant's campaigns are still carried by a final seat;
 // no seat the admission could still give up has a waiting channel that brings
 // new work against the other seat; a seat whose partner never changed gave up
-// only an ordinary channel or a duplicate of that partner (R3) and went to a
-// channel bringing work the partner does not carry (R14(a)); every waiting
+// only an ordinary channel or a duplicate of that partner (R3), was the weaker
+// of two unprotected seats in betterBoostVictim order (R4), and went to the
+// strongest waiting channel in betterBoostCandidate order among those bringing
+// work the partner does not carry (R2, R14(a)); every waiting
 // qualifying channel gets a reason; no reason reports a seated channel that is
 // not confirmed online as farming, or one confirmed offline as unconfirmed; a
 // seated channel's reason is a watched one; no reason names an unseated channel
@@ -1431,11 +1444,26 @@ func TestRestrictedAdmissionInvariantsHoldForRandomAssignments(t *testing.T) {
 			if rng.Intn(6) == 0 {
 				s.Settings.ClaimDrops = false
 			}
+			if rng.Intn(6) == 0 {
+				admissionPursuingStreak(s)
+			}
 		}
+		// Coarse deficits tie often, so recency, Campaign Policy utility and
+		// in-progress streaks all get to decide some orders.
+		now := time.Now()
 		w.rotation.deficitMinutes = map[string]float64{}
-		for _, s := range w.streamers {
-			w.rotation.deficitMinutes[s.GetUsername()] = float64(rng.Intn(100))
+		w.rotation.lastWatched = map[int]time.Time{}
+		utilities := map[string]policy.SemanticUtility{}
+		for i, s := range w.streamers {
+			w.rotation.deficitMinutes[s.GetUsername()] = float64(rng.Intn(5) * 20)
+			if rng.Intn(2) == 0 {
+				w.rotation.lastWatched[i] = now.Add(-time.Duration(rng.Intn(60)) * time.Minute)
+			}
+			if rng.Intn(3) == 0 {
+				utilities[s.GetUsername()] = policy.SemanticUtility{SemanticClass: policy.SemanticClass(rng.Intn(3))}
+			}
 		}
+		w.SetCampaignSemanticPolicy(utilities, nil, nil)
 		w.selectionReasons = make(map[int]string)
 		first := rng.Intn(len(w.streamers))
 		second := (first + 1 + rng.Intn(len(w.streamers)-1)) % len(w.streamers)
@@ -1453,7 +1481,7 @@ func TestRestrictedAdmissionInvariantsHoldForRandomAssignments(t *testing.T) {
 			}
 		}
 
-		got := w.admitRestrictedDrops(base, start, online, time.Now())
+		got := w.admitRestrictedDrops(base, start, online, now)
 
 		// occupied is the restricted work a seated channel protects or carries:
 		// that of a restricted occupant, and nothing for any other channel.
@@ -1516,6 +1544,33 @@ func TestRestrictedAdmissionInvariantsHoldForRandomAssignments(t *testing.T) {
 			}
 			if len(partner) > 0 && restrictedWorkSubset(occupied(got[i]), partner) {
 				t.Fatalf("iteration %d: %d admitted beside %d without new work (start %v got %v)", iteration, got[i], start[1-i], start, got)
+			}
+			// Such a seat changed exactly once, at the first step, so it went to
+			// the strongest waiting channel in betterBoostCandidate order among
+			// those bringing work the partner does not carry (R2) ...
+			best := -1
+			for idx := range w.streamers {
+				if !qualifying[idx] || idx == start[0] || idx == start[1] {
+					continue
+				}
+				if len(partner) > 0 && restrictedWorkSubset(occupied(idx), partner) {
+					continue
+				}
+				if best == -1 || w.betterBoostCandidate(idx, best) {
+					best = idx
+				}
+			}
+			if got[i] != best {
+				t.Fatalf("iteration %d: seat %d went to %d, want the strongest passing waiting channel %d (start %v got %v)", iteration, i, got[i], best, start, got)
+			}
+			// ... and when both starting seats were unprotected it was the weaker
+			// one in betterBoostVictim order (R4).
+			unprotected := func(j int) bool {
+				own, other := occupied(start[j]), occupied(start[1-j])
+				return len(own) == 0 || (len(other) > 0 && restrictedWorkSubset(own, other))
+			}
+			if unprotected(0) && unprotected(1) && (i == 1) != w.betterBoostVictim(start[1], start[0], now) {
+				t.Fatalf("iteration %d: seat %d given up, want the weaker in betterBoostVictim order (start %v got %v)", iteration, i, start, got)
 			}
 		}
 		for idx := range qualifying {
@@ -1605,8 +1660,10 @@ func TestRestrictedAdmissionInvariantsHoldForRandomAssignments(t *testing.T) {
 						return st.GetUsername() + " status unconfirmed"
 					}
 				}
-				if list := "(" + label(got[0]) + ", " + label(got[1]) + ")"; !strings.Contains(reason, list) {
-					t.Fatalf("iteration %d: reason %q does not name the final seats %s", iteration, reason, list)
+				forward := "(" + label(got[0]) + ", " + label(got[1]) + ")"
+				backward := "(" + label(got[1]) + ", " + label(got[0]) + ")"
+				if !strings.Contains(reason, forward) && !strings.Contains(reason, backward) {
+					t.Fatalf("iteration %d: reason %q does not name the final seats %s", iteration, reason, forward)
 				}
 				for _, seat := range got {
 					s := w.streamers[seat]
