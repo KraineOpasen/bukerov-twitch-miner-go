@@ -2042,7 +2042,8 @@ func (w *MinuteWatcher) pinResidentOrdinary(ranked []int, now time.Time) [2]int 
 // than a scheduler timer. A pursuing streak self-limits through its bounded
 // state. An ordinary drop has no continuity exception: it may hold a seat only
 // while its current hard/semantic facts win, and a full tie returns to persisted
-// fairness. That does not starve the other online streamers:
+// fairness. Apart from owner rule PA-B1 (see the third point and the end of
+// this comment), that does not starve the other online streamers:
 //   - the OTHER slot is reconciled from persisted deficit whenever the base
 //     pair is reconcilable, so the most-owed non-boosted channel keeps
 //     surfacing;
@@ -2159,10 +2160,12 @@ func (w *MinuteWatcher) applyPriorityBoost(pair [2]int, onlineIndexes []int, now
 // channel; only applyPriorityBoost, under its unchanged rules, can still do
 // that. Residence orders the victims and never delays the admission. A
 // qualifying channel still waiting when both seats hold restricted occupants
-// is told so in its selection reason. Composed after applyPriorityBoost, which
-// already seats one qualifying channel whenever any waits off a pair without a
-// restricted occupant, this seats at most one more in practice; the general
-// rule keeps the result exact should that composition change.
+// is told so in its selection reason, unless a more specific reason was
+// already recorded this tick. Composed after applyPriorityBoost, which already
+// seats one channel-restricted channel whenever a qualifying channel waits off
+// a pair without a restricted occupant, this seats at most one more in
+// practice; the general rule keeps the result exact should that composition
+// change.
 //
 // The boost latch is neither read nor written: it keeps describing the single
 // overlay seat. A channel seated here off the base pair is a stronger seat for
@@ -2203,7 +2206,7 @@ func (w *MinuteWatcher) admitRestrictedDrops(pair [2]int, onlineIndexes []int, n
 			w.streamers[victim].GetUsername()+" - its campaign only progresses on the channels it lists")
 		w.noteSelection(victim, "not watched this tick: displaced by channel-restricted drop "+
 			w.streamers[best].GetUsername()+
-			" (channel-restricted drops may hold both slots; returns when one no longer qualifies)")
+			" (channel-restricted drops may hold both slots; it competes again when one stops qualifying)")
 
 		if pair[0] == victim {
 			pair[0] = best
