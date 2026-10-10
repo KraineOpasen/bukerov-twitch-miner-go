@@ -423,19 +423,26 @@ func TestRestrictedQualificationRespectsCandidateExclusions(t *testing.T) {
 
 // Q-channel definition with two qualifying candidates: a channel-restricted
 // drop that is not a Phase-A candidate — watching disabled, watchdog-avoided,
-// "avoid" while other channels are online, or online for less than 30 seconds —
-// is never admitted, even though the admission runs for the two that qualify.
+// "avoid" while other channels are online, online for less than 30 seconds, or
+// confirmed offline — is never admitted, even though the admission runs for the
+// two that qualify, and keeps the reason its exclusion wrote instead of an
+// admission waiting reason.
 func TestRestrictedExcludedChannelNotAdmittedBesideTwoQualifying(t *testing.T) {
 	cases := []struct {
 		name    string
 		exclude func(f *residenceFixture, s *models.Streamer)
+		reason  string // empty: the channel is not published as waiting
 	}{
-		{name: "DisableWatch", exclude: func(_ *residenceFixture, s *models.Streamer) { s.Settings.DisableWatch = true }},
+		{name: "DisableWatch", exclude: func(_ *residenceFixture, s *models.Streamer) { s.Settings.DisableWatch = true },
+			reason: "watching disabled for this streamer in its settings"},
 		{name: "watchdog avoided", exclude: func(f *residenceFixture, s *models.Streamer) {
 			f.w.SetAvoidChecker(&staticAvoid{avoided: map[string]bool{s.GetUsername(): true}})
-		}},
-		{name: "preference avoid", exclude: func(_ *residenceFixture, s *models.Streamer) { s.Settings.Preference = models.PreferenceAvoid }},
-		{name: "settling after going online", exclude: func(_ *residenceFixture, s *models.Streamer) { s.OnlineAt = time.Now() }},
+		}, reason: "temporarily avoided by the drop-progress watchdog"},
+		{name: "preference avoid", exclude: func(_ *residenceFixture, s *models.Streamer) { s.Settings.Preference = models.PreferenceAvoid },
+			reason: `excluded from watching: preference is set to "avoid"`},
+		{name: "settling after going online", exclude: func(_ *residenceFixture, s *models.Streamer) { s.OnlineAt = time.Now() },
+			reason: "went online less than 30s ago"},
+		{name: "confirmed offline", exclude: func(_ *residenceFixture, s *models.Streamer) { s.SetConfirmedOffline() }},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -453,6 +460,16 @@ func TestRestrictedExcludedChannelNotAdmittedBesideTwoQualifying(t *testing.T) {
 
 			if got := restrictedSlotLogins(t, f); !sameLoginSet(got, "streamerc", "streamerd") {
 				t.Fatalf("slots=%v, want [streamerc streamerd]; the excluded streamere never qualifies", got)
+			}
+			reason := decisionReason(f.w, "streamere")
+			if tc.reason == "" {
+				if strings.HasPrefix(reason, "waiting") {
+					t.Fatalf("streamere reason=%q, want it not published as waiting", reason)
+				}
+				return
+			}
+			if !strings.Contains(reason, tc.reason) {
+				t.Fatalf("streamere reason=%q, want its exclusion reason %q", reason, tc.reason)
 			}
 		})
 	}
