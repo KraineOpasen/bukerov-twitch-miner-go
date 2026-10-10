@@ -304,8 +304,8 @@ func TestRestrictedPairKeepsRetainedUnknownBoostOccupant(t *testing.T) {
 // T2(b), R3/R13: a channel-restricted drop that goes UNKNOWN while holding a
 // stronger seat — the single boost's seat or the PA-B1 admission's — is
 // released at the next evaluation and does not count as a qualifying channel:
-// at tick 2 it is still a candidate (retained) and is not re-seated. Tick 3
-// confirms it stays out once retention no longer applies.
+// at tick 2 it can still be retained as a candidate yet is not re-seated, and
+// tick 3 confirms it stays out once retention no longer applies.
 func TestRestrictedSeatGoingUnknownIsReleasedAsBefore(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -871,8 +871,10 @@ func TestRestrictedPairPublishesReasons(t *testing.T) {
 		!strings.Contains(reason, "streamera") {
 		t.Fatalf("streamerd reason=%q, want the PA-B1 admission naming the displaced streamera", reason)
 	}
-	if reason := decisionReason(f.w, "streamera"); !strings.Contains(reason, "displaced by channel-restricted drop streamerd") {
-		t.Fatalf("streamera reason=%q, want it displaced by the PA-B1 admission of streamerd", reason)
+	if reason := decisionReason(f.w, "streamera"); !strings.Contains(reason, "displaced by channel-restricted drop streamerd") ||
+		!strings.Contains(reason, "(channel-restricted drops may hold both slots; it competes again when one stops qualifying)") ||
+		strings.Contains(reason, "already farms") {
+		t.Fatalf("streamera reason=%q, want the ordinary seat's PA-B1 displacement reason naming streamerd", reason)
 	}
 	if reason := decisionReason(f.w, "streamerc"); !strings.Contains(reason, "boosted into a slot - channel-restricted drop") {
 		t.Fatalf("streamerc reason=%q, want the unchanged single-boost reason", reason)

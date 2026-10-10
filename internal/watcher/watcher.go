@@ -2022,9 +2022,10 @@ func (w *MinuteWatcher) pinResidentOrdinary(ranked []int, now time.Time) [2]int 
 
 // applyPriorityBoost lets one DROPS/STREAK-eligible online streamer take over a
 // base-pair seat for the current tick, without affecting the base ranking
-// computed by reconcileLeastWatchedPair. A second channel-restricted drop is
-// not seated here: admitRestrictedDrops runs afterwards for that (owner rule
-// PA-B1).
+// computed by reconcileLeastWatchedPair. Beyond the one seat this boost may
+// take — which can already seat a strictly stronger channel-restricted drop
+// beside a fairly seated one — further channel-restricted drops are seated by
+// admitRestrictedDrops, which runs afterwards (owner rules PA-B1 and PA-B1a).
 //
 // Continuity latch: a pursuit-eligible watch streak is held across ticks rather
 // than re-picked every tick. This includes the zero-minute bootstrap needed to
@@ -2274,8 +2275,11 @@ func (w *MinuteWatcher) selectRestrictedAdmissionSeat(pair [2]int, workOf func(i
 	seat := -1
 	for i, slot := range pair {
 		if w.streamers[slot].HasChannelRestrictedCampaign() {
+			// An empty RW beside a restricted flag means the assignment changed
+			// between the two reads; such an occupant is not judged a duplicate.
+			rw := workOf(slot)
 			held, otherRestricted := w.heldRestrictedWork(pair[1-i], workOf)
-			if !otherRestricted || !restrictedWorkSubset(workOf(slot), held) {
+			if len(rw) == 0 || !otherRestricted || !restrictedWorkSubset(rw, held) {
 				continue
 			}
 		}
@@ -2309,15 +2313,15 @@ func (w *MinuteWatcher) restrictedWaitingReason(pair [2]int, idx int, workOf fun
 }
 
 // restrictedCarrier returns the seated channel whose restricted work carries
-// all of idx's restricted work, or -1 when neither seat does. idx must itself
-// carry restricted work; a channel without any (an ordinary seat) has none to
-// carry.
+// all of idx's restricted work, or -1 when neither seat does or idx has no
+// restricted work to carry (an ordinary seat).
 func (w *MinuteWatcher) restrictedCarrier(pair [2]int, idx int, workOf func(int) map[string]bool) int {
-	if !w.streamers[idx].HasChannelRestrictedCampaign() {
+	rw := workOf(idx)
+	if len(rw) == 0 || !w.streamers[idx].HasChannelRestrictedCampaign() {
 		return -1
 	}
 	for _, slot := range pair {
-		if held, restricted := w.heldRestrictedWork(slot, workOf); restricted && restrictedWorkSubset(workOf(idx), held) {
+		if held, restricted := w.heldRestrictedWork(slot, workOf); restricted && restrictedWorkSubset(rw, held) {
 			return slot
 		}
 	}
