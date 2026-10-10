@@ -17,12 +17,13 @@ import (
 // that seat (a later step can still seat beside it a channel carrying all of
 // its work). Most cases drive the real processWatching pipeline on the same
 // fixture as restricted_two_slots_test.go and read the published
-// BrokerSnapshot and debug decisions as the oracle; the unit-level cases drive admitRestrictedDrops, or
-// its waiting-reason helper, directly for states the pipeline does not produce
-// deterministically or only through a long setup (two open seats, a carrier
-// confirmed offline after the online list was read, an assignment changing
-// between two reads, carriers in a chosen seat order), and the property case
-// checks the admission's invariants over random assignments.
+// BrokerSnapshot and debug decisions as the oracle; the unit-level cases drive
+// admitRestrictedDrops, or its waiting-reason helper, directly for states the
+// pipeline does not produce deterministically or only through a long setup
+// (two open seats, a carrier confirmed offline after the online list was read,
+// an assignment changing between two reads, carriers in a chosen seat order),
+// and the property case checks the admission's invariants over random
+// assignments.
 
 // alreadyFarmedReason is the selection-reason fragment a qualifying channel
 // gets when PA-B1a holds it back.

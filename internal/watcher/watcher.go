@@ -373,10 +373,11 @@ type rotationState struct {
 	// channel-restricted drop can still preempt it. The latch describes only
 	// that single overlay seat: the owner rule PA-B1 admission that lets further
 	// channel-restricted drops take the remaining seat (admitRestrictedDrops)
-	// neither reads nor writes it, even when it gives the overlay seat itself to
-	// a channel with distinct restricted work because the latched target is a
-	// duplicate occupant (PA-B1a); the latch then names an unseated channel
-	// until the existing behaviour resumes.
+	// neither reads nor writes it, even when it gives the latched channel's seat
+	// away — the overlay seat of a latched target that is a duplicate occupant
+	// (PA-B1a), or the base seat of a plain streak latched inside the base pair;
+	// the latch then names an unseated channel until the existing behaviour
+	// resumes.
 	boostLatched bool
 	boostTarget  int // eligible streamer held for continuity; it may later enter the fair base pair
 	boostVictim  int // displaced base member, or -1 while target itself belongs to the base pair
@@ -1610,7 +1611,8 @@ var watcherEligibility = eligibility.Evaluator{}
 // across all online streamers over time (selectRotating), with DROPS/STREAK
 // only influencing how often a channel gets an extra turn - never granting
 // it a permanent exclusive slot. The one exception is owner rules PA-B1 and
-// PA-B1a: while two or more of them hold channel-restricted Drops, which
+// PA-B1a: while two or more qualifying channels hold channel-restricted Drops
+// (online with an active drop whose work is channel-restricted), which
 // progress only on the channels their campaigns list, they may occupy both
 // slots, provided the second brings restricted work the first does not
 // already carry.
@@ -1692,12 +1694,13 @@ func (w *MinuteWatcher) isPreferred(idx int) bool {
 // persisted-deficit base pair; a strictly stronger hard/semantic contender may
 // still take a seat.
 //
-// When two or more candidates hold channel-restricted Drops, owner rules PA-B1
-// and PA-B1a lift that single-seat limit for them only: admitRestrictedDrops
-// gives every seat not protected by a distinct channel-restricted occupant to
-// the strongest waiting one that brings restricted work the other seat does
-// not already carry, so distinct channel-restricted drops may hold both seats
-// while ordinary rotation and streak pursuit wait.
+// When two or more qualifying candidates hold channel-restricted Drops, owner
+// rules PA-B1 and PA-B1a lift that single-seat limit for them only:
+// admitRestrictedDrops gives every seat not protected by a distinct
+// channel-restricted occupant to the strongest waiting one that brings
+// restricted work the other seat does not already carry, so distinct
+// channel-restricted drops may hold both seats while ordinary rotation and
+// streak pursuit wait.
 //
 // A fairness replacement that would interrupt an in-progress streak may use
 // one explicit deferUntil deadline for the current approach. Re-evaluation
@@ -2193,12 +2196,12 @@ func (w *MinuteWatcher) applyPriorityBoost(pair [2]int, onlineIndexes []int, now
 // it qualifies.
 //
 // The boost latch is neither read nor written. It keeps describing the single
-// overlay seat even when this admission gives that seat away — a latched
-// target that is a duplicate occupant is displaced like any other — so the
-// latch can name a channel that is not seated until the existing behaviour
-// resumes. A channel seated here off the base pair is a stronger seat for the
-// committed-cohort partition, since ordinarySeat counts only activePair members
-// as ordinary.
+// overlay seat even when this admission gives the latched channel's seat away
+// — a latched target that is a duplicate occupant is displaced like any other,
+// and so is a plain streak latched inside the base pair — so the latch can name
+// a channel that is not seated until the existing behaviour resumes. A channel
+// seated here off the base pair is a stronger seat for the committed-cohort
+// partition, since ordinarySeat counts only activePair members as ordinary.
 func (w *MinuteWatcher) admitRestrictedDrops(base, pair [2]int, onlineIndexes []int, now time.Time) [2]int {
 	qualifying := 0
 	var waiting []int
