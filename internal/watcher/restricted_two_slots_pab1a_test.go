@@ -992,26 +992,47 @@ func TestRestrictedSupersetWaitsBesideNonDuplicateOccupants(t *testing.T) {
 // Restricted occupant definition: a channel whose drop claiming is switched off
 // keeps a stale restricted assignment until the drops tracker clears it, but
 // HasChannelRestrictedCampaign is false for it, so its seat is ordinary and a
-// second qualifying channel takes it.
+// second qualifying channel takes it. Its reason is the ordinary seat's, also
+// when a seated channel farms the stale campaign.
 func TestRestrictedStaleAssignmentWithoutClaimDropsIsOrdinary(t *testing.T) {
-	f := newResidenceFixture(t, 4)
-	byLogin := streamersByLogin(f.w.streamers)
-	a := byLogin["streamera"]
-	assignRestricted(a, restrictedTestCampaign("camp-streamera", a))
-	a.Settings.ClaimDrops = false
-	makeDropCandidate(byLogin["streamerc"], true)
-	makeDropCandidate(byLogin["streamerd"], true)
-	f.seedWeights(t, time.Now(), map[string]float64{
-		"streamera": 5, "streamerb": 10, "streamerc": 50, "streamerd": 80,
-	})
-
-	f.w.processWatching(tickCtx(f.w))
-
-	if got := restrictedSlotLogins(t, f); !sameLoginSet(got, "streamerc", "streamerd") {
-		t.Fatalf("slots=%v, want streamera's stale assignment to protect nothing", got)
+	cases := []struct {
+		name   string
+		assign func(byLogin map[string]*models.Streamer)
+	}{
+		{name: "stale campaign of its own", assign: func(byLogin map[string]*models.Streamer) {
+			a := byLogin["streamera"]
+			assignRestricted(a, restrictedTestCampaign("camp-streamera", a))
+			makeDropCandidate(byLogin["streamerc"], true)
+		}},
+		{name: "stale campaign a seated channel farms", assign: func(byLogin map[string]*models.Streamer) {
+			a, c := byLogin["streamera"], byLogin["streamerc"]
+			shared := restrictedTestCampaign("camp-shared", a, c)
+			assignRestricted(a, shared)
+			assignRestricted(c, shared)
+		}},
 	}
-	if reason := decisionReason(f.w, "streamera"); !strings.Contains(reason, "displaced by channel-restricted drop streamerd (channel-restricted drops may hold both slots") {
-		t.Fatalf("streamera reason=%q, want it displaced as an ordinary seat", reason)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newResidenceFixture(t, 4)
+			byLogin := streamersByLogin(f.w.streamers)
+			tc.assign(byLogin)
+			byLogin["streamera"].Settings.ClaimDrops = false
+			makeDropCandidate(byLogin["streamerd"], true)
+			f.seedWeights(t, time.Now(), map[string]float64{
+				"streamera": 5, "streamerb": 10, "streamerc": 50, "streamerd": 80,
+			})
+
+			f.w.processWatching(tickCtx(f.w))
+
+			if got := restrictedSlotLogins(t, f); !sameLoginSet(got, "streamerc", "streamerd") {
+				t.Fatalf("slots=%v, want streamera's stale assignment to protect nothing", got)
+			}
+			reason := decisionReason(f.w, "streamera")
+			if !strings.Contains(reason, "displaced by channel-restricted drop streamerd (channel-restricted drops may hold both slots") ||
+				strings.Contains(reason, "already farms") {
+				t.Fatalf("streamera reason=%q, want it displaced as an ordinary seat", reason)
+			}
+		})
 	}
 }
 
@@ -1055,6 +1076,33 @@ func TestRestrictedSharedCampaignContinuesThroughAdmission(t *testing.T) {
 				t.Fatalf("tick 2: slots=%v, want streamerd continuing the shared campaign beside streamere", got)
 			}
 		})
+	}
+}
+
+// R9, unit level: when both seats carry a waiting channel's work, the reason
+// names the carrier confirmed online, not the one retained while UNKNOWN.
+func TestRestrictedWaitingReasonNamesOnlineCarrier(t *testing.T) {
+	f := newResidenceFixture(t, 4)
+	byLogin := streamersByLogin(f.w.streamers)
+	a, b, c := byLogin["streamera"], byLogin["streamerb"], byLogin["streamerc"]
+	shared := restrictedTestCampaign("camp-shared", a, b, c)
+	assignRestricted(a, shared)
+	assignRestricted(b, shared, restrictedTestCampaign("camp-streamerb", b))
+	assignRestricted(c, shared)
+	a.SetUnknown(models.ReasonTransportError)
+	f.w.rotation.deficitMinutes = map[string]float64{
+		"streamera": 10, "streamerb": 20, "streamerc": 70, "streamerd": 80,
+	}
+	online := []int{0, 1, 2, 3}
+	ai, bi := restrictedIndex(t, f.w, "streamera"), restrictedIndex(t, f.w, "streamerb")
+
+	got := f.w.admitRestrictedDrops([2]int{ai, bi}, [2]int{ai, bi}, online, time.Now())
+
+	if want := [2]int{ai, bi}; got != want {
+		t.Fatalf("pair=%v, want %v: streamerc brings nothing new", got, want)
+	}
+	if reason := f.w.selectionReasons[restrictedIndex(t, f.w, "streamerc")]; !strings.Contains(reason, "waiting: streamerb "+alreadyFarmedReason) {
+		t.Fatalf("streamerc reason=%q, want it to name the online carrier streamerb", reason)
 	}
 }
 
@@ -1121,7 +1169,8 @@ func TestRestrictedWaitingReasonWhenAssignmentChangedMidEvaluation(t *testing.T)
 		workOf func(int) map[string]bool
 		want   string
 	}{
-		{name: "no carrier beside an ordinary seat", pair: [2]int{a, c}, workOf: readEmpty(-1), want: changed},
+		{name: "no carrier beside an ordinary first seat", pair: [2]int{a, c}, workOf: readEmpty(-1), want: changed},
+		{name: "no carrier beside an ordinary second seat", pair: [2]int{c, a}, workOf: readEmpty(-1), want: changed},
 		{name: "work read empty beside an ordinary seat", pair: [2]int{a, c}, workOf: readEmpty(d), want: changed},
 		{name: "work read empty beside restricted seats", pair: [2]int{c, e}, workOf: readEmpty(d), want: changed},
 		{name: "both seats restricted, distinct work", pair: [2]int{c, e}, workOf: readEmpty(-1), want: waitingForRestrictedSeats},
@@ -1151,7 +1200,9 @@ func TestRestrictedWaitingReasonWhenAssignmentChangedMidEvaluation(t *testing.T)
 // qualifying channel gets a reason; no reason reports a seated channel that is
 // not confirmed online as farming, or one confirmed offline as unconfirmed; a
 // seated channel's reason is a watched one; no reason names an unseated channel
-// as holding a seat; and the boost's victim gets the right reason: an ordinary
+// as holding a seat; a displaced restricted occupant names its admitter and
+// its carrier while a displaced ordinary seat gets the ordinary reason; and
+// the boost's victim gets the right reason: an ordinary
 // one is told which channel holds its seat once the admission gave it away and
 // otherwise keeps the boost's reason, and a qualifying one gets its waiting
 // reason when its seat was given away or one seated channel carries all of its
@@ -1331,6 +1382,22 @@ func TestRestrictedAdmissionInvariantsHoldForRandomAssignments(t *testing.T) {
 						t.Fatalf("iteration %d: reason %q names unseated %s as holding a seat", iteration, reason, login)
 					}
 				}
+			}
+		}
+		for i, out := range start {
+			if out == got[0] || out == got[1] {
+				continue
+			}
+			reason := w.selectionReasons[out]
+			prefix := "displaced by channel-restricted drop " + w.streamers[got[i]].GetUsername()
+			if w.streamers[out].HasChannelRestrictedCampaign() {
+				if !strings.Contains(reason, prefix+"; ") || !strings.Contains(reason, "(owner rule PA-B1a)") {
+					t.Fatalf("iteration %d: displaced restricted occupant %d reason=%q, want its admitter and carrier", iteration, out, reason)
+				}
+				continue
+			}
+			if !strings.Contains(reason, prefix+" (channel-restricted drops may hold both slots") {
+				t.Fatalf("iteration %d: displaced ordinary seat %d reason=%q, want the ordinary displacement reason", iteration, out, reason)
 			}
 		}
 		for i := range got {

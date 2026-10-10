@@ -2181,12 +2181,13 @@ func (w *MinuteWatcher) applyPriorityBoost(pair [2]int, onlineIndexes []int, now
 // channel-restricted drops. These replace any note written earlier this tick,
 // such as the one that the avoid preference was ignored, except that a base
 // member whose seat the single boost target still holds keeps the boost's
-// reason unless one seated channel carries all of its restricted campaigns. Only a carrier confirmed online is reported as
-// farming; one retained while UNKNOWN is reported as unconfirmed and one
-// confirmed offline as offline. When the single boost had taken a seat from a
-// member of base, the fair pair it started from, and this admission gives that
-// seat to another channel, that member is told which channel now holds it, or
-// gets its waiting reason when it qualifies.
+// reason unless one seated channel carries all of its restricted campaigns.
+// Only a carrier confirmed online is reported as farming; one retained while
+// UNKNOWN is reported as unconfirmed and one confirmed offline as offline.
+// When the single boost had taken a seat from a member of base, the fair pair
+// it started from, and this admission gives that seat to another channel, that
+// member is told which channel now holds it, or gets its waiting reason when
+// it qualifies.
 //
 // The boost latch is neither read nor written. It keeps describing the single
 // overlay seat even when this admission gives that seat away — a latched
@@ -2303,9 +2304,12 @@ func (w *MinuteWatcher) admitRestrictedDrops(base, pair [2]int, onlineIndexes []
 // admitRestrictedDrops gives up, or -1 when both seats are protected. A seat
 // holding a restricted occupant is protected unless that occupant is a
 // duplicate under owner rule PA-B1a: its restricted work is a subset of the
-// work of the restricted channel in the other seat, so giving it up loses no
-// campaign. Among the unprotected seats the weakest in betterBoostVictim order
-// is given up; of two duplicates with equal work that order picks exactly one.
+// work of the restricted channel in the other seat, so that seat still holds
+// every campaign it gives up. The other seat counts whatever its status, so a
+// channel retained while UNKNOWN, or one confirmed offline after the online
+// list was read, can be the seat kept for this evaluation. Among the
+// unprotected seats the weakest in betterBoostVictim order is given up; of two
+// duplicates with equal work that order picks exactly one.
 func (w *MinuteWatcher) selectRestrictedAdmissionSeat(pair [2]int, workOf func(int) map[string]bool, now time.Time) int {
 	seat := -1
 	for i, slot := range pair {
@@ -2358,18 +2362,25 @@ func (w *MinuteWatcher) restrictedWaitingReason(pair [2]int, idx int, workOf fun
 
 // restrictedCarrier returns the seated channel whose restricted work carries
 // all of idx's restricted work, or -1 when neither seat does or idx has no
-// restricted work to carry (an ordinary seat).
+// restricted work to carry (an ordinary seat). When both seats carry it, the
+// one confirmed online is named, since that is the seat actually farming it.
 func (w *MinuteWatcher) restrictedCarrier(pair [2]int, idx int, workOf func(int) map[string]bool) int {
 	rw := workOf(idx)
 	if len(rw) == 0 || !w.streamers[idx].HasChannelRestrictedCampaign() {
 		return -1
 	}
+	carrier := -1
 	for _, slot := range pair {
 		if held, restricted := w.heldRestrictedWork(slot, workOf); restricted && restrictedWorkSubset(rw, held) {
-			return slot
+			if w.streamers[slot].GetIsOnline() {
+				return slot
+			}
+			if carrier == -1 {
+				carrier = slot
+			}
 		}
 	}
-	return -1
+	return carrier
 }
 
 // restrictedCarrierClause names the seated carrier of some restricted work for
