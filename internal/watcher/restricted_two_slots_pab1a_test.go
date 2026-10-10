@@ -1993,8 +1993,14 @@ func TestRestrictedAdmissionInvariantsHoldForRandomAssignments(t *testing.T) {
 				}
 				continue
 			}
-			if !strings.Contains(reason, prefix+" (channel-restricted drops may hold both slots") {
-				t.Fatalf("iteration %d: displaced ordinary seat %d reason=%q, want the ordinary displacement reason", iteration, out, reason)
+			// Both seats hold channel-restricted drops only when the partner
+			// seat has restricted work.
+			want := prefix + " (channel-restricted drops may hold both slots"
+			if !restricted(got[1-i]) {
+				want = prefix + " (it competes again at the next evaluation)"
+			}
+			if !strings.Contains(reason, want) {
+				t.Fatalf("iteration %d: displaced ordinary seat %d reason=%q, want %q", iteration, out, reason, want)
 			}
 		}
 		for idx, reason := range w.selectionReasons {
@@ -2062,8 +2068,12 @@ func TestRestrictedAdmissionInvariantsHoldForRandomAssignments(t *testing.T) {
 			}
 			switch {
 			case !qualifying[victim] && gaveAway:
-				if !strings.Contains(reason, "went to channel-restricted drop "+w.streamers[got[i]].GetUsername()+" (") {
-					t.Fatalf("iteration %d: boost victim %d reason=%q, want it told %d holds its seat", iteration, victim, reason, got[i])
+				want := "went to channel-restricted drop " + w.streamers[got[i]].GetUsername() + " (keeps its rotation slot; channel-restricted drops may hold both slots"
+				if !restricted(got[1-i]) {
+					want = "went to channel-restricted drop " + w.streamers[got[i]].GetUsername() + " (keeps its rotation slot and competes again at the next evaluation)"
+				}
+				if !strings.Contains(reason, want) {
+					t.Fatalf("iteration %d: boost victim %d reason=%q, want it told %d holds its seat: %q", iteration, victim, reason, got[i], want)
 				}
 			case gaveAway:
 				if !strings.HasPrefix(reason, "waiting: ") || strings.Contains(reason, "DROPS/STREAK boost") {

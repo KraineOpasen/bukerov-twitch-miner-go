@@ -2285,10 +2285,17 @@ func (w *MinuteWatcher) admitRestrictedDrops(base, pair [2]int, onlineIndexes []
 		}
 		// The partner seat holds a channel-restricted drop unless it has no
 		// restricted work: an ordinary seat, or one whose restricted campaigns
-		// are all skip-ruled.
+		// are all skip-ruled. Only when it does do both seats hold
+		// channel-restricted drops; otherwise the channel that lost this seat
+		// competes for the partner's seat by the existing selection.
+		bothRestricted := len(workOf(pair[1-seat])) > 0
 		admission := "watched: admitted beside another channel-restricted drop, displacing "
-		if len(workOf(pair[1-seat])) == 0 {
+		victimNote := " (keeps its rotation slot; channel-restricted drops may hold both slots and it competes again when one stops qualifying)"
+		displacedNote := " (channel-restricted drops may hold both slots; it competes again when one stops qualifying)"
+		if !bothRestricted {
 			admission = "watched: admitted as a channel-restricted drop, displacing "
+			victimNote = " (keeps its rotation slot and competes again at the next evaluation)"
+			displacedNote = " (it competes again at the next evaluation)"
 		}
 		w.noteSelection(in, admission+w.streamers[out].GetUsername()+" - its campaign only progresses on the channels it lists")
 		// The single boost took this seat from victim, so its boost reason no
@@ -2296,8 +2303,7 @@ func (w *MinuteWatcher) admitRestrictedDrops(base, pair [2]int, onlineIndexes []
 		// waiting reason below instead.
 		if boosted && victim != pair[0] && victim != pair[1] && !containsIndex(waiting, victim) {
 			w.noteSelection(victim, "not watched this tick: displaced by a DROPS/STREAK boost whose seat then went to channel-restricted drop "+
-				w.streamers[in].GetUsername()+
-				" (keeps its rotation slot; channel-restricted drops may hold both slots and it competes again when one stops qualifying)")
+				w.streamers[in].GetUsername()+victimNote)
 		}
 		if carrier := w.restrictedCarrier(pair, out, workOf); carrier >= 0 {
 			w.noteSelection(out, "not watched this tick: displaced by channel-restricted drop "+
@@ -2305,8 +2311,7 @@ func (w *MinuteWatcher) admitRestrictedDrops(base, pair [2]int, onlineIndexes []
 			continue
 		}
 		w.noteSelection(out, "not watched this tick: displaced by channel-restricted drop "+
-			w.streamers[in].GetUsername()+
-			" (channel-restricted drops may hold both slots; it competes again when one stops qualifying)")
+			w.streamers[in].GetUsername()+displacedNote)
 	}
 	for _, idx := range waiting {
 		reason, carried := w.restrictedWaitingReason(pair, idx, workOf)
