@@ -907,4 +907,11 @@ func TestRestrictedPairPublishesReasons(t *testing.T) {
 	if reason := decisionReason(f.w, "streamerc"); !strings.Contains(reason, "boosted into a slot - channel-restricted drop") {
 		t.Fatalf("streamerc reason=%q, want the unchanged single-boost reason", reason)
 	}
+	// streamerc still holds the seat the boost took from streamerb, so
+	// streamerb keeps the boost's own reason.
+	if reason := decisionReason(f.w, "streamerb"); !strings.Contains(reason,
+		"displaced by a DROPS/STREAK boost (keeps its rotation slot and returns when the boost ends)") ||
+		strings.Contains(reason, "whose seat then went to") {
+		t.Fatalf("streamerb reason=%q, want the single boost's displacement reason", reason)
+	}
 }

@@ -28,10 +28,11 @@ import (
 // whole point: the residence work may change WHICH ordinary channel keeps a
 // contested seat over time, and it may change nothing else. One later admission
 // change is deliberate and pinned here instead of hidden: owner rule PA-B1 lets
-// two configured channel-restricted drops hold BOTH seats. The row that pinned
-// the old single-seat answer now pins the PA-B1 answer, so on a tree without
-// PA-B1 that row fails, and an unrestricted twin pins that ordinary active drops
-// still share a single boost seat. Every case below is built so the admission
+// two configured channel-restricted drops hold BOTH seats when the second
+// brings restricted work the first does not carry (owner rule PA-B1a). The
+// row that pinned the old single-seat answer now pins the PA-B1 answer, so on
+// a tree without PA-B1 that row fails, and an unrestricted twin pins that
+// ordinary active drops still share a single boost seat. Every case below is built so the admission
 // answer is unique — the strong contenders and the reason classes are fully
 // determined by the fixture, and no case depends on which ordinary competitor
 // wins an ordinary tie-break, because that is precisely the decision D1 is
@@ -163,8 +164,8 @@ func admissionPursuingStreak(s *models.Streamer) {
 }
 
 // TestAdmissionEquivalenceMatrix is the differential oracle. Every expectation
-// below is the behaviour of the EXISTING admission policy, including owner rule
-// PA-B1. PA-B1 re-pinned one row and added its unrestricted twin; every other
+// below is the behaviour of the EXISTING admission policy, including owner rules
+// PA-B1 and PA-B1a. PA-B1 re-pinned one row and added its unrestricted twin; every other
 // expectation is unchanged by it, and without PA-B1 only the re-pinned row
 // differs.
 func TestAdmissionEquivalenceMatrix(t *testing.T) {
