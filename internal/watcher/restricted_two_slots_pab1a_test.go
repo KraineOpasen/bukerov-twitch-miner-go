@@ -634,6 +634,118 @@ func TestRestrictedEqualDuplicatesVictimOrderUsesHardAndSemanticClass(t *testing
 	}
 }
 
+// R4 tie-breaks between two equal duplicates holding the fair pair: the victim
+// order goes on past the hard class to banked streak minutes, then residence
+// (which ends for a member whose broadcast was replaced), then persisted
+// deficit including the "prefer" handicap.
+func TestRestrictedEqualDuplicatesVictimOrderTieBreaks(t *testing.T) {
+	cases := []struct {
+		name        string
+		seeds       map[string]float64
+		beforeTick1 func(byLogin map[string]*models.Streamer)
+		beforeTick2 func(t *testing.T, byLogin map[string]*models.Streamer)
+		kept        string
+		displaced   string
+	}{
+		{
+			name:  "more banked streak minutes kept",
+			seeds: map[string]float64{"streamera": 10, "streamerb": 50, "streamerc": 20, "streamerd": 90},
+			beforeTick1: func(byLogin map[string]*models.Streamer) {
+				admissionPursuingStreak(byLogin["streamera"])
+				admissionPursuingStreak(byLogin["streamerc"])
+			},
+			beforeTick2: func(t *testing.T, byLogin map[string]*models.Streamer) {
+				byLogin["streamera"].Stream.MinuteWatched = 5
+				byLogin["streamerc"].Stream.MinuteWatched = 12
+				for _, login := range []string{"streamera", "streamerc"} {
+					if st := byLogin[login].Stream.EvaluateWatchStreak(time.Now()).State; st != models.WatchStreakPursuing {
+						t.Fatalf("precondition: %s streak state=%v, want PURSUING", login, st)
+					}
+				}
+			},
+			kept:      "streamerc",
+			displaced: "streamera",
+		},
+		{
+			name:  "replaced broadcast ends residence",
+			seeds: map[string]float64{"streamera": 20, "streamerb": 50, "streamerc": 10, "streamerd": 90},
+			beforeTick2: func(_ *testing.T, byLogin map[string]*models.Streamer) {
+				byLogin["streamerc"].Stream.Update("broadcast-streamerc-2", "", nil, nil, 1)
+			},
+			kept:      "streamera",
+			displaced: "streamerc",
+		},
+		{
+			name:  "prefer handicap counts in the deficit",
+			seeds: map[string]float64{"streamera": 10, "streamerb": 50, "streamerc": 12, "streamerd": 90},
+			beforeTick1: func(byLogin map[string]*models.Streamer) {
+				byLogin["streamerc"].Settings.Preference = models.PreferencePrefer
+			},
+			kept:      "streamerc",
+			displaced: "streamera",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newResidenceFixture(t, 4)
+			byLogin := streamersByLogin(f.w.streamers)
+			a, c, d := byLogin["streamera"], byLogin["streamerc"], byLogin["streamerd"]
+			shared := restrictedTestCampaign("camp-shared", a, c)
+			assignRestricted(a, shared)
+			assignRestricted(c, shared)
+			if tc.beforeTick1 != nil {
+				tc.beforeTick1(byLogin)
+			}
+			f.seedWeights(t, time.Now(), tc.seeds)
+
+			f.w.processWatching(tickCtx(f.w))
+			if got := restrictedSlotLogins(t, f); !sameLoginSet(got, "streamera", "streamerc") {
+				t.Fatalf("tick 1: slots=%v, want fairness holding both channels of the shared campaign", got)
+			}
+
+			assignRestricted(d, restrictedTestCampaign("camp-streamerd", d))
+			if tc.beforeTick2 != nil {
+				tc.beforeTick2(t, byLogin)
+			}
+			f.w.processWatching(tickCtx(f.w))
+
+			if got := restrictedSlotLogins(t, f); !sameLoginSet(got, tc.kept, "streamerd") {
+				t.Fatalf("tick 2: slots=%v, want %s kept beside streamerd", got, tc.kept)
+			}
+			want := "displaced by channel-restricted drop streamerd; " + tc.kept + " already farms its channel-restricted campaigns"
+			if reason := decisionReason(f.w, tc.displaced); !strings.Contains(reason, want) {
+				t.Fatalf("%s reason=%q, want %q", tc.displaced, reason, want)
+			}
+		})
+	}
+}
+
+// R1 and R14(b) over a four-step chain: each admitted channel carries all the
+// work of the channel it displaced and more, so the chain runs until the last
+// channel with its own campaign is seated beside the widest one.
+func TestRestrictedAdmissionFourStepChain(t *testing.T) {
+	f := newResidenceFixture(t, 7)
+	byLogin := streamersByLogin(f.w.streamers)
+	c, d, e, g, h := byLogin["streamerc"], byLogin["streamerd"], byLogin["streamere"], byLogin["streamerf"], byLogin["streamerg"]
+	k1 := restrictedTestCampaign("camp-k1", c, d, e, g)
+	k2 := restrictedTestCampaign("camp-k2", d, e, g)
+	k3 := restrictedTestCampaign("camp-k3", e, g)
+	assignRestricted(c, k1)
+	assignRestricted(d, k1, k2)
+	assignRestricted(e, k1, k2, k3)
+	assignRestricted(g, k1, k2, k3, restrictedTestCampaign("camp-k4", g))
+	assignRestricted(h, restrictedTestCampaign("camp-k5", h))
+	f.seedWeights(t, time.Now(), map[string]float64{
+		"streamera": 5, "streamerb": 10, "streamerc": 60, "streamerd": 70, "streamere": 80, "streamerf": 85, "streamerg": 90,
+	})
+
+	f.w.processWatching(tickCtx(f.w))
+
+	if got := restrictedSlotLogins(t, f); !sameLoginSet(got, "streamerf", "streamerg") {
+		t.Fatalf("slots=%v, want [streamerf streamerg] after the four-step chain", got)
+	}
+}
+
 // R14(a) per step, owner question (E): each step is judged against the channel
 // then holding the other seat, so streamerd {k1,k2} is admitted beside the
 // boosted streamerc {k1}; streamerc is then a duplicate and streamere
@@ -1367,36 +1479,33 @@ func TestRestrictedWaitingReasonWhenAssignmentChangedMidEvaluation(t *testing.T)
 	}
 }
 
-// Property, unit level: over random assignments of restricted campaigns,
-// random statuses (confirmed online, retained UNKNOWN, confirmed offline),
-// stale assignments with drop claiming switched off, game-wide campaigns,
-// random starting pairs, coarse persisted deficits with random recency,
-// Campaign Policy classes, in-progress streaks and committed ordinary
-// residence, and, in some cases, a fair
-// base pair that the single boost changed in one seat (its victim noted with
-// the boost's reason), the
-// admission keeps its invariants: the two seats stay
-// distinct and come from the starting pair or the qualifying channels; every
-// displaced restricted occupant's campaigns are still carried by a final seat;
-// no seat the admission could still give up has a waiting channel that brings
-// new work against the other seat; a seat whose partner never changed gave up
-// only an ordinary channel or a duplicate of that partner (R3), was the weaker
-// of two unprotected seats in betterBoostVictim order (R4), and went to the
-// strongest waiting channel in betterBoostCandidate order among those bringing
-// work the partner does not carry (R2, R14(a)); every waiting
-// qualifying channel gets a reason; no reason reports a seated channel that is
-// not confirmed online as farming, or one confirmed offline as unconfirmed; a
-// seated channel's reason is a watched one; no reason names an unseated channel
-// as holding a seat; a displaced restricted occupant names its admitter and
-// its carrier while a displaced ordinary seat gets the ordinary reason; a
-// carrier reason names a carrier confirmed online when one exists, and the
-// both-seats reason names exactly the final seats and marks one that is not
-// confirmed online; and
-// the boost's victim gets the right reason: an ordinary
-// one is told which channel holds its seat once the admission gave it away and
-// otherwise keeps the boost's reason, and a qualifying one gets its waiting
-// reason when its seat was given away or one seated channel carries all of its
-// restricted work, and otherwise keeps the boost's reason.
+// Property, unit level: over random assignments of restricted campaigns, random
+// statuses (confirmed online, retained UNKNOWN, confirmed offline), stale
+// assignments with drop claiming switched off, game-wide campaigns, random
+// starting pairs, coarse persisted deficits with random recency, Campaign
+// Policy classes, in-progress streaks and committed ordinary residence, and, in
+// some cases, a fair base pair that the single boost changed in one seat (its
+// victim noted with the boost's reason), the admission keeps its invariants:
+// the two seats stay distinct and come from the starting pair or the qualifying
+// channels; every displaced restricted occupant's campaigns are still carried
+// by a final seat; no seat the admission could still give up has a waiting
+// channel that brings new work against the other seat; a seat whose partner
+// never changed gave up only an ordinary channel or a duplicate of that partner
+// (R3), was the weaker of two unprotected seats in betterBoostVictim order
+// (R4), and went to the strongest waiting channel in betterBoostCandidate order
+// among those bringing work the partner does not carry (R2, R14(a)); every
+// waiting qualifying channel gets a reason; no reason reports a seated channel
+// that is not confirmed online as farming, or one confirmed offline as
+// unconfirmed; a seated channel's reason is a watched one; no reason names an
+// unseated channel as holding a seat; a displaced restricted occupant names its
+// admitter and its carrier while a displaced ordinary seat gets the ordinary
+// reason; a carrier reason names a carrier confirmed online when one exists,
+// and the both-seats reason names exactly the final seats and marks one that is
+// not confirmed online; and the boost's victim gets the right reason: an
+// ordinary one is told which channel holds its seat once the admission gave it
+// away and otherwise keeps the boost's reason, and a qualifying one gets its
+// waiting reason when its seat was given away or one seated channel carries all
+// of its restricted work, and otherwise keeps the boost's reason.
 func TestRestrictedAdmissionInvariantsHoldForRandomAssignments(t *testing.T) {
 	f := newResidenceFixture(t, 6)
 	w := f.w

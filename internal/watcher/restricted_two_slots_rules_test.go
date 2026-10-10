@@ -421,6 +421,43 @@ func TestRestrictedQualificationRespectsCandidateExclusions(t *testing.T) {
 	}
 }
 
+// Q-channel definition with two qualifying candidates: a channel-restricted
+// drop that is not a Phase-A candidate — watching disabled, watchdog-avoided,
+// "avoid" while other channels are online, or online for less than 30 seconds —
+// is never admitted, even though the admission runs for the two that qualify.
+func TestRestrictedExcludedChannelNotAdmittedBesideTwoQualifying(t *testing.T) {
+	cases := []struct {
+		name    string
+		exclude func(f *residenceFixture, s *models.Streamer)
+	}{
+		{name: "DisableWatch", exclude: func(_ *residenceFixture, s *models.Streamer) { s.Settings.DisableWatch = true }},
+		{name: "watchdog avoided", exclude: func(f *residenceFixture, s *models.Streamer) {
+			f.w.SetAvoidChecker(&staticAvoid{avoided: map[string]bool{s.GetUsername(): true}})
+		}},
+		{name: "preference avoid", exclude: func(_ *residenceFixture, s *models.Streamer) { s.Settings.Preference = models.PreferenceAvoid }},
+		{name: "settling after going online", exclude: func(_ *residenceFixture, s *models.Streamer) { s.OnlineAt = time.Now() }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newResidenceFixture(t, 5)
+			byLogin := streamersByLogin(f.w.streamers)
+			for _, login := range []string{"streamerc", "streamerd", "streamere"} {
+				makeDropCandidate(byLogin[login], true)
+			}
+			tc.exclude(f, byLogin["streamere"])
+			f.seedWeights(t, time.Now(), map[string]float64{
+				"streamera": 5, "streamerb": 10, "streamerc": 70, "streamerd": 90, "streamere": 80,
+			})
+
+			f.w.processWatching(tickCtx(f.w))
+
+			if got := restrictedSlotLogins(t, f); !sameLoginSet(got, "streamerc", "streamerd") {
+				t.Fatalf("slots=%v, want [streamerc streamerd]; the excluded streamere never qualifies", got)
+			}
+		})
+	}
+}
+
 // T4, R6: when one channel-restricted drop stops qualifying — its work ends,
 // its assignment goes away, it goes offline or it is avoided — its seat returns
 // to the existing selection at the next evaluation. While both drops held the
@@ -827,6 +864,27 @@ func TestRestrictedPairAgainstDiscoveryContender(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// R2 with the "prefer" handicap: persisted deficit in the admission's candidate
+// order is the effective one, so a preferred waiting channel can be more owed
+// than one with fewer raw minutes.
+func TestRestrictedAdmissionCandidateOrderCountsPreferHandicap(t *testing.T) {
+	f := newResidenceFixture(t, 5)
+	byLogin := streamersByLogin(f.w.streamers)
+	for _, login := range []string{"streamerc", "streamerd", "streamere"} {
+		makeDropCandidate(byLogin[login], true)
+	}
+	byLogin["streamere"].Settings.Preference = models.PreferencePrefer
+	f.seedWeights(t, time.Now(), map[string]float64{
+		"streamera": 5, "streamerb": 10, "streamerc": 70, "streamerd": 80, "streamere": 83,
+	})
+
+	f.w.processWatching(tickCtx(f.w))
+
+	if got := restrictedSlotLogins(t, f); !sameLoginSet(got, "streamerc", "streamere") {
+		t.Fatalf("slots=%v, want [streamerc streamere]: the preferred streamere is more owed than streamerd", got)
 	}
 }
 
