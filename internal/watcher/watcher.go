@@ -2160,12 +2160,16 @@ func (w *MinuteWatcher) applyPriorityBoost(pair [2]int, onlineIndexes []int, now
 // all of its work.
 //
 // A qualifying channel is a candidate with an active drop (DropsCondition)
-// whose assigned unfinished work is channel-restricted
-// (HasChannelRestrictedCampaign). A channel retained through an UNKNOWN blip
-// never qualifies, because DropsCondition requires a confirmed-online status.
-// With fewer than two qualifying channels the pair is returned untouched, so
-// the single boost seat, its latch and its victim stay exactly as
-// applyPriorityBoost left them.
+// and restricted work (restrictedWork): assigned unfinished channel-restricted
+// campaigns whose current drop the operator's Skip rules do not exclude
+// (owner decision FB-OD-10). A channel whose restricted campaigns are all
+// skip-ruled is an ordinary channel for this admission, its protection and
+// its reasons. The Skip rules are read once per admission pass, and each
+// channel's restricted work once per evaluation. A channel retained through an
+// UNKNOWN blip never qualifies, because DropsCondition requires a
+// confirmed-online status. With fewer than two qualifying channels the pair is
+// returned untouched, so the single boost seat, its latch and its victim stay
+// exactly as applyPriorityBoost left them.
 //
 // Otherwise every seat that selectRestrictedAdmissionSeat does not protect goes
 // to the strongest waiting qualifying channel, in betterBoostCandidate order,
@@ -2203,11 +2207,21 @@ func (w *MinuteWatcher) applyPriorityBoost(pair [2]int, onlineIndexes []int, now
 // seated here off the base pair is a stronger seat for the committed-cohort
 // partition, since ordinarySeat counts only activePair members as ordinary.
 func (w *MinuteWatcher) admitRestrictedDrops(base, pair [2]int, onlineIndexes []int, now time.Time) [2]int {
+	skips := w.rewardSkips.Load()
+	work := make(map[int]map[string]bool)
+	workOf := func(idx int) map[string]bool {
+		rw, ok := work[idx]
+		if !ok {
+			rw = restrictedWork(w.streamers[idx], skips)
+			work[idx] = rw
+		}
+		return rw
+	}
+
 	qualifying := 0
 	var waiting []int
 	for _, idx := range onlineIndexes {
-		s := w.streamers[idx]
-		if !s.DropsCondition() || !s.HasChannelRestrictedCampaign() {
+		if !w.streamers[idx].DropsCondition() || len(workOf(idx)) == 0 {
 			continue
 		}
 		qualifying++
@@ -2217,16 +2231,6 @@ func (w *MinuteWatcher) admitRestrictedDrops(base, pair [2]int, onlineIndexes []
 	}
 	if qualifying < 2 {
 		return pair
-	}
-
-	work := make(map[int]map[string]bool)
-	workOf := func(idx int) map[string]bool {
-		rw, ok := work[idx]
-		if !ok {
-			rw = restrictedWork(w.streamers[idx])
-			work[idx] = rw
-		}
-		return rw
 	}
 
 	original := pair
@@ -2308,27 +2312,27 @@ func (w *MinuteWatcher) admitRestrictedDrops(base, pair [2]int, onlineIndexes []
 
 // selectRestrictedAdmissionSeat returns the index of the seat
 // admitRestrictedDrops gives up, or -1 when both seats are protected. A seat
-// holding a restricted occupant is protected unless that occupant is a
-// duplicate under owner rule PA-B1a: its restricted work is a subset of the
-// work of the restricted channel in the other seat, so that seat still holds
-// every campaign it gives up. The other seat counts whatever its status, so a
-// channel retained while UNKNOWN, or one confirmed offline after the online
-// list was read, can be the seat kept for this evaluation. Among the
-// unprotected seats the weakest in betterBoostVictim order is given up; of two
-// duplicates with equal work that order picks exactly one.
+// holding a restricted occupant — a channel with restricted work — is
+// protected unless that occupant is a duplicate under owner rule PA-B1a: its
+// restricted work is a subset of the work of the restricted channel in the
+// other seat, so that seat still holds every campaign it gives up. The other
+// seat counts whatever its status, so a channel retained while UNKNOWN, or one
+// confirmed offline after the online list was read, can be the seat kept for
+// this evaluation. Among the unprotected seats the weakest in betterBoostVictim
+// order is given up, with its restricted step read from restricted work, so a
+// seat whose restricted campaigns are all skip-ruled competes as an ordinary
+// seat; of two duplicates with equal work that order picks exactly one.
 func (w *MinuteWatcher) selectRestrictedAdmissionSeat(pair [2]int, workOf func(int) map[string]bool, now time.Time) int {
+	restricted := func(idx int) bool { return len(workOf(idx)) > 0 }
 	seat := -1
 	for i, slot := range pair {
-		if w.streamers[slot].HasChannelRestrictedCampaign() {
-			// An empty RW beside a restricted flag means the assignment changed
-			// between the two reads; such an occupant is not judged a duplicate.
-			rw := workOf(slot)
+		if rw := workOf(slot); len(rw) > 0 {
 			held, otherRestricted := w.heldRestrictedWork(pair[1-i], workOf)
-			if len(rw) == 0 || !otherRestricted || !restrictedWorkSubset(rw, held) {
+			if !otherRestricted || !restrictedWorkSubset(rw, held) {
 				continue
 			}
 		}
-		if seat == -1 || w.betterBoostVictim(slot, pair[seat], now) {
+		if seat == -1 || w.betterBoostVictimBy(slot, pair[seat], now, restricted) {
 			seat = i
 		}
 	}
@@ -2336,22 +2340,21 @@ func (w *MinuteWatcher) selectRestrictedAdmissionSeat(pair [2]int, workOf func(i
 }
 
 // heldRestrictedWork returns the restricted work of the channel holding a seat
-// and whether that channel is a restricted occupant at all.
+// and whether that channel is a restricted occupant at all, i.e. has any.
 func (w *MinuteWatcher) heldRestrictedWork(idx int, workOf func(int) map[string]bool) (map[string]bool, bool) {
-	if !w.streamers[idx].HasChannelRestrictedCampaign() {
-		return nil, false
-	}
-	return workOf(idx), true
+	rw := workOf(idx)
+	return rw, len(rw) > 0
 }
 
 // restrictedWaitingReason explains why a qualifying channel is still waiting
 // once admitRestrictedDrops is done, and reports whether a seated channel
 // carries its work: a seated restricted channel already farms all of its
 // restricted campaigns (owner rule PA-B1a), or both seats hold
-// channel-restricted drops that this admission does not displace. Neither
-// holds only when an assignment — this channel's or a seated channel's —
-// changed between this evaluation's reads, and the reason says so instead of
-// blaming the seats.
+// channel-restricted drops that this admission does not displace. Since each
+// channel's restricted work is read once per evaluation, an admission never
+// leaves a qualifying channel waiting otherwise; a caller whose work snapshot
+// disagrees with the seats gets a reason saying the assignment changed
+// instead of one blaming the seats.
 func (w *MinuteWatcher) restrictedWaitingReason(pair [2]int, idx int, workOf func(int) map[string]bool) (string, bool) {
 	if carrier := w.restrictedCarrier(pair, idx, workOf); carrier >= 0 {
 		return "waiting: " + w.restrictedCarrierClause(carrier, "the same channel-restricted drop campaign"), true
@@ -2387,7 +2390,7 @@ func (w *MinuteWatcher) restrictedSeatLabel(idx int) string {
 // one confirmed online is named, since that is the seat actually farming it.
 func (w *MinuteWatcher) restrictedCarrier(pair [2]int, idx int, workOf func(int) map[string]bool) int {
 	rw := workOf(idx)
-	if len(rw) == 0 || !w.streamers[idx].HasChannelRestrictedCampaign() {
+	if len(rw) == 0 {
 		return -1
 	}
 	carrier := -1
@@ -2422,14 +2425,20 @@ func (w *MinuteWatcher) restrictedCarrierClause(carrier int, work string) string
 	}
 }
 
-// restrictedWork returns the restricted work RW of owner rule PA-B1a: the IDs
-// of the campaigns assigned to s that are channel-restricted and still have
-// remaining unclaimed work. It reads the same campaign basis as
-// HasChannelRestrictedCampaign and, like it, applies no farming exclusions.
-func restrictedWork(s *models.Streamer) map[string]bool {
+// restrictedWork returns the restricted work RW of owner rule PA-B1a: with
+// drop claiming on, the IDs of the campaigns assigned to s that are
+// channel-restricted, still have remaining unclaimed work and whose current
+// drop skips does not farming-exclude (owner decision FB-OD-10). That is the
+// campaign basis of HasChannelRestrictedCampaign minus the campaigns the
+// drops tracker's broker views withhold for an operator Skip rule
+// (RewardSkips.SkipsCampaignCurrentDrop); a nil skips excludes nothing.
+func restrictedWork(s *models.Streamer, skips *models.RewardSkips) map[string]bool {
+	if !s.GetSettings().ClaimDrops {
+		return nil
+	}
 	var ids map[string]bool
 	for _, c := range s.Stream.GetCampaigns() {
-		if c == nil || !c.HasRemainingUnclaimedWork() || !c.IsChannelRestricted() {
+		if c == nil || !c.HasRemainingUnclaimedWork() || !c.IsChannelRestricted() || skips.SkipsCampaignCurrentDrop(c) {
 			continue
 		}
 		if ids == nil {
@@ -2550,7 +2559,13 @@ func (w *MinuteWatcher) selectBoostVictim(pair [2]int, target int, now time.Time
 }
 
 func (w *MinuteWatcher) betterBoostVictim(candidate, current int, now time.Time) bool {
-	if cmp := w.compareStrictBoost(candidate, current); cmp != 0 {
+	return w.betterBoostVictimBy(candidate, current, now, w.channelRestricted)
+}
+
+// betterBoostVictimBy is betterBoostVictim with the channel-restricted step of
+// compareStrictBoost read from restricted instead.
+func (w *MinuteWatcher) betterBoostVictimBy(candidate, current int, now time.Time, restricted func(int) bool) bool {
+	if cmp := w.compareStrictBoostBy(candidate, current, restricted); cmp != 0 {
 		return cmp < 0
 	}
 	// A committed ordinary seat inside its minimum residence is not the one to
@@ -2601,8 +2616,20 @@ func (w *MinuteWatcher) strictlyHigherBoost(cand, held int) bool {
 // between them). Semantic utility remains a lexicographic ordinal comparison,
 // never a weighted sum with watch minutes.
 func (w *MinuteWatcher) compareStrictBoost(a, b int) int {
-	ar := w.streamers[a].HasChannelRestrictedCampaign()
-	br := w.streamers[b].HasChannelRestrictedCampaign()
+	return w.compareStrictBoostBy(a, b, w.channelRestricted)
+}
+
+// channelRestricted is compareStrictBoost's channel-restricted step:
+// HasChannelRestrictedCampaign, which applies no farming exclusions.
+func (w *MinuteWatcher) channelRestricted(idx int) bool {
+	return w.streamers[idx].HasChannelRestrictedCampaign()
+}
+
+// compareStrictBoostBy is compareStrictBoost with its channel-restricted step
+// read from restricted instead.
+func (w *MinuteWatcher) compareStrictBoostBy(a, b int, restricted func(int) bool) int {
+	ar := restricted(a)
+	br := restricted(b)
 	if ar != br {
 		if ar {
 			return 1

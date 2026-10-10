@@ -1653,10 +1653,10 @@ func TestRestrictedOfflineCarrierReportedAsOffline(t *testing.T) {
 	}
 }
 
-// R9, unit level: the restricted work of a qualifying channel is read again
-// after the qualifying check, so a concurrent assignment change can leave it
-// empty, or leave an ordinary seat beside a channel no seat carries. No
-// deterministic pipeline produces either, so the waiting reason is driven
+// R9, unit level: a work snapshot that disagrees with the seats — a qualifying
+// channel's work read empty, or an ordinary seat beside a channel no seat
+// carries — is never produced by the admission, which reads each channel's
+// restricted work once per evaluation, so the waiting reason is driven
 // directly: with no carrier and an ordinary seat, or with the channel's work
 // read empty, the reason says its assignment changed instead of blaming the
 // seats; with both seats restricted and real work it keeps the both-seats
@@ -1674,7 +1674,7 @@ func TestRestrictedWaitingReasonWhenAssignmentChangedMidEvaluation(t *testing.T)
 			if idx == empty {
 				return nil
 			}
-			return restrictedWork(f.w.streamers[idx])
+			return restrictedWork(f.w.streamers[idx], nil)
 		}
 	}
 	const changed = "waiting: a channel-restricted assignment changed while this evaluation read it"
@@ -1702,9 +1702,9 @@ func TestRestrictedWaitingReasonWhenAssignmentChangedMidEvaluation(t *testing.T)
 }
 
 // Property, unit level: over random assignments of restricted campaigns, random
-// statuses (confirmed online, retained UNKNOWN, confirmed offline), stale
-// assignments with drop claiming switched off, game-wide campaigns, random
-// starting pairs, coarse persisted deficits with random recency, Campaign
+// operator Skip rules on their current drops, random statuses (confirmed
+// online, retained UNKNOWN, confirmed offline), stale assignments with drop
+// claiming switched off, game-wide campaigns, random starting pairs, coarse persisted deficits with random recency, Campaign
 // Policy classes, in-progress streaks and committed ordinary residence, and, in
 // some cases, a fair base pair that the single boost changed in one seat (its
 // victim noted with the boost's reason), the admission keeps its invariants:
@@ -1713,8 +1713,8 @@ func TestRestrictedWaitingReasonWhenAssignmentChangedMidEvaluation(t *testing.T)
 // by a final seat; no seat the admission could still give up has a waiting
 // channel that brings new work against the other seat; a seat whose partner
 // never changed gave up only an ordinary channel or a duplicate of that partner
-// (R3), was the weaker of two unprotected seats in betterBoostVictim order
-// (R4), and went to the strongest waiting channel in betterBoostCandidate order
+// (R3), was the weaker of two unprotected seats in betterBoostVictim order with
+// restricted work as its restricted step (R4), and went to the strongest waiting channel in betterBoostCandidate order
 // among those bringing work the partner does not carry (R2, R14(a)); every
 // waiting qualifying channel gets a reason; no reason reports a seated channel
 // that is not confirmed online as farming, or one confirmed offline as
@@ -1745,6 +1745,16 @@ func TestRestrictedAdmissionInvariantsHoldForRandomAssignments(t *testing.T) {
 				}
 			}
 		}
+		// Each restricted campaign has its own game, and a random subset of their
+		// current drops carries a Skip rule, so a channel holding only skip-ruled
+		// campaigns is an ordinary channel for the admission (FB-OD-10).
+		var skipKeys []string
+		for _, id := range ids {
+			if rng.Intn(4) == 0 {
+				skipKeys = append(skipKeys, models.NormalizeRewardKey("game-"+id, "Reward"))
+			}
+		}
+		w.SetRewardSkips(models.NewRewardSkips(skipKeys))
 		for i, s := range w.streamers {
 			// A confirmed-offline stamp from an earlier iteration would block
 			// watch-streak admission for 30 minutes and silently disable the
@@ -1766,7 +1776,9 @@ func TestRestrictedAdmissionInvariantsHoldForRandomAssignments(t *testing.T) {
 						holders = append(holders, other)
 					}
 				}
-				campaigns = append(campaigns, restrictedTestCampaign(id, holders...))
+				campaign := restrictedTestCampaign(id, holders...)
+				campaign.Game = &models.Game{ID: "game-" + id}
+				campaigns = append(campaigns, campaign)
 			}
 			if rng.Intn(4) == 0 {
 				campaigns = append(campaigns, watchSlotTestCampaign("camp-gamewide", "", false))
@@ -1837,16 +1849,16 @@ func TestRestrictedAdmissionInvariantsHoldForRandomAssignments(t *testing.T) {
 		got := w.admitRestrictedDrops(base, start, online, now)
 
 		// occupied is the restricted work a seated channel protects or carries:
-		// that of a restricted occupant, and nothing for any other channel.
+		// that of a restricted occupant, its unfinished channel-restricted
+		// campaigns no Skip rule excludes, and nothing for any other channel.
+		skips := w.rewardSkips.Load()
 		occupied := func(idx int) map[string]bool {
-			if !w.streamers[idx].HasChannelRestrictedCampaign() {
-				return nil
-			}
-			return restrictedWork(w.streamers[idx])
+			return restrictedWork(w.streamers[idx], skips)
 		}
+		restricted := func(idx int) bool { return len(occupied(idx)) > 0 }
 		qualifying := map[int]bool{}
 		for i, s := range w.streamers {
-			if s.DropsCondition() && s.HasChannelRestrictedCampaign() {
+			if s.DropsCondition() && restricted(i) {
 				qualifying[i] = true
 			}
 		}
@@ -1922,8 +1934,8 @@ func TestRestrictedAdmissionInvariantsHoldForRandomAssignments(t *testing.T) {
 				own, other := occupied(start[j]), occupied(start[1-j])
 				return len(own) == 0 || (len(other) > 0 && restrictedWorkSubset(own, other))
 			}
-			if unprotected(0) && unprotected(1) && (i == 1) != w.betterBoostVictim(start[1], start[0], now) {
-				t.Fatalf("iteration %d: seat %d given up, want the weaker in betterBoostVictim order (start %v got %v)", iteration, i, start, got)
+			if unprotected(0) && unprotected(1) && (i == 1) != w.betterBoostVictimBy(start[1], start[0], now, restricted) {
+				t.Fatalf("iteration %d: seat %d given up, want the weaker in betterBoostVictim order with restricted work as its restricted step (start %v got %v)", iteration, i, start, got)
 			}
 		}
 		for idx := range qualifying {
@@ -1973,7 +1985,7 @@ func TestRestrictedAdmissionInvariantsHoldForRandomAssignments(t *testing.T) {
 			}
 			reason := w.selectionReasons[out]
 			prefix := "displaced by channel-restricted drop " + w.streamers[got[i]].GetUsername()
-			if w.streamers[out].HasChannelRestrictedCampaign() {
+			if restricted(out) {
 				if !strings.Contains(reason, prefix+"; ") || !strings.Contains(reason, "(owner rule PA-B1a)") {
 					t.Fatalf("iteration %d: displaced restricted occupant %d reason=%q, want its admitter and carrier", iteration, out, reason)
 				}
