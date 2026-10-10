@@ -1704,18 +1704,20 @@ func TestRestrictedWaitingReasonWhenAssignmentChangedMidEvaluation(t *testing.T)
 // Property, unit level: over random assignments of restricted campaigns, random
 // operator Skip rules on their current drops, random statuses (confirmed
 // online, retained UNKNOWN, confirmed offline), stale assignments with drop
-// claiming switched off, game-wide campaigns, random starting pairs, coarse persisted deficits with random recency, Campaign
-// Policy classes, in-progress streaks and committed ordinary residence, and, in
-// some cases, a fair base pair that the single boost changed in one seat (its
-// victim noted with the boost's reason), the admission keeps its invariants:
-// the two seats stay distinct and come from the starting pair or the qualifying
-// channels; every displaced restricted occupant's campaigns are still carried
-// by a final seat; no seat the admission could still give up has a waiting
-// channel that brings new work against the other seat; a seat whose partner
-// never changed gave up only an ordinary channel or a duplicate of that partner
-// (R3), was the weaker of two unprotected seats in betterBoostVictim order with
-// restricted work as its restricted step (R4), and went to the strongest waiting channel in betterBoostCandidate order
-// among those bringing work the partner does not carry (R2, R14(a)); every
+// claiming switched off, game-wide campaigns, random starting pairs, coarse
+// persisted deficits with random recency, Campaign Policy classes, in-progress
+// streaks and committed ordinary residence, and, in some cases, a fair base
+// pair that the single boost changed in one seat (its victim noted with the
+// boost's reason), the admission keeps its invariants: the two seats stay
+// distinct and come from the starting pair or the qualifying channels; every
+// displaced restricted occupant's campaigns are still carried by a final seat;
+// no seat the admission could still give up has a waiting channel that brings
+// new work against the other seat; a seat whose partner never changed gave up
+// only an ordinary channel or a duplicate of that partner (R3), was the weaker
+// of two unprotected seats in betterBoostVictim order with restricted work as
+// its restricted step (R4), and went to the strongest waiting channel in
+// betterBoostCandidate order among those bringing work the partner does not
+// carry (R2, R14(a)); every
 // waiting qualifying channel gets a reason; no reason reports a seated channel
 // that is not confirmed online as farming, or one confirmed offline as
 // unconfirmed; a seated channel's reason is a watched one; no reason names an

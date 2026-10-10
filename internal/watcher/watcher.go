@@ -375,9 +375,10 @@ type rotationState struct {
 	// channel-restricted drops take the remaining seat (admitRestrictedDrops)
 	// neither reads nor writes it, even when it gives the latched channel's seat
 	// away — for example a latched target that is a duplicate occupant
-	// (PA-B1a), in the overlay seat or in its own base seat, or a plain streak
-	// latched inside the base pair; the latch then names an unseated channel
-	// until the existing behaviour resumes.
+	// (PA-B1a), in the overlay seat or in its own base seat, one whose
+	// restricted campaigns are all skip-ruled, or a plain streak latched inside
+	// the base pair; the latch then names an unseated channel until the existing
+	// behaviour resumes.
 	boostLatched bool
 	boostTarget  int // eligible streamer held for continuity; it may later enter the fair base pair
 	boostVictim  int // displaced base member, or -1 while target itself belongs to the base pair
@@ -1612,10 +1613,10 @@ var watcherEligibility = eligibility.Evaluator{}
 // only influencing how often a channel gets an extra turn - never granting
 // it a permanent exclusive slot. The one exception is owner rules PA-B1 and
 // PA-B1a: while two or more qualifying channels hold channel-restricted Drops
-// (online with an active drop whose work is channel-restricted), which
-// progress only on the channels their campaigns list, they may occupy both
-// slots, provided the second brings restricted work the first does not
-// already carry.
+// (online with an active drop and channel-restricted work that no operator
+// Skip rule excludes), which progress only on the channels their campaigns
+// list, they may occupy both slots, provided the second brings restricted
+// work the first does not already carry.
 func (w *MinuteWatcher) selectStreamersToWatch(onlineIndexes []int, now time.Time) []int {
 	candidates := w.filterAvoided(onlineIndexes)
 	if len(candidates) <= constants.MaxSimultaneousStreams {
@@ -2201,9 +2202,11 @@ func (w *MinuteWatcher) applyPriorityBoost(pair [2]int, onlineIndexes []int, now
 //
 // The boost latch is neither read nor written. It keeps describing the single
 // overlay seat even when this admission gives the latched channel's seat away
-// — a latched target that is a duplicate occupant is displaced like any other,
-// and so is a plain streak latched inside the base pair — so the latch can name
-// a channel that is not seated until the existing behaviour resumes. A channel
+// — a latched target that is a duplicate occupant, or that has no restricted
+// work because its restricted campaigns are all skip-ruled, is displaced like
+// any other, and so is a plain streak latched inside the base pair — so the
+// latch can name a channel that is not seated until the existing behaviour
+// resumes. A channel
 // seated here off the base pair is a stronger seat for the committed-cohort
 // partition, since ordinarySeat counts only activePair members as ordinary.
 func (w *MinuteWatcher) admitRestrictedDrops(base, pair [2]int, onlineIndexes []int, now time.Time) [2]int {
@@ -2280,8 +2283,14 @@ func (w *MinuteWatcher) admitRestrictedDrops(base, pair [2]int, onlineIndexes []
 			}
 			continue
 		}
-		w.noteSelection(in, "watched: admitted beside another channel-restricted drop, displacing "+
-			w.streamers[out].GetUsername()+" - its campaign only progresses on the channels it lists")
+		// The partner seat holds a channel-restricted drop unless it has no
+		// restricted work: an ordinary seat, or one whose restricted campaigns
+		// are all skip-ruled.
+		admission := "watched: admitted beside another channel-restricted drop, displacing "
+		if len(workOf(pair[1-seat])) == 0 {
+			admission = "watched: admitted as a channel-restricted drop, displacing "
+		}
+		w.noteSelection(in, admission+w.streamers[out].GetUsername()+" - its campaign only progresses on the channels it lists")
 		// The single boost took this seat from victim, so its boost reason no
 		// longer names who holds the seat; a victim that qualifies gets its
 		// waiting reason below instead.

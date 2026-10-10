@@ -55,6 +55,9 @@ func TestRestrictedSkipRuledChannelGainsNoSeat(t *testing.T) {
 			f.seedWeights(t, time.Now(), map[string]float64{
 				"streamera": 5, "streamerb": 10, "streamerc": 60, "streamerd": 80,
 			})
+			if !containsIndex(f.w.getOnlineStreamers(nil), restrictedIndex(t, f.w, "streamerd")) {
+				t.Fatalf("precondition: streamerd must stay an online candidate through its channel points")
+			}
 
 			f.w.processWatching(tickCtx(f.w))
 
@@ -69,7 +72,10 @@ func TestRestrictedSkipRuledChannelGainsNoSeat(t *testing.T) {
 				t.Fatalf("slots=%v, want streamerc beside a fair-pair channel and the skip-ruled streamerd unseated", got)
 			}
 			reason := decisionReason(f.w, "streamerd")
-			for _, admission := range []string{"admitted beside another channel-restricted drop", "(owner rule PA-B1a)", waitingForRestrictedSeats} {
+			for _, admission := range []string{
+				"admitted beside another channel-restricted drop", "(owner rule PA-B1a)", waitingForRestrictedSeats,
+				"a channel-restricted assignment changed",
+			} {
 				if strings.Contains(reason, admission) {
 					t.Fatalf("streamerd reason=%q carries the admission's %q", reason, admission)
 				}
@@ -122,19 +128,27 @@ func TestRestrictedSkipRuledOccupantKeepsNoSeat(t *testing.T) {
 	}
 }
 
-// R12 repaired, R4: between an ordinary seat and a skip-ruled one, both
+// R12 repaired, R4/R9: between an ordinary seat and a skip-ruled one, both
 // unprotected, the victim order no longer counts the skip-ruled campaign as
 // restricted, so the less owed of the two is given up; streamerd, carried by
-// streamerc, waits. Without the rule the skip-ruled channel is a restricted
-// occupant and the ordinary seat goes.
+// streamerc, waits, and streamerc is not described as seated beside another
+// channel-restricted drop. Without the rule the skip-ruled channel is a
+// restricted occupant and the ordinary seat goes.
 func TestRestrictedSkipRuledSeatGivenUpAsOrdinary(t *testing.T) {
 	cases := []struct {
-		name    string
-		skipped bool
-		want    []string
+		name     string
+		skipped  bool
+		want     []string
+		admitted string
 	}{
-		{name: "skip-ruled seat competes as ordinary", skipped: true, want: []string{"streamera", "streamerc"}},
-		{name: "control: the same seat without the rule", want: []string{"streamerb", "streamerc"}},
+		{
+			name: "skip-ruled seat competes as ordinary", skipped: true, want: []string{"streamera", "streamerc"},
+			admitted: "watched: admitted as a channel-restricted drop, displacing streamerb",
+		},
+		{
+			name: "control: the same seat without the rule", want: []string{"streamerb", "streamerc"},
+			admitted: "watched: admitted beside another channel-restricted drop, displacing streamera",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -159,6 +173,107 @@ func TestRestrictedSkipRuledSeatGivenUpAsOrdinary(t *testing.T) {
 			}
 			if reason := decisionReason(f.w, "streamerd"); !strings.Contains(reason, "streamerc already farms the same channel-restricted drop campaign") {
 				t.Fatalf("streamerd reason=%q, want its carrier streamerc", reason)
+			}
+			if reason := decisionReason(f.w, "streamerc"); !strings.HasPrefix(reason, tc.admitted) {
+				t.Fatalf("streamerc reason=%q, want prefix %q", reason, tc.admitted)
+			}
+		})
+	}
+}
+
+// FB-OD-10 per campaign: a Skip rule removes only the campaign it rules, so a
+// channel keeps the seat its other, unskipped restricted campaign brings, and
+// a skip-ruled campaign never makes a channel bring distinct work.
+func TestRestrictedSkipRuleExcludesOnlyThatCampaign(t *testing.T) {
+	cases := []struct {
+		name    string
+		shared  bool
+		want    []string
+		carried bool
+	}{
+		{name: "unskipped campaign beside a skip-ruled one still brings work", want: []string{"streamerc", "streamerd"}},
+		{name: "skip-ruled campaign beside a shared one brings no distinct work", shared: true, carried: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newResidenceFixture(t, 4)
+			byLogin := streamersByLogin(f.w.streamers)
+			c, d := byLogin["streamerc"], byLogin["streamerd"]
+			own := restrictedTestCampaign("camp-streamerd", d)
+			if tc.shared {
+				own = restrictedTestCampaign("camp-shared", c, d)
+				assignRestricted(c, own)
+			} else {
+				assignRestricted(c, restrictedTestCampaign("camp-streamerc", c))
+			}
+			assignRestricted(d, own, skipRuledRestrictedCampaign("camp-skip-streamerd", d))
+			f.w.SetRewardSkips(skipRuledRewards())
+			f.seedWeights(t, time.Now(), map[string]float64{
+				"streamera": 5, "streamerb": 10, "streamerc": 60, "streamerd": 70,
+			})
+
+			f.w.processWatching(tickCtx(f.w))
+
+			got := restrictedSlotLogins(t, f)
+			if !tc.carried {
+				if !sameLoginSet(got, tc.want...) {
+					t.Fatalf("slots=%v, want %v", got, tc.want)
+				}
+				return
+			}
+			if !sameLoginSet(got, "streamera", "streamerc") && !sameLoginSet(got, "streamerb", "streamerc") {
+				t.Fatalf("slots=%v, want streamerc beside a fair-pair channel and streamerd waiting", got)
+			}
+			if reason := decisionReason(f.w, "streamerd"); !strings.Contains(reason, "streamerc already farms the same channel-restricted drop campaign") {
+				t.Fatalf("streamerd reason=%q, want its carrier streamerc", reason)
+			}
+		})
+	}
+}
+
+// FB-OD-10 current drop: a Skip rule counts only when it rules the campaign's
+// current drop (the one farmed next), exactly as the drops tracker's broker
+// views judge it, not any other or the final drop.
+func TestRestrictedSkipRuleKeysOnCurrentDrop(t *testing.T) {
+	cases := []struct {
+		name    string
+		drops   []string
+		skipped bool
+	}{
+		{name: "only a later drop is skip-ruled", drops: []string{"Reward", "Skipped Reward"}},
+		{name: "the current drop is skip-ruled, a later one not", drops: []string{"Skipped Reward", "Reward"}, skipped: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newResidenceFixture(t, 4)
+			byLogin := streamersByLogin(f.w.streamers)
+			c, d := byLogin["streamerc"], byLogin["streamerd"]
+			assignRestricted(c, restrictedTestCampaign("camp-streamerc", c))
+			campaign := skipRuledRestrictedCampaign("camp-streamerd", d)
+			campaign.Drops = []*models.Drop{
+				{ID: "camp-streamerd-drop-1", Name: tc.drops[0], MinutesRequired: 60},
+				{ID: "camp-streamerd-drop-2", Name: tc.drops[1], MinutesRequired: 120},
+			}
+			if current := campaign.CurrentDrop(); current == nil || current.Name != tc.drops[0] {
+				t.Fatalf("precondition: current drop=%v, want %q", current, tc.drops[0])
+			}
+			assignRestricted(d, campaign)
+			f.w.SetRewardSkips(skipRuledRewards())
+			f.seedWeights(t, time.Now(), map[string]float64{
+				"streamera": 5, "streamerb": 10, "streamerc": 60, "streamerd": 80,
+			})
+
+			f.w.processWatching(tickCtx(f.w))
+
+			got := restrictedSlotLogins(t, f)
+			if !tc.skipped {
+				if !sameLoginSet(got, "streamerc", "streamerd") {
+					t.Fatalf("slots=%v, want [streamerc streamerd]: a later skip-ruled drop does not exclude the campaign", got)
+				}
+				return
+			}
+			if !sameLoginSet(got, "streamera", "streamerc") && !sameLoginSet(got, "streamerb", "streamerc") {
+				t.Fatalf("slots=%v, want streamerc beside a fair-pair channel and streamerd unseated", got)
 			}
 		})
 	}
