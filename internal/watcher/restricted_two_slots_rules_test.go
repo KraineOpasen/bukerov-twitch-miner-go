@@ -265,8 +265,9 @@ func TestRestrictedPairKeepsRetainedUnknownOccupant(t *testing.T) {
 	if got := restrictedSlotLogins(t, f); !sameLoginSet(got, "streamera", "streamerd") {
 		t.Fatalf("tick 2: slots=%v, want the retained restricted occupant plus the stronger waiting drop", got)
 	}
-	if reason := decisionReason(f.w, "streamere"); !strings.Contains(reason, waitingForRestrictedSeats) {
-		t.Fatalf("streamere reason=%q, want it told both seats hold channel-restricted drops", reason)
+	if reason := decisionReason(f.w, "streamere"); !strings.Contains(reason, waitingForRestrictedSeats) ||
+		!strings.Contains(reason, "streamera status unconfirmed") {
+		t.Fatalf("streamere reason=%q, want it told both seats hold channel-restricted drops, one unconfirmed", reason)
 	}
 }
 
@@ -296,8 +297,9 @@ func TestRestrictedPairKeepsRetainedUnknownBoostOccupant(t *testing.T) {
 	if got := restrictedSlotLogins(t, f); !sameLoginSet(got, "streamerc", "streamerd") {
 		t.Fatalf("tick 2: slots=%v, want the retained boost occupant plus the stronger waiting drop", got)
 	}
-	if reason := decisionReason(f.w, "streamere"); !strings.Contains(reason, waitingForRestrictedSeats) {
-		t.Fatalf("streamere reason=%q, want it told both seats hold channel-restricted drops", reason)
+	if reason := decisionReason(f.w, "streamere"); !strings.Contains(reason, waitingForRestrictedSeats) ||
+		!strings.Contains(reason, "streamerc status unconfirmed") {
+		t.Fatalf("streamere reason=%q, want it told both seats hold channel-restricted drops, one unconfirmed", reason)
 	}
 }
 
@@ -346,10 +348,11 @@ func TestRestrictedSeatGoingUnknownIsReleasedAsBefore(t *testing.T) {
 // every online channel is avoided is the exclusion lifted.
 func TestRestrictedQualificationRespectsCandidateExclusions(t *testing.T) {
 	cases := []struct {
-		name     string
-		exclude  func(f *residenceFixture, byLogin map[string]*models.Streamer)
-		want     []string
-		admitted string
+		name      string
+		exclude   func(f *residenceFixture, byLogin map[string]*models.Streamer)
+		want      []string
+		admitted  string
+		displaced string
 	}{
 		{
 			name: "DisableWatch",
@@ -379,8 +382,9 @@ func TestRestrictedQualificationRespectsCandidateExclusions(t *testing.T) {
 					s.Settings.Preference = models.PreferenceAvoid
 				}
 			},
-			want:     []string{"streamerc", "streamerd"},
-			admitted: "streamerd",
+			want:      []string{"streamerc", "streamerd"},
+			admitted:  "streamerd",
+			displaced: "streamera",
 		},
 	}
 	for _, tc := range cases {
@@ -403,6 +407,12 @@ func TestRestrictedQualificationRespectsCandidateExclusions(t *testing.T) {
 			if tc.admitted != "" {
 				if reason := decisionReason(f.w, tc.admitted); !strings.Contains(reason, "admitted beside another channel-restricted drop, displacing") {
 					t.Fatalf("%s reason=%q, want the admission's reason", tc.admitted, reason)
+				}
+			}
+			if tc.displaced != "" {
+				if reason := decisionReason(f.w, tc.displaced); !strings.Contains(reason,
+					"displaced by channel-restricted drop "+tc.admitted+" (channel-restricted drops may hold both slots") {
+					t.Fatalf("%s reason=%q, want the ordinary displacement reason", tc.displaced, reason)
 				}
 			}
 		})

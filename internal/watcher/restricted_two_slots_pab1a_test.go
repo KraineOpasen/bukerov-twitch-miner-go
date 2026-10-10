@@ -18,9 +18,10 @@ import (
 // restricted_two_slots_test.go and read the published BrokerSnapshot and debug
 // decisions as the oracle; the unit-level cases drive admitRestrictedDrops, or
 // its waiting-reason helper, directly for states the pipeline does not produce
-// deterministically (two open seats, a carrier confirmed offline after the
-// online list was read, an assignment changing between two reads), and the
-// property case checks the admission's invariants over random assignments.
+// deterministically or only through a long setup (two open seats, a carrier
+// confirmed offline after the online list was read, an assignment changing
+// between two reads, carriers in a chosen seat order), and the property case
+// checks the admission's invariants over random assignments.
 
 // alreadyFarmedReason is the selection-reason fragment a qualifying channel
 // gets when PA-B1a holds it back.
@@ -573,34 +574,64 @@ func TestRestrictedEqualDuplicatesReplacedStepByStep(t *testing.T) {
 
 // R14(b) with a retained-UNKNOWN superset: the UNKNOWN channel is still a
 // restricted occupant, so a confirmed channel whose work it fully carries is a
-// duplicate and gives up its seat for distinct work; the reason reports the
-// carrier as unconfirmed.
+// duplicate and gives up its seat for distinct work. The reason reports the
+// UNKNOWN carrier as unconfirmed; when the admitted channel carries that work
+// too, the reason names it, the carrier confirmed online.
 func TestRestrictedUnknownSupersetMakesConfirmedSubsetDuplicate(t *testing.T) {
-	f := newResidenceFixture(t, 4)
-	byLogin := streamersByLogin(f.w.streamers)
-	a, c, d := byLogin["streamera"], byLogin["streamerc"], byLogin["streamerd"]
-	shared := restrictedTestCampaign("camp-shared", a, c)
-	assignRestricted(a, shared, restrictedTestCampaign("camp-streamera", a))
-	assignRestricted(c, shared)
-	f.seedWeights(t, time.Now(), map[string]float64{
-		"streamera": 5, "streamerb": 50, "streamerc": 10, "streamerd": 90,
-	})
-
-	f.w.processWatching(tickCtx(f.w))
-	if got := restrictedSlotLogins(t, f); !sameLoginSet(got, "streamera", "streamerc") {
-		t.Fatalf("tick 1: slots=%v, want fairness holding streamera and streamerc", got)
+	cases := []struct {
+		name string
+		// assign seats the shared campaign on streamera and streamerc and
+		// returns the step that assigns streamerd before the second tick.
+		assign func(a, c, d *models.Streamer) func()
+		want   string
+	}{
+		{
+			name: "only the UNKNOWN channel carries it",
+			assign: func(a, c, d *models.Streamer) func() {
+				shared := restrictedTestCampaign("camp-shared", a, c)
+				assignRestricted(a, shared, restrictedTestCampaign("camp-streamera", a))
+				assignRestricted(c, shared)
+				return func() { assignRestricted(d, restrictedTestCampaign("camp-streamerd", d)) }
+			},
+			want: "displaced by channel-restricted drop streamerd; streamera, whose status is unconfirmed, holds a slot with its channel-restricted campaigns",
+		},
+		{
+			name: "the online admitted channel carries it too",
+			assign: func(a, c, d *models.Streamer) func() {
+				shared := restrictedTestCampaign("camp-shared", a, c, d)
+				assignRestricted(a, shared, restrictedTestCampaign("camp-streamera", a))
+				assignRestricted(c, shared)
+				return func() { assignRestricted(d, shared, restrictedTestCampaign("camp-streamerd", d)) }
+			},
+			want: "displaced by channel-restricted drop streamerd; streamerd already farms its channel-restricted campaigns",
+		},
 	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newResidenceFixture(t, 4)
+			byLogin := streamersByLogin(f.w.streamers)
+			a, c, d := byLogin["streamera"], byLogin["streamerc"], byLogin["streamerd"]
+			assignD := tc.assign(a, c, d)
+			f.seedWeights(t, time.Now(), map[string]float64{
+				"streamera": 5, "streamerb": 50, "streamerc": 10, "streamerd": 90,
+			})
 
-	a.SetUnknown(models.ReasonTransportError)
-	assignRestricted(d, restrictedTestCampaign("camp-streamerd", d))
-	f.w.processWatching(tickCtx(f.w))
+			f.w.processWatching(tickCtx(f.w))
+			if got := restrictedSlotLogins(t, f); !sameLoginSet(got, "streamera", "streamerc") {
+				t.Fatalf("tick 1: slots=%v, want fairness holding streamera and streamerc", got)
+			}
 
-	if got := restrictedSlotLogins(t, f); !sameLoginSet(got, "streamera", "streamerd") {
-		t.Fatalf("tick 2: slots=%v, want the confirmed subset streamerc displaced for streamerd", got)
-	}
-	want := "streamera, whose status is unconfirmed, holds a slot with its channel-restricted campaigns"
-	if reason := decisionReason(f.w, "streamerc"); !strings.Contains(reason, want) {
-		t.Fatalf("streamerc reason=%q, want %q", reason, want)
+			a.SetUnknown(models.ReasonTransportError)
+			assignD()
+			f.w.processWatching(tickCtx(f.w))
+
+			if got := restrictedSlotLogins(t, f); !sameLoginSet(got, "streamera", "streamerd") {
+				t.Fatalf("tick 2: slots=%v, want the confirmed subset streamerc displaced for streamerd", got)
+			}
+			if reason := decisionReason(f.w, "streamerc"); !strings.Contains(reason, tc.want) {
+				t.Fatalf("streamerc reason=%q, want %q", reason, tc.want)
+			}
+		})
 	}
 }
 
@@ -1080,29 +1111,75 @@ func TestRestrictedSharedCampaignContinuesThroughAdmission(t *testing.T) {
 }
 
 // R9, unit level: when both seats carry a waiting channel's work, the reason
-// names the carrier confirmed online, not the one retained while UNKNOWN.
+// names the carrier confirmed online, whichever seat it holds and whether the
+// other carrier is retained while UNKNOWN or confirmed offline after the
+// online list was read.
 func TestRestrictedWaitingReasonNamesOnlineCarrier(t *testing.T) {
-	f := newResidenceFixture(t, 4)
+	statuses := map[string]func(s *models.Streamer){
+		"UNKNOWN": func(s *models.Streamer) { s.SetUnknown(models.ReasonTransportError) },
+		"offline": func(s *models.Streamer) { s.SetConfirmedOffline() },
+	}
+	for statusName, setStatus := range statuses {
+		for _, onlineFirst := range []bool{false, true} {
+			name := statusName + " carrier first"
+			if onlineFirst {
+				name = statusName + " carrier second"
+			}
+			t.Run(name, func(t *testing.T) {
+				f := newResidenceFixture(t, 4)
+				byLogin := streamersByLogin(f.w.streamers)
+				a, b, c := byLogin["streamera"], byLogin["streamerb"], byLogin["streamerc"]
+				shared := restrictedTestCampaign("camp-shared", a, b, c)
+				assignRestricted(a, shared)
+				assignRestricted(b, shared, restrictedTestCampaign("camp-streamerb", b))
+				assignRestricted(c, shared)
+				setStatus(a)
+				f.w.rotation.deficitMinutes = map[string]float64{
+					"streamera": 10, "streamerb": 20, "streamerc": 70, "streamerd": 80,
+				}
+				online := []int{0, 1, 2, 3}
+				pair := [2]int{restrictedIndex(t, f.w, "streamera"), restrictedIndex(t, f.w, "streamerb")}
+				if onlineFirst {
+					pair = [2]int{pair[1], pair[0]}
+				}
+
+				got := f.w.admitRestrictedDrops(pair, pair, online, time.Now())
+
+				if got != pair {
+					t.Fatalf("pair=%v, want %v: streamerc brings nothing new", got, pair)
+				}
+				if reason := f.w.selectionReasons[restrictedIndex(t, f.w, "streamerc")]; !strings.Contains(reason, "waiting: streamerb "+alreadyFarmedReason) {
+					t.Fatalf("streamerc reason=%q, want it to name the online carrier streamerb", reason)
+				}
+			})
+		}
+	}
+}
+
+// R9, unit level: the both-seats waiting reason marks a seated channel that
+// is not confirmed online, so a seat confirmed offline after the online list
+// was read never reads as a channel farming its drop.
+func TestRestrictedBothSeatsReasonMarksOfflineOccupant(t *testing.T) {
+	f := newResidenceFixture(t, 5)
 	byLogin := streamersByLogin(f.w.streamers)
-	a, b, c := byLogin["streamera"], byLogin["streamerb"], byLogin["streamerc"]
-	shared := restrictedTestCampaign("camp-shared", a, b, c)
-	assignRestricted(a, shared)
-	assignRestricted(b, shared, restrictedTestCampaign("camp-streamerb", b))
-	assignRestricted(c, shared)
-	a.SetUnknown(models.ReasonTransportError)
+	for _, login := range []string{"streamerc", "streamerd", "streamere"} {
+		makeDropCandidate(byLogin[login], true)
+	}
+	byLogin["streamerc"].SetConfirmedOffline()
 	f.w.rotation.deficitMinutes = map[string]float64{
-		"streamera": 10, "streamerb": 20, "streamerc": 70, "streamerd": 80,
+		"streamera": 10, "streamerb": 20, "streamerc": 70, "streamerd": 75, "streamere": 80,
 	}
-	online := []int{0, 1, 2, 3}
-	ai, bi := restrictedIndex(t, f.w, "streamera"), restrictedIndex(t, f.w, "streamerb")
+	online := []int{0, 1, 2, 3, 4}
+	c, a := restrictedIndex(t, f.w, "streamerc"), restrictedIndex(t, f.w, "streamera")
 
-	got := f.w.admitRestrictedDrops([2]int{ai, bi}, [2]int{ai, bi}, online, time.Now())
+	got := f.w.admitRestrictedDrops([2]int{c, a}, [2]int{c, a}, online, time.Now())
 
-	if want := [2]int{ai, bi}; got != want {
-		t.Fatalf("pair=%v, want %v: streamerc brings nothing new", got, want)
+	if want := [2]int{c, restrictedIndex(t, f.w, "streamerd")}; got != want {
+		t.Fatalf("pair=%v, want %v", got, want)
 	}
-	if reason := f.w.selectionReasons[restrictedIndex(t, f.w, "streamerc")]; !strings.Contains(reason, "waiting: streamerb "+alreadyFarmedReason) {
-		t.Fatalf("streamerc reason=%q, want it to name the online carrier streamerb", reason)
+	want := waitingForRestrictedSeats + " (streamerc now confirmed offline, streamerd)"
+	if reason := f.w.selectionReasons[restrictedIndex(t, f.w, "streamere")]; !strings.Contains(reason, want) {
+		t.Fatalf("streamere reason=%q, want %q", reason, want)
 	}
 }
 
@@ -1201,7 +1278,9 @@ func TestRestrictedWaitingReasonWhenAssignmentChangedMidEvaluation(t *testing.T)
 // not confirmed online as farming, or one confirmed offline as unconfirmed; a
 // seated channel's reason is a watched one; no reason names an unseated channel
 // as holding a seat; a displaced restricted occupant names its admitter and
-// its carrier while a displaced ordinary seat gets the ordinary reason; and
+// its carrier while a displaced ordinary seat gets the ordinary reason; a
+// carrier reason names a carrier confirmed online when one exists, and the
+// both-seats reason marks a seat that is not confirmed online; and
 // the boost's victim gets the right reason: an ordinary
 // one is told which channel holds its seat once the admission gave it away and
 // otherwise keeps the boost's reason, and a qualifying one gets its waiting
@@ -1398,6 +1477,41 @@ func TestRestrictedAdmissionInvariantsHoldForRandomAssignments(t *testing.T) {
 			}
 			if !strings.Contains(reason, prefix+" (channel-restricted drops may hold both slots") {
 				t.Fatalf("iteration %d: displaced ordinary seat %d reason=%q, want the ordinary displacement reason", iteration, out, reason)
+			}
+		}
+		for idx, reason := range w.selectionReasons {
+			if idx == got[0] || idx == got[1] {
+				continue
+			}
+			if strings.Contains(reason, "(owner rule PA-B1a)") && len(occupied(idx)) > 0 {
+				var onlineCarriers []string
+				for _, seat := range got {
+					if held := occupied(seat); w.streamers[seat].GetStatus() == models.StatusOnline && len(held) > 0 && restrictedWorkSubset(occupied(idx), held) {
+						onlineCarriers = append(onlineCarriers, w.streamers[seat].GetUsername())
+					}
+				}
+				named := len(onlineCarriers) == 0
+				for _, login := range onlineCarriers {
+					named = named || strings.Contains(reason, login+" already farms")
+				}
+				if !named {
+					t.Fatalf("iteration %d: reason %q of %d does not name an online carrier %v", iteration, reason, idx, onlineCarriers)
+				}
+			}
+			if strings.Contains(reason, "both watch slots are held by channel-restricted drops (") {
+				for _, seat := range got {
+					s := w.streamers[seat]
+					switch s.GetStatus() {
+					case models.StatusOffline:
+						if !strings.Contains(reason, s.GetUsername()+" now confirmed offline") {
+							t.Fatalf("iteration %d: reason %q does not mark offline seat %d", iteration, reason, seat)
+						}
+					case models.StatusUnknown:
+						if !strings.Contains(reason, s.GetUsername()+" status unconfirmed") {
+							t.Fatalf("iteration %d: reason %q does not mark unconfirmed seat %d", iteration, reason, seat)
+						}
+					}
+				}
 			}
 		}
 		for i := range got {

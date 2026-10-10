@@ -2183,7 +2183,8 @@ func (w *MinuteWatcher) applyPriorityBoost(pair [2]int, onlineIndexes []int, now
 // member whose seat the single boost target still holds keeps the boost's
 // reason unless one seated channel carries all of its restricted campaigns.
 // Only a carrier confirmed online is reported as farming; one retained while
-// UNKNOWN is reported as unconfirmed and one confirmed offline as offline.
+// UNKNOWN is reported as unconfirmed and one confirmed offline as offline, and
+// the both-seats reason marks such a seat the same way.
 // When the single boost had taken a seat from a member of base, the fair pair
 // it started from, and this admission gives that seat to another channel, that
 // member is told which channel now holds it, or gets its waiting reason when
@@ -2356,8 +2357,23 @@ func (w *MinuteWatcher) restrictedWaitingReason(pair [2]int, idx int, workOf fun
 		return "waiting: a channel-restricted assignment changed while this evaluation read it; it competes again at the next evaluation", false
 	}
 	return "waiting: both watch slots are held by channel-restricted drops (" +
-		w.streamers[pair[0]].GetUsername() + ", " + w.streamers[pair[1]].GetUsername() +
+		w.restrictedSeatLabel(pair[0]) + ", " + w.restrictedSeatLabel(pair[1]) +
 		"); a seated channel-restricted drop is not displaced by another", false
+}
+
+// restrictedSeatLabel names a seated channel in the both-seats waiting reason,
+// marking one that is not confirmed online so its seat never reads as a
+// channel farming its drop.
+func (w *MinuteWatcher) restrictedSeatLabel(idx int) string {
+	s := w.streamers[idx]
+	switch s.GetStatus() {
+	case models.StatusOnline:
+		return s.GetUsername()
+	case models.StatusOffline:
+		return s.GetUsername() + " now confirmed offline"
+	default:
+		return s.GetUsername() + " status unconfirmed"
+	}
 }
 
 // restrictedCarrier returns the seated channel whose restricted work carries
