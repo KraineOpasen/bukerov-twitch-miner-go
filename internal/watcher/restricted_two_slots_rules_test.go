@@ -878,34 +878,3 @@ func TestRestrictedPairPublishesReasons(t *testing.T) {
 		t.Fatalf("streamerc reason=%q, want the unchanged single-boost reason", reason)
 	}
 }
-
-// Disclosed limit of PA-B1: the rule compares channels, not campaigns. One
-// channel-restricted campaign whose allowlist names two configured channels
-// makes both qualify, so both seats go to that single campaign.
-func TestRestrictedPairForOneCampaignListingBothChannels(t *testing.T) {
-	f := newResidenceFixture(t, 4)
-	byLogin := streamersByLogin(f.w.streamers)
-	c, d := byLogin["streamerc"], byLogin["streamerd"]
-	for _, s := range []*models.Streamer{c, d} {
-		campaign := watchSlotTestCampaign("camp-shared", c.ChannelID, true)
-		campaign.Channels = []string{c.ChannelID, d.ChannelID}
-		s.Settings.ClaimDrops = true
-		s.Settings.WatchStreak = false
-		s.Stream.SetCampaignIDs([]string{campaign.ID})
-		s.Stream.SetCampaigns([]*models.Campaign{campaign})
-	}
-	f.seedWeights(t, time.Now(), map[string]float64{
-		"streamera": 10, "streamerb": 20, "streamerc": 80, "streamerd": 90,
-	})
-
-	f.w.processWatching(tickCtx(f.w))
-
-	if got := restrictedSlotLogins(t, f); !sameLoginSet(got, "streamerc", "streamerd") {
-		t.Fatalf("slots=%v, want both channels listed by the one restricted campaign", got)
-	}
-	for _, slot := range f.w.BrokerSnapshot().Slots {
-		if slot.ReasonCode != ReasonRestrictedDrop {
-			t.Fatalf("%s reasonCode=%q, want %q", slot.Channel, slot.ReasonCode, ReasonRestrictedDrop)
-		}
-	}
-}
