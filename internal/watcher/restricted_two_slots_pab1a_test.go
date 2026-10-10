@@ -721,18 +721,18 @@ func TestRestrictedEqualDuplicatesVictimOrderTieBreaks(t *testing.T) {
 }
 
 // R4 between two equal duplicates, the relative order of its steps: an
-// in-progress streak ranks above Campaign Policy utility, and utility ranks
-// above residence, whether residence comes from the fair pair or ends with a
-// replaced broadcast.
+// in-progress streak ranks above Campaign Policy utility, so do banked streak
+// minutes between two pursuing duplicates, and utility ranks above residence,
+// whether residence comes from the fair pair or ends with a replaced broadcast.
 func TestRestrictedEqualDuplicatesVictimStepOrder(t *testing.T) {
 	cases := []struct {
 		name        string
 		shared      [2]string
 		classes     map[string]policy.SemanticClass
-		streak      string
+		streaks     []string
 		seeds       map[string]float64
 		tick1       []string
-		beforeTick2 func(byLogin map[string]*models.Streamer)
+		beforeTick2 func(t *testing.T, byLogin map[string]*models.Streamer)
 		kept        string
 		displaced   string
 	}{
@@ -751,7 +751,7 @@ func TestRestrictedEqualDuplicatesVictimStepOrder(t *testing.T) {
 			classes: map[string]policy.SemanticClass{"streamera": 0, "streamerc": 2, "streamerd": 1},
 			seeds:   map[string]float64{"streamera": 20, "streamerb": 50, "streamerc": 10, "streamerd": 90},
 			tick1:   []string{"streamera", "streamerc"},
-			beforeTick2: func(byLogin map[string]*models.Streamer) {
+			beforeTick2: func(_ *testing.T, byLogin map[string]*models.Streamer) {
 				byLogin["streamera"].Stream.Update("broadcast-streamera-2", "", nil, nil, 1)
 			},
 			kept:      "streamera",
@@ -761,10 +761,29 @@ func TestRestrictedEqualDuplicatesVictimStepOrder(t *testing.T) {
 			name:      "in-progress streak before utility",
 			shared:    [2]string{"streamera", "streamerb"},
 			classes:   map[string]policy.SemanticClass{"streamera": 2, "streamerb": 0, "streamerd": 1},
-			streak:    "streamera",
+			streaks:   []string{"streamera"},
 			seeds:     map[string]float64{"streamera": 10, "streamerb": 5, "streamerc": 50, "streamerd": 80},
 			kept:      "streamera",
 			displaced: "streamerb",
+		},
+		{
+			name:    "banked streak minutes before utility",
+			shared:  [2]string{"streamera", "streamerc"},
+			classes: map[string]policy.SemanticClass{"streamera": 2, "streamerc": 0, "streamerd": 1},
+			streaks: []string{"streamera", "streamerc"},
+			seeds:   map[string]float64{"streamera": 10, "streamerb": 50, "streamerc": 20, "streamerd": 90},
+			tick1:   []string{"streamera", "streamerc"},
+			beforeTick2: func(t *testing.T, byLogin map[string]*models.Streamer) {
+				byLogin["streamera"].Stream.MinuteWatched = 12
+				byLogin["streamerc"].Stream.MinuteWatched = 5
+				for _, login := range []string{"streamera", "streamerc"} {
+					if st := byLogin[login].Stream.EvaluateWatchStreak(time.Now()).State; st != models.WatchStreakPursuing {
+						t.Fatalf("precondition: %s streak state=%v, want PURSUING", login, st)
+					}
+				}
+			},
+			kept:      "streamera",
+			displaced: "streamerc",
 		},
 	}
 	for _, tc := range cases {
@@ -775,8 +794,8 @@ func TestRestrictedEqualDuplicatesVictimStepOrder(t *testing.T) {
 			shared := restrictedTestCampaign("camp-shared", x, y)
 			assignRestricted(x, shared)
 			assignRestricted(y, shared)
-			if tc.streak != "" {
-				admissionPursuingStreak(byLogin[tc.streak])
+			for _, login := range tc.streaks {
+				admissionPursuingStreak(byLogin[login])
 			}
 			utilities := map[string]policy.SemanticUtility{}
 			for login, class := range tc.classes {
@@ -793,7 +812,7 @@ func TestRestrictedEqualDuplicatesVictimStepOrder(t *testing.T) {
 			}
 			assignRestricted(d, restrictedTestCampaign("camp-streamerd", d))
 			if tc.beforeTick2 != nil {
-				tc.beforeTick2(byLogin)
+				tc.beforeTick2(t, byLogin)
 			}
 			f.w.processWatching(tickCtx(f.w))
 
@@ -833,6 +852,119 @@ func TestRestrictedAdmissionFourStepChain(t *testing.T) {
 
 	if got := restrictedSlotLogins(t, f); !sameLoginSet(got, "streamerf", "streamerg") {
 		t.Fatalf("slots=%v, want [streamerf streamerg] after the four-step chain", got)
+	}
+}
+
+// R2 at a later admission step: the boost seats streamerc {k1}, the first step
+// seats streamerd {k1,k2} in the other seat and leaves streamerc a duplicate,
+// and the second step chooses between streamere {k3} and streamerf {k4} by the
+// full candidate order, Campaign Policy utility and the "prefer" handicap
+// included. The one not chosen is told that both seats hold channel-restricted
+// drops.
+func TestRestrictedAdmissionLaterStepCandidateOrder(t *testing.T) {
+	cases := []struct {
+		name    string
+		classes map[string]policy.SemanticClass
+		prefer  string
+		seeds   map[string]float64
+		want    []string
+		waiting string
+	}{
+		{
+			name:    "utility at the second step",
+			classes: map[string]policy.SemanticClass{"streamerc": 0, "streamerd": 0, "streamere": 0, "streamerf": 2},
+			seeds: map[string]float64{
+				"streamera": 5, "streamerb": 10, "streamerc": 60, "streamerd": 70, "streamere": 90, "streamerf": 80,
+			},
+			want:    []string{"streamerd", "streamere"},
+			waiting: "streamerf",
+		},
+		{
+			name:   "prefer handicap at the second step",
+			prefer: "streamere",
+			seeds: map[string]float64{
+				"streamera": 5, "streamerb": 10, "streamerc": 60, "streamerd": 70, "streamere": 83, "streamerf": 80,
+			},
+			want:    []string{"streamerd", "streamere"},
+			waiting: "streamerf",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newResidenceFixture(t, 6)
+			byLogin := streamersByLogin(f.w.streamers)
+			c, d, e, fs := byLogin["streamerc"], byLogin["streamerd"], byLogin["streamere"], byLogin["streamerf"]
+			k1 := restrictedTestCampaign("camp-k1", c, d)
+			assignRestricted(c, k1)
+			assignRestricted(d, k1, restrictedTestCampaign("camp-k2", d))
+			assignRestricted(e, restrictedTestCampaign("camp-k3", e))
+			assignRestricted(fs, restrictedTestCampaign("camp-k4", fs))
+			utilities := map[string]policy.SemanticUtility{}
+			for login, class := range tc.classes {
+				utilities[login] = policy.SemanticUtility{SemanticClass: class}
+			}
+			f.w.SetCampaignSemanticPolicy(utilities, nil, nil)
+			if tc.prefer != "" {
+				byLogin[tc.prefer].Settings.Preference = models.PreferencePrefer
+			}
+			f.seedWeights(t, time.Now(), tc.seeds)
+
+			f.w.processWatching(tickCtx(f.w))
+
+			if got := restrictedSlotLogins(t, f); !sameLoginSet(got, tc.want...) {
+				t.Fatalf("slots=%v, want %v", got, tc.want)
+			}
+			if reason := decisionReason(f.w, tc.waiting); !strings.Contains(reason, waitingForRestrictedSeats) {
+				t.Fatalf("%s reason=%q, want %q", tc.waiting, reason, waitingForRestrictedSeats)
+			}
+		})
+	}
+}
+
+// R2, recency at equal deficit at a later step, unit level: streamerd {k1,k2}
+// takes streamera's seat and leaves streamerc {k1} a duplicate; of streamere
+// and streamerf, equally owed, the one watched longer ago takes streamerc's
+// seat.
+func TestRestrictedAdmissionLaterStepOrdersEqualDeficitByRecency(t *testing.T) {
+	cases := []struct {
+		name   string
+		recent string
+		want   string
+	}{
+		{name: "streamere watched more recently", recent: "streamere", want: "streamerf"},
+		{name: "streamerf watched more recently", recent: "streamerf", want: "streamere"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newResidenceFixture(t, 6)
+			byLogin := streamersByLogin(f.w.streamers)
+			c, d, e, fs := byLogin["streamerc"], byLogin["streamerd"], byLogin["streamere"], byLogin["streamerf"]
+			k1 := restrictedTestCampaign("camp-k1", c, d)
+			assignRestricted(c, k1)
+			assignRestricted(d, k1, restrictedTestCampaign("camp-k2", d))
+			assignRestricted(e, restrictedTestCampaign("camp-k3", e))
+			assignRestricted(fs, restrictedTestCampaign("camp-k4", fs))
+			now := time.Now()
+			f.w.rotation.deficitMinutes = map[string]float64{
+				"streamera": 10, "streamerb": 20, "streamerc": 60, "streamerd": 70, "streamere": 80, "streamerf": 80,
+			}
+			older := "streamere"
+			if tc.recent == older {
+				older = "streamerf"
+			}
+			f.w.rotation.lastWatched = map[int]time.Time{
+				restrictedIndex(t, f.w, tc.recent): now.Add(-time.Minute),
+				restrictedIndex(t, f.w, older):     now.Add(-10 * time.Minute),
+			}
+			online := []int{0, 1, 2, 3, 4, 5}
+			a, ci := restrictedIndex(t, f.w, "streamera"), restrictedIndex(t, f.w, "streamerc")
+
+			got := f.w.admitRestrictedDrops([2]int{a, ci}, [2]int{a, ci}, online, now)
+
+			if want := [2]int{restrictedIndex(t, f.w, "streamerd"), restrictedIndex(t, f.w, tc.want)}; got != want {
+				t.Fatalf("pair=%v, want %v: the one watched longer ago takes the duplicate's seat", got, want)
+			}
+		})
 	}
 }
 
