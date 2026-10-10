@@ -18,7 +18,7 @@ import (
 // channels on the loop fakes with a real SQLite watch-time store — where
 // streamera and streamerb are the least-watched ordinary channels unless a case
 // says otherwise. One unit-level case drives admitRestrictedDrops directly for
-// the part of the rule the pipeline cannot reach today.
+// two open ordinary seats, which the pipeline does not produce today.
 
 // restrictedIndex returns the configured index of login.
 func restrictedIndex(t *testing.T, w *MinuteWatcher, login string) int {
@@ -521,8 +521,8 @@ func TestRestrictedSingleQualifyingChannelBesideRetainedStreakIsUnchanged(t *tes
 }
 
 // R4, unit level: the pipeline always lets the single boost seat one
-// channel-restricted channel first, so two open seats never reach the admission
-// today. Driven directly, the admission gives the strongest waiting channel the
+// channel-restricted channel first, so two open ordinary seats never reach the
+// admission today. Driven directly, the admission gives the strongest waiting channel the
 // weakest seat in betterBoostVictim order and the next one the other seat.
 // streamera is the less-owed seat (30 against 20 minutes), so persisted deficit
 // alone gives it up first; when streamera is resident in the committed ordinary

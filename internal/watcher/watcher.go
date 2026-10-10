@@ -2147,8 +2147,8 @@ func (w *MinuteWatcher) applyPriorityBoost(pair [2]int, onlineIndexes []int, now
 // Drops may occupy BOTH watch slots, because such a campaign progresses only on
 // the channels it lists, but the second seat goes to such a channel only when
 // it brings restricted work that the restricted channel in the other seat does
-// not already carry. One restricted campaign therefore never holds both seats
-// through this admission.
+// not already carry: a channel whose restricted campaigns the other seat
+// already carries never takes the second seat.
 //
 // A qualifying channel is a candidate with an active drop (DropsCondition)
 // whose assigned unfinished work is channel-restricted
@@ -2164,14 +2164,18 @@ func (w *MinuteWatcher) applyPriorityBoost(pair [2]int, onlineIndexes []int, now
 // restricted channel holding — or, within this evaluation, taking — the other
 // seat. When no waiting channel brings new restricted work, nothing is
 // admitted and the existing selection stands. Residence orders the victims and
-// never delays the admission. A qualifying channel left waiting is told why in
-// its selection reason — which seated channel already farms its campaign, or
-// that both seats hold channel-restricted drops — unless a more specific
-// reason was already recorded this tick. Composed after applyPriorityBoost,
-// which already seats one channel-restricted channel whenever a qualifying
-// channel waits off a pair without a restricted occupant, this seats at most
-// one more in practice; the general rule keeps the result exact should that
-// composition change.
+// never delays the admission. Each step is judged against the channel then
+// holding the other seat, so when an admitted channel carries all the work of
+// the restricted channel beside it, that channel becomes a duplicate occupant
+// and the next step may replace it too: one evaluation can replace both seats,
+// and every displaced channel's restricted campaigns stay carried by a seat.
+// Selection reasons are written once the pair is final: an admitted channel
+// names the channel whose seat it took, a displaced one names its admitter and,
+// when it was a duplicate, the seated channel that carries its campaigns, and
+// a qualifying channel left waiting is told which seated channel carries its
+// campaign or that both seats hold channel-restricted drops, unless a more
+// specific reason was already recorded this tick. A carrier whose status is
+// not confirmed online is reported as unconfirmed rather than as farming.
 //
 // The boost latch is neither read nor written: it keeps describing the single
 // overlay seat. A channel seated here off the base pair is a stronger seat for
@@ -2204,6 +2208,8 @@ func (w *MinuteWatcher) admitRestrictedDrops(pair [2]int, onlineIndexes []int, n
 		return rw
 	}
 
+	original := pair
+	admitted := make(map[int]bool)
 	for len(waiting) > 0 {
 		seat := w.selectRestrictedAdmissionSeat(pair, workOf, now)
 		if seat == -1 {
@@ -2222,22 +2228,34 @@ func (w *MinuteWatcher) admitRestrictedDrops(pair [2]int, onlineIndexes []int, n
 		if bestAt == -1 {
 			break
 		}
-		best, victim := waiting[bestAt], pair[seat]
+		best := waiting[bestAt]
 		waiting = append(waiting[:bestAt], waiting[bestAt+1:]...)
-
-		w.noteSelection(best, "watched: admitted beside another channel-restricted drop, displacing "+
-			w.streamers[victim].GetUsername()+" - its campaign only progresses on the channels it lists")
-		if w.streamers[victim].HasChannelRestrictedCampaign() {
-			w.noteSelection(victim, "not watched this tick: displaced by channel-restricted drop "+
-				w.streamers[best].GetUsername()+"; "+w.streamers[pair[1-seat]].GetUsername()+
-				" in the other slot already farms its channel-restricted campaign (owner rule PA-B1a)")
-		} else {
-			w.noteSelection(victim, "not watched this tick: displaced by channel-restricted drop "+
-				w.streamers[best].GetUsername()+
-				" (channel-restricted drops may hold both slots; it competes again when one stops qualifying)")
-		}
-
+		admitted[best] = true
 		pair[seat] = best
+	}
+
+	for seat := range pair {
+		in, out := pair[seat], original[seat]
+		if in == out {
+			continue
+		}
+		w.noteSelection(in, "watched: admitted beside another channel-restricted drop, displacing "+
+			w.streamers[out].GetUsername()+" - its campaign only progresses on the channels it lists")
+		if carrier := w.restrictedCarrier(pair, out, workOf); carrier >= 0 {
+			w.noteSelection(out, "not watched this tick: displaced by channel-restricted drop "+
+				w.streamers[in].GetUsername()+"; "+w.restrictedCarrierClause(carrier, "its channel-restricted campaigns"))
+			continue
+		}
+		w.noteSelection(out, "not watched this tick: displaced by channel-restricted drop "+
+			w.streamers[in].GetUsername()+
+			" (channel-restricted drops may hold both slots; it competes again when one stops qualifying)")
+	}
+	// A channel admitted and replaced again within this evaluation waits like
+	// any other qualifying channel.
+	for idx := range admitted {
+		if idx != pair[0] && idx != pair[1] {
+			waiting = append(waiting, idx)
+		}
 	}
 	for _, idx := range waiting {
 		w.noteSelectionIfEmpty(idx, w.restrictedWaitingReason(pair, idx, workOf))
@@ -2282,15 +2300,40 @@ func (w *MinuteWatcher) heldRestrictedWork(idx int, workOf func(int) map[string]
 // all of its restricted campaigns (owner rule PA-B1a), or both seats hold
 // channel-restricted drops that this admission does not displace.
 func (w *MinuteWatcher) restrictedWaitingReason(pair [2]int, idx int, workOf func(int) map[string]bool) string {
-	for _, slot := range pair {
-		if held, restricted := w.heldRestrictedWork(slot, workOf); restricted && restrictedWorkSubset(workOf(idx), held) {
-			return "waiting: " + w.streamers[slot].GetUsername() +
-				" already farms the same channel-restricted drop campaign (owner rule PA-B1a)"
-		}
+	if carrier := w.restrictedCarrier(pair, idx, workOf); carrier >= 0 {
+		return "waiting: " + w.restrictedCarrierClause(carrier, "the same channel-restricted drop campaign")
 	}
 	return "waiting: both watch slots are held by channel-restricted drops (" +
 		w.streamers[pair[0]].GetUsername() + ", " + w.streamers[pair[1]].GetUsername() +
 		"); a seated channel-restricted drop is not displaced by another"
+}
+
+// restrictedCarrier returns the seated channel whose restricted work carries
+// all of idx's restricted work, or -1 when neither seat does. idx must itself
+// carry restricted work; a channel without any (an ordinary seat) has none to
+// carry.
+func (w *MinuteWatcher) restrictedCarrier(pair [2]int, idx int, workOf func(int) map[string]bool) int {
+	if !w.streamers[idx].HasChannelRestrictedCampaign() {
+		return -1
+	}
+	for _, slot := range pair {
+		if held, restricted := w.heldRestrictedWork(slot, workOf); restricted && restrictedWorkSubset(workOf(idx), held) {
+			return slot
+		}
+	}
+	return -1
+}
+
+// restrictedCarrierClause names the seated carrier of some restricted work for
+// a selection reason. A carrier whose status is not confirmed online — one
+// retained through an UNKNOWN blip — is reported as unconfirmed, not as
+// farming, so UNKNOWN never reads as success.
+func (w *MinuteWatcher) restrictedCarrierClause(carrier int, work string) string {
+	login := w.streamers[carrier].GetUsername()
+	if !w.streamers[carrier].GetIsOnline() {
+		return login + ", whose status is unconfirmed, holds a slot with " + work + " (owner rule PA-B1a)"
+	}
+	return login + " already farms " + work + " (owner rule PA-B1a)"
 }
 
 // restrictedWork returns the restricted work RW of owner rule PA-B1a: the IDs
