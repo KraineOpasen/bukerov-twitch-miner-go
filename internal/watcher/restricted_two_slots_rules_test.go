@@ -17,8 +17,10 @@ import (
 // fixture restricted_two_slots_test.go uses — two, four or five configured
 // channels on the loop fakes with a real SQLite watch-time store — where
 // streamera and streamerb are the least-watched ordinary channels unless a case
-// says otherwise. One unit-level case drives admitRestrictedDrops directly for
-// two open ordinary seats, which the pipeline does not produce today.
+// says otherwise. Two unit-level cases drive admitRestrictedDrops directly:
+// one for two open ordinary seats, which the pipeline does not produce today,
+// and one for recency at equal deficit, which the pipeline reaches only
+// without a watch-time store.
 
 // restrictedIndex returns the configured index of login.
 func restrictedIndex(t *testing.T, w *MinuteWatcher, login string) int {
@@ -516,26 +518,47 @@ func TestRestrictedAdmissionOverridesResidenceAndReanchors(t *testing.T) {
 // R5 boundary (control, identical without PA-B1): exactly one qualifying
 // channel beside a non-qualifying restricted occupant changes nothing. The
 // latched restricted streak goes UNKNOWN and is retained in its boost seat; the
-// single new qualifying channel stays waiting.
+// single new qualifying channel stays waiting. A channel-restricted drop that
+// is not a Phase-A candidate — watching disabled, watchdog-avoided or "avoid"
+// while other channels are online — does not count towards the two.
 func TestRestrictedSingleQualifyingChannelBesideRetainedStreakIsUnchanged(t *testing.T) {
-	f := newResidenceFixture(t, 4)
-	byLogin := streamersByLogin(f.w.streamers)
-	makeDropCandidate(byLogin["streamerc"], true)
-	admissionPursuingStreak(byLogin["streamerc"])
-	f.seedWeights(t, time.Now(), map[string]float64{
-		"streamera": 10, "streamerb": 20, "streamerc": 80, "streamerd": 90,
-	})
-
-	f.w.processWatching(tickCtx(f.w))
-	if got := restrictedSlotLogins(t, f); !sameLoginSet(got, "streamera", "streamerc") {
-		t.Fatalf("tick 1: slots=%v, want the latched restricted streak beside streamera", got)
+	cases := []struct {
+		name    string
+		exclude func(f *residenceFixture, s *models.Streamer)
+	}{
+		{name: "no other restricted channel"},
+		{name: "DisableWatch", exclude: func(_ *residenceFixture, s *models.Streamer) { s.Settings.DisableWatch = true }},
+		{name: "watchdog avoided", exclude: func(f *residenceFixture, s *models.Streamer) {
+			f.w.SetAvoidChecker(&staticAvoid{avoided: map[string]bool{s.GetUsername(): true}})
+		}},
+		{name: "preference avoid", exclude: func(_ *residenceFixture, s *models.Streamer) { s.Settings.Preference = models.PreferenceAvoid }},
 	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newResidenceFixture(t, 5)
+			byLogin := streamersByLogin(f.w.streamers)
+			makeDropCandidate(byLogin["streamerc"], true)
+			admissionPursuingStreak(byLogin["streamerc"])
+			if tc.exclude != nil {
+				makeDropCandidate(byLogin["streamere"], true)
+				tc.exclude(f, byLogin["streamere"])
+			}
+			f.seedWeights(t, time.Now(), map[string]float64{
+				"streamera": 10, "streamerb": 20, "streamerc": 80, "streamerd": 90, "streamere": 95,
+			})
 
-	byLogin["streamerc"].SetUnknown(models.ReasonTransportError)
-	makeDropCandidate(byLogin["streamerd"], true)
-	f.w.processWatching(tickCtx(f.w))
-	if got := restrictedSlotLogins(t, f); !sameLoginSet(got, "streamera", "streamerc") {
-		t.Fatalf("tick 2: slots=%v, want the single-boost result kept with one qualifying channel", got)
+			f.w.processWatching(tickCtx(f.w))
+			if got := restrictedSlotLogins(t, f); !sameLoginSet(got, "streamera", "streamerc") {
+				t.Fatalf("tick 1: slots=%v, want the latched restricted streak beside streamera", got)
+			}
+
+			byLogin["streamerc"].SetUnknown(models.ReasonTransportError)
+			makeDropCandidate(byLogin["streamerd"], true)
+			f.w.processWatching(tickCtx(f.w))
+			if got := restrictedSlotLogins(t, f); !sameLoginSet(got, "streamera", "streamerc") {
+				t.Fatalf("tick 2: slots=%v, want the single-boost result kept with one qualifying channel", got)
+			}
+		})
 	}
 }
 
@@ -546,7 +569,8 @@ func TestRestrictedSingleQualifyingChannelBesideRetainedStreakIsUnchanged(t *tes
 // streamera is the less-owed seat (30 against 20 minutes), so persisted deficit
 // alone gives it up first; when streamera is resident in the committed ordinary
 // cohort, residence ranks above deficit and the non-resident streamerb goes
-// first instead.
+// first instead, unless that residence has elapsed. With equal deficits the
+// seat watched more recently goes first.
 func TestRestrictedAdmissionVictimOrderAcrossTwoOpenSeats(t *testing.T) {
 	cases := []struct {
 		name             string

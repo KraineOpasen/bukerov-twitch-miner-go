@@ -15,10 +15,9 @@ import (
 // the other seat does not already carry at the step that admits it, so a
 // channel whose restricted campaigns the other seat then carries never takes
 // that seat (a later step can still seat beside it a channel carrying all of
-// its work). Most
-// cases drive the real processWatching pipeline on the same fixture as
-// restricted_two_slots_test.go and read the published BrokerSnapshot and debug
-// decisions as the oracle; the unit-level cases drive admitRestrictedDrops, or
+// its work). Most cases drive the real processWatching pipeline on the same
+// fixture as restricted_two_slots_test.go and read the published
+// BrokerSnapshot and debug decisions as the oracle; the unit-level cases drive admitRestrictedDrops, or
 // its waiting-reason helper, directly for states the pipeline does not produce
 // deterministically or only through a long setup (two open seats, a carrier
 // confirmed offline after the online list was read, an assignment changing
@@ -1413,6 +1412,10 @@ func TestRestrictedAdmissionInvariantsHoldForRandomAssignments(t *testing.T) {
 			}
 		}
 		for i, s := range w.streamers {
+			// A confirmed-offline stamp from an earlier iteration would block
+			// watch-streak admission for 30 minutes and silently disable the
+			// random streaks below; each iteration starts without one.
+			s.OfflineAt = time.Time{}
 			switch rng.Intn(8) {
 			case 0, 1:
 				s.SetUnknown(models.ReasonTransportError)

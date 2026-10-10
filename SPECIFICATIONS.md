@@ -1695,9 +1695,8 @@ Drops may occupy BOTH watch slots, but the PA-B1 admission gives the second
 slot to such a streamer only when it brings a restricted campaign that the
 streamer in the other slot does not already carry at the step that admits it
 (see *Priority as a boost, not exclusivity* for the exact qualification and
-seat rules); unrestricted
-Drops keep at most one boost seat, and further distinct channel-restricted
-ones wait for a slot. While two of them hold the slots, ordinary fair rotation
+seat rules); unrestricted Drops keep at most one boost seat, and further
+distinct channel-restricted ones wait for a slot. While two of them hold the slots, ordinary fair rotation
 and watch-streak pursuit wait, directory-discovery drops wait unless they
 strictly outrank a channel-restricted drop, and channel points accrue only on
 those two channels.
