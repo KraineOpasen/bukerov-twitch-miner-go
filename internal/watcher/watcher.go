@@ -2151,8 +2151,10 @@ func (w *MinuteWatcher) applyPriorityBoost(pair [2]int, onlineIndexes []int, now
 // Drops may occupy BOTH watch slots, because such a campaign progresses only on
 // the channels it lists, but the second seat goes to such a channel only when
 // it brings restricted work that the restricted channel in the other seat does
-// not already carry: a channel whose restricted campaigns the other seat
-// already carries never takes the second seat.
+// not already carry at the step it is admitted: a channel whose restricted
+// campaigns the other seat then carries never takes that seat, although a
+// later step of the same evaluation can seat beside it a channel that carries
+// all of its work.
 //
 // A qualifying channel is a candidate with an active drop (DropsCondition)
 // whose assigned unfinished work is channel-restricted

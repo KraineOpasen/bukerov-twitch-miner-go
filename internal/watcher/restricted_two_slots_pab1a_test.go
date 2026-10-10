@@ -572,6 +572,101 @@ func TestRestrictedEqualDuplicatesReplacedStepByStep(t *testing.T) {
 	}
 }
 
+// R4 with R14(b): of two equal duplicates holding the fair pair, the victim
+// order decides by hard and semantic class before persisted deficit, so the
+// stronger duplicate keeps its seat even when it is the less owed one: the one
+// with the better Campaign Policy utility, or the one pursuing its watch
+// streak.
+func TestRestrictedEqualDuplicatesVictimOrderUsesHardAndSemanticClass(t *testing.T) {
+	cases := []struct {
+		name      string
+		setup     func(f *residenceFixture, a *models.Streamer)
+		seeds     map[string]float64
+		kept      string
+		displaced string
+	}{
+		{
+			name: "better utility kept",
+			setup: func(f *residenceFixture, _ *models.Streamer) {
+				f.w.SetCampaignSemanticPolicy(map[string]policy.SemanticUtility{
+					"streamera": {SemanticClass: 2}, "streamerb": {SemanticClass: 0}, "streamerd": {SemanticClass: 1},
+				}, nil, nil)
+			},
+			seeds:     map[string]float64{"streamera": 5, "streamerb": 10, "streamerc": 50, "streamerd": 80},
+			kept:      "streamerb",
+			displaced: "streamera",
+		},
+		{
+			name: "streak in progress kept",
+			setup: func(_ *residenceFixture, a *models.Streamer) {
+				admissionPursuingStreak(a)
+			},
+			seeds:     map[string]float64{"streamera": 10, "streamerb": 5, "streamerc": 50, "streamerd": 80},
+			kept:      "streamera",
+			displaced: "streamerb",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newResidenceFixture(t, 4)
+			byLogin := streamersByLogin(f.w.streamers)
+			a, b, d := byLogin["streamera"], byLogin["streamerb"], byLogin["streamerd"]
+			shared := restrictedTestCampaign("camp-shared", a, b)
+			assignRestricted(a, shared)
+			assignRestricted(b, shared)
+			assignRestricted(d, restrictedTestCampaign("camp-streamerd", d))
+			tc.setup(f, a)
+			f.seedWeights(t, time.Now(), tc.seeds)
+
+			f.w.processWatching(tickCtx(f.w))
+
+			if got := restrictedSlotLogins(t, f); !sameLoginSet(got, tc.kept, "streamerd") {
+				t.Fatalf("slots=%v, want the stronger duplicate %s kept beside streamerd", got, tc.kept)
+			}
+			want := "displaced by channel-restricted drop streamerd; " + tc.kept + " already farms its channel-restricted campaigns"
+			if reason := decisionReason(f.w, tc.displaced); !strings.Contains(reason, want) {
+				t.Fatalf("%s reason=%q, want %q", tc.displaced, reason, want)
+			}
+		})
+	}
+}
+
+// R14(a) per step, owner question (E): each step is judged against the channel
+// then holding the other seat, so streamerd {k1,k2} is admitted beside the
+// boosted streamerc {k1}; streamerc is then a duplicate and streamere
+// {k1,k2,k3} takes its seat, which leaves streamerd seated beside a channel
+// that carries all of its work. Every campaign stays farmed and the allocation
+// holds over three ticks.
+func TestRestrictedAdmissionCanSeatChannelLaterCarriedByItsPartner(t *testing.T) {
+	f := newResidenceFixture(t, 5)
+	byLogin := streamersByLogin(f.w.streamers)
+	c, d, e := byLogin["streamerc"], byLogin["streamerd"], byLogin["streamere"]
+	k1 := restrictedTestCampaign("camp-k1", c, d, e)
+	k2 := restrictedTestCampaign("camp-k2", d, e)
+	assignRestricted(c, k1)
+	assignRestricted(d, k1, k2)
+	assignRestricted(e, k1, k2, restrictedTestCampaign("camp-k3", e))
+	f.seedWeights(t, time.Now(), map[string]float64{
+		"streamera": 5, "streamerb": 10, "streamerc": 60, "streamerd": 70, "streamere": 80,
+	})
+
+	for tick := range 3 {
+		f.w.processWatching(tickCtx(f.w))
+		if got := restrictedSlotLogins(t, f); !sameLoginSet(got, "streamerd", "streamere") {
+			t.Fatalf("tick %d: slots=%v, want [streamerd streamere] from the per-step chain", tick, got)
+		}
+		for login, want := range map[string]string{
+			"streamerd": "admitted beside another channel-restricted drop, displacing streamera",
+			"streamere": "admitted beside another channel-restricted drop, displacing streamerc",
+			"streamerc": "displaced by channel-restricted drop streamere; streamerd already farms its channel-restricted campaigns",
+		} {
+			if reason := decisionReason(f.w, login); !strings.Contains(reason, want) {
+				t.Fatalf("tick %d: %s reason=%q, want %q", tick, login, reason, want)
+			}
+		}
+	}
+}
+
 // R14(b) with a retained-UNKNOWN superset: the UNKNOWN channel is still a
 // restricted occupant, so a confirmed channel whose work it fully carries is a
 // duplicate and gives up its seat for distinct work. The reason reports the
@@ -1280,7 +1375,8 @@ func TestRestrictedWaitingReasonWhenAssignmentChangedMidEvaluation(t *testing.T)
 // as holding a seat; a displaced restricted occupant names its admitter and
 // its carrier while a displaced ordinary seat gets the ordinary reason; a
 // carrier reason names a carrier confirmed online when one exists, and the
-// both-seats reason marks a seat that is not confirmed online; and
+// both-seats reason names exactly the final seats and marks one that is not
+// confirmed online; and
 // the boost's victim gets the right reason: an ordinary
 // one is told which channel holds its seat once the admission gave it away and
 // otherwise keeps the boost's reason, and a qualifying one gets its waiting
@@ -1499,6 +1595,19 @@ func TestRestrictedAdmissionInvariantsHoldForRandomAssignments(t *testing.T) {
 				}
 			}
 			if strings.Contains(reason, "both watch slots are held by channel-restricted drops (") {
+				label := func(seat int) string {
+					switch st := w.streamers[seat]; st.GetStatus() {
+					case models.StatusOnline:
+						return st.GetUsername()
+					case models.StatusOffline:
+						return st.GetUsername() + " now confirmed offline"
+					default:
+						return st.GetUsername() + " status unconfirmed"
+					}
+				}
+				if list := "(" + label(got[0]) + ", " + label(got[1]) + ")"; !strings.Contains(reason, list) {
+					t.Fatalf("iteration %d: reason %q does not name the final seats %s", iteration, reason, list)
+				}
 				for _, seat := range got {
 					s := w.streamers[seat]
 					switch s.GetStatus() {

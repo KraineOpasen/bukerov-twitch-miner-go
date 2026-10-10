@@ -549,14 +549,16 @@ func TestRestrictedSingleQualifyingChannelBesideRetainedStreakIsUnchanged(t *tes
 // first instead.
 func TestRestrictedAdmissionVictimOrderAcrossTwoOpenSeats(t *testing.T) {
 	cases := []struct {
-		name          string
-		residentA     bool
-		firstVictim   string
-		secondVictim  string
-		wantFirstSeat string // the channel that ends in streamera's seat
+		name             string
+		residentA        bool
+		residenceElapsed bool
+		firstVictim      string
+		secondVictim     string
+		wantFirstSeat    string // the channel that ends in streamera's seat
 	}{
 		{name: "resident seat kept longer", residentA: true, firstVictim: "streamerb", secondVictim: "streamera", wantFirstSeat: "streamerd"},
 		{name: "deficit alone", residentA: false, firstVictim: "streamera", secondVictim: "streamerb", wantFirstSeat: "streamerc"},
+		{name: "residence elapsed", residentA: true, residenceElapsed: true, firstVictim: "streamera", secondVictim: "streamerb", wantFirstSeat: "streamerc"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -573,6 +575,9 @@ func TestRestrictedAdmissionVictimOrderAcrossTwoOpenSeats(t *testing.T) {
 					"streamera": byLogin["streamera"].Stream.GetBroadcastID(),
 				}
 				f.w.rotation.cohortSince = now
+				if tc.residenceElapsed {
+					f.w.rotation.cohortSince = now.Add(-fairRotationResidence - time.Second)
+				}
 			}
 			online := make([]int, len(f.w.streamers))
 			for i := range online {
@@ -763,6 +768,30 @@ func TestRestrictedPairAgainstDiscoveryContender(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// R2, in-progress streak first: among waiting channel-restricted drops, two
+// pursuing their watch streak are seated ahead of a more-owed one that is not.
+func TestRestrictedAdmissionPrefersInProgressStreak(t *testing.T) {
+	f := newResidenceFixture(t, 5)
+	byLogin := streamersByLogin(f.w.streamers)
+	for _, login := range []string{"streamerc", "streamerd", "streamere"} {
+		makeDropCandidate(byLogin[login], true)
+	}
+	admissionPursuingStreak(byLogin["streamerc"])
+	admissionPursuingStreak(byLogin["streamerd"])
+	f.seedWeights(t, time.Now(), map[string]float64{
+		"streamera": 5, "streamerb": 10, "streamerc": 60, "streamerd": 70, "streamere": 50,
+	})
+
+	f.w.processWatching(tickCtx(f.w))
+
+	if got := restrictedSlotLogins(t, f); !sameLoginSet(got, "streamerc", "streamerd") {
+		t.Fatalf("slots=%v, want the two streaking channel-restricted drops", got)
+	}
+	if reason := decisionReason(f.w, "streamerd"); !strings.Contains(reason, "admitted beside another channel-restricted drop") {
+		t.Fatalf("streamerd reason=%q, want the admission's reason", reason)
 	}
 }
 
