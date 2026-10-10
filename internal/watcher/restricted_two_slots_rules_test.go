@@ -346,9 +346,10 @@ func TestRestrictedSeatGoingUnknownIsReleasedAsBefore(t *testing.T) {
 // every online channel is avoided is the exclusion lifted.
 func TestRestrictedQualificationRespectsCandidateExclusions(t *testing.T) {
 	cases := []struct {
-		name    string
-		exclude func(f *residenceFixture, byLogin map[string]*models.Streamer)
-		want    []string
+		name     string
+		exclude  func(f *residenceFixture, byLogin map[string]*models.Streamer)
+		want     []string
+		admitted string
 	}{
 		{
 			name: "DisableWatch",
@@ -378,7 +379,8 @@ func TestRestrictedQualificationRespectsCandidateExclusions(t *testing.T) {
 					s.Settings.Preference = models.PreferenceAvoid
 				}
 			},
-			want: []string{"streamerc", "streamerd"},
+			want:     []string{"streamerc", "streamerd"},
+			admitted: "streamerd",
 		},
 	}
 	for _, tc := range cases {
@@ -395,6 +397,13 @@ func TestRestrictedQualificationRespectsCandidateExclusions(t *testing.T) {
 			f.w.processWatching(tickCtx(f.w))
 			if got := restrictedSlotLogins(t, f); !sameLoginSet(got, tc.want...) {
 				t.Fatalf("slots=%v, want %v", got, tc.want)
+			}
+			// The admission's reason replaces the note that the avoid
+			// preference was ignored.
+			if tc.admitted != "" {
+				if reason := decisionReason(f.w, tc.admitted); !strings.Contains(reason, "admitted beside another channel-restricted drop, displacing") {
+					t.Fatalf("%s reason=%q, want the admission's reason", tc.admitted, reason)
+				}
 			}
 		})
 	}
@@ -562,7 +571,7 @@ func TestRestrictedAdmissionVictimOrderAcrossTwoOpenSeats(t *testing.T) {
 			a, b := restrictedIndex(t, f.w, "streamera"), restrictedIndex(t, f.w, "streamerb")
 			c, d := restrictedIndex(t, f.w, "streamerc"), restrictedIndex(t, f.w, "streamerd")
 
-			got := f.w.admitRestrictedDrops([2]int{a, b}, online, now)
+			got := f.w.admitRestrictedDrops([2]int{a, b}, [2]int{a, b}, online, now)
 
 			wantA := restrictedIndex(t, f.w, tc.wantFirstSeat)
 			want := [2]int{wantA, c + d - wantA}
@@ -637,7 +646,8 @@ func TestRestrictedPairIsStableAndBanksWatchTime(t *testing.T) {
 
 // T6, R8: the seat set does not depend on the configured roster order, both
 // when persisted deficit separates the channels and when only the recency and
-// login tie-breaks do.
+// login tie-breaks do, including when two of the channels share one restricted
+// campaign (PA-B1a).
 func TestRestrictedPairIgnoresRosterOrder(t *testing.T) {
 	orders := map[string]func([]*models.Streamer) []*models.Streamer{
 		"configured": func(s []*models.Streamer) []*models.Streamer { return s },
@@ -652,24 +662,42 @@ func TestRestrictedPairIgnoresRosterOrder(t *testing.T) {
 			return append(append([]*models.Streamer{}, s[2:]...), s[:2]...)
 		},
 	}
-	seeds := map[string]map[string]float64{
-		"separated deficits": {"streamera": 5, "streamerb": 10, "streamerc": 70, "streamerd": 80, "streamere": 90},
-		"equal deficits":     {"streamera": 5, "streamerb": 10, "streamerc": 80, "streamerd": 80, "streamere": 80},
+	distinct := func(byLogin map[string]*models.Streamer) {
+		for _, login := range []string{"streamerc", "streamerd", "streamere"} {
+			makeDropCandidate(byLogin[login], true)
+		}
 	}
-	for seedName, seed := range seeds {
+	sharedCD := func(byLogin map[string]*models.Streamer) {
+		c, d, e := byLogin["streamerc"], byLogin["streamerd"], byLogin["streamere"]
+		shared := restrictedTestCampaign("camp-shared", c, d)
+		assignRestricted(c, shared)
+		assignRestricted(d, shared)
+		assignRestricted(e, restrictedTestCampaign("camp-streamere", e))
+	}
+	separated := map[string]float64{"streamera": 5, "streamerb": 10, "streamerc": 70, "streamerd": 80, "streamere": 90}
+	equal := map[string]float64{"streamera": 5, "streamerb": 10, "streamerc": 80, "streamerd": 80, "streamere": 80}
+	cases := map[string]struct {
+		seed   map[string]float64
+		assign func(byLogin map[string]*models.Streamer)
+		want   []string
+	}{
+		"separated deficits":                  {seed: separated, assign: distinct, want: []string{"streamerc", "streamerd"}},
+		"equal deficits":                      {seed: equal, assign: distinct, want: []string{"streamerc", "streamerd"}},
+		"shared campaign, separated deficits": {seed: separated, assign: sharedCD, want: []string{"streamerc", "streamere"}},
+		"shared campaign, equal deficits":     {seed: equal, assign: sharedCD, want: []string{"streamerc", "streamere"}},
+	}
+	for caseName, tc := range cases {
 		for orderName, permute := range orders {
-			t.Run(seedName+"/"+orderName, func(t *testing.T) {
+			t.Run(caseName+"/"+orderName, func(t *testing.T) {
 				f := newResidenceFixture(t, 5)
 				f.w.streamers = permute(f.w.streamers)
 				byLogin := streamersByLogin(f.w.streamers)
-				for _, login := range []string{"streamerc", "streamerd", "streamere"} {
-					makeDropCandidate(byLogin[login], true)
-				}
-				f.seedWeights(t, time.Now(), seed)
+				tc.assign(byLogin)
+				f.seedWeights(t, time.Now(), tc.seed)
 
 				f.w.processWatching(tickCtx(f.w))
-				if got := restrictedSlotLogins(t, f); !sameLoginSet(got, "streamerc", "streamerd") {
-					t.Fatalf("slots=%v, want [streamerc streamerd] for every roster order", got)
+				if got := restrictedSlotLogins(t, f); !sameLoginSet(got, tc.want...) {
+					t.Fatalf("slots=%v, want %v for every roster order", got, tc.want)
 				}
 			})
 		}
