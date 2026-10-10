@@ -1,11 +1,11 @@
 package watcher
 
 import (
+	"sort"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/constants"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/models"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/policy"
 )
@@ -13,11 +13,12 @@ import (
 // These cases pin the exact limits of owner rule PA-B1 (configured channels
 // holding channel-restricted Drops may occupy both watch slots) through the
 // real processWatching pipeline, reading the published BrokerSnapshot, the
-// debug decisions and the rotation bookkeeping as the oracle. The fixtures are
-// the ones restricted_two_slots_test.go uses: four or five configured channels
-// on the loop fakes with a real SQLite watch-time store, where streamera and
-// streamerb are the least-watched ordinary channels unless a case says
-// otherwise.
+// debug decisions and the rotation bookkeeping as the oracle. They use the
+// fixture restricted_two_slots_test.go uses — two, four or five configured
+// channels on the loop fakes with a real SQLite watch-time store — where
+// streamera and streamerb are the least-watched ordinary channels unless a case
+// says otherwise. One unit-level case drives admitRestrictedDrops directly for
+// the part of the rule the pipeline cannot reach today.
 
 // restrictedIndex returns the configured index of login.
 func restrictedIndex(t *testing.T, w *MinuteWatcher, login string) int {
@@ -32,7 +33,7 @@ func restrictedIndex(t *testing.T, w *MinuteWatcher, login string) int {
 }
 
 // takeTickSends drains the minute-watched reports sent since the last call
-// without closing the channel, so a test can count sends per tick.
+// without closing the channel, so a test can inspect the sends of one tick.
 func takeTickSends(f *residenceFixture) []string {
 	var sent []string
 	for {
@@ -45,20 +46,16 @@ func takeTickSends(f *residenceFixture) []string {
 	}
 }
 
-// assertTickSends fails when one tick reported more than the slot cap or the
-// same channel twice.
-func assertTickSends(t *testing.T, f *residenceFixture) {
+// assertTickSendsMatchSlots fails unless this tick sent exactly one
+// minute-watched report to every committed slot and to nothing else, which
+// also bounds the tick by the slot cap and rules out a second send to one
+// channel.
+func assertTickSendsMatchSlots(t *testing.T, f *residenceFixture) {
 	t.Helper()
 	sent := takeTickSends(f)
-	if len(sent) > constants.MaxSimultaneousStreams {
-		t.Fatalf("one tick sent %d minute-watched reports, cap is %d: %v", len(sent), constants.MaxSimultaneousStreams, sent)
-	}
-	seen := make(map[string]bool, len(sent))
-	for _, login := range sent {
-		if seen[login] {
-			t.Fatalf("channel %s was sent minute-watched twice in one tick: %v", login, sent)
-		}
-		seen[login] = true
+	sort.Strings(sent)
+	if slots := restrictedSlotLogins(t, f); !sameLoginSet(sent, slots...) {
+		t.Fatalf("tick sent minute-watched to %v, want exactly the committed slots %v", sent, slots)
 	}
 }
 
@@ -84,6 +81,10 @@ func endDropWork(s *models.Streamer, claimed bool) {
 	s.Stream.SetCampaigns([]*models.Campaign{campaign})
 }
 
+// waitingForRestrictedSeats is the selection reason a qualifying channel gets
+// when both seats already hold channel-restricted drops.
+const waitingForRestrictedSeats = "waiting: both watch slots are held by channel-restricted drops"
+
 // T1(a), R4: a watch streak in progress in a fair seat yields to two
 // channel-restricted drops; it does not protect its seat.
 func TestRestrictedPairDisplacesPursuingStreakSeat(t *testing.T) {
@@ -107,8 +108,9 @@ func TestRestrictedPairDisplacesPursuingStreakSeat(t *testing.T) {
 }
 
 // T1(b), R6/R7: a plain streak latched in the boost seat gives way while two
-// channel-restricted drops qualify, and competes for the boost seat again as
-// soon as their work ends.
+// channel-restricted drops qualify — its latch ends in the single boost, which
+// hands the latch to the stronger drop before the PA-B1 admission runs — and it
+// competes for the boost seat again as soon as their work ends.
 func TestRestrictedPairReleasesToLatchedPlainStreak(t *testing.T) {
 	f := newResidenceFixture(t, 5)
 	byLogin := streamersByLogin(f.w.streamers)
@@ -132,6 +134,12 @@ func TestRestrictedPairReleasesToLatchedPlainStreak(t *testing.T) {
 	f.w.processWatching(tickCtx(f.w))
 	if got := restrictedSlotLogins(t, f); !sameLoginSet(got, "streamerc", "streamerd") {
 		t.Fatalf("tick 2: slots=%v, want both channel-restricted drops", got)
+	}
+	boostTarget := restrictedIndex(t, f.w, "streamerc")
+	boostVictim := restrictedIndex(t, f.w, "streamerb")
+	if !f.w.rotation.boostLatched || f.w.rotation.boostTarget != boostTarget || f.w.rotation.boostVictim != boostVictim {
+		t.Fatalf("tick 2: latch=%v target=%d victim=%d, want the single boost's target %d and victim %d",
+			f.w.rotation.boostLatched, f.w.rotation.boostTarget, f.w.rotation.boostVictim, boostTarget, boostVictim)
 	}
 
 	endDropWork(byLogin["streamerc"], true)
@@ -183,10 +191,60 @@ func TestRestrictedPairKeepsRestrictedStreakLatchBookkeeping(t *testing.T) {
 	}
 }
 
-// T2(a), R1/R3 (control, same result without PA-B1): a channel-restricted
+// T1(d), R7: a plain streak whose latch persists while persisted fairness seats
+// it IN the base pair is a non-restricted seat, so a second channel-restricted
+// drop takes it. The admission leaves the latch as the boost left it, and once
+// the drop's work ends the latched streak is back exactly as before.
+func TestRestrictedAdmissionLeavesInPairStreakLatch(t *testing.T) {
+	f := newResidenceFixture(t, 4)
+	byLogin := streamersByLogin(f.w.streamers)
+	admissionPursuingStreak(byLogin["streamerb"])
+	f.seedWeights(t, time.Now(), map[string]float64{
+		"streamera": 5, "streamerb": 30, "streamerc": 80, "streamerd": 10,
+	})
+	streak := restrictedIndex(t, f.w, "streamerb")
+	assertInPairLatch := func(tick int) {
+		t.Helper()
+		if !f.w.rotation.boostLatched || f.w.rotation.boostTarget != streak || f.w.rotation.boostVictim != -1 {
+			t.Fatalf("tick %d: latch=%v target=%d victim=%d, want the streak %d latched in the base pair (victim -1)",
+				tick, f.w.rotation.boostLatched, f.w.rotation.boostTarget, f.w.rotation.boostVictim, streak)
+		}
+	}
+
+	f.w.processWatching(tickCtx(f.w))
+	if got := restrictedSlotLogins(t, f); !sameLoginSet(got, "streamera", "streamerb") {
+		t.Fatalf("tick 1: slots=%v, want the boosted streak beside streamera", got)
+	}
+
+	// streamerd falls behind in the ranking, so fairness itself brings the
+	// latched streak into the base pair.
+	f.seedWeights(t, time.Now(), map[string]float64{"streamerd": 100})
+	f.w.processWatching(tickCtx(f.w))
+	if got := restrictedSlotLogins(t, f); !sameLoginSet(got, "streamera", "streamerb") {
+		t.Fatalf("tick 2: slots=%v, want the latched streak held in the base pair", got)
+	}
+	assertInPairLatch(2)
+
+	makeDropCandidate(byLogin["streamera"], true)
+	makeDropCandidate(byLogin["streamerc"], true)
+	f.w.processWatching(tickCtx(f.w))
+	if got := restrictedSlotLogins(t, f); !sameLoginSet(got, "streamera", "streamerc") {
+		t.Fatalf("tick 3: slots=%v, want the second channel-restricted drop in the streak's seat", got)
+	}
+	assertInPairLatch(3)
+
+	endDropWork(byLogin["streamerc"], true)
+	f.w.processWatching(tickCtx(f.w))
+	if got := restrictedSlotLogins(t, f); !sameLoginSet(got, "streamera", "streamerb") {
+		t.Fatalf("tick 4: slots=%v, want the latched streak back in its base-pair seat", got)
+	}
+	assertInPairLatch(4)
+}
+
+// T2(a), R1/R3 (control, same seats without PA-B1): a channel-restricted
 // channel retained in its fair seat through an UNKNOWN blip is a restricted
 // occupant. Two channel-restricted drops off the pair then get only the other
-// seat, which goes to the stronger one.
+// seat, which goes to the stronger one, and the other is told why it waits.
 func TestRestrictedPairKeepsRetainedUnknownOccupant(t *testing.T) {
 	f := newResidenceFixture(t, 5)
 	byLogin := streamersByLogin(f.w.streamers)
@@ -207,32 +265,48 @@ func TestRestrictedPairKeepsRetainedUnknownOccupant(t *testing.T) {
 	if got := restrictedSlotLogins(t, f); !sameLoginSet(got, "streamera", "streamerd") {
 		t.Fatalf("tick 2: slots=%v, want the retained restricted occupant plus the stronger waiting drop", got)
 	}
+	if reason := decisionReason(f.w, "streamere"); !strings.Contains(reason, waitingForRestrictedSeats) {
+		t.Fatalf("streamere reason=%q, want it told both seats hold channel-restricted drops", reason)
+	}
 }
 
-// T2(b), R3/R13: a channel-restricted drop holding a stronger seat that goes
-// UNKNOWN is released at the next evaluation, exactly as the single boost
-// already releases it, and an UNKNOWN channel never gains a new seat.
+// T2(b), R3/R13: a channel-restricted drop that goes UNKNOWN while holding a
+// stronger seat — the single boost's seat or the PA-B1 admission's — is
+// released at the next evaluation and does not count as a qualifying channel:
+// at tick 2 it is still a candidate (retained) and is not re-seated. Tick 3
+// confirms it stays out once retention no longer applies.
 func TestRestrictedSeatGoingUnknownIsReleasedAsBefore(t *testing.T) {
-	f := newResidenceFixture(t, 4)
-	byLogin := streamersByLogin(f.w.streamers)
-	makeDropCandidate(byLogin["streamerc"], true)
-	makeDropCandidate(byLogin["streamerd"], true)
-	f.seedWeights(t, time.Now(), map[string]float64{
-		"streamera": 10, "streamerb": 20, "streamerc": 80, "streamerd": 90,
-	})
-
-	f.w.processWatching(tickCtx(f.w))
-	if got := restrictedSlotLogins(t, f); !sameLoginSet(got, "streamerc", "streamerd") {
-		t.Fatalf("tick 1: slots=%v, want both channel-restricted drops", got)
+	cases := []struct {
+		name    string
+		unknown string
+		want    []string
+	}{
+		{name: "boost seat", unknown: "streamerc", want: []string{"streamera", "streamerd"}},
+		{name: "admitted seat", unknown: "streamerd", want: []string{"streamera", "streamerc"}},
 	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newResidenceFixture(t, 4)
+			byLogin := streamersByLogin(f.w.streamers)
+			makeDropCandidate(byLogin["streamerc"], true)
+			makeDropCandidate(byLogin["streamerd"], true)
+			f.seedWeights(t, time.Now(), map[string]float64{
+				"streamera": 10, "streamerb": 20, "streamerc": 80, "streamerd": 90,
+			})
 
-	byLogin["streamerc"].SetUnknown(models.ReasonTransportError)
-	for tick := 2; tick <= 3; tick++ {
-		f.w.processWatching(tickCtx(f.w))
-		got := restrictedSlotLogins(t, f)
-		if !sameLoginSet(got, "streamera", "streamerd") {
-			t.Fatalf("tick %d: slots=%v, want the UNKNOWN channel released and [streamera streamerd] seated", tick, got)
-		}
+			f.w.processWatching(tickCtx(f.w))
+			if got := restrictedSlotLogins(t, f); !sameLoginSet(got, "streamerc", "streamerd") {
+				t.Fatalf("tick 1: slots=%v, want both channel-restricted drops", got)
+			}
+
+			byLogin[tc.unknown].SetUnknown(models.ReasonTransportError)
+			for tick := 2; tick <= 3; tick++ {
+				f.w.processWatching(tickCtx(f.w))
+				if got := restrictedSlotLogins(t, f); !sameLoginSet(got, tc.want...) {
+					t.Fatalf("tick %d: slots=%v, want %s released and %v seated", tick, got, tc.unknown, tc.want)
+				}
+			}
+		})
 	}
 }
 
@@ -243,25 +317,28 @@ func TestRestrictedQualificationRespectsCandidateExclusions(t *testing.T) {
 	cases := []struct {
 		name    string
 		exclude func(f *residenceFixture, byLogin map[string]*models.Streamer)
-		want    []string // nil: streamerd is excluded and only streamerc boosts
+		want    []string
 	}{
 		{
 			name: "DisableWatch",
 			exclude: func(_ *residenceFixture, byLogin map[string]*models.Streamer) {
 				byLogin["streamerd"].Settings.DisableWatch = true
 			},
+			want: []string{"streamera", "streamerc"},
 		},
 		{
 			name: "watchdog avoided",
 			exclude: func(f *residenceFixture, _ map[string]*models.Streamer) {
 				f.w.SetAvoidChecker(&staticAvoid{avoided: map[string]bool{"streamerd": true}})
 			},
+			want: []string{"streamera", "streamerc"},
 		},
 		{
 			name: "preference avoid",
 			exclude: func(_ *residenceFixture, byLogin map[string]*models.Streamer) {
 				byLogin["streamerd"].Settings.Preference = models.PreferenceAvoid
 			},
+			want: []string{"streamera", "streamerc"},
 		},
 		{
 			name: "every online channel avoided lifts the exclusion",
@@ -285,31 +362,34 @@ func TestRestrictedQualificationRespectsCandidateExclusions(t *testing.T) {
 			tc.exclude(f, byLogin)
 
 			f.w.processWatching(tickCtx(f.w))
-			got := restrictedSlotLogins(t, f)
-			if tc.want != nil {
-				if !sameLoginSet(got, tc.want...) {
-					t.Fatalf("slots=%v, want %v", got, tc.want)
-				}
-				return
-			}
-			if sameLoginSet(got, "streamerc", "streamerd") || !sameLoginSet(got, "streamera", "streamerc") {
-				t.Fatalf("slots=%v, want the excluded streamerd unseated and the single boost [streamera streamerc]", got)
+			if got := restrictedSlotLogins(t, f); !sameLoginSet(got, tc.want...) {
+				t.Fatalf("slots=%v, want %v", got, tc.want)
 			}
 		})
 	}
 }
 
-// T4, R6: when one channel-restricted drop's work ends its seat returns to the
-// existing selection at the next evaluation. While both drops held the seats
-// the ordinary cohort was invalidated (C=0); the returning ordinary seat
-// re-anchors a fresh cohort instead of inheriting stale residence.
+// T4, R6: when one channel-restricted drop stops qualifying — its work ends,
+// its assignment goes away, it goes offline or it is avoided — its seat returns
+// to the existing selection at the next evaluation. While both drops held the
+// seats the ordinary cohort was invalidated (C=0); the returning ordinary seat
+// then starts its own cohort at C=1.
 func TestRestrictedSeatEndingWorkReanchorsOrdinaryCohort(t *testing.T) {
-	for _, claimed := range []bool{true, false} {
-		name := "no remaining minutes"
-		if claimed {
-			name = "drop claimed"
-		}
-		t.Run(name, func(t *testing.T) {
+	cases := []struct {
+		name string
+		stop func(s *models.Streamer)
+	}{
+		{name: "drop claimed", stop: func(s *models.Streamer) { endDropWork(s, true) }},
+		{name: "no remaining minutes", stop: func(s *models.Streamer) { endDropWork(s, false) }},
+		{name: "unassigned", stop: func(s *models.Streamer) {
+			s.Stream.SetCampaignIDs(nil)
+			s.Stream.SetCampaigns(nil)
+		}},
+		{name: "offline", stop: func(s *models.Streamer) { s.SetConfirmedOffline() }},
+		{name: "avoided", stop: func(s *models.Streamer) { s.Settings.Preference = models.PreferenceAvoid }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
 			f := newResidenceFixture(t, 4)
 			byLogin := streamersByLogin(f.w.streamers)
 			makeDropCandidate(byLogin["streamerc"], true)
@@ -327,31 +407,130 @@ func TestRestrictedSeatEndingWorkReanchorsOrdinaryCohort(t *testing.T) {
 					f.w.rotation.committedCohort, f.w.rotation.cohortSince, f.w.rotation.cohortCapacity)
 			}
 
-			endDropWork(byLogin["streamerd"], claimed)
-			beforeTick2 := time.Now()
+			tc.stop(byLogin["streamerd"])
 			f.w.processWatching(tickCtx(f.w))
 			if got := restrictedSlotLogins(t, f); !sameLoginSet(got, "streamera", "streamerc") {
 				t.Fatalf("tick 2: slots=%v, want streamerd released and the single boost [streamera streamerc]", got)
 			}
 			cohort := f.w.rotation.committedCohort
-			if len(cohort) != 1 || f.w.rotation.cohortCapacity != 1 {
-				t.Fatalf("tick 2: cohort=%v capacity=%d, want exactly the one returning ordinary seat at C=1",
+			if _, ok := cohort["streamera"]; !ok || len(cohort) != 1 || f.w.rotation.cohortCapacity != 1 {
+				t.Fatalf("tick 2: cohort=%v capacity=%d, want exactly the returning ordinary seat streamera at C=1",
 					cohort, f.w.rotation.cohortCapacity)
-			}
-			if _, ok := cohort["streamera"]; !ok {
-				t.Fatalf("tick 2: cohort=%v, want streamera as the returning ordinary seat", cohort)
-			}
-			if f.w.rotation.cohortSince.Before(beforeTick2) {
-				t.Fatalf("tick 2: cohort anchor %v predates the evaluation at %v: stale residence",
-					f.w.rotation.cohortSince, beforeTick2)
 			}
 		})
 	}
 }
 
+// T4b, R4/R6: a committed ordinary seat inside its minimum residence does not
+// delay the admission of a second channel-restricted drop; the admission
+// invalidates the cohort (C=0), and when the drop's work ends the returning
+// ordinary seat is anchored afresh instead of resuming the old residence.
+func TestRestrictedAdmissionOverridesResidenceAndReanchors(t *testing.T) {
+	f := newResidenceFixture(t, 4)
+	byLogin := streamersByLogin(f.w.streamers)
+	makeDropCandidate(byLogin["streamerc"], true)
+	f.seedWeights(t, time.Now(), map[string]float64{
+		"streamera": 10, "streamerb": 20, "streamerc": 80, "streamerd": 90,
+	})
+	resident := restrictedIndex(t, f.w, "streamera")
+
+	f.w.processWatching(tickCtx(f.w))
+	if got := restrictedSlotLogins(t, f); !sameLoginSet(got, "streamera", "streamerc") {
+		t.Fatalf("tick 1: slots=%v, want the single boost beside streamera", got)
+	}
+	firstAnchor := f.w.rotation.cohortSince
+	if firstAnchor.IsZero() || !f.w.residentOrdinaryIndex(resident, time.Now()) {
+		t.Fatalf("tick 1: anchor=%v, want streamera resident in a committed ordinary cohort", firstAnchor)
+	}
+
+	makeDropCandidate(byLogin["streamerd"], true)
+	f.w.processWatching(tickCtx(f.w))
+	if got := restrictedSlotLogins(t, f); !sameLoginSet(got, "streamerc", "streamerd") {
+		t.Fatalf("tick 2: slots=%v, want the resident streamera displaced by the second drop at once", got)
+	}
+	if !f.w.rotation.cohortSince.IsZero() || f.w.rotation.committedCohort != nil {
+		t.Fatalf("tick 2: cohort=%v since=%v, want the ordinary cohort invalidated at C=0",
+			f.w.rotation.committedCohort, f.w.rotation.cohortSince)
+	}
+
+	endDropWork(byLogin["streamerd"], true)
+	f.w.processWatching(tickCtx(f.w))
+	if got := restrictedSlotLogins(t, f); !sameLoginSet(got, "streamera", "streamerc") {
+		t.Fatalf("tick 3: slots=%v, want streamera back beside the single boost", got)
+	}
+	if !f.w.rotation.cohortSince.After(firstAnchor) {
+		t.Fatalf("tick 3: anchor=%v, want a fresh anchor after the invalidated %v", f.w.rotation.cohortSince, firstAnchor)
+	}
+}
+
+// R5 boundary (control, identical without PA-B1): exactly one qualifying
+// channel beside a non-qualifying restricted occupant changes nothing. The
+// latched restricted streak goes UNKNOWN and is retained in its boost seat; the
+// single new qualifying channel stays waiting.
+func TestRestrictedSingleQualifyingChannelBesideRetainedStreakIsUnchanged(t *testing.T) {
+	f := newResidenceFixture(t, 4)
+	byLogin := streamersByLogin(f.w.streamers)
+	makeDropCandidate(byLogin["streamerc"], true)
+	admissionPursuingStreak(byLogin["streamerc"])
+	f.seedWeights(t, time.Now(), map[string]float64{
+		"streamera": 10, "streamerb": 20, "streamerc": 80, "streamerd": 90,
+	})
+
+	f.w.processWatching(tickCtx(f.w))
+	if got := restrictedSlotLogins(t, f); !sameLoginSet(got, "streamera", "streamerc") {
+		t.Fatalf("tick 1: slots=%v, want the latched restricted streak beside streamera", got)
+	}
+
+	byLogin["streamerc"].SetUnknown(models.ReasonTransportError)
+	makeDropCandidate(byLogin["streamerd"], true)
+	f.w.processWatching(tickCtx(f.w))
+	if got := restrictedSlotLogins(t, f); !sameLoginSet(got, "streamera", "streamerc") {
+		t.Fatalf("tick 2: slots=%v, want the single-boost result kept with one qualifying channel", got)
+	}
+}
+
+// R4, unit level: the pipeline always lets the single boost seat one qualifying
+// channel first, so two open seats never reach the admission today. Driven
+// directly, the admission gives the strongest waiting channel the weakest seat
+// in betterBoostVictim order — here the non-resident streamerb, because the
+// resident streamera ranks as the stronger seat — and the next one the other.
+func TestRestrictedAdmissionVictimOrderAcrossTwoOpenSeats(t *testing.T) {
+	f := newResidenceFixture(t, 4)
+	byLogin := streamersByLogin(f.w.streamers)
+	makeDropCandidate(byLogin["streamerc"], true)
+	makeDropCandidate(byLogin["streamerd"], true)
+	now := time.Now()
+	f.w.rotation.deficitMinutes = map[string]float64{
+		"streamera": 10, "streamerb": 20, "streamerc": 70, "streamerd": 80,
+	}
+	f.w.rotation.committedCohort = map[string]string{
+		"streamera": byLogin["streamera"].Stream.GetBroadcastID(),
+	}
+	f.w.rotation.cohortSince = now
+	online := make([]int, len(f.w.streamers))
+	for i := range online {
+		online[i] = i
+	}
+	a, b := restrictedIndex(t, f.w, "streamera"), restrictedIndex(t, f.w, "streamerb")
+	c, d := restrictedIndex(t, f.w, "streamerc"), restrictedIndex(t, f.w, "streamerd")
+
+	got := f.w.admitRestrictedDrops([2]int{a, b}, online, now)
+
+	if want := [2]int{d, c}; got != want {
+		t.Fatalf("pair=%v, want %v: streamerc into the non-resident streamerb seat, then streamerd into streamera's", got, want)
+	}
+	if reason := f.w.selectionReasons[c]; !strings.Contains(reason, "displacing streamerb") {
+		t.Fatalf("streamerc reason=%q, want it to name the displaced streamerb", reason)
+	}
+	if reason := f.w.selectionReasons[d]; !strings.Contains(reason, "displacing streamera") {
+		t.Fatalf("streamerd reason=%q, want it to name the displaced streamera", reason)
+	}
+}
+
 // T5, R8/R9: with exactly two channel-restricted drops, six unchanged ticks keep
 // the same seats, both publish restricted_drop, both bank persisted watch time
-// through the real delivery chain, and steady ticks log no slot changes.
+// through the real delivery chain, every tick reports exactly the two seats,
+// and only the first tick logs the slot assignments.
 func TestRestrictedPairIsStableAndBanksWatchTime(t *testing.T) {
 	f := newResidenceFixture(t, 4)
 	byLogin := streamersByLogin(f.w.streamers)
@@ -368,7 +547,7 @@ func TestRestrictedPairIsStableAndBanksWatchTime(t *testing.T) {
 
 	const ticks = 6
 	var afterFirstTick int
-	for tick := 0; tick < ticks; tick++ {
+	for tick := range ticks {
 		f.w.processWatching(tickCtx(f.w))
 		if got := restrictedSlotLogins(t, f); !sameLoginSet(got, "streamerc", "streamerd") {
 			t.Fatalf("tick %d: slots=%v, want the same two channel-restricted drops", tick, got)
@@ -378,8 +557,13 @@ func TestRestrictedPairIsStableAndBanksWatchTime(t *testing.T) {
 				t.Fatalf("tick %d: %s reasonCode=%q, want %q", tick, slot.Channel, slot.ReasonCode, ReasonRestrictedDrop)
 			}
 		}
-		assertTickSends(t, f)
+		assertTickSendsMatchSlots(t, f)
 		if tick == 0 {
+			for _, login := range []string{"streamerc", "streamerd"} {
+				if logLineContaining(logs, "Watch slot assigned", "channel="+login) == "" {
+					t.Fatalf("tick 0 logged no slot assignment for %s:\n%s", login, logs.String())
+				}
+			}
 			afterFirstTick = logs.Len()
 		}
 	}
@@ -397,7 +581,9 @@ func TestRestrictedPairIsStableAndBanksWatchTime(t *testing.T) {
 	}
 }
 
-// T6, R8: the seat set does not depend on the configured roster order.
+// T6, R8: the seat set does not depend on the configured roster order, both
+// when persisted deficit separates the channels and when only the recency and
+// login tie-breaks do.
 func TestRestrictedPairIgnoresRosterOrder(t *testing.T) {
 	orders := map[string]func([]*models.Streamer) []*models.Streamer{
 		"configured": func(s []*models.Streamer) []*models.Streamer { return s },
@@ -412,38 +598,43 @@ func TestRestrictedPairIgnoresRosterOrder(t *testing.T) {
 			return append(append([]*models.Streamer{}, s[2:]...), s[:2]...)
 		},
 	}
-	for name, permute := range orders {
-		t.Run(name, func(t *testing.T) {
-			f := newResidenceFixture(t, 5)
-			f.w.streamers = permute(f.w.streamers)
-			byLogin := streamersByLogin(f.w.streamers)
-			for _, login := range []string{"streamerc", "streamerd", "streamere"} {
-				makeDropCandidate(byLogin[login], true)
-			}
-			f.seedWeights(t, time.Now(), map[string]float64{
-				"streamera": 5, "streamerb": 10, "streamerc": 70, "streamerd": 80, "streamere": 90,
-			})
+	seeds := map[string]map[string]float64{
+		"separated deficits": {"streamera": 5, "streamerb": 10, "streamerc": 70, "streamerd": 80, "streamere": 90},
+		"equal deficits":     {"streamera": 5, "streamerb": 10, "streamerc": 80, "streamerd": 80, "streamere": 80},
+	}
+	for seedName, seed := range seeds {
+		for orderName, permute := range orders {
+			t.Run(seedName+"/"+orderName, func(t *testing.T) {
+				f := newResidenceFixture(t, 5)
+				f.w.streamers = permute(f.w.streamers)
+				byLogin := streamersByLogin(f.w.streamers)
+				for _, login := range []string{"streamerc", "streamerd", "streamere"} {
+					makeDropCandidate(byLogin[login], true)
+				}
+				f.seedWeights(t, time.Now(), seed)
 
-			f.w.processWatching(tickCtx(f.w))
-			if got := restrictedSlotLogins(t, f); !sameLoginSet(got, "streamerc", "streamerd") {
-				t.Fatalf("slots=%v, want the two most-owed channel-restricted drops [streamerc streamerd]", got)
-			}
-		})
+				f.w.processWatching(tickCtx(f.w))
+				if got := restrictedSlotLogins(t, f); !sameLoginSet(got, "streamerc", "streamerd") {
+					t.Fatalf("slots=%v, want [streamerc streamerd] for every roster order", got)
+				}
+			})
+		}
 	}
 }
 
 // T7, R5: Phase B is unchanged. A discovery channel-restricted drop with equal
 // semantics waits instead of displacing either configured seat; a strictly
-// stronger one takes exactly one seat under the existing displacement rule;
-// no tick ever sends more than two reports or one channel twice.
+// stronger one takes exactly one seat under the existing displacement rule,
+// which gives up the less-owed streamerd; every tick reports exactly the
+// committed slots.
 func TestRestrictedPairAgainstDiscoveryContender(t *testing.T) {
 	cases := []struct {
 		name           string
 		discoveryClass policy.SemanticClass
-		displaces      bool
+		want           []string
 	}{
-		{name: "equal semantics waits", discoveryClass: 1},
-		{name: "strictly stronger takes one seat", discoveryClass: 0, displaces: true},
+		{name: "equal semantics waits", discoveryClass: 1, want: []string{"streamerc", "streamerd"}},
+		{name: "strictly stronger takes one seat", discoveryClass: 0, want: []string{"disco", "streamerc"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -467,32 +658,19 @@ func TestRestrictedPairAgainstDiscoveryContender(t *testing.T) {
 				Restricted: true,
 			})
 
-			for tick := 0; tick < 2; tick++ {
+			for tick := range 2 {
 				f.w.processWatching(tickCtx(f.w))
-				assertTickSends(t, f)
-				snap := f.w.BrokerSnapshot()
-				got := restrictedSlotLogins(t, f)
-				if !tc.displaces {
-					if !sameLoginSet(got, "streamerc", "streamerd") {
-						t.Fatalf("tick %d: slots=%v, want the configured pair kept", tick, got)
-					}
-					waits := false
-					for _, c := range snap.Waiting {
-						waits = waits || (c.Channel == "disco" && c.ReasonCode == ReasonLowerPriority)
-					}
-					if !waits {
-						t.Fatalf("tick %d: waiting=%+v, want disco waiting as lower priority", tick, snap.Waiting)
-					}
-					continue
+				if got := restrictedSlotLogins(t, f); !sameLoginSet(got, tc.want...) {
+					t.Fatalf("tick %d: slots=%v, want %v", tick, got, tc.want)
 				}
-				configured := 0
-				for _, login := range got {
-					if login == "streamerc" || login == "streamerd" {
-						configured++
-					}
+				assertTickSendsMatchSlots(t, f)
+				waits := false
+				for _, c := range f.w.BrokerSnapshot().Waiting {
+					waits = waits || c.ReasonCode == ReasonLowerPriority
 				}
-				if !brokerHasChannel(snap, "disco") || configured != 1 {
-					t.Fatalf("tick %d: slots=%v, want disco plus exactly one configured restricted drop", tick, got)
+				if !waits {
+					t.Fatalf("tick %d: waiting=%+v, want the channel without a seat reported as lower priority",
+						tick, f.w.BrokerSnapshot().Waiting)
 				}
 			}
 		})
@@ -502,22 +680,26 @@ func TestRestrictedPairAgainstDiscoveryContender(t *testing.T) {
 // T8, R2: five channels, the two least-watched ordinary ones hold the fair pair
 // and three channel-restricted drops wait off-pair. The two strongest by
 // Campaign Policy utility are seated; with equal utility the two most owed by
-// persisted deficit are.
+// persisted deficit are. The third is told that both seats hold
+// channel-restricted drops.
 func TestRestrictedAdmissionPicksStrongestWaiting(t *testing.T) {
 	cases := []struct {
 		name    string
 		classes map[string]policy.SemanticClass
 		want    []string
+		waiting string
 	}{
 		{
 			name:    "different utility",
 			classes: map[string]policy.SemanticClass{"streamerc": 2, "streamerd": 0, "streamere": 1},
 			want:    []string{"streamerd", "streamere"},
+			waiting: "streamerc",
 		},
 		{
 			name:    "equal utility",
 			classes: map[string]policy.SemanticClass{"streamerc": 1, "streamerd": 1, "streamere": 1},
 			want:    []string{"streamerc", "streamere"},
+			waiting: "streamerd",
 		},
 	}
 	for _, tc := range cases {
@@ -537,6 +719,9 @@ func TestRestrictedAdmissionPicksStrongestWaiting(t *testing.T) {
 			f.w.processWatching(tickCtx(f.w))
 			if got := restrictedSlotLogins(t, f); !sameLoginSet(got, tc.want...) {
 				t.Fatalf("slots=%v, want %v", got, tc.want)
+			}
+			if reason := decisionReason(f.w, tc.waiting); !strings.Contains(reason, waitingForRestrictedSeats) {
+				t.Fatalf("%s reason=%q, want it told both seats hold channel-restricted drops", tc.waiting, reason)
 			}
 		})
 	}
@@ -597,7 +782,7 @@ func TestRestrictedPairDirectModeUnchanged(t *testing.T) {
 	if got := restrictedSlotLogins(t, f); !sameLoginSet(got, "streamera", "streamerb") {
 		t.Fatalf("slots=%v, want both direct-mode candidates", got)
 	}
-	assertTickSends(t, f)
+	assertTickSendsMatchSlots(t, f)
 }
 
 // T10, R9: both seats publish restricted_drop, and the selection reasons name
@@ -613,6 +798,9 @@ func TestRestrictedPairPublishesReasons(t *testing.T) {
 
 	f.w.processWatching(tickCtx(f.w))
 
+	if got := restrictedSlotLogins(t, f); !sameLoginSet(got, "streamerc", "streamerd") {
+		t.Fatalf("slots=%v, want both channel-restricted drops", got)
+	}
 	for _, slot := range f.w.BrokerSnapshot().Slots {
 		if slot.ReasonCode != ReasonRestrictedDrop {
 			t.Fatalf("%s reasonCode=%q, want %q", slot.Channel, slot.ReasonCode, ReasonRestrictedDrop)

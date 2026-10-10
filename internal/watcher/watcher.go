@@ -1607,8 +1607,9 @@ var watcherEligibility = eligibility.Evaluator{}
 // across all online streamers over time (selectRotating), with DROPS/STREAK
 // only influencing how often a channel gets an extra turn - never granting
 // it a permanent exclusive slot. The one exception is owner rule PA-B1: while
-// two or more of them hold channel-restricted Drops, which progress only on
-// that exact channel, they may occupy both slots until they stop qualifying.
+// two or more of them hold channel-restricted Drops, which progress only on the
+// channels their campaigns list, they may occupy both slots until they stop
+// qualifying.
 func (w *MinuteWatcher) selectStreamersToWatch(onlineIndexes []int, now time.Time) []int {
 	candidates := w.filterAvoided(onlineIndexes)
 	if len(candidates) <= constants.MaxSimultaneousStreams {
@@ -1720,9 +1721,10 @@ func (w *MinuteWatcher) selectRotating(onlineIndexes []int, now time.Time) []int
 //
 // It protects the service that exists rather than the pair that was proposed.
 // Phase A's pair is only a proposal: applyPriorityBoost and the cross-source
-// broker both run after it and can take one of its two seats, so a guard on the
-// pair would be measuring the tenure of something that is not, at that moment,
-// what the miner is watching.
+// broker both run after it and can take one of its two seats, and with the
+// owner rule PA-B1 admission (admitRestrictedDrops) channel-restricted drops can
+// take both, so a guard on the pair would be measuring the tenure of something
+// that is not, at that moment, what the miner is watching.
 //
 // It is a MINIMUM RESIDENCE, not a switching cadence: nothing schedules or
 // forces a switch when it elapses. Reaching it only re-opens ordinary
@@ -2052,6 +2054,8 @@ func (w *MinuteWatcher) pinResidentOrdinary(ranked []int, now time.Time) [2]int 
 //     persisted deficit — so it is the seat whose service is not protected and,
 //     between two the residence cannot separate, the LESS-owed one. Its identity
 //     moves as the base pair and the cohort recompute, so no channel is locked out.
+//     The exception is owner rule PA-B1: when a second channel-restricted drop
+//     qualifies, admitRestrictedDrops can give it the other base seat too.
 //
 // fairRotationResidence bounds how fast that last point can act, and is also
 // what keeps it from thrashing. The victim is chosen below the hard/semantic
@@ -2135,8 +2139,9 @@ func (w *MinuteWatcher) applyPriorityBoost(pair [2]int, onlineIndexes []int, now
 
 // admitRestrictedDrops applies owner rule PA-B1 on top of the single
 // DROPS/STREAK boost: configured channels holding channel-restricted Drops may
-// occupy BOTH watch slots, because such a campaign progresses only on that
-// exact channel.
+// occupy BOTH watch slots, because such a campaign progresses only on the
+// channels it lists. The rule compares channels, not campaigns: two channels
+// listed by the same restricted campaign both qualify.
 //
 // A qualifying channel is a candidate with an active drop (DropsCondition)
 // whose assigned unfinished work is channel-restricted
@@ -2152,7 +2157,12 @@ func (w *MinuteWatcher) applyPriorityBoost(pair [2]int, onlineIndexes []int, now
 // and the seat given up is the weakest in betterBoostVictim order. A
 // restricted occupant is never displaced here, not even by a stronger waiting
 // channel; only applyPriorityBoost, under its unchanged rules, can still do
-// that. Residence orders the victims and never delays the admission.
+// that. Residence orders the victims and never delays the admission. A
+// qualifying channel still waiting when both seats hold restricted occupants
+// is told so in its selection reason. Composed after applyPriorityBoost, which
+// already seats one qualifying channel whenever any waits off a pair without a
+// restricted occupant, this seats at most one more in practice; the general
+// rule keeps the result exact should that composition change.
 //
 // The boost latch is neither read nor written: it keeps describing the single
 // overlay seat. A channel seated here off the base pair is a stronger seat for
@@ -2190,7 +2200,7 @@ func (w *MinuteWatcher) admitRestrictedDrops(pair [2]int, onlineIndexes []int, n
 		waiting = append(waiting[:bestAt], waiting[bestAt+1:]...)
 
 		w.noteSelection(best, "watched: admitted beside another channel-restricted drop, displacing "+
-			w.streamers[victim].GetUsername()+" - its campaign only progresses on this exact channel")
+			w.streamers[victim].GetUsername()+" - its campaign only progresses on the channels it lists")
 		w.noteSelection(victim, "not watched this tick: displaced by channel-restricted drop "+
 			w.streamers[best].GetUsername()+
 			" (channel-restricted drops may hold both slots; returns when one no longer qualifies)")
@@ -2200,6 +2210,11 @@ func (w *MinuteWatcher) admitRestrictedDrops(pair [2]int, onlineIndexes []int, n
 		} else {
 			pair[1] = best
 		}
+	}
+	for _, idx := range waiting {
+		w.noteSelectionIfEmpty(idx, "waiting: both watch slots are held by channel-restricted drops ("+
+			w.streamers[pair[0]].GetUsername()+", "+w.streamers[pair[1]].GetUsername()+
+			"); a seated channel-restricted drop is not displaced by another")
 	}
 	return pair
 }
