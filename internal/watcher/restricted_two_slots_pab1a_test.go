@@ -213,9 +213,10 @@ func TestRestrictedDuplicateOccupantYieldsToDistinctWork(t *testing.T) {
 	}
 }
 
-// P5, R14(c) (control, same seats without PA-B1a): when the seated channel of a
-// shared restricted campaign stops qualifying — offline, unassigned or avoided —
-// another online channel of that campaign takes a seat at the next evaluation.
+// P5, R14(c) (control: its assertions also hold without PA-B1a): when the
+// seated channel of a shared restricted campaign stops qualifying — offline,
+// unassigned or avoided — another online channel of that campaign takes a seat
+// at the next evaluation.
 func TestRestrictedSharedCampaignContinuesOnOtherChannel(t *testing.T) {
 	cases := []struct {
 		name string
@@ -1370,7 +1371,8 @@ func TestRestrictedWaitingReasonWhenAssignmentChangedMidEvaluation(t *testing.T)
 // random statuses (confirmed online, retained UNKNOWN, confirmed offline),
 // stale assignments with drop claiming switched off, game-wide campaigns,
 // random starting pairs, coarse persisted deficits with random recency,
-// Campaign Policy classes and in-progress streaks, and, in some cases, a fair
+// Campaign Policy classes, in-progress streaks and committed ordinary
+// residence, and, in some cases, a fair
 // base pair that the single boost changed in one seat (its victim noted with
 // the boost's reason), the
 // admission keeps its invariants: the two seats stay
@@ -1483,6 +1485,22 @@ func TestRestrictedAdmissionInvariantsHoldForRandomAssignments(t *testing.T) {
 					break
 				}
 			}
+		}
+
+		// Some evaluations run with a committed ordinary cohort over base members,
+		// so residence orders the victims (R4) and must not order the
+		// candidates (R2).
+		w.rotation.committedCohort = nil
+		w.rotation.cohortSince = time.Time{}
+		if rng.Intn(2) == 0 {
+			w.rotation.committedCohort = map[string]string{}
+			for _, member := range base {
+				if rng.Intn(2) == 0 {
+					s := w.streamers[member]
+					w.rotation.committedCohort[s.GetUsername()] = s.Stream.GetBroadcastID()
+				}
+			}
+			w.rotation.cohortSince = now
 		}
 
 		got := w.admitRestrictedDrops(base, start, online, now)

@@ -374,10 +374,10 @@ type rotationState struct {
 	// that single overlay seat: the owner rule PA-B1 admission that lets further
 	// channel-restricted drops take the remaining seat (admitRestrictedDrops)
 	// neither reads nor writes it, even when it gives the latched channel's seat
-	// away — the overlay seat of a latched target that is a duplicate occupant
-	// (PA-B1a), or the base seat of a plain streak latched inside the base pair;
-	// the latch then names an unseated channel until the existing behaviour
-	// resumes.
+	// away — for example a latched target that is a duplicate occupant
+	// (PA-B1a), in the overlay seat or in its own base seat, or a plain streak
+	// latched inside the base pair; the latch then names an unseated channel
+	// until the existing behaviour resumes.
 	boostLatched bool
 	boostTarget  int // eligible streamer held for continuity; it may later enter the fair base pair
 	boostVictim  int // displaced base member, or -1 while target itself belongs to the base pair

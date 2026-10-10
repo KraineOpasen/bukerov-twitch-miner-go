@@ -732,7 +732,17 @@ func TestRestrictedPairIgnoresRosterOrder(t *testing.T) {
 	}
 	separated := map[string]float64{"streamera": 5, "streamerb": 10, "streamerc": 70, "streamerd": 80, "streamere": 90}
 	equal := map[string]float64{"streamera": 5, "streamerb": 10, "streamerc": 80, "streamerd": 80, "streamere": 80}
+	chain := func(byLogin map[string]*models.Streamer) {
+		c, d, e, g := byLogin["streamerc"], byLogin["streamerd"], byLogin["streamere"], byLogin["streamerf"]
+		k1 := restrictedTestCampaign("camp-k1", c, d, e)
+		k2 := restrictedTestCampaign("camp-k2", d, e)
+		assignRestricted(c, k1)
+		assignRestricted(d, k1, k2)
+		assignRestricted(e, k1, k2, restrictedTestCampaign("camp-k3", e))
+		assignRestricted(g, restrictedTestCampaign("camp-k4", g))
+	}
 	cases := map[string]struct {
+		size   int
 		seed   map[string]float64
 		assign func(byLogin map[string]*models.Streamer)
 		want   []string
@@ -741,11 +751,19 @@ func TestRestrictedPairIgnoresRosterOrder(t *testing.T) {
 		"equal deficits":                      {seed: equal, assign: distinct, want: []string{"streamerc", "streamerd"}},
 		"shared campaign, separated deficits": {seed: separated, assign: sharedCD, want: []string{"streamerc", "streamere"}},
 		"shared campaign, equal deficits":     {seed: equal, assign: sharedCD, want: []string{"streamerc", "streamere"}},
+		"admission chain": {size: 6, assign: chain, want: []string{"streamere", "streamerf"},
+			seed: map[string]float64{"streamera": 5, "streamerb": 10, "streamerc": 60, "streamerd": 70, "streamere": 80, "streamerf": 90}},
+		"admission chain, other order at the second step": {size: 6, assign: chain, want: []string{"streamerd", "streamerf"},
+			seed: map[string]float64{"streamera": 5, "streamerb": 10, "streamerc": 60, "streamerd": 70, "streamere": 90, "streamerf": 80}},
 	}
 	for caseName, tc := range cases {
 		for orderName, permute := range orders {
 			t.Run(caseName+"/"+orderName, func(t *testing.T) {
-				f := newResidenceFixture(t, 5)
+				size := tc.size
+				if size == 0 {
+					size = 5
+				}
+				f := newResidenceFixture(t, size)
 				f.w.streamers = permute(f.w.streamers)
 				byLogin := streamersByLogin(f.w.streamers)
 				tc.assign(byLogin)
