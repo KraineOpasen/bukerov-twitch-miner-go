@@ -949,6 +949,38 @@ func TestRestrictedAdmissionOrdersEqualDeficitByRecency(t *testing.T) {
 	}
 }
 
+// R2, residence does not order the candidates, unit level: streamerd held the
+// base seat the single boost gave streamerc and is still resident in the
+// committed ordinary cohort; the more owed streamere, not resident, takes the
+// open seat, because residence orders only the victims (R4).
+func TestRestrictedAdmissionCandidateOrderIgnoresResidence(t *testing.T) {
+	f := newResidenceFixture(t, 5)
+	byLogin := streamersByLogin(f.w.streamers)
+	for _, login := range []string{"streamerc", "streamerd", "streamere"} {
+		makeDropCandidate(byLogin[login], true)
+	}
+	now := time.Now()
+	f.w.rotation.deficitMinutes = map[string]float64{
+		"streamera": 10, "streamerb": 20, "streamerc": 80, "streamerd": 70, "streamere": 60,
+	}
+	f.w.rotation.committedCohort = map[string]string{
+		"streamera": byLogin["streamera"].Stream.GetBroadcastID(),
+		"streamerd": byLogin["streamerd"].Stream.GetBroadcastID(),
+	}
+	f.w.rotation.cohortSince = now
+	a, c := restrictedIndex(t, f.w, "streamera"), restrictedIndex(t, f.w, "streamerc")
+	d, e := restrictedIndex(t, f.w, "streamerd"), restrictedIndex(t, f.w, "streamere")
+	if !f.w.residentOrdinaryIndex(d, now) || f.w.residentOrdinaryIndex(e, now) {
+		t.Fatalf("precondition: streamerd must be resident and streamere not")
+	}
+
+	got := f.w.admitRestrictedDrops([2]int{a, d}, [2]int{a, c}, []int{0, 1, 2, 3, 4}, now)
+
+	if want := [2]int{e, c}; got != want {
+		t.Fatalf("pair=%v, want %v: the more owed streamere takes streamera's seat although streamerd is resident", got, want)
+	}
+}
+
 // R2, in-progress streak first: among waiting channel-restricted drops, two
 // pursuing their watch streak are seated ahead of a more-owed one that is not.
 func TestRestrictedAdmissionPrefersInProgressStreak(t *testing.T) {
