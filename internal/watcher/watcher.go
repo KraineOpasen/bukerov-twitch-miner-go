@@ -370,7 +370,14 @@ type rotationState struct {
 	// current hard/semantic facts strictly outrank the fair pair; equality returns
 	// ownership to persisted-deficit fairness. The latch yields immediately to a
 	// strictly higher-priority candidate (see strictlyHigherBoost), so a
-	// channel-restricted drop can still preempt it.
+	// channel-restricted drop can still preempt it. The latch describes only
+	// that single overlay seat: the owner rule PA-B1 admission that lets further
+	// channel-restricted drops take the remaining seat (admitRestrictedDrops)
+	// neither reads nor writes it, even when it gives the latched channel's seat
+	// away — for example a latched target that is a duplicate occupant
+	// (PA-B1a), in the overlay seat or in its own base seat, or a plain streak
+	// latched inside the base pair; the latch then names an unseated channel
+	// until the existing behaviour resumes.
 	boostLatched bool
 	boostTarget  int // eligible streamer held for continuity; it may later enter the fair base pair
 	boostVictim  int // displaced base member, or -1 while target itself belongs to the base pair
@@ -447,8 +454,9 @@ func (w *MinuteWatcher) residentOrdinaryIndex(idx int, now time.Time) bool {
 //
 //   - An external (discovery) proposal, including a proven provisional one, is
 //     never an ordinary seat: it is not part of the configured fairness cohort.
-//   - A configured channel the DROPS/STREAK overlay seated OFF the base pair is a
-//     stronger admission — it is precisely the member the overlay swapped in.
+//   - A configured channel the DROPS/STREAK overlay, or the owner rule PA-B1
+//     channel-restricted drop admission, seated OFF the base pair is a stronger
+//     admission — it is precisely the member that admission swapped in.
 //   - A configured channel persisted fairness itself put in the base pair is
 //     ordinary even when it carries a drop and even when it is the boost target,
 //     because fairness, not the overlay, is why it holds the seat.
@@ -1602,7 +1610,12 @@ var watcherEligibility = eligibility.Evaluator{}
 // other online channel indefinitely, so instead we rotate the watched pair
 // across all online streamers over time (selectRotating), with DROPS/STREAK
 // only influencing how often a channel gets an extra turn - never granting
-// it a permanent exclusive slot.
+// it a permanent exclusive slot. The one exception is owner rules PA-B1 and
+// PA-B1a: while two or more qualifying channels hold channel-restricted Drops
+// (online with an active drop whose work is channel-restricted), which
+// progress only on the channels their campaigns list, they may occupy both
+// slots, provided the second brings restricted work the first does not
+// already carry.
 func (w *MinuteWatcher) selectStreamersToWatch(onlineIndexes []int, now time.Time) []int {
 	candidates := w.filterAvoided(onlineIndexes)
 	if len(candidates) <= constants.MaxSimultaneousStreams {
@@ -1681,6 +1694,14 @@ func (w *MinuteWatcher) isPreferred(idx int) bool {
 // persisted-deficit base pair; a strictly stronger hard/semantic contender may
 // still take a seat.
 //
+// When two or more qualifying candidates hold channel-restricted Drops, owner
+// rules PA-B1 and PA-B1a lift that single-seat limit for them only:
+// admitRestrictedDrops gives every seat not protected by a distinct
+// channel-restricted occupant to the strongest waiting one that brings
+// restricted work the other seat does not already carry, so distinct
+// channel-restricted drops may hold both seats while ordinary rotation and
+// streak pursuit wait.
+//
 // A fairness replacement that would interrupt an in-progress streak may use
 // one explicit deferUntil deadline for the current approach. Re-evaluation
 // cannot extend that deadline, and offline or no-longer-protected members leave
@@ -1689,6 +1710,7 @@ func (w *MinuteWatcher) selectRotating(onlineIndexes []int, now time.Time) []int
 	w.reconcileLeastWatchedPair(onlineIndexes, now)
 
 	pair := w.applyPriorityBoost(w.rotation.activePair, onlineIndexes, now)
+	pair = w.admitRestrictedDrops(w.rotation.activePair, pair, onlineIndexes, now)
 
 	for _, idx := range pair {
 		w.noteSelectionIfEmpty(idx, "watched: holds a fair slot based on persisted accumulated watch time at this broker evaluation")
@@ -1707,9 +1729,10 @@ func (w *MinuteWatcher) selectRotating(onlineIndexes []int, now time.Time) []int
 //
 // It protects the service that exists rather than the pair that was proposed.
 // Phase A's pair is only a proposal: applyPriorityBoost and the cross-source
-// broker both run after it and can take one of its two seats, so a guard on the
-// pair would be measuring the tenure of something that is not, at that moment,
-// what the miner is watching.
+// broker both run after it and can take one of its two seats, and with the
+// owner rule PA-B1 admission (admitRestrictedDrops) channel-restricted drops can
+// take both, so a guard on the pair would be measuring the tenure of something
+// that is not, at that moment, what the miner is watching.
 //
 // It is a MINIMUM RESIDENCE, not a switching cadence: nothing schedules or
 // forces a switch when it elapses. Reaching it only re-opens ordinary
@@ -2005,7 +2028,10 @@ func (w *MinuteWatcher) pinResidentOrdinary(ranked []int, now time.Time) [2]int 
 
 // applyPriorityBoost lets one DROPS/STREAK-eligible online streamer take over a
 // base-pair seat for the current tick, without affecting the base ranking
-// computed by reconcileLeastWatchedPair.
+// computed by reconcileLeastWatchedPair. Beyond the one seat this boost may
+// take — which can already seat a strictly stronger channel-restricted drop
+// beside a fairly seated one — further channel-restricted drops are seated by
+// admitRestrictedDrops, which runs afterwards (owner rules PA-B1 and PA-B1a).
 //
 // Continuity latch: a pursuit-eligible watch streak is held across ticks rather
 // than re-picked every tick. This includes the zero-minute bootstrap needed to
@@ -2025,7 +2051,8 @@ func (w *MinuteWatcher) pinResidentOrdinary(ranked []int, now time.Time) [2]int 
 // than a scheduler timer. A pursuing streak self-limits through its bounded
 // state. An ordinary drop has no continuity exception: it may hold a seat only
 // while its current hard/semantic facts win, and a full tie returns to persisted
-// fairness. That does not starve the other online streamers:
+// fairness. Apart from owner rule PA-B1 (see the third point and the end of
+// this comment), that does not starve the other online streamers:
 //   - the OTHER slot is reconciled from persisted deficit whenever the base
 //     pair is reconcilable, so the most-owed non-boosted channel keeps
 //     surfacing;
@@ -2037,6 +2064,9 @@ func (w *MinuteWatcher) pinResidentOrdinary(ranked []int, now time.Time) [2]int 
 //     persisted deficit — so it is the seat whose service is not protected and,
 //     between two the residence cannot separate, the LESS-owed one. Its identity
 //     moves as the base pair and the cohort recompute, so no channel is locked out.
+//     The exception is owner rule PA-B1: when a second channel-restricted drop
+//     with distinct restricted work qualifies (PA-B1a), admitRestrictedDrops
+//     can give it the other base seat too.
 //
 // fairRotationResidence bounds how fast that last point can act, and is also
 // what keeps it from thrashing. The victim is chosen below the hard/semantic
@@ -2050,7 +2080,10 @@ func (w *MinuteWatcher) pinResidentOrdinary(ranked []int, now time.Time) [2]int 
 // cap.
 //
 // The bounded cost is throughput while a real streak pursuit holds one seat:
-// the remaining channels temporarily share the other rotating slot.
+// the remaining channels temporarily share the other rotating slot. Under owner
+// rules PA-B1 and PA-B1a, two channel-restricted drops with distinct restricted
+// work may hold both seats instead, and the remaining channels then wait while
+// channel-restricted drops hold them.
 func (w *MinuteWatcher) applyPriorityBoost(pair [2]int, onlineIndexes []int, now time.Time) [2]int {
 	best := w.selectBoostTarget(pair, onlineIndexes)
 
@@ -2114,6 +2147,308 @@ func (w *MinuteWatcher) applyPriorityBoost(pair [2]int, onlineIndexes []int, now
 		pair[1] = best
 	}
 	return pair
+}
+
+// admitRestrictedDrops applies owner rules PA-B1 and PA-B1a on top of the
+// single DROPS/STREAK boost: configured channels holding channel-restricted
+// Drops may occupy BOTH watch slots, because such a campaign progresses only on
+// the channels it lists, but the second seat goes to such a channel only when
+// it brings restricted work that the restricted channel in the other seat does
+// not already carry at the step it is admitted: a channel whose restricted
+// campaigns the other seat then carries never takes that seat, although a
+// later step of the same evaluation can seat beside it a channel that carries
+// all of its work.
+//
+// A qualifying channel is a candidate with an active drop (DropsCondition)
+// whose assigned unfinished work is channel-restricted
+// (HasChannelRestrictedCampaign). A channel retained through an UNKNOWN blip
+// never qualifies, because DropsCondition requires a confirmed-online status.
+// With fewer than two qualifying channels the pair is returned untouched, so
+// the single boost seat, its latch and its victim stay exactly as
+// applyPriorityBoost left them.
+//
+// Otherwise every seat that selectRestrictedAdmissionSeat does not protect goes
+// to the strongest waiting qualifying channel, in betterBoostCandidate order,
+// whose restricted work (restrictedWork) is not a subset of the work of the
+// restricted channel holding — or, within this evaluation, taking — the other
+// seat. When no waiting channel brings new restricted work, nothing is
+// admitted and the existing selection stands. Residence orders the victims and
+// never delays the admission. Each step is judged against the channel then
+// holding the other seat, so when an admitted channel carries all the work of
+// the restricted channel beside it, that channel becomes a duplicate occupant
+// and the next step may replace it too: one evaluation can replace both seats,
+// and every displaced channel's restricted campaigns stay carried by a seat.
+// Selection reasons are written once the pair is final: an admitted channel
+// names the channel whose seat it took, a displaced one names its admitter and,
+// when it was a duplicate, the seated channel that carries its campaigns, and
+// a qualifying channel left waiting is told which seated channel carries all
+// of its restricted campaigns (owner rule PA-B1a) or else that both seats hold
+// channel-restricted drops. These replace any note written earlier this tick,
+// such as the one that the avoid preference was ignored, except that a base
+// member whose seat the single boost target still holds keeps the boost's
+// reason unless one seated channel carries all of its restricted campaigns.
+// Only a carrier confirmed online is reported as farming; one retained while
+// UNKNOWN is reported as unconfirmed and one confirmed offline as offline, and
+// the both-seats reason marks such a seat the same way.
+// When the single boost had taken a seat from a member of base, the fair pair
+// it started from, and this admission gives that seat to another channel, that
+// member is told which channel now holds it, or gets its waiting reason when
+// it qualifies.
+//
+// The boost latch is neither read nor written. It keeps describing the single
+// overlay seat even when this admission gives the latched channel's seat away
+// — a latched target that is a duplicate occupant is displaced like any other,
+// and so is a plain streak latched inside the base pair — so the latch can name
+// a channel that is not seated until the existing behaviour resumes. A channel
+// seated here off the base pair is a stronger seat for the committed-cohort
+// partition, since ordinarySeat counts only activePair members as ordinary.
+func (w *MinuteWatcher) admitRestrictedDrops(base, pair [2]int, onlineIndexes []int, now time.Time) [2]int {
+	qualifying := 0
+	var waiting []int
+	for _, idx := range onlineIndexes {
+		s := w.streamers[idx]
+		if !s.DropsCondition() || !s.HasChannelRestrictedCampaign() {
+			continue
+		}
+		qualifying++
+		if idx != pair[0] && idx != pair[1] {
+			waiting = append(waiting, idx)
+		}
+	}
+	if qualifying < 2 {
+		return pair
+	}
+
+	work := make(map[int]map[string]bool)
+	workOf := func(idx int) map[string]bool {
+		rw, ok := work[idx]
+		if !ok {
+			rw = restrictedWork(w.streamers[idx])
+			work[idx] = rw
+		}
+		return rw
+	}
+
+	original := pair
+	admitted := make(map[int]bool)
+	for len(waiting) > 0 {
+		seat := w.selectRestrictedAdmissionSeat(pair, workOf, now)
+		if seat == -1 {
+			break
+		}
+		held, otherRestricted := w.heldRestrictedWork(pair[1-seat], workOf)
+		bestAt := -1
+		for i, idx := range waiting {
+			if otherRestricted && restrictedWorkSubset(workOf(idx), held) {
+				continue
+			}
+			if bestAt == -1 || w.betterBoostCandidate(idx, waiting[bestAt]) {
+				bestAt = i
+			}
+		}
+		if bestAt == -1 {
+			break
+		}
+		best := waiting[bestAt]
+		waiting = append(waiting[:bestAt], waiting[bestAt+1:]...)
+		admitted[best] = true
+		pair[seat] = best
+	}
+
+	// A channel admitted and replaced again within this evaluation waits like
+	// any other qualifying channel.
+	for idx := range admitted {
+		if idx != pair[0] && idx != pair[1] {
+			waiting = append(waiting, idx)
+		}
+	}
+	// keptBoostVictim is the base member whose seat the single boost target
+	// still holds; its boost reason stays unless one seated channel carries all
+	// of its restricted campaigns.
+	keptBoostVictim := -1
+	for seat := range pair {
+		in, out := pair[seat], original[seat]
+		victim := base[seat]
+		boosted := victim >= 0 && victim != out
+		if in == out {
+			if boosted {
+				keptBoostVictim = victim
+			}
+			continue
+		}
+		w.noteSelection(in, "watched: admitted beside another channel-restricted drop, displacing "+
+			w.streamers[out].GetUsername()+" - its campaign only progresses on the channels it lists")
+		// The single boost took this seat from victim, so its boost reason no
+		// longer names who holds the seat; a victim that qualifies gets its
+		// waiting reason below instead.
+		if boosted && victim != pair[0] && victim != pair[1] && !containsIndex(waiting, victim) {
+			w.noteSelection(victim, "not watched this tick: displaced by a DROPS/STREAK boost whose seat then went to channel-restricted drop "+
+				w.streamers[in].GetUsername()+
+				" (keeps its rotation slot; channel-restricted drops may hold both slots and it competes again when one stops qualifying)")
+		}
+		if carrier := w.restrictedCarrier(pair, out, workOf); carrier >= 0 {
+			w.noteSelection(out, "not watched this tick: displaced by channel-restricted drop "+
+				w.streamers[in].GetUsername()+"; "+w.restrictedCarrierClause(carrier, "its channel-restricted campaigns"))
+			continue
+		}
+		w.noteSelection(out, "not watched this tick: displaced by channel-restricted drop "+
+			w.streamers[in].GetUsername()+
+			" (channel-restricted drops may hold both slots; it competes again when one stops qualifying)")
+	}
+	for _, idx := range waiting {
+		reason, carried := w.restrictedWaitingReason(pair, idx, workOf)
+		if idx == keptBoostVictim && !carried {
+			w.noteSelectionIfEmpty(idx, reason)
+			continue
+		}
+		w.noteSelection(idx, reason)
+	}
+	return pair
+}
+
+// selectRestrictedAdmissionSeat returns the index of the seat
+// admitRestrictedDrops gives up, or -1 when both seats are protected. A seat
+// holding a restricted occupant is protected unless that occupant is a
+// duplicate under owner rule PA-B1a: its restricted work is a subset of the
+// work of the restricted channel in the other seat, so that seat still holds
+// every campaign it gives up. The other seat counts whatever its status, so a
+// channel retained while UNKNOWN, or one confirmed offline after the online
+// list was read, can be the seat kept for this evaluation. Among the
+// unprotected seats the weakest in betterBoostVictim order is given up; of two
+// duplicates with equal work that order picks exactly one.
+func (w *MinuteWatcher) selectRestrictedAdmissionSeat(pair [2]int, workOf func(int) map[string]bool, now time.Time) int {
+	seat := -1
+	for i, slot := range pair {
+		if w.streamers[slot].HasChannelRestrictedCampaign() {
+			// An empty RW beside a restricted flag means the assignment changed
+			// between the two reads; such an occupant is not judged a duplicate.
+			rw := workOf(slot)
+			held, otherRestricted := w.heldRestrictedWork(pair[1-i], workOf)
+			if len(rw) == 0 || !otherRestricted || !restrictedWorkSubset(rw, held) {
+				continue
+			}
+		}
+		if seat == -1 || w.betterBoostVictim(slot, pair[seat], now) {
+			seat = i
+		}
+	}
+	return seat
+}
+
+// heldRestrictedWork returns the restricted work of the channel holding a seat
+// and whether that channel is a restricted occupant at all.
+func (w *MinuteWatcher) heldRestrictedWork(idx int, workOf func(int) map[string]bool) (map[string]bool, bool) {
+	if !w.streamers[idx].HasChannelRestrictedCampaign() {
+		return nil, false
+	}
+	return workOf(idx), true
+}
+
+// restrictedWaitingReason explains why a qualifying channel is still waiting
+// once admitRestrictedDrops is done, and reports whether a seated channel
+// carries its work: a seated restricted channel already farms all of its
+// restricted campaigns (owner rule PA-B1a), or both seats hold
+// channel-restricted drops that this admission does not displace. Neither
+// holds only when an assignment — this channel's or a seated channel's —
+// changed between this evaluation's reads, and the reason says so instead of
+// blaming the seats.
+func (w *MinuteWatcher) restrictedWaitingReason(pair [2]int, idx int, workOf func(int) map[string]bool) (string, bool) {
+	if carrier := w.restrictedCarrier(pair, idx, workOf); carrier >= 0 {
+		return "waiting: " + w.restrictedCarrierClause(carrier, "the same channel-restricted drop campaign"), true
+	}
+	_, firstRestricted := w.heldRestrictedWork(pair[0], workOf)
+	_, secondRestricted := w.heldRestrictedWork(pair[1], workOf)
+	if len(workOf(idx)) == 0 || !firstRestricted || !secondRestricted {
+		return "waiting: a channel-restricted assignment changed while this evaluation read it; it competes again at the next evaluation", false
+	}
+	return "waiting: both watch slots are held by channel-restricted drops (" +
+		w.restrictedSeatLabel(pair[0]) + ", " + w.restrictedSeatLabel(pair[1]) +
+		"); a seated channel-restricted drop is not displaced by another", false
+}
+
+// restrictedSeatLabel names a seated channel in the both-seats waiting reason,
+// marking one that is not confirmed online so its seat never reads as a
+// channel farming its drop.
+func (w *MinuteWatcher) restrictedSeatLabel(idx int) string {
+	s := w.streamers[idx]
+	switch s.GetStatus() {
+	case models.StatusOnline:
+		return s.GetUsername()
+	case models.StatusOffline:
+		return s.GetUsername() + " now confirmed offline"
+	default:
+		return s.GetUsername() + " status unconfirmed"
+	}
+}
+
+// restrictedCarrier returns the seated channel whose restricted work carries
+// all of idx's restricted work, or -1 when neither seat does or idx has no
+// restricted work to carry (an ordinary seat). When both seats carry it, the
+// one confirmed online is named, since that is the seat actually farming it.
+func (w *MinuteWatcher) restrictedCarrier(pair [2]int, idx int, workOf func(int) map[string]bool) int {
+	rw := workOf(idx)
+	if len(rw) == 0 || !w.streamers[idx].HasChannelRestrictedCampaign() {
+		return -1
+	}
+	carrier := -1
+	for _, slot := range pair {
+		if held, restricted := w.heldRestrictedWork(slot, workOf); restricted && restrictedWorkSubset(rw, held) {
+			if w.streamers[slot].GetIsOnline() {
+				return slot
+			}
+			if carrier == -1 {
+				carrier = slot
+			}
+		}
+	}
+	return carrier
+}
+
+// restrictedCarrierClause names the seated carrier of some restricted work for
+// a selection reason. Only a carrier confirmed online is reported as farming:
+// one retained through an UNKNOWN blip is reported as unconfirmed, and one
+// confirmed offline after the online list was read is reported as offline, so
+// neither UNKNOWN nor offline reads as success or as the other.
+func (w *MinuteWatcher) restrictedCarrierClause(carrier int, work string) string {
+	s := w.streamers[carrier]
+	login := s.GetUsername()
+	switch s.GetStatus() {
+	case models.StatusOnline:
+		return login + " already farms " + work + " (owner rule PA-B1a)"
+	case models.StatusOffline:
+		return login + ", now confirmed offline, still holds a slot with " + work + " at this evaluation (owner rule PA-B1a)"
+	default:
+		return login + ", whose status is unconfirmed, holds a slot with " + work + " (owner rule PA-B1a)"
+	}
+}
+
+// restrictedWork returns the restricted work RW of owner rule PA-B1a: the IDs
+// of the campaigns assigned to s that are channel-restricted and still have
+// remaining unclaimed work. It reads the same campaign basis as
+// HasChannelRestrictedCampaign and, like it, applies no farming exclusions.
+func restrictedWork(s *models.Streamer) map[string]bool {
+	var ids map[string]bool
+	for _, c := range s.Stream.GetCampaigns() {
+		if c == nil || !c.HasRemainingUnclaimedWork() || !c.IsChannelRestricted() {
+			continue
+		}
+		if ids == nil {
+			ids = make(map[string]bool)
+		}
+		ids[c.ID] = true
+	}
+	return ids
+}
+
+// restrictedWorkSubset reports whether every campaign in rw is also in held,
+// i.e. whether rw brings no restricted work that held does not already carry.
+func restrictedWorkSubset(rw, held map[string]bool) bool {
+	for id := range rw {
+		if !held[id] {
+			return false
+		}
+	}
+	return true
 }
 
 // selectBoostTarget returns the highest-priority off-pair boost-eligible
@@ -2549,8 +2884,10 @@ func (w *MinuteWatcher) streakNeedsContinuity(idx int) bool {
 	return admitted && decision.PursuitEligible
 }
 
-// betterBoostCandidate reports whether cand should take the single prioritized
-// seat over best. Hard/continuity and semantic facts are compared first;
+// betterBoostCandidate reports whether cand should take the prioritized boost
+// seat over best, and orders the waiting channel-restricted drops that
+// admitRestrictedDrops seats under owner rule PA-B1. Hard/continuity and
+// semantic facts are compared first;
 // persisted deficit decides only inside equal bounded semantic utility, followed by
 // recency and login for a deterministic total order.
 func (w *MinuteWatcher) betterBoostCandidate(cand, best int) bool {
