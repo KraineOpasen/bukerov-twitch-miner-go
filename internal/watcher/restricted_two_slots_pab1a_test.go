@@ -2132,7 +2132,8 @@ func unseatedTail(s *models.Streamer, onlineTail string) string {
 // single boost had — and keeps the retention reason while it stays seated.
 // When this tick's refresh confirms its status first, the retention note is
 // dropped: a channel confirmed offline publishes no reason, and one confirmed
-// online is not described as unconfirmed.
+// online is not described as unconfirmed, whether it is seated again or left
+// waiting.
 func TestRestrictedRetainedUnknownLeftOutIsNotToldRetained(t *testing.T) {
 	const notRetained = "status unconfirmed - not watched this tick: the configured selection left it out, so its slot is no longer retained"
 	boostSeat := func(byLogin map[string]*models.Streamer) {
@@ -2145,6 +2146,7 @@ func TestRestrictedRetainedUnknownLeftOutIsNotToldRetained(t *testing.T) {
 		tick1   []string
 		unknown string
 		confirm string
+		before2 func(byLogin map[string]*models.Streamer)
 		want    string
 	}{
 		{
@@ -2184,6 +2186,21 @@ func TestRestrictedRetainedUnknownLeftOutIsNotToldRetained(t *testing.T) {
 			tick1:   []string{"streamera", "streamerc"},
 			unknown: "streamerc", confirm: "online", want: "watched",
 		},
+		{
+			name: "refresh confirms it online and a restricted drop takes its seat",
+			setup: func(byLogin map[string]*models.Streamer) {
+				makeDropCandidate(byLogin["streamerc"], false)
+			},
+			seeds: map[string]float64{"streamera": 10, "streamerb": 20, "streamerc": 80, "streamerd": 90},
+			tick1: []string{"streamera", "streamerc"},
+			before2: func(byLogin map[string]*models.Streamer) {
+				makeDropCandidate(byLogin["streamerd"], true)
+			},
+			// Confirmed online, it gets the ordinary waiting reason, not one
+			// that calls its status unconfirmed.
+			unknown: "streamerc", confirm: "online",
+			want: "waiting: persisted accumulated watch time did not earn a fair slot at this broker evaluation",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -2203,6 +2220,9 @@ func TestRestrictedRetainedUnknownLeftOutIsNotToldRetained(t *testing.T) {
 			}
 			byLogin[tc.unknown].SetUnknown(models.ReasonTransportError)
 			checker.armed = tc.confirm != ""
+			if tc.before2 != nil {
+				tc.before2(byLogin)
+			}
 			f.w.processWatching(tickCtx(f.w))
 
 			seated := containsLogin(restrictedSlotLogins(t, f), tc.unknown)
