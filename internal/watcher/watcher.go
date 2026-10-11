@@ -1238,6 +1238,15 @@ func (w *MinuteWatcher) processWatching(ctx context.Context) {
 	if len(onlineStreamers) > 0 {
 		configuredWatch = w.selectStreamersToWatch(onlineStreamers, now)
 	}
+	// A channel kept as a candidate only while its status is UNKNOWN was told
+	// its slot is retained. Phase B never seats a configured channel Phase A
+	// left out, so when Phase A leaves it out — the single boost or the PA-B1
+	// admission gave its seat away — say so instead.
+	for _, idx := range onlineStreamers {
+		if w.selectionReasons[idx] == retainedUnknownReason && !containsIndex(configuredWatch, idx) {
+			w.noteSelection(idx, "status unconfirmed - not watched this tick: the selection seated other channels, so its slot is no longer retained")
+		}
+	}
 	extra := w.gatherCandidates(ctx, sources, avoid)
 	if ctx.Err() != nil {
 		// The generation ended during candidate preparation. Continuing would
@@ -1509,6 +1518,10 @@ func (w *MinuteWatcher) gatherCandidates(ctx context.Context, sources []Candidat
 // minute-watched send or the stale re-check resolves most cases well within it.
 const unknownSlotRetentionGrace = 2 * time.Minute
 
+// retainedUnknownReason is the selection reason of a channel kept as a watch
+// candidate only while its status is UNKNOWN (retainsSlotWhileUnknown).
+const retainedUnknownReason = "status unconfirmed - retaining the current watch slot and continuity during a transient check failure"
+
 func (w *MinuteWatcher) getOnlineStreamers(avoid AvoidChecker) []int {
 	var online []int
 	// One coherent farming-exclusion decision per admission pass (the stored
@@ -1539,7 +1552,7 @@ func (w *MinuteWatcher) getOnlineStreamers(avoid AvoidChecker) []int {
 			continue
 		}
 		if retained {
-			w.noteSelection(i, "status unconfirmed - retaining the current watch slot and continuity during a transient check failure")
+			w.noteSelection(i, retainedUnknownReason)
 			online = append(online, i)
 			continue
 		}
@@ -2182,23 +2195,23 @@ func (w *MinuteWatcher) applyPriorityBoost(pair [2]int, onlineIndexes []int, now
 // holding the other seat, so when an admitted channel carries all the work of
 // the restricted channel beside it, that channel becomes a duplicate occupant
 // and the next step may replace it too: one evaluation can replace both seats,
-// and every displaced channel's restricted campaigns stay carried by a seat.
+// and every displaced channel's restricted work stays carried by a seat.
 // Selection reasons are written once the pair is final: an admitted channel
 // names the channel whose seat it took, a displaced one names its admitter and,
 // when it was a duplicate, the seated channel that carries its campaigns, and
 // a qualifying channel left waiting is told which seated channel carries all
-// of its restricted campaigns (owner rule PA-B1a) or else that both seats hold
+// of its restricted work (owner rule PA-B1a) or else that both seats hold
 // channel-restricted drops. These replace any note written earlier this tick,
 // such as the one that the avoid preference was ignored, except that a base
 // member whose seat the single boost target still holds keeps the boost's
-// reason unless one seated channel carries all of its restricted campaigns.
+// reason unless one seated channel carries all of its restricted work.
 // Only a carrier confirmed online is reported as farming; one retained while
 // UNKNOWN is reported as unconfirmed and one confirmed offline as offline, and
 // the both-seats reason marks such a seat the same way.
 // When the single boost had taken a seat from a member of base, the fair pair
 // it started from, and this admission gives that seat to another channel, that
 // member is told which channel now holds it, or gets its waiting reason when
-// it qualifies.
+// it qualifies and stays unseated.
 //
 // The boost latch is neither read nor written. It keeps describing the single
 // overlay seat even when this admission gives the latched channel's seat away
@@ -2271,7 +2284,7 @@ func (w *MinuteWatcher) admitRestrictedDrops(base, pair [2]int, onlineIndexes []
 	}
 	// keptBoostVictim is the base member whose seat the single boost target
 	// still holds; its boost reason stays unless one seated channel carries all
-	// of its restricted campaigns.
+	// of its restricted work.
 	keptBoostVictim := -1
 	for seat := range pair {
 		in, out := pair[seat], original[seat]
@@ -2299,19 +2312,20 @@ func (w *MinuteWatcher) admitRestrictedDrops(base, pair [2]int, onlineIndexes []
 		}
 		w.noteSelection(in, admission+w.streamers[out].GetUsername()+" - its campaign only progresses on the channels it lists")
 		// The single boost took this seat from victim, so its boost reason no
-		// longer names who holds the seat; a victim that qualifies gets its
-		// waiting reason below instead.
+		// longer names who holds the seat; a victim that qualifies and stays
+		// unseated gets its waiting reason below instead.
 		if boosted && victim != pair[0] && victim != pair[1] && !containsIndex(waiting, victim) {
 			w.noteSelection(victim, "not watched this tick: displaced by a DROPS/STREAK boost whose seat then went to channel-restricted drop "+
-				w.streamers[in].GetUsername()+victimNote)
+				w.streamers[in].GetUsername()+w.unseatedNote(victim, victimNote))
 		}
 		if carrier := w.restrictedCarrier(pair, out, workOf); carrier >= 0 {
 			w.noteSelection(out, "not watched this tick: displaced by channel-restricted drop "+
-				w.streamers[in].GetUsername()+"; "+w.restrictedCarrierClause(carrier, "its channel-restricted campaigns"))
+				w.streamers[in].GetUsername()+"; "+w.restrictedCarrierClause(carrier, "its channel-restricted campaigns")+
+				w.skipRuledNote(out, workOf))
 			continue
 		}
 		w.noteSelection(out, "not watched this tick: displaced by channel-restricted drop "+
-			w.streamers[in].GetUsername()+displacedNote)
+			w.streamers[in].GetUsername()+w.unseatedNote(out, displacedNote))
 	}
 	for _, idx := range waiting {
 		reason, carried := w.restrictedWaitingReason(pair, idx, workOf)
@@ -2363,7 +2377,7 @@ func (w *MinuteWatcher) heldRestrictedWork(idx int, workOf func(int) map[string]
 // restrictedWaitingReason explains why a qualifying channel is still waiting
 // once admitRestrictedDrops is done, and reports whether a seated channel
 // carries its work: a seated restricted channel already farms all of its
-// restricted campaigns (owner rule PA-B1a), or both seats hold
+// restricted work (owner rule PA-B1a), or both seats hold
 // channel-restricted drops that this admission does not displace. Since each
 // channel's restricted work is read once per evaluation, an admission never
 // leaves a qualifying channel waiting otherwise; a caller whose work snapshot
@@ -2371,7 +2385,7 @@ func (w *MinuteWatcher) heldRestrictedWork(idx int, workOf func(int) map[string]
 // instead of one blaming the seats.
 func (w *MinuteWatcher) restrictedWaitingReason(pair [2]int, idx int, workOf func(int) map[string]bool) (string, bool) {
 	if carrier := w.restrictedCarrier(pair, idx, workOf); carrier >= 0 {
-		return "waiting: " + w.restrictedCarrierClause(carrier, "the same channel-restricted drop campaign"), true
+		return "waiting: " + w.restrictedCarrierClause(carrier, "the same channel-restricted drop campaign") + w.skipRuledNote(idx, workOf), true
 	}
 	_, firstRestricted := w.heldRestrictedWork(pair[0], workOf)
 	_, secondRestricted := w.heldRestrictedWork(pair[1], workOf)
@@ -2396,6 +2410,32 @@ func (w *MinuteWatcher) restrictedSeatLabel(idx int) string {
 	default:
 		return s.GetUsername() + " status unconfirmed"
 	}
+}
+
+// unseatedNote is the tail of the reason of a channel that lost its seat to the
+// admission: note, which says when it competes again, for a channel confirmed
+// online. A channel kept only while its status is UNKNOWN loses that retention
+// with its seat and competes again once confirmed online, and one confirmed
+// offline competes again once it is back online.
+func (w *MinuteWatcher) unseatedNote(idx int, note string) string {
+	switch w.streamers[idx].GetStatus() {
+	case models.StatusOnline:
+		return note
+	case models.StatusOffline:
+		return " (now confirmed offline; it competes again once it is back online)"
+	default:
+		return " (status unconfirmed; it competes again once it is confirmed online)"
+	}
+}
+
+// skipRuledNote tells a channel whose seated carrier farms all of its
+// restricted work that its channel-restricted campaigns an operator Skip rule
+// excludes are not farmed, when it has any.
+func (w *MinuteWatcher) skipRuledNote(idx int, workOf func(int) map[string]bool) string {
+	if len(restrictedWork(w.streamers[idx], nil)) > len(workOf(idx)) {
+		return "; its channel-restricted campaigns that an operator Skip rule excludes are not farmed"
+	}
+	return ""
 }
 
 // restrictedCarrier returns the seated channel whose restricted work carries

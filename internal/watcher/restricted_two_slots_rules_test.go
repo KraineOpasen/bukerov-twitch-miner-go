@@ -18,7 +18,8 @@ import (
 // channels on the loop fakes with a real SQLite watch-time store — where
 // streamera and streamerb are the least-watched ordinary channels unless a case
 // says otherwise. Unit-level cases drive admitRestrictedDrops directly: one
-// for two open ordinary seats, which the pipeline does not produce today, one
+// for two open ordinary seats, which the pipeline reaches only beside a
+// skip-ruled fair seat (the restricted_two_slots_skip_test.go cases), one
 // for recency at equal deficit, which the pipeline reaches only when persisted
 // deficits tie (always without a watch-time store), and one for a resident
 // waiting channel, which residence must not prefer.
@@ -617,9 +618,10 @@ func TestRestrictedSingleQualifyingChannelBesideRetainedStreakIsUnchanged(t *tes
 	}
 }
 
-// R4, unit level: the pipeline always lets the single boost seat one
-// channel-restricted channel first, so two open ordinary seats never reach the
-// admission today. Driven directly, the admission gives the strongest waiting channel the
+// R4, unit level: the pipeline lets the single boost seat one
+// channel-restricted channel first unless a skip-ruled channel holds a fair
+// seat, so two open ordinary seats rarely reach the admission. Driven
+// directly, the admission gives the strongest waiting channel the
 // weakest seat in betterBoostVictim order and the next one the other seat.
 // streamera is the less-owed seat (30 against 20 minutes), so persisted deficit
 // alone gives it up first; when streamera is resident in the committed ordinary

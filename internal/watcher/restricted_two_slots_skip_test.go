@@ -260,10 +260,46 @@ func TestRestrictedSkipRuleExcludesOnlyThatCampaign(t *testing.T) {
 			if !sameLoginSet(got, "streamera", "streamerc") && !sameLoginSet(got, "streamerb", "streamerc") {
 				t.Fatalf("slots=%v, want streamerc beside a fair-pair channel and streamerd waiting", got)
 			}
-			if reason := decisionReason(f.w, "streamerd"); !strings.Contains(reason, "streamerc already farms the same channel-restricted drop campaign") {
+			reason := decisionReason(f.w, "streamerd")
+			if !strings.Contains(reason, "streamerc already farms the same channel-restricted drop campaign") {
 				t.Fatalf("streamerd reason=%q, want its carrier streamerc", reason)
 			}
+			if !strings.Contains(reason, skipRuledNotFarmed) {
+				t.Fatalf("streamerd reason=%q, want it told its skip-ruled campaign is not farmed", reason)
+			}
 		})
+	}
+}
+
+// skipRuledNotFarmed is the note a carried channel gets when it also holds
+// channel-restricted campaigns that an operator Skip rule excludes.
+const skipRuledNotFarmed = "its channel-restricted campaigns that an operator Skip rule excludes are not farmed"
+
+// R9 with FB-OD-10: a duplicate occupant that also holds a skip-ruled
+// campaign is displaced and told that its carrier farms its channel-restricted
+// campaigns, and that the skip-ruled one is not farmed.
+func TestRestrictedSkipRuledCampaignOfDisplacedDuplicateNotFarmed(t *testing.T) {
+	f := newResidenceFixture(t, 5)
+	byLogin := streamersByLogin(f.w.streamers)
+	c, d, e := byLogin["streamerc"], byLogin["streamerd"], byLogin["streamere"]
+	k1 := restrictedTestCampaign("camp-k1", c, d)
+	assignRestricted(c, k1, restrictedTestCampaign("camp-k2", c))
+	assignRestricted(d, k1, skipRuledRestrictedCampaign("camp-skip-streamerd", d))
+	assignRestricted(e, restrictedTestCampaign("camp-k3", e))
+	f.w.SetRewardSkips(skipRuledRewards())
+	f.seedWeights(t, time.Now(), map[string]float64{
+		"streamera": 5, "streamerb": 80, "streamerc": 60, "streamerd": 10, "streamere": 70,
+	})
+
+	f.w.processWatching(tickCtx(f.w))
+
+	if got := restrictedSlotLogins(t, f); !sameLoginSet(got, "streamerc", "streamere") {
+		t.Fatalf("slots=%v, want [streamerc streamere]", got)
+	}
+	reason := decisionReason(f.w, "streamerd")
+	if !strings.Contains(reason, "displaced by channel-restricted drop streamere; streamerc already farms its channel-restricted campaigns") ||
+		!strings.Contains(reason, skipRuledNotFarmed) {
+		t.Fatalf("streamerd reason=%q, want its carrier and the skip-ruled note", reason)
 	}
 }
 

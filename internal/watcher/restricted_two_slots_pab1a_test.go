@@ -1995,11 +1995,13 @@ func TestRestrictedAdmissionInvariantsHoldForRandomAssignments(t *testing.T) {
 				continue
 			}
 			// Both seats hold channel-restricted drops only when the partner
-			// seat has restricted work.
+			// seat has restricted work; a channel not confirmed online is told
+			// when it competes again instead.
 			want := prefix + " (channel-restricted drops may hold both slots"
 			if !restricted(got[1-i]) {
 				want = prefix + " (it competes again at the next evaluation)"
 			}
+			want = prefix + unseatedTail(w.streamers[out], strings.TrimPrefix(want, prefix))
 			if !strings.Contains(reason, want) {
 				t.Fatalf("iteration %d: displaced ordinary seat %d reason=%q, want %q", iteration, out, reason, want)
 			}
@@ -2069,10 +2071,12 @@ func TestRestrictedAdmissionInvariantsHoldForRandomAssignments(t *testing.T) {
 			}
 			switch {
 			case !qualifying[victim] && gaveAway:
-				want := "went to channel-restricted drop " + w.streamers[got[i]].GetUsername() + " (keeps its rotation slot; channel-restricted drops may hold both slots"
+				head := "went to channel-restricted drop " + w.streamers[got[i]].GetUsername()
+				want := head + " (keeps its rotation slot; channel-restricted drops may hold both slots"
 				if !restricted(got[1-i]) {
-					want = "went to channel-restricted drop " + w.streamers[got[i]].GetUsername() + " (keeps its rotation slot and competes again at the next evaluation)"
+					want = head + " (keeps its rotation slot and competes again at the next evaluation)"
 				}
+				want = head + unseatedTail(w.streamers[victim], strings.TrimPrefix(want, head))
 				if !strings.Contains(reason, want) {
 					t.Fatalf("iteration %d: boost victim %d reason=%q, want it told %d holds its seat: %q", iteration, victim, reason, got[i], want)
 				}
@@ -2090,5 +2094,153 @@ func TestRestrictedAdmissionInvariantsHoldForRandomAssignments(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+// unseatedTail is the expected tail of the reason of a channel that lost its
+// seat to the admission: onlineTail for a channel confirmed online, otherwise
+// the status-dependent note.
+func unseatedTail(s *models.Streamer, onlineTail string) string {
+	switch s.GetStatus() {
+	case models.StatusOnline:
+		return onlineTail
+	case models.StatusOffline:
+		return " (now confirmed offline; it competes again once it is back online)"
+	default:
+		return " (status unconfirmed; it competes again once it is confirmed online)"
+	}
+}
+
+// R9, R13 repaired: a channel kept as a candidate only while its status is
+// UNKNOWN is told its slot is no longer retained once the selection leaves it
+// out — after the PA-B1 admission had given it a seat, or after the single
+// boost had — and keeps the retention reason while it stays seated.
+func TestRestrictedRetainedUnknownLeftOutIsNotToldRetained(t *testing.T) {
+	const notRetained = "status unconfirmed - not watched this tick: the selection seated other channels, so its slot is no longer retained"
+	cases := []struct {
+		name    string
+		setup   func(byLogin map[string]*models.Streamer)
+		seeds   map[string]float64
+		tick1   []string
+		unknown string
+		want    string
+	}{
+		{
+			name: "seat the admission gave",
+			setup: func(byLogin map[string]*models.Streamer) {
+				assignRestricted(byLogin["streamerc"], restrictedTestCampaign("camp-streamerc", byLogin["streamerc"]))
+				assignRestricted(byLogin["streamerd"], restrictedTestCampaign("camp-streamerd", byLogin["streamerd"]))
+			},
+			seeds:   map[string]float64{"streamera": 5, "streamerb": 10, "streamerc": 60, "streamerd": 70},
+			tick1:   []string{"streamerc", "streamerd"},
+			unknown: "streamerd", want: notRetained,
+		},
+		{
+			name: "seat the single boost gave",
+			setup: func(byLogin map[string]*models.Streamer) {
+				makeDropCandidate(byLogin["streamerc"], true)
+			},
+			seeds:   map[string]float64{"streamera": 10, "streamerb": 20, "streamerc": 80, "streamerd": 90},
+			tick1:   []string{"streamera", "streamerc"},
+			unknown: "streamerc", want: notRetained,
+		},
+		{
+			name:    "seat kept in the fair pair",
+			seeds:   map[string]float64{"streamera": 10, "streamerb": 20, "streamerc": 80, "streamerd": 90},
+			tick1:   []string{"streamera", "streamerb"},
+			unknown: "streamera", want: retainedUnknownReason,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newResidenceFixture(t, 4)
+			byLogin := streamersByLogin(f.w.streamers)
+			if tc.setup != nil {
+				tc.setup(byLogin)
+			}
+			f.seedWeights(t, time.Now(), tc.seeds)
+
+			f.w.processWatching(tickCtx(f.w))
+			if got := restrictedSlotLogins(t, f); !sameLoginSet(got, tc.tick1...) {
+				t.Fatalf("tick 1: slots=%v, want %v", got, tc.tick1)
+			}
+			byLogin[tc.unknown].SetUnknown(models.ReasonTransportError)
+			f.w.processWatching(tickCtx(f.w))
+
+			seated := containsLogin(restrictedSlotLogins(t, f), tc.unknown)
+			if seated != (tc.want == retainedUnknownReason) {
+				t.Fatalf("tick 2: %s seated=%v, slots=%v", tc.unknown, seated, restrictedSlotLogins(t, f))
+			}
+			if reason := decisionReason(f.w, tc.unknown); reason != tc.want {
+				t.Fatalf("tick 2: %s reason=%q, want %q", tc.unknown, reason, tc.want)
+			}
+		})
+	}
+}
+
+// R9: a channel the admission displaces, or a boost victim whose seat it gives
+// away, that is kept only while its status is UNKNOWN loses that retention
+// with the seat, so it is told it competes again once confirmed online rather
+// than at the next evaluation or when a channel-restricted drop stops
+// qualifying.
+func TestRestrictedUnseatedUnknownToldWhenItCompetesAgain(t *testing.T) {
+	const unconfirmed = " (status unconfirmed; it competes again once it is confirmed online)"
+	cases := []struct {
+		name    string
+		size    int
+		setup   func(byLogin map[string]*models.Streamer)
+		seeds   map[string]float64
+		unknown string
+		want    []string
+		reason  string
+	}{
+		{
+			name: "displaced by the admission",
+			size: 4,
+			setup: func(byLogin map[string]*models.Streamer) {
+				assignRestricted(byLogin["streamerc"], restrictedTestCampaign("camp-streamerc", byLogin["streamerc"]))
+				assignRestricted(byLogin["streamerd"], restrictedTestCampaign("camp-streamerd", byLogin["streamerd"]))
+			},
+			seeds:   map[string]float64{"streamera": 5, "streamerb": 10, "streamerc": 60, "streamerd": 70},
+			unknown: "streamera", want: []string{"streamerc", "streamerd"},
+			reason: "not watched this tick: displaced by channel-restricted drop streamerd" + unconfirmed,
+		},
+		{
+			name: "boost victim whose seat the admission gave away",
+			size: 5,
+			setup: func(byLogin map[string]*models.Streamer) {
+				c, d, e := byLogin["streamerc"], byLogin["streamerd"], byLogin["streamere"]
+				assignRestricted(c, skipRuledRestrictedCampaign("camp-streamerc", c))
+				shared := restrictedTestCampaign("camp-shared", d, e)
+				assignRestricted(d, shared)
+				assignRestricted(e, shared)
+			},
+			seeds:   map[string]float64{"streamera": 5, "streamerb": 10, "streamerc": 20, "streamerd": 60, "streamere": 70},
+			unknown: "streamerb", want: []string{"streamera", "streamerd"},
+			reason: "whose seat then went to channel-restricted drop streamerd" + unconfirmed,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newResidenceFixture(t, tc.size)
+			byLogin := streamersByLogin(f.w.streamers)
+			f.w.SetRewardSkips(skipRuledRewards())
+			f.seedWeights(t, time.Now(), tc.seeds)
+			f.w.processWatching(tickCtx(f.w))
+			if got := restrictedSlotLogins(t, f); !sameLoginSet(got, "streamera", "streamerb") {
+				t.Fatalf("tick 1: slots=%v, want the fair pair [streamera streamerb]", got)
+			}
+
+			byLogin[tc.unknown].SetUnknown(models.ReasonTransportError)
+			tc.setup(byLogin)
+			f.w.processWatching(tickCtx(f.w))
+
+			if got := restrictedSlotLogins(t, f); !sameLoginSet(got, tc.want...) {
+				t.Fatalf("tick 2: slots=%v, want %v", got, tc.want)
+			}
+			if reason := decisionReason(f.w, tc.unknown); !strings.Contains(reason, tc.reason) {
+				t.Fatalf("tick 2: %s reason=%q, want %q", tc.unknown, reason, tc.reason)
+			}
+		})
 	}
 }
