@@ -2131,11 +2131,13 @@ func unseatedTail(s *models.Streamer, onlineTail string) string {
 // leaves it out — after the PA-B1 admission had given it a seat, or after the
 // single boost had — and keeps the retention reason while it stays seated.
 // When this tick's refresh confirms its status first, the retention note is
-// dropped: a channel confirmed offline publishes no reason, and one confirmed
-// online is not described as unconfirmed, whether it is seated again or left
-// waiting.
+// dropped before selection: a channel left out publishes no reason when
+// confirmed offline and the ordinary waiting reason when confirmed online, and
+// one the selection seats keeps a watched reason and its debug row whether it
+// is confirmed offline or online.
 func TestRestrictedRetainedUnknownLeftOutIsNotToldRetained(t *testing.T) {
 	const notRetained = "status unconfirmed - not watched this tick: the configured selection left it out, so its slot is no longer retained"
+	const fairSeat = "watched: holds a fair slot based on persisted accumulated watch time at this broker evaluation"
 	boostSeat := func(byLogin map[string]*models.Streamer) {
 		makeDropCandidate(byLogin["streamerc"], true)
 	}
@@ -2171,6 +2173,18 @@ func TestRestrictedRetainedUnknownLeftOutIsNotToldRetained(t *testing.T) {
 			seeds:   map[string]float64{"streamera": 10, "streamerb": 20, "streamerc": 80, "streamerd": 90},
 			tick1:   []string{"streamera", "streamerb"},
 			unknown: "streamera", want: retainedUnknownReason,
+		},
+		{
+			name:    "seat kept in the fair pair, refresh confirms it offline",
+			seeds:   map[string]float64{"streamera": 10, "streamerb": 20, "streamerc": 80, "streamerd": 90},
+			tick1:   []string{"streamera", "streamerb"},
+			unknown: "streamera", confirm: "offline", want: fairSeat,
+		},
+		{
+			name:    "seat kept in the fair pair, refresh confirms it online",
+			seeds:   map[string]float64{"streamera": 10, "streamerb": 20, "streamerc": 80, "streamerd": 90},
+			tick1:   []string{"streamera", "streamerb"},
+			unknown: "streamera", confirm: "online", want: fairSeat,
 		},
 		{
 			name:    "refresh confirms it offline",
@@ -2226,8 +2240,19 @@ func TestRestrictedRetainedUnknownLeftOutIsNotToldRetained(t *testing.T) {
 			f.w.processWatching(tickCtx(f.w))
 
 			seated := containsLogin(restrictedSlotLogins(t, f), tc.unknown)
-			if wantSeated := tc.want == retainedUnknownReason || tc.want == "watched"; seated != wantSeated {
+			if wantSeated := tc.want == retainedUnknownReason || strings.HasPrefix(tc.want, "watched"); seated != wantSeated {
 				t.Fatalf("tick 2: %s seated=%v, slots=%v", tc.unknown, seated, restrictedSlotLogins(t, f))
+			}
+			if seated {
+				// A seated channel keeps its debug row as watching, whatever its
+				// status, so the debug view and support bundle list its slot.
+				watching := false
+				for _, d := range f.w.GetDebugState().Decisions {
+					watching = watching || (d.Username == tc.unknown && d.Watching)
+				}
+				if !watching {
+					t.Fatalf("tick 2: seated %s has no watching debug row", tc.unknown)
+				}
 			}
 			reason := decisionReason(f.w, tc.unknown)
 			matches := reason == tc.want

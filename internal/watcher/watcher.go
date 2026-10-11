@@ -1230,6 +1230,15 @@ func (w *MinuteWatcher) processWatching(ctx context.Context) {
 			})
 		}
 	}
+	// A channel kept as a candidate only while its status was UNKNOWN was told
+	// its slot is retained. Once this tick's refresh has confirmed its status
+	// that note no longer applies, so it is dropped before selection and the
+	// selection's own reason for the channel stands, seated or not.
+	for _, idx := range onlineStreamers {
+		if w.selectionReasons[idx] == retainedUnknownReason && w.streamers[idx].GetStatus() != models.StatusUnknown {
+			delete(w.selectionReasons, idx)
+		}
+	}
 
 	// Phase A: pick from the configured streamer list with the unchanged
 	// priority/rotation logic. Phase B: layer external candidates (directory
@@ -1238,24 +1247,21 @@ func (w *MinuteWatcher) processWatching(ctx context.Context) {
 	if len(onlineStreamers) > 0 {
 		configuredWatch = w.selectStreamersToWatch(onlineStreamers, now)
 	}
-	// A channel kept as a candidate only while its status was UNKNOWN was told
-	// its slot is retained. Once this tick's refresh has confirmed its status
-	// that note no longer applies, so it is dropped and the default reason
-	// stands. While it is still UNKNOWN, Phase B cannot seat it, so when the
-	// configured selection leaves it out — fairness, the single boost or the
-	// PA-B1 admission gave its seat away, or no configured priority matched it
-	// — it is told its slot is no longer retained.
+	// While such a channel is still UNKNOWN, Phase B cannot seat it, so when
+	// the configured selection leaves it out — fairness, the single boost or
+	// the PA-B1 admission gave its seat away, or no configured priority matched
+	// it — it is told its slot is no longer retained. One left out whose status
+	// a concurrent update confirmed during selection has the stale note dropped;
+	// a seated one keeps its note, so its watched seat keeps a reason.
 	for _, idx := range onlineStreamers {
-		if w.selectionReasons[idx] != retainedUnknownReason {
+		if w.selectionReasons[idx] != retainedUnknownReason || containsIndex(configuredWatch, idx) {
 			continue
 		}
 		if w.streamers[idx].GetStatus() != models.StatusUnknown {
 			delete(w.selectionReasons, idx)
 			continue
 		}
-		if !containsIndex(configuredWatch, idx) {
-			w.noteSelection(idx, "status unconfirmed - not watched this tick: the configured selection left it out, so its slot is no longer retained")
-		}
+		w.noteSelection(idx, "status unconfirmed - not watched this tick: the configured selection left it out, so its slot is no longer retained")
 	}
 	extra := w.gatherCandidates(ctx, sources, avoid)
 	if ctx.Err() != nil {
