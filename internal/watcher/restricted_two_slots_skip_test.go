@@ -226,7 +226,9 @@ func TestRestrictedSkipRuleExcludesOnlyThatCampaign(t *testing.T) {
 			} else {
 				assignRestricted(c, restrictedTestCampaign("camp-streamerc", c))
 			}
-			assignRestricted(d, own, skipRuledRestrictedCampaign("camp-skip-streamerd", d))
+			// The skip-ruled campaign is listed first, so it must not hide the
+			// campaign after it.
+			assignRestricted(d, skipRuledRestrictedCampaign("camp-skip-streamerd", d), own)
 			f.w.SetRewardSkips(skipRuledRewards())
 			f.seedWeights(t, time.Now(), map[string]float64{
 				"streamera": 5, "streamerb": 10, "streamerc": 60, "streamerd": 70,
@@ -365,5 +367,44 @@ func TestRestrictedSkipRuledVictimOrderIgnoresSeatOrder(t *testing.T) {
 		if seat < 0 || pair[seat] != b {
 			t.Fatalf("pair %v: gave up seat %d, want the less owed skip-ruled streamerb", pair, seat)
 		}
+	}
+}
+
+// R5 unchanged for a skip-ruled seat: the single boost applies no Skip rule, so
+// while a skip-ruled channel holds a fair seat it still counts as a
+// channel-restricted seat there. A lone qualifying channel of equal strength
+// gets neither seat, and one that is strictly stronger (pursuing its watch
+// streak) is seated beside it by the single boost's own victim order, which
+// gives up the ordinary seat.
+func TestRestrictedSkipRuledSeatStillRestrictedForSingleBoost(t *testing.T) {
+	cases := []struct {
+		name   string
+		streak bool
+		want   []string
+	}{
+		{name: "equal lone qualifying channel gets neither seat", want: []string{"streamera", "streamerb"}},
+		{name: "strictly stronger lone qualifying channel takes the ordinary seat", streak: true, want: []string{"streamerb", "streamerc"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newResidenceFixture(t, 4)
+			byLogin := streamersByLogin(f.w.streamers)
+			b, c := byLogin["streamerb"], byLogin["streamerc"]
+			assignRestricted(b, skipRuledRestrictedCampaign("camp-streamerb", b))
+			assignRestricted(c, restrictedTestCampaign("camp-streamerc", c))
+			if tc.streak {
+				admissionPursuingStreak(c)
+			}
+			f.w.SetRewardSkips(skipRuledRewards())
+			f.seedWeights(t, time.Now(), map[string]float64{
+				"streamera": 5, "streamerb": 10, "streamerc": 60, "streamerd": 70,
+			})
+
+			f.w.processWatching(tickCtx(f.w))
+
+			if got := restrictedSlotLogins(t, f); !sameLoginSet(got, tc.want...) {
+				t.Fatalf("slots=%v, want %v", got, tc.want)
+			}
+		})
 	}
 }
