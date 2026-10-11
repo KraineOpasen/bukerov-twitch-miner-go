@@ -203,16 +203,26 @@ func TestRestrictedSkipRuledSeatGivenUpAsOrdinary(t *testing.T) {
 
 // FB-OD-10 per campaign: a Skip rule removes only the campaign it rules, so a
 // channel keeps the seat its other, unskipped restricted campaign brings, and
-// a skip-ruled campaign never makes a channel bring distinct work.
+// a skip-ruled campaign never makes a channel bring distinct work, whichever
+// campaign is listed first.
 func TestRestrictedSkipRuleExcludesOnlyThatCampaign(t *testing.T) {
-	cases := []struct {
-		name    string
-		shared  bool
-		want    []string
-		carried bool
-	}{
-		{name: "unskipped campaign beside a skip-ruled one still brings work", want: []string{"streamerc", "streamerd"}},
-		{name: "skip-ruled campaign beside a shared one brings no distinct work", shared: true, carried: true},
+	type row struct {
+		name      string
+		shared    bool
+		want      []string
+		carried   bool
+		skipFirst bool
+	}
+	var cases []row
+	for _, skipFirst := range []bool{true, false} {
+		order := " (skip-ruled campaign listed last)"
+		if skipFirst {
+			order = " (skip-ruled campaign listed first)"
+		}
+		cases = append(cases,
+			row{name: "unskipped campaign beside a skip-ruled one still brings work" + order, want: []string{"streamerc", "streamerd"}, skipFirst: skipFirst},
+			row{name: "skip-ruled campaign beside a shared one brings no distinct work" + order, shared: true, carried: true, skipFirst: skipFirst},
+		)
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -226,9 +236,13 @@ func TestRestrictedSkipRuleExcludesOnlyThatCampaign(t *testing.T) {
 			} else {
 				assignRestricted(c, restrictedTestCampaign("camp-streamerc", c))
 			}
-			// The skip-ruled campaign is listed first, so it must not hide the
-			// campaign after it.
-			assignRestricted(d, skipRuledRestrictedCampaign("camp-skip-streamerd", d), own)
+			// Whichever campaign is listed first must not hide or erase the other.
+			skipRuled := skipRuledRestrictedCampaign("camp-skip-streamerd", d)
+			if tc.skipFirst {
+				assignRestricted(d, skipRuled, own)
+			} else {
+				assignRestricted(d, own, skipRuled)
+			}
 			f.w.SetRewardSkips(skipRuledRewards())
 			f.seedWeights(t, time.Now(), map[string]float64{
 				"streamera": 5, "streamerb": 10, "streamerc": 60, "streamerd": 70,
@@ -371,11 +385,11 @@ func TestRestrictedSkipRuledVictimOrderIgnoresSeatOrder(t *testing.T) {
 }
 
 // R5 unchanged for a skip-ruled seat: the single boost applies no Skip rule, so
-// while a skip-ruled channel holds a fair seat it still counts as a
-// channel-restricted seat there. A lone qualifying channel of equal strength
-// gets neither seat, and one that is strictly stronger (pursuing its watch
-// streak) is seated beside it by the single boost's own victim order, which
-// gives up the ordinary seat.
+// a skip-ruled channel confirmed online in the fair pair still counts as a
+// channel-restricted seat there. In this fixture a lone qualifying channel of
+// equal strength gets neither seat, and one that is strictly stronger
+// (pursuing its watch streak) is seated beside it by the single boost's own
+// victim order, which gives up the ordinary seat.
 func TestRestrictedSkipRuledSeatStillRestrictedForSingleBoost(t *testing.T) {
 	cases := []struct {
 		name   string

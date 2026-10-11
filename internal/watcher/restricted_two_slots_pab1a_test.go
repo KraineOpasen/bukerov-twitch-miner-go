@@ -21,7 +21,8 @@ import (
 // admitRestrictedDrops, or its waiting-reason helper, directly for states the
 // pipeline does not produce deterministically or only through a long setup
 // (two open seats, a carrier confirmed offline after the online list was read,
-// an assignment changing between two reads, carriers in a chosen seat order),
+// a work snapshot that disagrees with the seats, carriers in a chosen seat
+// order),
 // and the property case checks the admission's invariants over random
 // assignments.
 

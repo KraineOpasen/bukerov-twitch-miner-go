@@ -17,10 +17,11 @@ import (
 // fixture restricted_two_slots_test.go uses — two, four or five configured
 // channels on the loop fakes with a real SQLite watch-time store — where
 // streamera and streamerb are the least-watched ordinary channels unless a case
-// says otherwise. Two unit-level cases drive admitRestrictedDrops directly:
-// one for two open ordinary seats, which the pipeline does not produce today,
-// and one for recency at equal deficit, which the pipeline reaches only when
-// persisted deficits tie (always without a watch-time store).
+// says otherwise. Unit-level cases drive admitRestrictedDrops directly: one
+// for two open ordinary seats, which the pipeline does not produce today, one
+// for recency at equal deficit, which the pipeline reaches only when persisted
+// deficits tie (always without a watch-time store), and one for a resident
+// waiting channel, which residence must not prefer.
 
 // restrictedIndex returns the configured index of login.
 func restrictedIndex(t *testing.T, w *MinuteWatcher, login string) int {
