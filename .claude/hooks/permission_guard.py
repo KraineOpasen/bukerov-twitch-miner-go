@@ -74,6 +74,7 @@ HEAD_RE = re.compile(r"^ref: refs/heads/(\S+)\n?$")
 UNTRACKED_RE = re.compile(r"^[a-z]+$")
 FORBIDDEN_RAW_CHARS = "`$\n\r\0"
 GLOB_CHARS = "*?[{"
+TRIGGER_WHITESPACE = " \t\r\n"
 GIT_FORBIDDEN_SUBSTRINGS = ("--output", "--ext-diff", "--textconv", "-O",
                             "--open-files-in-pager", "--no-textconv=false")
 READ_UTILITIES = ("cat", "head", "tail", "wc", "stat", "sha256sum", "ls")
@@ -122,6 +123,11 @@ def is_str(value):
 
 
 def normalize_trigger(text):
+    """Collapse runs of ASCII whitespace (space, tab, CR, LF) to one space and strip the ends.
+    Any other Unicode whitespace is not a separator the trigger texts may carry."""
+    for ch in text:
+        if ch.isspace() and ch not in TRIGGER_WHITESPACE:
+            raise NoDecision("unusual whitespace")
     return " ".join(text.split())
 
 
@@ -184,7 +190,7 @@ class Context:
         info = os.lstat(head)
         require(stat.S_ISREG(info.st_mode), "HEAD not a file")
         data, _ = read_regular_file(head, 4096)
-        match = HEAD_RE.match(data.decode("utf-8"))
+        match = HEAD_RE.fullmatch(data.decode("utf-8"))
         require(match is not None, "detached or unusual HEAD")
         return match.group(1)
 
@@ -203,15 +209,15 @@ class Context:
         for key in ("gh_path", "git_path", "goroot"):
             require(is_str(record.get(key)) and os.path.isabs(record[key]), "bad path in record")
         for key in ("gh_sha256", "git_sha256"):
-            require(is_str(record.get(key)) and HEX64_RE.match(record[key]), "bad hash in record")
+            require(is_str(record.get(key)) and HEX64_RE.fullmatch(record[key]), "bad hash in record")
         pr = record.get("pr")
         if pr is not None:
             require(isinstance(pr, int) and not isinstance(pr, bool) and pr > 0, "bad pr")
             head = record.get("pr_head")
-            require(is_str(head) and HEX40_RE.match(head), "bad pr_head")
+            require(is_str(head) and HEX40_RE.fullmatch(head), "bad pr_head")
         body = record.get("body_sha256")
         if body is not None:
-            require(is_str(body) and HEX64_RE.match(body), "bad body hash")
+            require(is_str(body) and HEX64_RE.fullmatch(body), "bad body hash")
         return record
 
     # bindings ---------------------------------------------------------------------
@@ -252,10 +258,10 @@ class Context:
         exists = lstat_components(path, must_exist)
         real = os.path.realpath(path)
         root = self.root_of(real)
-        if root == self.project:
-            rel = os.path.relpath(real, self.project)
-            if rel == ".git" or rel.startswith(".git/"):
-                require(rel == ".git/HEAD", "inside .git")
+        rel = os.path.relpath(real, root)
+        if ".git" in rel.split("/"):
+            # a .git directory at any depth under either root; only the project's own HEAD is readable
+            require(root == self.project and rel == ".git/HEAD", "inside .git")
         if exists:
             info = os.lstat(path)
             if kind == "file":
@@ -264,6 +270,8 @@ class Context:
                 require(stat.S_ISDIR(info.st_mode), "not a directory")
             else:
                 require(stat.S_ISREG(info.st_mode) or stat.S_ISDIR(info.st_mode), "odd operand")
+            if stat.S_ISREG(info.st_mode):
+                require(info.st_nlink == 1, "hardlinked operand")
         else:
             require(kind == "any", "missing operand")
         return real
@@ -351,6 +359,8 @@ def parse_flags(args, spec):
 # --- gh shapes ------------------------------------------------------------------------
 
 def match_gh(tokens, ctx):
+    for token in tokens:
+        require("~" not in token, "tilde in gh token")  # bash expands ~ after : and = inside words
     args = tokens[1:]
     if args == ["--version"] or args == ["version"]:
         ctx.require_env_absent(ENV_GH_NAMES)
@@ -375,7 +385,7 @@ def match_create(args, ctx):
     require(flags["repo"] == REPO, "repo")
     require(flags["base"] == BASE_BRANCH, "base")
     head = flags["head"]
-    require(BRANCH_RE.match(head) is not None and head == ctx.head_branch, "head")
+    require(BRANCH_RE.fullmatch(head) is not None and head == ctx.head_branch, "head")
     title = flags["title"]
     require(title != "" and len(title) <= MAX_TITLE and title.isprintable(), "title")
     ctx.require_write_context()
@@ -388,7 +398,7 @@ def match_create(args, ctx):
 def match_comment(args, ctx):
     spec = {"repo": ("R", True), "body": ("b", True), "body-file": ("F", True)}
     flags, positionals = parse_flags(args, spec)
-    require(len(positionals) == 1 and POSINT_RE.match(positionals[0]) is not None, "pr number")
+    require(len(positionals) == 1 and POSINT_RE.fullmatch(positionals[0]) is not None, "pr number")
     require(flags.get("repo") == REPO, "repo")
     require(("body" in flags) != ("body-file" in flags), "exactly one body source")
     ctx.require_write_context()
@@ -436,18 +446,22 @@ def parse_git_args(rest, flags0, flags_val, prefixes, dash_n, allow_dashdash):
             after = []
         elif token.startswith("-"):
             if token in flags0:
+                require(token not in flags, "repeated flag")
                 flags.append(token)
             elif token in flags_val:
                 i += 1
                 require(i < len(rest), "missing value")
+                require(token == "-e" or token not in values, "repeated flag")
                 values.setdefault(token, []).append(rest[i])
             else:
                 for prefix in prefixes:
                     if token.startswith(prefix):
+                        require(prefix not in values, "repeated flag")
                         values.setdefault(prefix, []).append(token[len(prefix):])
                         break
                 else:
-                    require(dash_n and DASH_N_RE.match(token) is not None, "unknown git option")
+                    require(dash_n and DASH_N_RE.fullmatch(token) is not None, "unknown git option")
+                    require("-n" not in values, "repeated flag")
                     values.setdefault("-n", []).append(token[1:])
         else:
             positionals.append(token)
@@ -459,25 +473,33 @@ def check_git_values(values):
     for key, items in values.items():
         for item in items:
             if key in ("-n", "--max-count="):
-                require(POSINT_RE.match(item) is not None, "count")
+                require(POSINT_RE.fullmatch(item) is not None, "count")
             elif key in ("--format=", "--pretty="):
-                require(FMT_RE.match(item) is not None, "format")
+                require(FMT_RE.fullmatch(item) is not None, "format")
             elif key == "--untracked-files=":
-                require(UNTRACKED_RE.match(item) is not None, "untracked value")
+                require(UNTRACKED_RE.fullmatch(item) is not None, "untracked value")
             elif key == "-e":
                 require(item != "", "empty pattern")
+            else:
+                raise NoDecision("unchecked git value")
+
+
+def check_rev(ctx, token):
+    """A revision: REV_RE shape; a path-shaped one (containing / or starting with .) must also
+    resolve as a repository path under ROOTS, so a rev-looking token never names a file elsewhere."""
+    require(REV_RE.fullmatch(token) is not None and not token.startswith("-"), "rev")
+    if "/" in token or token.startswith("."):
+        ctx.resolve_operand(token, kind="any", must_exist=False, allow_relative=True)
 
 
 def check_rev_or_path(ctx, token):
     require(token != "" and not token.startswith("-"), "operand")
-    if REV_RE.match(token):
-        return
     if ":" in token:
         rev, _, path = token.partition(":")
-        require(REV_RE.match(rev) is not None and not rev.startswith("-"), "rev")
+        check_rev(ctx, rev)
         ctx.resolve_operand(path, kind="any", must_exist=False, allow_relative=True)
         return
-    ctx.resolve_operand(token, kind="any", must_exist=False, allow_relative=True)
+    check_rev(ctx, token)
 
 
 def check_paths(ctx, paths):
@@ -526,7 +548,7 @@ def git_rev_parse(rest, ctx):
     _, _, positionals, _ = parse_git_args(
         rest, {"--verify", "--short", "--abbrev-ref", "--show-toplevel"}, set(), (), False, False)
     for token in positionals:
-        require(REV_RE.match(token) is not None and not token.startswith("-"), "rev")
+        check_rev(ctx, token)
 
 
 def git_ls_files(rest, ctx):
@@ -545,7 +567,8 @@ def git_hash_object(rest, ctx):
     _, _, positionals, _ = parse_git_args(rest, set(), set(), (), False, False)
     require(len(positionals) >= 1, "file operand")
     for token in positionals:
-        ctx.resolve_operand(token, kind="file", must_exist=True, allow_relative=True)
+        # absolute only: git would resolve a relative operand against its own cwd, not the project
+        ctx.resolve_operand(token, kind="file", must_exist=True, allow_relative=False)
 
 
 def git_check_ignore(rest, ctx):
@@ -577,7 +600,7 @@ def git_describe(rest, ctx):
     _, _, positionals, _ = parse_git_args(rest, {"--tags", "--always"}, set(), (), False, False)
     require(len(positionals) <= 1, "describe operand")
     for token in positionals:
-        require(REV_RE.match(token) is not None and not token.startswith("-"), "rev")
+        check_rev(ctx, token)
 
 
 def git_grep(rest, ctx):
@@ -596,7 +619,7 @@ def git_ls_remote(rest, ctx):
     _, _, positionals, _ = parse_git_args(rest, {"--heads", "--tags"}, set(), (), False, False)
     require(len(positionals) >= 1 and positionals[0] == "origin", "origin only")
     for token in positionals[1:]:
-        require(REV_RE.match(token) is not None and not token.startswith("-"), "refspec")
+        require(REV_RE.fullmatch(token) is not None and not token.startswith("-"), "refspec")
 
 
 GIT_SUBCOMMANDS = {
@@ -614,6 +637,10 @@ def match_git(tokens, ctx):
         require(len(args) >= 2, "-C value")
         require(ctx.resolve_operand(args[1], kind="dir", must_exist=True) == ctx.project, "-C root")
         args = args[2:]
+    else:
+        # without -C git works on the shell's cwd: bind it to the project
+        cwd = ctx.payload.get("cwd")
+        require(is_str(cwd) and os.path.realpath(cwd) == ctx.project, "git cwd")
     require(len(args) >= 1 and not args[0].startswith("-"), "git global option")
     for token in args:
         for forbidden in GIT_FORBIDDEN_SUBSTRINGS:
@@ -657,7 +684,7 @@ def parse_short_clusters(rest, flags0, flags_val, allow_dash_n, allow_dashdash, 
                 require(i < len(rest), "missing value")
                 value = rest[i]
             values.append((name, value))
-        elif allow_dash_n and DASH_N_RE.match(token):
+        elif allow_dash_n and DASH_N_RE.fullmatch(token):
             values.append(("-n", token[1:]))
         else:
             cluster = token[1:]
@@ -680,7 +707,7 @@ def match_grep(tokens, ctx):
         tokens[1:], set("nclLiEFwxohHqsr"), set("ABCme"), False, True)
     for key, value in values:
         if key in "ABCm":
-            require(POSINT_RE.match(value) is not None, "context count")
+            require(POSINT_RE.fullmatch(value) is not None, "context count")
         else:
             require(value != "", "empty pattern")
     if not any(key == "e" for key, _ in values):
@@ -689,7 +716,9 @@ def match_grep(tokens, ctx):
     require(len(operands) >= 1, "file operand")
     kind = "dir" if "r" in letters else "file"
     for operand in operands:
-        ctx.resolve_operand(operand, kind=kind, must_exist=True)
+        real = ctx.resolve_operand(operand, kind=kind, must_exist=True)
+        if kind == "dir":
+            require(real not in ctx.roots, "recursive grep over a whole root")
     return True
 
 
@@ -702,7 +731,7 @@ def match_read_utility(tokens, ctx):
     elif name in ("head", "tail"):
         _, values, operands = parse_short_clusters(rest, set(), set("nc"), True, False)
         for _, value in values:
-            require(POSINT_RE.match(value) is not None, "count")
+            require(POSINT_RE.fullmatch(value) is not None, "count")
         kind = "file"
     elif name == "wc":
         _, _, operands = parse_short_clusters(rest, set("lcwmL"), set(), False, False)
@@ -726,7 +755,7 @@ def match_read_utility(tokens, ctx):
 
 def match_sed(tokens, ctx):
     require(len(tokens) == 4 and tokens[1] == "-n", "sed form")
-    require(SED_SCRIPT_RE.match(tokens[2]) is not None, "sed script")
+    require(SED_SCRIPT_RE.fullmatch(tokens[2]) is not None, "sed script")
     ctx.resolve_operand(tokens[3], kind="file", must_exist=True)
     return True
 
@@ -743,7 +772,7 @@ def tokenize(command):
         raise NoDecision("unparsable") from exc
     require(len(tokens) >= 1, "empty command")
     for token in tokens:
-        require(OPERATOR_RE.match(token) is None and not token.startswith("#"), "operator")
+        require(OPERATOR_RE.fullmatch(token) is None and not token.startswith("#"), "operator")
         require(not any(ch in token for ch in GLOB_CHARS) and not token.startswith("~"), "glob")
     require(ASSIGNMENT_RE.match(tokens[0]) is None, "leading assignment")
     return tokens
@@ -752,7 +781,7 @@ def tokenize(command):
 def decide(argv, stdin, environ):
     require(len(argv) == 2 and argv[0] == "--expect-sha256", "argv")
     expected = argv[1]
-    require(HEX64_RE.match(expected) is not None, "argv hash")
+    require(HEX64_RE.fullmatch(expected) is not None, "argv hash")
     require(sha256_file(os.path.abspath(__file__)) == expected, "self hash")
     data = stdin.read(MAX_STDIN + 1)
     require(len(data) <= MAX_STDIN, "stdin too large")
@@ -784,7 +813,7 @@ def main():
     allow = False
     try:
         allow = bool(decide(sys.argv[1:], sys.stdin.buffer, os.environ))
-    except Exception:  # any error at all = no decision
+    except BaseException:  # any error at all, an interrupt included = no decision
         allow = False
     if allow:
         try:

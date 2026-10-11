@@ -6,8 +6,10 @@
 
 Builds a throwaway project under ROOT (must not exist) and runs the real
 `claude -p` against it, one nested session per case, with the candidate guard
-registered as the PermissionRequest hook in the project's own settings. Nothing
-the nested sessions run can reach the real repository or real credentials:
+registered as the PermissionRequest hook in the project's own settings. The real
+repository is unreachable by construction; the user's other credentials are
+protected by the permission engine (deny rules below, `--permission-prompts none`,
+`--max-turns 3`) and the nested session's own inventory is recorded per case:
 
   * ROOT/bin is first on PATH and holds a fake `gh` that prints its argv and exits 0;
   * the task record pins gh_path to that fake, so the guard never allows the real gh;
@@ -15,7 +17,10 @@ the nested sessions run can reach the real repository or real credentials:
     would be unauthenticated (the contract's GH_CONFIG_DIR layer cannot be used: the
     guard refuses any environment carrying that name, section 5.4(b), which is exactly
     what case H6 verifies for GH_HOST);
-  * the PR number is 999999999 and ROOT/proj is a fresh repository with no remote.
+  * the PR number is 999999999 and ROOT/proj is a fresh repository with no remote;
+  * proj/.claude/settings.json carries the clone's tracked deny list plus Read denies for
+    ~/.config/gh, ~/.claude and ~/.gitconfig; the nested init event (tools, MCP servers,
+    plugins, model) is copied into every case's meta.json and into receipt.json.
 
 Each case asks the nested session to run one exact command. A case PASSes only when
 the first Bash command the session ran equals that command byte for byte and the
@@ -97,7 +102,6 @@ class Harness:
             raise SystemExit("NATIVE_INTEGRATION_UNAVAILABLE: claude executable not found")
         os.makedirs(self.proj)
         os.makedirs(self.bin)
-        os.makedirs(os.path.join(self.root, "gh-config-empty"))
         os.makedirs(self.evidence, exist_ok=True)
         git_env = dict(os.environ)
         git_env["GIT_CONFIG_GLOBAL"] = "/dev/null"
@@ -175,8 +179,20 @@ class Harness:
                                                 "command": f"python3 -I {runtime_path} --expect-sha256 {sha}",
                                                 "timeout": timeout}]}
 
+    def _deny_rules(self):
+        """The clone's tracked deny list plus reads of the user's credential and config stores."""
+        deny = []
+        try:
+            with open(os.path.join(self.clone, ".claude", "settings.json")) as handle:
+                deny = list((json.load(handle).get("permissions") or {}).get("deny") or [])
+        except (OSError, ValueError):
+            self.unknowns["deny_rules"] = "clone settings unreadable; nested sessions carry no tracked deny list"
+        return deny + ["Read(~/.config/gh/**)", "Read(~/.claude/**)", "Read(~/.gitconfig)",
+                       "Bash(cat ~/.config/gh/*)", "Bash(cat ~/.claude/*)"]
+
     def write_settings(self, variant):
-        settings = {"permissions": {"ask": ASK_RULES}, "enabledPlugins": self.enabled_plugins}
+        settings = {"permissions": {"ask": ASK_RULES, "deny": self._deny_rules()},
+                    "enabledPlugins": self.enabled_plugins}
         if variant == "hook":
             settings["hooks"] = {"PermissionRequest": [self.registration(self.runtime_path, self.guard_sha)]}
         elif variant == "badpath":
@@ -249,6 +265,7 @@ class Harness:
         fake_gh = False
         result = None
         errors = []
+        init = None
         with open(path, "rb") as handle:
             for raw in handle:
                 raw = raw.strip()
@@ -260,7 +277,12 @@ class Harness:
                     errors.append(raw[:200].decode("utf-8", "replace"))
                     continue
                 kind = event.get("type")
-                if kind == "assistant":
+                if kind == "system" and event.get("subtype") == "init":
+                    init = {"tools": event.get("tools"), "mcp_servers": event.get("mcp_servers"),
+                            "plugins": event.get("plugins"), "model": event.get("model"),
+                            "permissionMode": event.get("permissionMode"),
+                            "apiKeySource": event.get("apiKeySource")}
+                elif kind == "assistant":
                     for block in (event.get("message") or {}).get("content") or []:
                         if isinstance(block, dict) and block.get("type") == "tool_use" and block.get("name") == "Bash":
                             commands.append((block.get("input") or {}).get("command"))
@@ -278,7 +300,7 @@ class Harness:
                     result = event
                     for denial in event.get("permission_denials") or []:
                         denials.append(denial)
-        return commands, denials, fake_gh, result, errors
+        return commands, denials, fake_gh, result, errors, init
 
     @staticmethod
     def denied_for(denials, command):
@@ -304,7 +326,11 @@ class Harness:
             finally:
                 if spec.get("flip_runtime"):
                     self.restore_runtime()
-            commands, denials, fake_gh, result, errors = self.parse_stream(os.path.join(case_dir, "stdout.jsonl"))
+            commands, denials, fake_gh, result, errors, init = self.parse_stream(os.path.join(case_dir, "stdout.jsonl"))
+            if init is not None and "nested_init_inventory" not in self.unknowns:
+                # what the nested session actually loaded (tools, MCP servers, plugins): the
+                # isolation claim is checkable from this without reading user-level settings
+                self.unknowns["nested_init_inventory"] = init
             extracted = commands[0] if commands else None
             launch_problem = self.launch_problem(code, result, case_dir)
             denied = self.denied_for(denials, spec["command"])
@@ -318,8 +344,14 @@ class Harness:
                 verdict = "INVALID"
             else:
                 verdict = "PASS" if observed == spec["expect"] else "FAIL"
+            try:
+                stderr_size = os.path.getsize(os.path.join(case_dir, "stderr.txt"))
+            except OSError:
+                stderr_size = None
             attempt_record = {
                 "attempt": attempt, "evidence_dir": case_dir, "exit_code": code, "duration_s": duration,
+                "stderr_bytes": stderr_size, "init_tools": (init or {}).get("tools"),
+                "init_mcp_servers": (init or {}).get("mcp_servers"), "init_plugins": (init or {}).get("plugins"),
                 "extracted_commands": commands, "first_command_matches": extracted == spec["command"],
                 "denials": len(denials), "fake_gh_seen": fake_gh, "observed": observed,
                 "launch_problem": launch_problem, "stream_parse_errors": len(errors),
@@ -434,6 +466,8 @@ def main():
         harness.results.append(result)
         sys.stdout.write(f"{case_id}: {result['verdict']}\n")
         sys.stdout.flush()
+    harness.write_record(with_pr=True)
+    harness.write_settings("hook")  # leave the project in its canonical state, not the last variant
     verdict, code, receipt = harness.receipt(selected)
     write_file(os.path.join(harness.evidence, "receipt.json"), json.dumps(receipt, indent=2) + "\n")
     table = Harness.table(receipt)

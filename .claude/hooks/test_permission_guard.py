@@ -81,9 +81,17 @@ class Fixture:
         os.mkdir(self.subdir)
         with open(os.path.join(self.subdir, "a.go"), "w") as fh:
             fh.write("package internal\n")
-        # a fake GOROOT with GOROOT/src/time/format.go
+        # a nested .git directory (a vendored or fixture repository) under the project
+        self.nested_git = os.path.join(self.proj, "sub", ".git")
+        os.makedirs(self.nested_git)
+        with open(os.path.join(self.nested_git, "config"), "w") as fh:
+            fh.write("[core]\n")
+        # a fake GOROOT with GOROOT/src/time/format.go and a .git under src
         self.goroot = os.path.join(tmp, "goroot")
         os.makedirs(os.path.join(self.goroot, "src", "time"))
+        os.makedirs(os.path.join(self.goroot, "src", ".git"))
+        with open(os.path.join(self.goroot, "src", ".git", "config"), "w") as fh:
+            fh.write("[core]\n")
         self.time_file = os.path.join(self.goroot, "src", "time", "format.go")
         with open(self.time_file, "w") as fh:
             fh.write("package time\n")
@@ -202,6 +210,8 @@ class Fixture:
 
 class GuardTest(unittest.TestCase):
     def setUp(self):
+        # the unreadable-file cases need a non-root runner; an assertion, never a skip
+        self.assertNotEqual(os.geteuid(), 0, "these tests must not run as root")
         self._tmp = tempfile.TemporaryDirectory(prefix="pgtest-")
         self.fx = Fixture(self._tmp.name)
 
@@ -220,11 +230,13 @@ class GuardTest(unittest.TestCase):
         out, err, rc = self.fx.run(command, **kw)
         self.assertEqual(rc, 0, f"exit {rc}, stderr={err!r}")
         self.assertEqual(out, ALLOW, f"expected ALLOW for {command!r}; stderr={err!r}")
+        self.assertEqual(err, "", "the guard never logs")
 
     def expect_empty(self, command=None, **kw):
         out, err, rc = self.fx.run(command, **kw)
         self.assertEqual(rc, 0, f"exit {rc}, stderr={err!r}")
         self.assertEqual(out, "", f"expected NO DECISION for {command!r}; stderr={err!r}")
+        self.assertEqual(err, "", "the guard never logs")
 
     # 5.1 input contract ---------------------------------------------------
     def test_5_1_wrong_event_no_output(self):
@@ -308,6 +320,21 @@ class GuardTest(unittest.TestCase):
     def test_5_2_backtick(self):
         self.expect_empty(self.fx.b_cmd() + " `id`")
 
+    # the raw-character rule placed in the least-validated slots, so only that rule can reject
+    def test_5_2_dollar_in_title_slot(self):
+        self.fx.set_record("create")
+        self.expect_empty(self.fx.a_cmd(title='"fix $HOME handling"'))
+
+    def test_5_2_backtick_in_title_slot(self):
+        self.fx.set_record("create")
+        self.expect_empty(self.fx.a_cmd(title='"fix `id` handling"'))
+
+    def test_5_2_dollar_in_grep_pattern(self):
+        self.expect_empty(f"grep -c 'end$' {self.fx.file}")
+
+    def test_5_2_dollar_in_git_format(self):
+        self.expect_empty("git log --format=%H$x -n 1")
+
     def test_5_2_newline(self):
         self.expect_empty(self.fx.b_cmd() + "\necho hi")
 
@@ -347,6 +374,13 @@ class GuardTest(unittest.TestCase):
     def test_5_2_compound_and_on_git_read(self):
         self.expect_empty("git log --oneline && echo hi")
 
+    # operators after `--`, where every other token is accepted as a repository path
+    def test_5_2_compound_pipe_after_dashdash(self):
+        self.expect_empty("git log --oneline -- internal | cat")
+
+    def test_5_2_compound_semicolon_after_dashdash(self):
+        self.expect_empty("git check-ignore -q -- .scratch/x ; echo hi")
+
     def test_5_2_leading_env_assignment_gh_repo(self):
         self.expect_empty("GH_REPO=x " + self.fx.b_cmd())
 
@@ -370,6 +404,15 @@ class GuardTest(unittest.TestCase):
 
     def test_5_2_comment_token_rejected(self):
         self.expect_empty(self.fx.b_cmd() + " #note")
+
+    def test_5_2_comment_token_rejected_on_git_read(self):
+        self.expect_empty("git log --oneline #note")
+
+    def test_5_2_tilde_inside_gh_token(self):
+        self.fx.set_record("create")
+        self.expect_empty(self.fx.a_cmd(title='"a~b"'))
+        self.fx.set_record("pr")
+        self.expect_empty(self.fx.c_cmd(field=f"-F body=@{self.fx.body}:~/x"))
 
     # 5.5 A — create ----------------------------------------------------------
     def test_5_5A_ok_long_flags(self):
@@ -576,6 +619,29 @@ class GuardTest(unittest.TestCase):
         path = self.fx.write_body(b"@codex review\r\nFull review of the entire PR. Review only; make no changes.\r\n", "t2.md")
         self.expect_allow(f"gh pr comment {PR} --repo {REPO} -F {path}")
 
+    def test_5_5B_t2_ok_tab_separated_body_file(self):
+        path = self.fx.write_body(b"@codex\treview\tFull review of the entire PR. Review only; make no changes.\n", "t2.md")
+        self.expect_allow(self.fx.b_cmd(body_file=path))
+
+    def test_5_5B_body_file_unicode_line_separator(self):
+        path = self.fx.write_body("@coderabbitai full review\n".encode("utf-8"), "t1.md")
+        self.expect_empty(self.fx.b_cmd(body_file=path))
+
+    def test_5_5B_body_file_nbsp_separator(self):
+        path = self.fx.write_body("@codex security review\n".encode("utf-8"), "t3.md")
+        self.expect_empty(self.fx.b_cmd(body_file=path))
+
+    def test_5_5B_repeated_body_flag(self):
+        self.expect_empty(self.fx.b_cmd(extra=f' --body "{T1}"'))
+
+    def test_5_5B_record_without_pr(self):
+        self.fx.set_record("create")
+        self.expect_empty(self.fx.b_cmd())
+
+    def test_5_5B_permission_mode_other_values(self):
+        for mode in ("acceptEdits", "bypassPermissions", "dontAsk"):
+            self.expect_empty(self.fx.b_cmd(), overrides={"permission_mode": mode})
+
     def test_5_5B_t3_ok(self):
         self.expect_allow(self.fx.b_cmd(body=T3))
 
@@ -730,6 +796,10 @@ class GuardTest(unittest.TestCase):
         self.fx.set_record("pr", overrides={"body_sha256": "f" * 64})
         self.expect_empty(self.fx.c_cmd())
 
+    def test_5_5C_record_without_pr(self):
+        self.fx.set_record("create")
+        self.expect_empty(self.fx.c_cmd())
+
     def test_5_5C_paginate_and_jq(self):
         self.expect_empty(self.fx.c_cmd(extra=" --paginate"))
         self.expect_empty(self.fx.c_cmd(extra=" --jq .id"))
@@ -760,11 +830,13 @@ class GuardTest(unittest.TestCase):
         self.expect_allow("gh --version", overrides={"cwd": self.fx.tmp})
 
     def test_5_4a_project_dir_env_missing(self):
-        out, err, rc = subprocess.run(
+        proc = subprocess.run(
             [sys.executable, "-I", GUARD, "--expect-sha256", sha256_file(GUARD)],
             input=json.dumps(self.fx.hook_input(self.fx.b_cmd())).encode(),
-            capture_output=True, env={"PATH": self.fx.bin}, timeout=GUARD_TIMEOUT).stdout.decode(), None, 0
-        self.assertEqual(out, "")
+            capture_output=True, env={"PATH": self.fx.bin}, timeout=GUARD_TIMEOUT)
+        self.assertEqual(proc.returncode, 0)
+        self.assertEqual(proc.stdout.decode(), "")
+        self.assertEqual(proc.stderr.decode(), "")
 
     def test_5_4b_env_gh_host_rejects_writes(self):
         self.expect_empty(self.fx.b_cmd(), env_extra={"GH_HOST": "example.invalid"})
@@ -885,6 +957,18 @@ class GuardTest(unittest.TestCase):
     def test_5_6R3_grep_recursive_on_file_operand(self):
         self.expect_empty(f"grep -r pat {self.fx.file}")
 
+    def test_5_6R3_grep_recursive_over_whole_root(self):
+        self.expect_empty(f"grep -r pat {self.fx.proj}")
+        self.expect_empty(f"grep -r pat {self.fx.goroot}/src")
+
+    def test_5_6R3_grep_nested_git_under_goroot(self):
+        self.expect_empty(f"grep -c core {self.fx.goroot}/src/.git/config")
+
+    def test_5_6R3_grep_hardlinked_operand(self):
+        other = os.path.join(self.fx.proj, "hardlink.txt")
+        os.link(self.fx.file, other)
+        self.expect_empty(f"grep -c git {other}")
+
     def test_5_6R3_grep_outside_roots(self):
         self.expect_empty("grep -c pat /home/claude/.claude/settings.json")
 
@@ -969,6 +1053,15 @@ class GuardTest(unittest.TestCase):
         os.symlink(self.fx.subdir, link)
         self.expect_empty(f"cat {link}/a.go")
 
+    def test_5_6R4_nested_git_under_project(self):
+        self.expect_empty(f"cat {self.fx.nested_git}/config")
+        self.expect_empty(f"ls -la {self.fx.nested_git}")
+
+    def test_5_6R4_cat_hardlinked_operand(self):
+        other = os.path.join(self.fx.proj, "hardlink.txt")
+        os.link(self.fx.file, other)
+        self.expect_empty(f"cat {other}")
+
     # 5.6 R5 ------------------------------------------------------------------
     def test_5_6R5_sed_range_ok(self):
         self.expect_allow(f"sed -n '10,20p' {self.fx.file}")
@@ -1021,6 +1114,35 @@ class GuardTest(unittest.TestCase):
 
     def test_5_6R6_C_other_root(self):
         self.expect_empty("git -C /tmp/other log")
+
+    def test_5_6R6_C_subdirectory_of_project(self):
+        self.expect_empty(f"git -C {self.fx.subdir} log --oneline")
+
+    def test_5_6R6_without_C_requires_project_cwd(self):
+        self.expect_empty("git status --porcelain", overrides={"cwd": self.fx.tmp})
+        self.expect_allow(f"git -C {self.fx.proj} status --porcelain", overrides={"cwd": self.fx.tmp})
+
+    def test_5_6R6_repeated_flags(self):
+        self.expect_empty("git log --oneline --oneline")
+        self.expect_empty("git log -n 3 -n 5")
+        self.expect_empty("git log --format=%H --format=%h")
+
+    def test_5_6R6_grep_repeated_e_ok(self):
+        self.expect_allow("git grep -c -e a -e b")
+
+    def test_5_6R6_path_shaped_rev_outside_roots(self):
+        self.expect_empty("git log /etc/passwd")
+        self.expect_empty("git show /etc/passwd")
+        self.expect_empty("git log ../../x")
+        self.expect_empty("git rev-parse /etc/passwd")
+        self.expect_empty(f"git log {self.fx.proj}/.git/config")
+
+    def test_5_6R6_branch_like_rev_ok(self):
+        self.expect_allow("git log --oneline origin/release/0.3")
+        self.expect_allow("git log --oneline -- internal")
+
+    def test_5_6R6_hash_object_relative_operand(self):
+        self.expect_empty("git hash-object internal/a.go")
 
     def test_5_6R6_grep_count_ok(self):
         self.expect_allow("git grep -c pat")

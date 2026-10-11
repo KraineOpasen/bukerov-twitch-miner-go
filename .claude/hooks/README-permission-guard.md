@@ -126,6 +126,17 @@ resolve under ROOTS and never under `.git/` except `.git/HEAD`.
 * **R5** `sed -n N[,M]p FILE`.
 * **R6** `git [-C <project>] <subcommand>` with no other global option, for: `status log show diff rev-parse ls-files cat-file hash-object check-ignore var branch remote worktree describe grep ls-remote`, each with the flag set listed in `permission_guard.py` (`GIT_SUBCOMMANDS`); REV matches `^[A-Za-z0-9._/^~-]{1,120}$`, formats match `^[%A-Za-z0-9 ()<>:,._-]{1,120}$`; any token containing `--output`, `--ext-diff`, `--textconv`, `-O`, `--open-files-in-pager` or `--no-textconv=false` means no decision. GIT_* names must be absent; git identity is checked.
 
+Narrowings beyond the contract text (each answers "nothing" where the contract would
+have allowed; none widens): a `.git` directory at any depth under either root is
+refused, not only the project's top-level one; a regular-file operand must have link
+count 1; `grep -r` over a whole root is refused; a rev-shaped token that contains `/`
+or starts with `.` is also checked as a repository path, so no rev can name a file
+elsewhere; `git` forms without `-C` require the hook's `cwd` to be the project;
+`git hash-object` takes absolute operands only; a repeated git flag is refused
+(`-e` may repeat for `git grep`); any `~` in a `gh` command is refused (bash
+expands `~` after `:` and `=` inside words); a body file whose separators are
+Unicode whitespace other than space, tab, CR and LF is not a trigger.
+
 Everything else: no decision. Deny rules are never reasoned about — Claude Code
 applies them before and regardless of the hook.
 
@@ -166,24 +177,45 @@ python3 -I /home/claude/bukerov-twitch-miner-go/.claude/hooks/install_permission
 python3 -I /home/claude/bukerov-twitch-miner-go/.claude/hooks/install_permission_guard.py promote  --manifest <evidence root>/install-manifest.json
 ```
 
-The manifest names `source`, `source_sha256`, `runtime_root`, `settings_target`,
-`evidence_dir` and the `registration` template; the installer touches nothing
-else and never deletes anything. `install` records the preimage (ABSENT, or a
-byte copy under the evidence directory), refuses any foreign `PermissionRequest`
-entry (exit 3) and is a no-op when the exact registration is already present
-(exit 0), creates the 0444 runtime copy (refusing an existing directory, exit
-5), re-reads the target before writing (DRIFT_BEFORE_WRITE, exit 6), and
-replaces atomically through a temporary file in the same directory. `verify`
-compares the settings hash with the recorded postimage and the runtime hash with
-the registered SHA (MATCH exit 0 / DRIFT exit 1) and writes nothing. `rollback`
-restores the preimage bytes (or renames an ABSENT-preimage file to
+The manifest names `source`, `source_sha256`, `runtime_root` (its parent must
+exist), `settings_target`, `evidence_dir` and the `registration` template (exactly
+the section-4 entry: matcher `Bash`, one `command` hook with the template command
+and an integer `timeout`; any other key, `onFailure` included, is refused); the
+installer touches nothing else and never deletes anything. `install` records the
+preimage (ABSENT, or a byte copy under the evidence directory), refuses any
+foreign `PermissionRequest` entry (exit 3) and is a no-op when the exact
+registration is already present (exit 0), builds and validates the new document
+before anything is created, re-reads the target (DRIFT_BEFORE_WRITE, exit 6),
+creates the 0444 runtime copy (refusing an existing directory, exit 5), re-reads
+once more, and replaces atomically through a temporary file in the same
+directory: the file is written in full, fsynced and hashed before `os.replace`,
+and the postimage on disk is compared with the intended bytes afterwards. Every
+failure of that path names the temporary file (exit 7). `verify` compares the
+settings hash with the recorded postimage, the runtime hash with the registered
+SHA and requires the registration to be present exactly once (MATCH exit 0 /
+DRIFT exit 1); it writes nothing. `rollback` restores the preimage bytes with the
+recorded mode (or renames an ABSENT-preimage file to
 `settings.local.json.rolled-back-<UTC>`) and renames the runtime directory to
 `<HASH12>.disabled-<UTC>`; with drift it refuses (exit 4). `promote` installs a
 repaired guard under its new hash, replaces the registration string once,
 renames the old runtime directory `.superseded-<UTC>` and chains its receipt to
-the previous one. Every run prints one JSON receipt (last stdout line) that
-names the rollback command; successful runs update
-`<evidence_dir>/permission-guard-state.json`.
+the previous one. Every path that `verify`, `rollback` and `promote` act on is
+re-checked against the manifest (the settings target must match, runtime
+directories must sit under `runtime_root`, a preimage backup must sit under
+`evidence_dir`); a state file that disagrees is refused (exit 2), never acted on.
+
+Every run prints one JSON receipt (last stdout line) that names the rollback
+command. The receipt records progress as it happens: `runtime_copy_created`,
+`settings_written` (install, promote) or `settings_restored` (rollback) with the
+live postimage hash, so a failure after a completed write is never silent; any
+run that changed the settings file updates `<evidence_dir>/permission-guard-state.json`
+even when a later step failed, and `rollback` then works from that live state. A
+failed install may leave `<runtime_root>/<HASH12>/` behind (the receipt names it);
+the owner renames it before retrying — nothing is deleted. After a rollback the
+state file records ROLLED_BACK and `verify`/`rollback`/`promote` refuse with
+STATE_NOT_INSTALLED (exit 2) until a new `install`. A state-file write that fails
+after a successful transaction keeps the transaction's result but exits 7 with
+reason STATE_SAVE_FAILED.
 
 The rollback command printed by the install receipt is valid while the settings
 file still hashes to the recorded postimage; otherwise the installer reports
@@ -199,21 +231,31 @@ python3 -I /home/claude/bukerov-twitch-miner-go/.claude/hooks/native_harness.py 
 
 Builds `ROOT/proj` (a fresh repository on `chore/permission-guard`), registers
 the candidate as the PermissionRequest hook in `proj/.claude/settings.json`
-beside the ask rules `Bash(gh *)`, `Bash(git config *)`, `Bash(git -* config *)`
-and the clone's all-false `enabledPlugins` map, and runs one nested
-`claude -p … --permission-mode default --permission-prompts none --max-turns 3
---output-format stream-json --verbose` per case. Isolation: a fake `gh` first on
-PATH (prints `FAKE_GH ARGV=…`), the record pins `gh_path` to that fake,
-`GH_TOKEN` is an invalid literal, the PR number is 999999999 and the project has
-no remote. The contract's `GH_CONFIG_DIR` layer is not used because the guard
-refuses any hook environment that carries that name (5.4 b) — the same check H6
-verifies with `GH_HOST`. Cases H1–H10 (H11 optional) must all PASS for
-`NATIVE_INERT_PASS`; a case whose first Bash command differs from the requested
-one is INVALID and retried once. Case H2 (create) runs with a record without
-`pr`, the others with `pr` 999999999, because shape A requires the record to
-carry no PR yet. The harness records what was UNKNOWN beforehand: whether a
-nested `claude -p` starts inside a Bash tool on this build, whether user-level
-hooks interfere, and the nested runs' cost.
+beside the ask rules `Bash(gh *)`, `Bash(git config *)`, `Bash(git -* config *)`,
+the clone's tracked deny list plus Read denies for `~/.config/gh`, `~/.claude`
+and `~/.gitconfig`, and the clone's all-false `enabledPlugins` map, and runs one
+nested `claude -p … --permission-mode default --permission-prompts none
+--max-turns 3 --output-format stream-json --verbose` per case. The real
+repository is unreachable by construction: a fake `gh` first on PATH (prints
+`FAKE_GH ARGV=…`), the record pins `gh_path` to that fake, `GH_TOKEN` is an
+invalid literal, the PR number is 999999999 and the project has no remote. The
+user's other credentials are protected by the permission engine (the deny rules,
+`--permission-prompts none`, `--max-turns 3`), not by construction: the nested
+session runs as the user and loads the user's MCP connectors and plugins, so the
+harness copies each nested session's `init` inventory (tools, MCP servers,
+plugins, model) into `meta.json` and `receipt.json` for review. The contract's
+`GH_CONFIG_DIR` layer is not used because the guard refuses any hook environment
+that carries that name (5.4 b) — the same check H6 verifies with `GH_HOST`.
+Cases H1–H10 (H11 optional) must all PASS for `NATIVE_INERT_PASS`; a case whose
+first Bash command differs from the requested one is INVALID and retried once.
+Case H2 (create) runs with a record without `pr`, the others with `pr`
+999999999, because shape A requires the record to carry no PR yet. H10's denial
+proves that without the hook no allow source exists for `gh --version` under the
+ask rules; it does not single out which rule fired. Not natively verified:
+that the engine supplies `agent_id` inside subagents (the sub-agent refusal of
+write shapes rests on the documented input fields). The throwaway project is
+left in its canonical state (hook variant) when the run ends; nested sessions
+also write their own transcripts under `~/.claude/projects/`.
 
 ## Trust boundary
 
