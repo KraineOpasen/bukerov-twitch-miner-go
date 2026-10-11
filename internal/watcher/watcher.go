@@ -1238,13 +1238,23 @@ func (w *MinuteWatcher) processWatching(ctx context.Context) {
 	if len(onlineStreamers) > 0 {
 		configuredWatch = w.selectStreamersToWatch(onlineStreamers, now)
 	}
-	// A channel kept as a candidate only while its status is UNKNOWN was told
-	// its slot is retained. Phase B never seats a configured channel Phase A
-	// left out, so when Phase A leaves it out — the single boost or the PA-B1
-	// admission gave its seat away — say so instead.
+	// A channel kept as a candidate only while its status was UNKNOWN was told
+	// its slot is retained. Once this tick's refresh has confirmed its status
+	// that note no longer applies, so it is dropped and the default reason
+	// stands. While it is still UNKNOWN, Phase B cannot seat it, so when the
+	// configured selection leaves it out — fairness, the single boost or the
+	// PA-B1 admission gave its seat away, or no configured priority matched it
+	// — it is told its slot is no longer retained.
 	for _, idx := range onlineStreamers {
-		if w.selectionReasons[idx] == retainedUnknownReason && !containsIndex(configuredWatch, idx) {
-			w.noteSelection(idx, "status unconfirmed - not watched this tick: the selection seated other channels, so its slot is no longer retained")
+		if w.selectionReasons[idx] != retainedUnknownReason {
+			continue
+		}
+		if w.streamers[idx].GetStatus() != models.StatusUnknown {
+			delete(w.selectionReasons, idx)
+			continue
+		}
+		if !containsIndex(configuredWatch, idx) {
+			w.noteSelection(idx, "status unconfirmed - not watched this tick: the configured selection left it out, so its slot is no longer retained")
 		}
 	}
 	extra := w.gatherCandidates(ctx, sources, avoid)
@@ -2321,7 +2331,7 @@ func (w *MinuteWatcher) admitRestrictedDrops(base, pair [2]int, onlineIndexes []
 		if carrier := w.restrictedCarrier(pair, out, workOf); carrier >= 0 {
 			w.noteSelection(out, "not watched this tick: displaced by channel-restricted drop "+
 				w.streamers[in].GetUsername()+"; "+w.restrictedCarrierClause(carrier, "its channel-restricted campaigns")+
-				w.skipRuledNote(out, workOf))
+				w.skipRuledNote(out, skips))
 			continue
 		}
 		w.noteSelection(out, "not watched this tick: displaced by channel-restricted drop "+
@@ -2329,6 +2339,9 @@ func (w *MinuteWatcher) admitRestrictedDrops(base, pair [2]int, onlineIndexes []
 	}
 	for _, idx := range waiting {
 		reason, carried := w.restrictedWaitingReason(pair, idx, workOf)
+		if carried {
+			reason += w.skipRuledNote(idx, skips)
+		}
 		if idx == keptBoostVictim && !carried {
 			w.noteSelectionIfEmpty(idx, reason)
 			continue
@@ -2385,7 +2398,7 @@ func (w *MinuteWatcher) heldRestrictedWork(idx int, workOf func(int) map[string]
 // instead of one blaming the seats.
 func (w *MinuteWatcher) restrictedWaitingReason(pair [2]int, idx int, workOf func(int) map[string]bool) (string, bool) {
 	if carrier := w.restrictedCarrier(pair, idx, workOf); carrier >= 0 {
-		return "waiting: " + w.restrictedCarrierClause(carrier, "the same channel-restricted drop campaign") + w.skipRuledNote(idx, workOf), true
+		return "waiting: " + w.restrictedCarrierClause(carrier, "the same channel-restricted drop campaign"), true
 	}
 	_, firstRestricted := w.heldRestrictedWork(pair[0], workOf)
 	_, secondRestricted := w.heldRestrictedWork(pair[1], workOf)
@@ -2428,12 +2441,15 @@ func (w *MinuteWatcher) unseatedNote(idx int, note string) string {
 	}
 }
 
-// skipRuledNote tells a channel whose seated carrier farms all of its
-// restricted work that its channel-restricted campaigns an operator Skip rule
-// excludes are not farmed, when it has any.
-func (w *MinuteWatcher) skipRuledNote(idx int, workOf func(int) map[string]bool) string {
-	if len(restrictedWork(w.streamers[idx], nil)) > len(workOf(idx)) {
-		return "; its channel-restricted campaigns that an operator Skip rule excludes are not farmed"
+// skipRuledNote tells a channel whose restricted work a seated channel carries
+// that its channel-restricted campaigns an operator Skip rule excludes are not
+// farmed, when one read of its assignment shows any under skips, the Skip rules
+// of this admission pass.
+func (w *MinuteWatcher) skipRuledNote(idx int, skips *models.RewardSkips) string {
+	for _, c := range w.streamers[idx].Stream.GetCampaigns() {
+		if c != nil && c.HasRemainingUnclaimedWork() && c.IsChannelRestricted() && skips.SkipsCampaignCurrentDrop(c) {
+			return "; its channel-restricted campaigns that an operator Skip rule excludes are not farmed"
+		}
 	}
 	return ""
 }

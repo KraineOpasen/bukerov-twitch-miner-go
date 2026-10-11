@@ -188,8 +188,9 @@ func TestRestrictedSkipRuledSeatGivenUpAsOrdinary(t *testing.T) {
 			if got := restrictedSlotLogins(t, f); !sameLoginSet(got, tc.want...) {
 				t.Fatalf("slots=%v, want %v", got, tc.want)
 			}
-			if reason := decisionReason(f.w, "streamerd"); !strings.Contains(reason, "streamerc already farms the same channel-restricted drop campaign") {
-				t.Fatalf("streamerd reason=%q, want its carrier streamerc", reason)
+			if reason := decisionReason(f.w, "streamerd"); !strings.Contains(reason, "streamerc already farms the same channel-restricted drop campaign") ||
+				strings.Contains(reason, skipRuledNotFarmed) {
+				t.Fatalf("streamerd reason=%q, want its carrier streamerc and no skip-ruled note (it holds no skip-ruled campaign)", reason)
 			}
 			if reason := decisionReason(f.w, "streamerc"); !strings.HasPrefix(reason, tc.admitted) {
 				t.Fatalf("streamerc reason=%q, want prefix %q", reason, tc.admitted)
@@ -300,6 +301,71 @@ func TestRestrictedSkipRuledCampaignOfDisplacedDuplicateNotFarmed(t *testing.T) 
 	if !strings.Contains(reason, "displaced by channel-restricted drop streamere; streamerc already farms its channel-restricted campaigns") ||
 		!strings.Contains(reason, skipRuledNotFarmed) {
 		t.Fatalf("streamerd reason=%q, want its carrier and the skip-ruled note", reason)
+	}
+}
+
+// R9 with FB-OD-10: the skip-ruled note counts only unfinished
+// channel-restricted campaigns, so a carried channel whose game-wide or
+// finished campaign carries the operator's Skip rule is not told that
+// skip-ruled campaigns are not farmed, while one whose unfinished
+// channel-restricted campaign carries it is.
+func TestRestrictedSkipRuledNoteOnlyForRestrictedCampaigns(t *testing.T) {
+	cases := []struct {
+		name     string
+		extra    func(d *models.Streamer) *models.Campaign
+		wantNote bool
+	}{
+		{
+			name: "skip-ruled game-wide campaign",
+			extra: func(*models.Streamer) *models.Campaign {
+				gameWide := watchSlotTestCampaign("camp-gamewide", "", false)
+				gameWide.Game = &models.Game{ID: "game-skip"}
+				gameWide.Drops[0].Name = "Skipped Reward"
+				return gameWide
+			},
+		},
+		{
+			name: "finished skip-ruled channel-restricted campaign",
+			extra: func(d *models.Streamer) *models.Campaign {
+				finished := skipRuledRestrictedCampaign("camp-skip-streamerd", d)
+				finished.ClaimStatus = models.CampaignClaimStatusAlreadyClaimed
+				return finished
+			},
+		},
+		{
+			name: "control: skip-ruled channel-restricted campaign",
+			extra: func(d *models.Streamer) *models.Campaign {
+				return skipRuledRestrictedCampaign("camp-skip-streamerd", d)
+			},
+			wantNote: true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newResidenceFixture(t, 4)
+			byLogin := streamersByLogin(f.w.streamers)
+			c, d := byLogin["streamerc"], byLogin["streamerd"]
+			shared := restrictedTestCampaign("camp-shared", c, d)
+			assignRestricted(c, shared)
+			assignRestricted(d, shared, tc.extra(d))
+			f.w.SetRewardSkips(skipRuledRewards())
+			f.seedWeights(t, time.Now(), map[string]float64{
+				"streamera": 5, "streamerb": 10, "streamerc": 60, "streamerd": 70,
+			})
+
+			f.w.processWatching(tickCtx(f.w))
+
+			if got := restrictedSlotLogins(t, f); !sameLoginSet(got, "streamera", "streamerc") && !sameLoginSet(got, "streamerb", "streamerc") {
+				t.Fatalf("slots=%v, want streamerc beside a fair-pair channel and streamerd waiting", got)
+			}
+			reason := decisionReason(f.w, "streamerd")
+			if !strings.Contains(reason, "streamerc already farms the same channel-restricted drop campaign") {
+				t.Fatalf("streamerd reason=%q, want its carrier streamerc", reason)
+			}
+			if got := strings.Contains(reason, skipRuledNotFarmed); got != tc.wantNote {
+				t.Fatalf("streamerd reason=%q, skip-ruled note present=%v, want %v", reason, got, tc.wantNote)
+			}
+		})
 	}
 }
 

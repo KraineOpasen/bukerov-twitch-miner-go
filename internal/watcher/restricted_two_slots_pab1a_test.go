@@ -1,11 +1,13 @@
 package watcher
 
 import (
+	"context"
 	"math/rand"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/config"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/models"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/policy"
 )
@@ -1724,8 +1726,9 @@ func TestRestrictedWaitingReasonWhenAssignmentChangedMidEvaluation(t *testing.T)
 // unconfirmed; a seated channel's reason is a watched one; no reason names an
 // unseated channel as holding a seat; a displaced restricted occupant names its
 // admitter and its carrier while a displaced ordinary seat gets the ordinary
-// reason; a carrier reason names a carrier confirmed online when one exists,
-// and the both-seats reason names exactly the final seats and marks one that is
+// reason; a carrier reason names a carrier confirmed online when one exists
+// and carries the skip-ruled note exactly when a Skip rule excludes one of the
+// channel's restricted campaigns, and the both-seats reason names exactly the final seats and marks one that is
 // not confirmed online; and the boost's victim gets the right reason: an
 // ordinary one is told which channel holds its seat once the admission gave it
 // away and otherwise keeps the boost's reason, and a qualifying one gets its
@@ -2025,6 +2028,18 @@ func TestRestrictedAdmissionInvariantsHoldForRandomAssignments(t *testing.T) {
 					t.Fatalf("iteration %d: reason %q of %d does not name an online carrier %v", iteration, reason, idx, onlineCarriers)
 				}
 			}
+			// A carried channel is told its skip-ruled campaigns are not farmed
+			// exactly when a Skip rule removes one of its unfinished
+			// channel-restricted campaigns from its restricted work.
+			if strings.Contains(reason, "(owner rule PA-B1a)") {
+				excluded := false
+				for id := range restrictedWork(w.streamers[idx], nil) {
+					excluded = excluded || !occupied(idx)[id]
+				}
+				if strings.Contains(reason, "an operator Skip rule excludes are not farmed") != excluded {
+					t.Fatalf("iteration %d: carried %d reason=%q, want the skip-ruled note exactly when a Skip rule excludes one of its restricted campaigns (%v)", iteration, idx, reason, excluded)
+				}
+			}
 			if strings.Contains(reason, "both watch slots are held by channel-restricted drops (") {
 				label := func(seat int) string {
 					switch st := w.streamers[seat]; st.GetStatus() {
@@ -2112,17 +2127,24 @@ func unseatedTail(s *models.Streamer, onlineTail string) string {
 }
 
 // R9, R13 repaired: a channel kept as a candidate only while its status is
-// UNKNOWN is told its slot is no longer retained once the selection leaves it
-// out — after the PA-B1 admission had given it a seat, or after the single
-// boost had — and keeps the retention reason while it stays seated.
+// UNKNOWN is told its slot is no longer retained once the configured selection
+// leaves it out — after the PA-B1 admission had given it a seat, or after the
+// single boost had — and keeps the retention reason while it stays seated.
+// When this tick's refresh confirms its status first, the retention note is
+// dropped: a channel confirmed offline publishes no reason, and one confirmed
+// online is not described as unconfirmed.
 func TestRestrictedRetainedUnknownLeftOutIsNotToldRetained(t *testing.T) {
-	const notRetained = "status unconfirmed - not watched this tick: the selection seated other channels, so its slot is no longer retained"
+	const notRetained = "status unconfirmed - not watched this tick: the configured selection left it out, so its slot is no longer retained"
+	boostSeat := func(byLogin map[string]*models.Streamer) {
+		makeDropCandidate(byLogin["streamerc"], true)
+	}
 	cases := []struct {
 		name    string
 		setup   func(byLogin map[string]*models.Streamer)
 		seeds   map[string]float64
 		tick1   []string
 		unknown string
+		confirm string
 		want    string
 	}{
 		{
@@ -2136,10 +2158,8 @@ func TestRestrictedRetainedUnknownLeftOutIsNotToldRetained(t *testing.T) {
 			unknown: "streamerd", want: notRetained,
 		},
 		{
-			name: "seat the single boost gave",
-			setup: func(byLogin map[string]*models.Streamer) {
-				makeDropCandidate(byLogin["streamerc"], true)
-			},
+			name:    "seat the single boost gave",
+			setup:   boostSeat,
 			seeds:   map[string]float64{"streamera": 10, "streamerb": 20, "streamerc": 80, "streamerd": 90},
 			tick1:   []string{"streamera", "streamerc"},
 			unknown: "streamerc", want: notRetained,
@@ -2150,6 +2170,20 @@ func TestRestrictedRetainedUnknownLeftOutIsNotToldRetained(t *testing.T) {
 			tick1:   []string{"streamera", "streamerb"},
 			unknown: "streamera", want: retainedUnknownReason,
 		},
+		{
+			name:    "refresh confirms it offline",
+			setup:   boostSeat,
+			seeds:   map[string]float64{"streamera": 10, "streamerb": 20, "streamerc": 80, "streamerd": 90},
+			tick1:   []string{"streamera", "streamerc"},
+			unknown: "streamerc", confirm: "offline", want: "",
+		},
+		{
+			name:    "refresh confirms it online",
+			setup:   boostSeat,
+			seeds:   map[string]float64{"streamera": 10, "streamerb": 20, "streamerc": 80, "streamerd": 90},
+			tick1:   []string{"streamera", "streamerc"},
+			unknown: "streamerc", confirm: "online", want: "watched",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -2158,6 +2192,9 @@ func TestRestrictedRetainedUnknownLeftOutIsNotToldRetained(t *testing.T) {
 			if tc.setup != nil {
 				tc.setup(byLogin)
 			}
+			checker := &statusConfirmingChecker{login: tc.unknown, online: tc.confirm == "online"}
+			f.w.client = checker
+			f.w.routineRefreshAfter = -1
 			f.seedWeights(t, time.Now(), tc.seeds)
 
 			f.w.processWatching(tickCtx(f.w))
@@ -2165,17 +2202,68 @@ func TestRestrictedRetainedUnknownLeftOutIsNotToldRetained(t *testing.T) {
 				t.Fatalf("tick 1: slots=%v, want %v", got, tc.tick1)
 			}
 			byLogin[tc.unknown].SetUnknown(models.ReasonTransportError)
+			checker.armed = tc.confirm != ""
 			f.w.processWatching(tickCtx(f.w))
 
 			seated := containsLogin(restrictedSlotLogins(t, f), tc.unknown)
-			if seated != (tc.want == retainedUnknownReason) {
+			if wantSeated := tc.want == retainedUnknownReason || tc.want == "watched"; seated != wantSeated {
 				t.Fatalf("tick 2: %s seated=%v, slots=%v", tc.unknown, seated, restrictedSlotLogins(t, f))
 			}
-			if reason := decisionReason(f.w, tc.unknown); reason != tc.want {
+			reason := decisionReason(f.w, tc.unknown)
+			matches := reason == tc.want
+			if tc.want == "watched" {
+				// Confirmed online and seated again: a watched reason, never the
+				// retention note.
+				matches = strings.HasPrefix(reason, "watched")
+			}
+			if !matches {
 				t.Fatalf("tick 2: %s reason=%q, want %q", tc.unknown, reason, tc.want)
 			}
 		})
 	}
+}
+
+// R13 repaired in direct mode: with a priority list that seats nothing for a
+// retained channel whose drop no longer qualifies while UNKNOWN, it is told
+// the configured selection left it out, not that other channels were seated.
+func TestRestrictedRetainedUnknownLeftOutInDirectMode(t *testing.T) {
+	f := newResidenceFixture(t, 2)
+	f.w.priorities = []config.Priority{config.PriorityDrops}
+	byLogin := streamersByLogin(f.w.streamers)
+	makeDropCandidate(byLogin["streamera"], true)
+
+	f.w.processWatching(tickCtx(f.w))
+	if got := brokerChannels(f.w.BrokerSnapshot()); len(got) != 1 || !strings.HasPrefix(got[0], "streamera") {
+		t.Fatalf("tick 1: slots=%v, want streamera alone", got)
+	}
+	byLogin["streamera"].SetUnknown(models.ReasonTransportError)
+	f.w.processWatching(tickCtx(f.w))
+
+	if got := brokerChannels(f.w.BrokerSnapshot()); len(got) != 0 {
+		t.Fatalf("tick 2: slots=%v, want none", got)
+	}
+	want := "status unconfirmed - not watched this tick: the configured selection left it out, so its slot is no longer retained"
+	if reason := decisionReason(f.w, "streamera"); reason != want {
+		t.Fatalf("tick 2: streamera reason=%q, want %q", reason, want)
+	}
+}
+
+// statusConfirmingChecker confirms login's status during the routine refresh
+// once armed, as a transport recovering mid-tick would.
+type statusConfirmingChecker struct {
+	login  string
+	online bool
+	armed  bool
+}
+
+func (c *statusConfirmingChecker) CheckStreamerOnlineContext(_ context.Context, s *models.Streamer) models.StatusTransition {
+	if !c.armed || s.GetUsername() != c.login {
+		return models.StatusTransition{}
+	}
+	if c.online {
+		return s.SetConfirmedOnline()
+	}
+	return s.SetConfirmedOffline()
 }
 
 // R9: a channel the admission displaces, or a boost victim whose seat it gives
