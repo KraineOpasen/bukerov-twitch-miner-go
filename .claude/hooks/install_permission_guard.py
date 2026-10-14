@@ -66,9 +66,14 @@ Validation before the first write (rev21, 7.11d (2)):
      the settings target, the state file, an archive or sibling name of them) every outcome keeps its code:
      0, 2, 3, 4, 5 or 6, with nothing but the refusal receipt written. After one, a refusal is FAILED /
      exit 7 with original_code, and every write the run made is named (preimage_backup_created,
-     runtime_parent_created, runtime_dir_owned, runtime_renamed_to, temp_path, ...).
+     runtime_parent_created, runtime_dir_owned, runtime_renamed_to, temp_path, ...). The creation of
+     RUNTIME_PARENT and the creation of <HASH12> are each, on their own, a transaction write: with an ABSENT
+     preimage (no preimage copy) a failure right after the RUNTIME_PARENT mkdir is already FAILED / exit 7
+     (rev23 X1). failed_step is set only after a transaction write; runtime_renamed_to is null when a
+     pre-commit failure found no <HASH12> of this run to archive.
   V3 verify reads a malformed hooks structure as no registration (registration_error) and continues the
-     11.3 precedence; it never exits 2 for it.
+     11.3 precedence; it never exits 2 for it. A document nested deeper than the JSON decoder can follow
+     (RecursionError) is malformed JSON like any other, in every mode and for every file read (rev23 X2).
 
 Interrupts (rev18, 7.11c (2), S1H-OD-7; rev21 7.11d (1)):
   P  the precondition checks write nothing and keep the default signal behaviour: Ctrl+C there raises
@@ -82,8 +87,11 @@ Interrupts (rev18, 7.11c (2), S1H-OD-7; rev21 7.11d (1)):
      stays plainly interruptible. The handler stores the first signal's number and does nothing else: it
      raises nothing, performs no I/O and is never removed, so from then until the process exits these
      signals end nothing.
-  W  every write follows E. Each creation or rename is recorded in the statement after it (D5), a created
-     file the moment os.open returns.
+  W  every write follows E. Each transaction write the receipt names is recorded in the statement after it
+     (D5): the RUNTIME_PARENT and <HASH12> mkdirs, the preimage copy (the moment os.open returns), the
+     settings replacement or ABSENT rename, and the .aborted-, .disabled-, .superseded- and rolled-back-
+     renames. The runtime copy file is covered by its recorded <HASH12>; receipts/ and the receipt file are
+     evidence-only (a failure there is receipt_saved false).
   D3 the state and the final receipt each record interrupt_deferred (bool) and interrupt_signal (the first
      signal's name or null) as observed at the record's snapshot, taken immediately before it is
      serialized. The printed receipt carries the final receipt's snapshot. A signal that arrives after that
@@ -102,10 +110,13 @@ every pinned constant, including the manifest paths, is then rebased under DIR, 
 from TEST_FAULT_POINTS) are accepted only together with it. The signal-* points send this process
 SIGINT at a fixed place; pause-in-scope waits at most 30 s inside the scope for DIR/pause-release; the
 interrupt-* points raise KeyboardInterrupt from code, which a real signal no longer does; post-creation-check
-fails the run's first strict check after a directory creation (V1).
+fails the run's first strict check after a directory creation (V1); transaction-boundary records, at the run's
+first post-creation boundary, whether the run is already in the transaction-write state, then fails there
+(rev23 X1).
 
 Every run prints one JSON receipt as its last stdout line; once the manifest is verified the receipt
-also names the rollback command with both pins. Exit codes:
+also names the rollback command with both pins (null, with rollback_command_unavailable, when a promote finds no
+install manifest to pin). Exit codes:
   0 installed / idempotent / MATCH / rolled back / promoted
   1 verify DRIFT, INCOMPLETE_INSTALL (no trustworthy state but a registration, runtime dir or .aborted-
     archive), NOT_INSTALLED or STATE_UNREADABLE
@@ -126,7 +137,8 @@ state with a committed write (MATCH/DRIFT; DRIFT when the postimage is unknown o
 INCOMPLETE_INSTALL (no trustworthy state, but a registration, runtime dir or .aborted- archive remains);
 NOT_INSTALLED. Receipts and the state file are ASCII-escaped JSON. A receipt file is written under a
 temporary name in receipts/ and renamed to its final name only after a complete, fsynced write; a leftover
-temporary file is named in receipt_save_temp_path.
+temporary file is named in receipt_save_temp_path and is not authoritative (its content is the bytes prepared
+for the final name; the printed receipt, which says receipt_saved false, is the record of that run).
 A refusal before the evidence directory is verified is printed only (never written to an
 unverified path) and says receipt_saved false. The installer never deletes anything: it renames (rollback, promote, a failed
 install's runtime dir -> <HASH12>.aborted-<UTC>-<pid>) and replaces atomically.
@@ -169,14 +181,14 @@ EXIT_WRITE_FAILED = 7
 BARRIER_TIMEOUT_SECONDS = 15
 OPEN_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 OPEN_CLOEXEC = getattr(os, "O_CLOEXEC", 0)
-# --test-fault POINT (tests only, with --test-root): the fixed failure-injection points of 7.11b (2), 7.11c (2) D7 and the
-# single point 7.11d (2) V4 adds (post-creation-check)
+# --test-fault POINT (tests only, with --test-root): the fixed failure-injection points of 7.11b (2), 7.11c (2) D7, the
+# single point 7.11d (2) V4 adds (post-creation-check) and the single point 7.11e (2) X1 adds (transaction-boundary)
 TEST_FAULT_POINTS = ("postimage-read", "runtime-copy-write", "interrupt-before-replace", "interrupt-after-replace",
                      "state-save", "receipt-save", "dir-fsync", "temp-readback", "state-read",
                      "signal-before-scope", "signal-at-scope-entry", "signal-at-first-write",
                      "signal-after-archive-rename", "signal-after-disabled-rename", "signal-after-superseded-rename",
                      "signal-after-receipt-snapshot", "signal-after-final-observation", "pause-in-scope",
-                     "post-creation-check")
+                     "post-creation-check", "transaction-boundary")
 STEP_AFTER_REPLACE = "after the settings replacement"
 PAUSE_SECONDS = 30  # pause-in-scope (test only) waits at most this long for its release file
 # V2: the receipt records of the transaction writes (each set in the statement after its write, D5). Once one of them is
@@ -210,6 +222,7 @@ _deferred_signal = None  # the first deferred signal's number, or None
 _scope_entered = False
 _first_write_reached = False  # test seam bookkeeping for signal-at-first-write only
 _post_creation_fault_used = False  # test seam bookkeeping for post-creation-check only
+_boundary_fault_used = False  # test seam bookkeeping for transaction-boundary only
 
 
 def defer_signal(signum, frame):
@@ -316,7 +329,12 @@ def _reject_duplicate_keys(pairs):
 
 
 def loads_strict(data):
-    return json.loads(data.decode("utf-8"), object_pairs_hook=_reject_duplicate_keys)
+    """X2: a document nested deeper than the decoder can follow is invalid JSON like any other (the decoder raises
+    RecursionError for it, FACT from r23-x2/repro-on-head.log), never an unexpected error."""
+    try:
+        return json.loads(data.decode("utf-8"), object_pairs_hook=_reject_duplicate_keys)
+    except RecursionError as exc:
+        raise ValueError(f"nesting too deep: {exc}") from exc
 
 
 def dumps(obj):
@@ -486,7 +504,15 @@ def check_created_dir(path, root, reason, receipt, seams=None):
     """V1: the strict CT2-CT5 checks, run immediately after the installer created the directory `path` and before
     anything is written inside it. A failure there follows the post-write rule of V2 (FAILED, exit 7); a passed check is
     logged in post_creation_checks. The test point post-creation-check fails the first such check of a run."""
-    global _post_creation_fault_used
+    global _post_creation_fault_used, _boundary_fault_used
+    if "transaction-boundary" in (seams or {}).get("faults", ()) and not _boundary_fault_used:
+        # X1 (test only): the REFUSED-versus-FAILED classification as it stands right after this creation and its
+        # record, before any recovery, archive or other write; then the run halts here like a failed check
+        _boundary_fault_used = True
+        written = transaction_written(receipt)
+        receipt["test_transaction_boundary"] = {"path": path, "transaction_written": written,
+                                               "outcome_if_refused_here": "FAILED" if written else "REFUSED"}
+        refuse(reason, path=path, detail="TEST_FAULT transaction-boundary")
     if "post-creation-check" in (seams or {}).get("faults", ()) and not _post_creation_fault_used:
         _post_creation_fault_used = True
         refuse(reason, path=path, detail="TEST_FAULT post-creation-check")
@@ -796,17 +822,18 @@ def create_runtime_copy(layout, sha, receipt, seams=None):
     copy the source there (0444) and verify the copy. Ownership of <HASH12> is recorded in the receipt
     the moment its mkdir returns, so every later failure archives it (invariant A)."""
     if not os.path.lexists(layout.runtime_parent):
+        receipt["step"] = "runtime parent"
         require_real_dir(layout.hooks_dir, "HOOKS_DIR_NOT_REAL_DIRECTORY")
         before_first_write(seams)
         os.mkdir(layout.runtime_parent)
         receipt["runtime_parent_created"] = layout.runtime_parent  # D5: recorded in the statement after the mkdir returns
         check_created_dir(layout.runtime_parent, layout.hooks_dir, "RUNTIME_PARENT_NOT_REAL_DIRECTORY", receipt, seams)
+    receipt["step"] = "runtime copy"
     require_real_dir(layout.runtime_parent, "RUNTIME_PARENT_NOT_REAL_DIRECTORY")
     runtime_dir = layout.runtime_parent + "/" + sha[:12]
     require_contained(runtime_dir, layout.runtime_parent, "dir", "RUNTIME_DIR_NOT_CONTAINED")
     if os.path.lexists(runtime_dir):
         refuse("RUNTIME_DIR_EXISTS", EXIT_RUNTIME_EXISTS, runtime_dir=runtime_dir)
-    receipt["step"] = "runtime copy"
     before_first_write(seams)
     os.mkdir(runtime_dir)
     receipt["runtime_dir_owned"] = runtime_dir  # D5: recorded in the statement after the mkdir returns (A)
@@ -1052,8 +1079,8 @@ def do_install(layout, manifest, receipt, seams):
             receipt["test_" + name] = True
 
     receipt["hooks"] = new_obj["hooks"]
-    recheck_preimage(layout, pre_bytes)
-    try:
+    try:  # every pre-commit failure from here on goes through the archive rule (A), which records runtime_renamed_to
+        recheck_preimage(layout, pre_bytes)
         create_runtime_copy(layout, sha, receipt, seams)
         receipt["step"] = "settings replacement"
         recheck_preimage(layout, pre_bytes)
@@ -1415,9 +1442,12 @@ def main():
             install_manifest_sha = (receipt["manifest_sha256_verified"] if opts.mode != "promote"
                                     else (sha256_bytes(read_regular(layout.install_manifest, "MANIFEST_MISSING"))
                                           if os.path.isfile(layout.install_manifest) else None))
-            receipt["rollback_command"] = (
-                f"python3 -I {installer_path} rollback --manifest {layout.install_manifest} --expect-sha256 {own_sha} "
-                f"--expect-manifest-sha256 {install_manifest_sha}" + (f" --test-root {test_root}" if test_root else ""))
+            if install_manifest_sha is None:  # R5b-c-5: no rollback command can be printed without its manifest pin
+                receipt.update(rollback_command=None, rollback_command_unavailable="INSTALL_MANIFEST_MISSING")
+            else:
+                receipt["rollback_command"] = (
+                    f"python3 -I {installer_path} rollback --manifest {layout.install_manifest} --expect-sha256 {own_sha} "
+                    f"--expect-manifest-sha256 {install_manifest_sha}" + (f" --test-root {test_root}" if test_root else ""))
             if opts.mode == "install":
                 do_install(layout, manifest, receipt, seams)
             elif opts.mode == "verify":
@@ -1438,8 +1468,8 @@ def main():
         except KeyboardInterrupt as late:
             outcome = late_interrupt(receipt, outcome, late)
     record_outcome(receipt, outcome)
-    if receipt.get("exit_code") == EXIT_WRITE_FAILED and "step" in receipt:
-        receipt.setdefault("failed_step", receipt["step"])
+    if receipt.get("exit_code") == EXIT_WRITE_FAILED and "step" in receipt and transaction_written(receipt):
+        receipt.setdefault("failed_step", receipt["step"])  # R5b-c-3: a write step failed only if one was taken
     changed = bool(receipt.get("settings_written") or receipt.get("settings_restored"))
     if writing:
         if layout is not None:

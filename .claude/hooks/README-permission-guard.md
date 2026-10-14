@@ -256,7 +256,9 @@ Before the first transaction write (all modes that write):
   and its `hooks` structure validated at every level the installer reads or
   changes (a `hooks` or `PermissionRequest` value that is null, a list where an
   object is expected, a string or a number, or a `PermissionRequest` entry that
-  is not an object, is refused with exit 2), the new document is built and
+  is not an object, is refused with exit 2; a document nested deeper than the JSON
+  decoder can follow is malformed JSON like any other, SETTINGS_MALFORMED, exit 2,
+  and this holds for every file the installer parses), the new document is built and
   encoded, the foreign-hook, registration, manifest and source checks run, and
   the containment of every path the run will create, write or rename is checked
   prospectively: the existing part of each path as an existing parent is
@@ -278,8 +280,13 @@ Before the first transaction write (all modes that write):
   then is FAILED, exit 7, with its own code in `original_code`, and the receipt
   names every write the run made (`preimage_backup_created`,
   `runtime_parent_created`, `runtime_dir_owned`, `runtime_renamed_to`, which is
-  null when no `<HASH12>` was created, `temp_path`, `settings_written`,
-  `settings_restored`).
+  null when a failure before the settings replacement found no `<HASH12>` of this
+  run to archive, `temp_path`, `settings_written`, `settings_restored`), and
+  `failed_step` names the step that failed. The creation of RUNTIME_PARENT and the
+  creation of `<HASH12>` each count on their own: with no settings file before the
+  run (no preimage copy), a failure right after the installer created
+  RUNTIME_PARENT is already FAILED, exit 7, and RUNTIME_PARENT stays in place. A
+  RUNTIME_PARENT that existed before the run is never claimed as created by it.
 
 Write outcomes (all modes that write):
 
@@ -293,12 +300,14 @@ Write outcomes (all modes that write):
   `os.replace` of the settings target (or the rename of an ABSENT rollback)
   returns, the receipt records `settings_written` (install, promote) or
   `settings_restored` (rollback), the temporary file and
-  `intended_postimage_sha256`. Every other creation or rename is likewise
+  `intended_postimage_sha256`. Every other transaction write is likewise
   recorded in the statement after it (the `mkdir` of RUNTIME_PARENT as
   `runtime_parent_created` and of `<HASH12>` as `runtime_dir_owned`, the
   preimage copy as `preimage_backup_created` the moment the file exists, so a
   copy that fails part-way is named too, the `.aborted-`, `.disabled-` and
-  `.superseded-` renames); because no signal raises inside the write phase (see
+  `.superseded-` renames); the runtime copy file inside `<HASH12>` is covered by
+  the record of its directory, and `receipts/` with the receipt file is
+  evidence only; because no signal raises inside the write phase (see
   "Interrupts" below), nothing can come between an operation and its record. The
   read-back is a later step: when it fails the run ends with exit 7,
   POSTIMAGE_UNREADABLE and a null `postimage_sha256`, and the state records the
@@ -337,7 +346,8 @@ Interrupts (Ctrl+C, SIGTERM, SIGHUP):
   before the arguments are parsed, or within the few instructions of that
   take-over itself, can still end the process with Python's KeyboardInterrupt
   message (exit 130) and no receipt. SIGTERM or SIGHUP in phase P end the process
-  at once with no receipt. In every one of these cases nothing has been written.
+  at once with no receipt. In every one of these cases nothing has been written
+  to the settings target, RUNTIME_PARENT, `<HASH12>` or the state file.
 * **From the first write on.** Before its first write, and in every case before
   it reports its outcome (a refusal, an IDEMPOTENT no-op or a failure), `install`,
   `rollback` and `promote` install one handler for SIGINT, then SIGTERM, then
@@ -384,19 +394,27 @@ never absent; (3) no trustworthy state (none, or one whose paths or hashes fail
 the pinned layout, named in `state_refusal`) but a registration, a runtime
 directory or an `.aborted-` archive for the hash: INCOMPLETE_INSTALL (exit 1;
 owner recovery, no guessed rollback); (4) NOT_INSTALLED (exit 1). A settings
-document whose `hooks` structure is malformed counts as holding no registration
-(the cause in `registration_error`) and the precedence continues; `verify` never
-refuses it with exit 2. A transaction that ended nonzero stays nonzero in its
+document whose `hooks` structure is malformed, or that cannot be parsed at all
+(including one nested deeper than the JSON decoder can follow), counts as holding
+no registration (the cause in `registration_error`) and the precedence continues;
+a state file nested that deeply is STATE_UNREADABLE (`state_refusal`
+STATE_MALFORMED); `verify` never refuses either with exit 2 and never ends in an
+unexpected error for them. A transaction that ended nonzero stays nonzero in its
 receipt even when a later `verify` returns MATCH.
 
 Every run prints one JSON receipt (last stdout line); once the manifest has been
 verified the receipt also names the rollback command with both pins (a refusal
-before that point, such as a wrong installer or manifest pin, names none). A
+before that point, such as a wrong installer or manifest pin, names none; a
+`promote` that finds no install manifest to pin prints `rollback_command` null
+with `rollback_command_unavailable` INSTALL_MANIFEST_MISSING). A
 refusal before the evidence directory is verified is printed only, with
 `receipt_saved` false; otherwise the receipt is also written under
 `<evidence directory>/receipts/`, first under a temporary name that is renamed to
 `<UTC>-<mode>-<pid>.json` only after the whole receipt is written and fsynced (a
-leftover temporary receipt is named in `receipt_save_temp_path`). Once the
+leftover temporary receipt is named in `receipt_save_temp_path`; it is not
+authoritative: its content is the bytes prepared for the final name, and the
+printed receipt of that run, which says `receipt_saved` false, is the record).
+Once the
 temporary settings file has been created, every failure names it in `temp_path`
 and exits 7; failures before that point (for example the runtime copy, the
 preimage copy or a receipt file) have no temporary settings file to name. After a
@@ -426,10 +444,12 @@ interrupt-after-replace state-save receipt-save dir-fsync temp-readback
 state-read signal-before-scope signal-at-scope-entry signal-at-first-write
 signal-after-archive-rename signal-after-disabled-rename
 signal-after-superseded-rename signal-after-receipt-snapshot
-signal-after-final-observation pause-in-scope post-creation-check`) are accepted
-only together with it; an unknown POINT is refused (exit 2) before anything is
-written. `post-creation-check` fails the run's first strict check after a
-directory creation, to exercise the post-write rule. The
+signal-after-final-observation pause-in-scope post-creation-check
+transaction-boundary`) are accepted only together with it; an unknown POINT is
+refused (exit 2) before anything is written. `post-creation-check` fails the
+run's first strict check after a directory creation, to exercise the post-write
+rule; `transaction-boundary` records at that first boundary whether the run is
+already in the transaction-write state, then fails there. The
 `interrupt-*` points raise KeyboardInterrupt from code, to exercise the failure
 paths; a real signal no longer takes that path. The `signal-*` points send the
 installer SIGINT at that fixed place. `pause-in-scope` waits inside the deferral

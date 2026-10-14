@@ -382,6 +382,8 @@ class InstallerTest(unittest.TestCase):
         self.assertEqual(receipt["reason"], "DRIFT_BEFORE_WRITE", err.decode())
         self.assertEqual((proc.returncode, receipt["result"], receipt["original_code"]), (7, "FAILED", 6), receipt)
         self.assertEqual(receipt["preimage_backup_created"], receipt["preimage"]["backup_path"])
+        self.assertIn("runtime_renamed_to", receipt)  # R5b-c-3: README says null when no <HASH12> was created
+        self.assertIsNone(receipt["runtime_renamed_to"])
         self.assertEqual(read_bytes(self.fx.settings), mutated_bytes)
         self.assertEqual(read_bytes(receipt["preimage"]["backup_path"]), doc_bytes(OTHER_SETTINGS))
         self.assertFalse(os.path.exists(self.fx.runtime_dir()))
@@ -1433,6 +1435,7 @@ class InstallerTest(unittest.TestCase):
         self.assertEqual((receipt["result"], receipt["reason"], receipt.get("interrupted")), ("FAILED", "INTERRUPTED", True), receipt)
         self.assertNotIn("settings_written", receipt)
         self.assertNotIn("runtime_dir_owned", receipt)
+        self.assertNotIn("failed_step", receipt)  # R5b-c-3: nothing was written, so no write step failed
         after = snapshot(self.fx.root)
         for path in (self.fx.settings, self.fx.runtime_parent, self.fx.runtime_dir(), self.fx.state_path()):
             rel = os.path.relpath(path, self.fx.root)
@@ -1591,14 +1594,18 @@ class InstallerTest(unittest.TestCase):
             import shutil
             shutil.rmtree(twin.root, ignore_errors=True)
 
+    MALFORMED_HOOKS_REASONS = ("SETTINGS_HOOKS_NOT_OBJECT", "SETTINGS_PERMISSION_REQUEST_NOT_LIST", "SETTINGS_HOOKS_NOT_OBJECT",
+                               "SETTINGS_HOOKS_NOT_OBJECT", "SETTINGS_PERMISSION_REQUEST_NOT_LIST",
+                               "SETTINGS_PERMISSION_REQUEST_ENTRY_INVALID")
+
     def test_u2_every_malformed_hooks_shape_is_a_phase_p_refusal(self):
-        for doc in self.MALFORMED_HOOKS:
+        for doc, reason in zip(self.MALFORMED_HOOKS, self.MALFORMED_HOOKS_REASONS):
             with self.subTest(settings=doc):
                 self.fx.write_settings(doc)
                 before = snapshot(self.fx.root)
                 rc, receipt, out, err = self.fx.run("install")
                 self.assertEqual((rc, receipt["result"]), (2, "REFUSED"), (receipt, err))
-                self.assertTrue(receipt["reason"].startswith("SETTINGS_"), receipt)
+                self.assertEqual(receipt["reason"], reason, receipt)  # R5b-b-5: the exact reason per shape
                 self.assertNotIn("Traceback", err)
                 self.assert_only_receipts_changed(before)
                 self.assertFalse(os.path.exists(self.fx.runtime_parent))
@@ -1661,7 +1668,7 @@ class InstallerTest(unittest.TestCase):
         try:
             before = snapshot(self.fx.root)
             rc, receipt, out, err = self.fx.run("install")
-            self.assertEqual((rc, receipt["result"]), (2, "REFUSED"), receipt)
+            self.assertEqual((rc, receipt["result"], receipt["reason"]), (2, "REFUSED", "EVIDENCE_DIR_NOT_REAL_DIRECTORY"), receipt)
             self.assertFalse(receipt["receipt_saved"])
             self.assertEqual(before, snapshot(self.fx.root))
         finally:
@@ -1682,6 +1689,16 @@ class InstallerTest(unittest.TestCase):
         # RUNTIME_DRIFT, exit 4 (11.2)
         os.chmod(self.fx.runtime_path(), 0o644)
         self.assert_code_kept_both_ways(lambda: self.fx.run("install"), 4, "RUNTIME_DRIFT")
+        # R5b-b-6: drifted runtime BYTES, as U3e names it (the persisted case is also in the unchanged
+        # test_idempotent_only_with_an_intact_runtime_file)
+        intact = read_bytes(self.fx.runtime_path())
+        with open(self.fx.runtime_path(), "ab") as fh:
+            fh.write(b"# drifted\n")
+        os.chmod(self.fx.runtime_path(), 0o444)
+        self.assert_code_kept_both_ways(lambda: self.fx.run("install"), 4, "RUNTIME_DRIFT")
+        os.chmod(self.fx.runtime_path(), 0o644)
+        with open(self.fx.runtime_path(), "wb") as fh:
+            fh.write(intact)
         os.chmod(self.fx.runtime_path(), 0o444)
         # SAME_HASH_ALREADY_INSTALLED, exit 5 (11.5)
         self.write_promote_manifest()
@@ -1860,53 +1877,188 @@ class InstallerTest(unittest.TestCase):
         return [(name, None) for name in sorted(os.listdir(directory))] if os.path.isdir(directory) else []
 
     def test_r5a4_a_failed_print_never_changes_the_exit_code(self):
-        """R5a-4 / R5c-3: the receipt cannot be printed (the reader closed stdout); the exit code stays the outcome's and
-        the D3 line says the receipt was neither printed nor, here, the only copy (it was saved)."""
-        reached, release = self.fx.root + "/pause-reached", self.fx.root + "/pause-release"
-        argv = [sys.executable, "-I", INSTALLER, "install", "--manifest", self.fx.manifest,
-                "--expect-sha256", sha256_file(INSTALLER), "--expect-manifest-sha256", self.fx.manifest_sha,
-                "--test-root", self.fx.root, "--test-fault", "pause-in-scope"]
-        proc = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=self.fx.root)
-        deadline = time.time() + 20
-        while not os.path.exists(reached):
-            if time.time() > deadline or proc.poll() is not None:
-                proc.kill()
-                self.fail("installer never reached pause-in-scope")
-            time.sleep(0.05)
-        proc.stdout.close()
-        with open(release, "w") as fh:
-            fh.write("go\n")
-        err = proc.stderr.read().decode()
-        proc.wait(timeout=60)
-        self.assertEqual(proc.returncode, 0, err)
+        """R5a-4 / R5c-3: the receipt cannot be printed (the reader closed stdout); the exit code stays the outcome's (no
+        signal is sent, so no D3 line is expected) and the receipt file on disk is the complete INSTALLED receipt."""
+        rc, err = self.run_with_closed_stdout(self.fault("pause-in-scope"))
+        self.assertEqual(rc, 0, err)
         self.assertNotIn("Exception ignored", err)
         self.assertNotIn("Traceback", err)
         [(_, saved)] = self.receipts()
         self.assertEqual((saved["result"], saved["exit_code"]), ("INSTALLED", 0))
 
-    def test_r5a4_d3_line_says_neither_saved_nor_printed(self):
+    def run_with_closed_stdout(self, faults):
+        """Install with pause-in-scope; while the installer is paused the test closes its end of the stdout pipe, then
+        releases the pause; returns (exit code, stderr). Every wait is bounded."""
         reached, release = self.fx.root + "/pause-reached", self.fx.root + "/pause-release"
         argv = [sys.executable, "-I", INSTALLER, "install", "--manifest", self.fx.manifest,
                 "--expect-sha256", sha256_file(INSTALLER), "--expect-manifest-sha256", self.fx.manifest_sha,
-                "--test-root", self.fx.root] + self.fault("pause-in-scope", "signal-after-receipt-snapshot", "receipt-save")
+                "--test-root", self.fx.root] + list(faults)
         proc = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=self.fx.root)
         deadline = time.time() + 20
         while not os.path.exists(reached):
             if time.time() > deadline or proc.poll() is not None:
                 proc.kill()
+                proc.communicate(timeout=10)
                 self.fail("installer never reached pause-in-scope")
             time.sleep(0.05)
         proc.stdout.close()
+        proc.stdout = None  # communicate() then reads stderr only
         with open(release, "w") as fh:
             fh.write("go\n")
-        err = proc.stderr.read().decode()
-        proc.wait(timeout=60)
-        self.assertEqual(proc.returncode, 7, err)
+        _, err = proc.communicate(timeout=60)
+        return proc.returncode, err.decode()
+
+    def test_r5a4_d3_line_says_neither_saved_nor_printed(self):
+        rc, err = self.run_with_closed_stdout(self.fault("pause-in-scope", "signal-after-receipt-snapshot", "receipt-save"))
+        self.assertEqual(rc, 7, err)
         notes = [ln for ln in err.splitlines() if "after the final receipt's snapshot" in ln]
         self.assertEqual(len(notes), 1, err)
         self.assertIn("neither written to disk nor printed", notes[0])
         self.assertNotIn("only printed", notes[0])
         self.assertNotIn("Exception ignored", err)
+
+    # rev23 7.11e (2): X1 (U4c-U4e), X2 (U8) and the closures of the round-5b re-examination ---------------------------
+    DEEP_SETTINGS = b'{"hooks": ' + b"[" * 100000 + b"]" * 100000 + b"}\n"
+
+    def test_u4c_parent_only_the_runtime_parent_creation_alone_is_a_transaction_write(self):
+        """X1, parent only: the settings target and RUNTIME_PARENT are absent before the run, so no preimage copy or other
+        transaction write precedes the RUNTIME_PARENT mkdir; its strict check fails -> FAILED / exit 7."""
+        self.assertFalse(os.path.exists(self.fx.settings))
+        self.assertFalse(os.path.exists(self.fx.runtime_parent))
+        rc, receipt, out, err = self.fx.run("install", extra=self.fault("post-creation-check"))
+        self.assertEqual((rc, receipt["result"], receipt["reason"], receipt["original_code"]),
+                         (7, "FAILED", "RUNTIME_PARENT_NOT_REAL_DIRECTORY", 2), (receipt, err))
+        self.assertNotIn("preimage_backup_created", receipt)  # nothing else can stand in for the parent creation
+        self.assertEqual(receipt["runtime_parent_created"], self.fx.runtime_parent)
+        self.assertIsNone(receipt["runtime_renamed_to"])
+        self.assertEqual(receipt["failed_step"], "runtime parent")  # R5b-c-3
+        self.assertTrue(os.path.isdir(self.fx.runtime_parent))
+        self.assertEqual(os.listdir(self.fx.runtime_parent), [])
+        self.assertFalse(os.path.exists(self.fx.settings))
+        self.assertFalse(os.path.exists(self.fx.state_path()))
+        self.assertIn(receipt, [saved for _, saved in self.receipts()])
+
+    def test_u4d_child_only_the_runtime_dir_creation_alone_is_a_transaction_write(self):
+        """X1, child only: RUNTIME_PARENT is created by the fixture (never by the run), the settings target and <HASH12>
+        are absent; the run's only transaction write before the boundary is the <HASH12> mkdir. transaction-boundary
+        records the REFUSED-versus-FAILED classification at the post-mkdir boundary, before any archive, and halts."""
+        os.mkdir(self.fx.runtime_parent)
+        self.assertFalse(os.path.exists(self.fx.settings))
+        rc, receipt, out, err = self.fx.run("install", extra=self.fault("transaction-boundary"))
+        boundary = receipt["test_transaction_boundary"]
+        self.assertEqual((boundary["path"], boundary["transaction_written"], boundary["outcome_if_refused_here"]),
+                         (self.fx.runtime_dir(), True, "FAILED"), (receipt, err))
+        self.assertNotIn("runtime_parent_created", receipt)  # the parent is not attributed to this run
+        self.assertNotIn("preimage_backup_created", receipt)
+
+    def test_u4e_child_only_failure_archives_the_runtime_dir_once(self):
+        """X1, archive integration: the U4d fixture run to its end; the archive assertions here never stand in for U4d."""
+        os.mkdir(self.fx.runtime_parent)
+        rc, receipt, out, err = self.fx.run("install", extra=self.fault("post-creation-check"))
+        self.assertEqual((rc, receipt["result"], receipt["reason"], receipt["original_code"]),
+                         (7, "FAILED", "RUNTIME_DIR_NOT_CONTAINED", 2), (receipt, err))
+        self.assertEqual(len(self.aborted()), 1)
+        self.assertEqual(receipt["runtime_renamed_to"], self.fx.runtime_parent + "/" + self.aborted()[0])
+        self.assertNotIn("runtime_parent_created", receipt)
+        self.assertTrue(os.path.isdir(self.fx.runtime_parent))
+        self.assertFalse(os.path.exists(self.fx.runtime_dir()))
+        self.assertEqual(receipt["failed_step"], "runtime copy")  # R5b-c-3
+
+    def test_u8_deep_settings_in_verify_keeps_the_precedence(self):
+        """X2: a settings document nested deeper than the recursion limit is unparseable JSON, never an unexpected error."""
+        self.fx.write_settings(raw=self.DEEP_SETTINGS)
+        receipt = self.assert_verify("NOT_INSTALLED")  # (i) nothing on disk
+        self.assertEqual(receipt["registration_error"], "SETTINGS_MALFORMED")
+        os.makedirs(self.fx.runtime_parent)
+        os.mkdir(self.fx.runtime_dir() + ".aborted-20261014T000000Z-1")
+        self.assert_verify("INCOMPLETE_INSTALL")  # (ii) an orphan .aborted- archive, no state
+
+    def test_u8_deep_settings_with_a_committed_or_unreadable_state(self):
+        self.install_ok()
+        self.fx.write_settings(raw=self.DEEP_SETTINGS)
+        receipt = self.assert_verify("DRIFT")  # (iii) a committed state
+        self.assertEqual(receipt["registration_error"], "SETTINGS_MALFORMED")
+        os.chmod(self.fx.state_path(), 0o000)
+        try:
+            self.assert_verify("STATE_UNREADABLE", state_refusal="STATE_UNREADABLE")  # (iv) an unreadable state file
+        finally:
+            os.chmod(self.fx.state_path(), 0o600)
+        with open(self.fx.state_path(), "wb") as fh:  # a state file nested too deep is a malformed state (F7)
+            fh.write(b'{"a": ' + b"[" * 100000 + b"]" * 100000 + b"}\n")
+        self.assert_verify("STATE_UNREADABLE", state_refusal="STATE_MALFORMED")
+
+    def test_u8_deep_settings_in_install_rollback_and_promote(self):
+        self.fx.write_settings(raw=self.DEEP_SETTINGS)
+        before = snapshot(self.fx.root)
+        rc, receipt, out, err = self.fx.run("install")
+        self.assertEqual((rc, receipt["result"], receipt["reason"]), (2, "REFUSED", "SETTINGS_MALFORMED"), (receipt, err))
+        self.assert_only_receipts_changed(before)
+        os.unlink(self.fx.settings)
+        self.install_ok()
+        self.fx.write_settings(raw=self.DEEP_SETTINGS)
+        # rollback hashes the settings target and never parses it: its drift refusal is reached unchanged
+        self.assert_refused(self.fx.run("rollback"), 4, "SETTINGS_DRIFT")
+        self.fx.write_source(GUARD_V2)
+        self.write_promote_manifest()
+        before = snapshot(self.fx.root)
+        rc, receipt, out, err = self.fx.run("promote")
+        self.assertEqual((rc, receipt["result"], receipt["reason"]), (2, "REFUSED", "SETTINGS_MALFORMED"), (receipt, err))
+        self.assertNotIn("Traceback", err)
+        self.assert_only_receipts_changed(before)
+
+    def test_r5b_b3_unencodable_document_and_invalid_entries_are_phase_p_refusals(self):
+        cases = ((b'{"x": "\\ud800"}\n', "SETTINGS_NOT_ENCODABLE"),
+                 (doc_bytes({"hooks": {"PermissionRequest": [{"hooks": "x"}]}}), "SETTINGS_PERMISSION_REQUEST_ENTRY_INVALID"),
+                 (doc_bytes({"hooks": {"PermissionRequest": [{"hooks": [{"command": 1}]}]}}),
+                  "SETTINGS_PERMISSION_REQUEST_ENTRY_INVALID"))
+        for raw, reason in cases:
+            with self.subTest(reason=reason, raw=raw[:40]):
+                self.fx.write_settings(raw=raw)
+                before = snapshot(self.fx.root)
+                rc, receipt, out, err = self.fx.run("install")
+                self.assertEqual((rc, receipt["result"], receipt["reason"]), (2, "REFUSED", reason), (receipt, err))
+                self.assert_only_receipts_changed(before)
+
+    def test_r5b_b4_verify_step_2_reads_a_malformed_hooks_structure_as_no_registration(self):
+        self.install_ok()
+        self.fx.write_settings({"hooks": None})
+        receipt = self.assert_verify("DRIFT")
+        self.assertEqual(receipt["registration_error"], "SETTINGS_HOOKS_NOT_OBJECT")
+
+    def test_r5b_a1_promote_refusal_after_the_commit_is_exit_7(self):
+        """R5b-a-1: the existing barrier reaches the post-commit rename in promote: the old runtime dir becomes a symlink
+        after phase P, the settings replacement commits, and the rename's refusal (code 2) is FAILED / exit 7."""
+        self.install_ok()
+        old_dir = self.fx.runtime_dir()
+        self.fx.write_source(GUARD_V2)
+        self.write_promote_manifest()
+        rc, receipt, err = self.run_with_barrier_action("promote", lambda: self.replace_with_symlink(old_dir))
+        self.assertEqual((rc, receipt["result"], receipt["reason"], receipt["original_code"]),
+                         (7, "FAILED", "RENAME_SOURCE_NOT_CONTAINED", 2), (receipt, err))
+        self.assertTrue(receipt["settings_written"])
+        state = self.fx.state()
+        self.assertEqual((state["result"], state["settings_written"], state["runtime_dir"]), ("FAILED", True, self.fx.runtime_dir()))
+        self.fx.write_manifest()  # verify reads the install manifest: re-frozen for the v2 source
+        rc, receipt, out, err = self.fx.run("verify")
+        self.assertNotEqual(receipt["result"], "NOT_INSTALLED", receipt)
+
+    def test_r5b_c3_promote_pre_commit_failure_names_its_step(self):
+        self.install_ok()
+        self.fx.write_source(GUARD_V2)
+        self.write_promote_manifest()
+        rc, receipt, out, err = self.fx.run("promote", extra=self.fault("post-creation-check"))
+        self.assertEqual((rc, receipt["result"], receipt["original_code"]), (7, "FAILED", 2), (receipt, err))
+        self.assertEqual(receipt["failed_step"], "runtime copy")
+
+    def test_r5b_c5_promote_without_the_install_manifest_prints_no_unusable_rollback_command(self):
+        self.install_ok()
+        self.fx.write_source(GUARD_V2)
+        self.write_promote_manifest()
+        os.rename(self.fx.manifest, self.fx.manifest + ".away")
+        rc, receipt, out, err = self.fx.run("promote")
+        self.assertEqual((rc, receipt["result"]), (0, "PROMOTED"), (receipt, err))
+        self.assertIsNone(receipt["rollback_command"])
+        self.assertEqual(receipt["rollback_command_unavailable"], "INSTALL_MANIFEST_MISSING")
 
 
 def main():
