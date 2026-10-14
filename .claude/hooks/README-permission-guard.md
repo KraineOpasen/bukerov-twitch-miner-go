@@ -246,18 +246,21 @@ disagrees is refused (exit 2), never acted on. Nothing is ever deleted.
 
 Write outcomes (all modes that write):
 
-* **Invariant A (before the replacement).** Every handled failure or interrupt
-  after this run's `mkdir` of `<HASH12>` and before the settings replacement has
-  returned, including failures inside the copy step, renames that directory to
+* **Invariant A (before the replacement).** Every handled failure after this
+  run's `mkdir` of `<HASH12>` and before the settings replacement has returned,
+  including failures inside the copy step, renames that directory to
   `<HASH12>.aborted-<UTC>-<pid>` exactly once; the receipt names `failed_step`
   and `runtime_renamed_to`, and the settings target stays byte-identical.
-* **Invariant W (the write is recorded at once).** The moment `os.replace` of the
-  settings target (or the rename of an ABSENT rollback) returns, the receipt
-  records `settings_written` (install, promote) or `settings_restored` (rollback),
-  the temporary file and `intended_postimage_sha256`; SIGINT and SIGTERM are
-  blocked across the call and that record, so a signal is delivered only after the
-  record exists (the same holds for the `mkdir` of `<HASH12>` and its ownership
-  record, invariant A). The read-back is a later step: when it fails the run ends
+* **Invariant W (the write is recorded at once).** In the statement right after
+  `os.replace` of the settings target (or the rename of an ABSENT rollback)
+  returns, the receipt records `settings_written` (install, promote) or
+  `settings_restored` (rollback), the temporary file and
+  `intended_postimage_sha256`. Every other creation or rename is likewise
+  recorded in the statement after it (the `mkdir` of `<HASH12>` as
+  `runtime_dir_owned`, the preimage copy as `preimage`, the `.aborted-`,
+  `.disabled-` and `.superseded-` renames); because no signal raises inside the
+  write phase (see "Interrupts" below), nothing can come between an operation
+  and its record. The read-back is a later step: when it fails the run ends
   with exit 7, POSTIMAGE_UNREADABLE and a null `postimage_sha256`, and the state
   records the write. Any refusal raised after a committed write is reported as
   FAILED with exit 7 (its own code kept in `original_code`), never as refused
@@ -265,13 +268,9 @@ Write outcomes (all modes that write):
   (POSTIMAGE_MISMATCH, a concurrent writer), is never acted on: `rollback` and
   `promote` refuse POSTIMAGE_UNKNOWN (exit 4, nothing written) and `verify` reports
   DRIFT with the intended and the current hash.
-* **F3 (after the replacement).** No failure, KeyboardInterrupt, SystemExit or
-  SIGTERM (converted into an exception for the transaction) touches the runtime
-  directory the new registration points at; the receipt sets `failed_step` and,
-  for an interrupt, `interrupted`; state and receipt are saved; exit 7. Only the
-  first interrupt raises: the handler switches to recording before it raises, so
-  any further interrupt (during an archive, while the outcome is recorded) is
-  noted as `late_interrupt` and never ends in exit 0.
+* **F3 (after the replacement).** No failure touches the runtime directory the
+  new registration points at; the receipt sets `failed_step`; state and receipt
+  are saved; exit 7.
 * **Outcome S (state before receipt).** After a completed write the state file
   `permission-guard-state.json` is saved first; a receipt with a success result
   and exit 0 is persisted only after that save succeeded. When the state save
@@ -285,6 +284,39 @@ Write outcomes (all modes that write):
   so no text read from the settings can break them. A directory fsync failure
   after the replacement is recorded as `dir_fsync_error` (for the state write,
   `state_dir_fsync_error`).
+
+Interrupts (Ctrl+C, SIGTERM, SIGHUP):
+
+* **Before the first write (phase P).** The precondition checks write nothing and
+  keep Python's default signal behaviour. Ctrl+C (SIGINT) there ends the run as
+  FAILED, reason INTERRUPTED, `interrupted` true, exit 7, with nothing written
+  but the receipt: the receipt file is written when the evidence directory was
+  already verified, otherwise the receipt is printed only. SIGTERM or SIGHUP there
+  end the process at once with no receipt; nothing has been written.
+* **From the first write on.** Before its first write `install`, `rollback` and
+  `promote` install one handler for SIGINT, then SIGTERM, then SIGHUP (before a
+  refusal or IDEMPOTENT receipt is written the installer does the same; `verify`
+  never does). The handler only notes the first signal it receives; it raises
+  nothing and is never removed, so from then until the process exits Ctrl+C,
+  SIGTERM and SIGHUP stop nothing: the run completes, and a deferred signal
+  never changes the outcome or the exit code. No signal mask is used.
+* **Where it is recorded.** The state file and the receipt file each look once,
+  immediately before they are written, and record what they saw as
+  `interrupt_deferred` (true or false) and `interrupt_signal` (the first
+  signal's name, such as `SIGINT`, or null); a later signal is not in them. The
+  printed receipt carries the same values as the receipt file. A signal that
+  arrives after the receipt's look is reported once on stderr (the JSON receipt
+  stays the last stdout line), saying whether the receipt was saved to disk or
+  only printed. A signal after that report leaves no trace.
+* **Limits.** SIGKILL, SIGQUIT, SIGSTOP, power loss and a host crash are not
+  deferred and can stop the run between two file operations: the sequence of
+  operations is not atomic as a whole, and `verify` then reports what is on disk
+  (DRIFT or INCOMPLETE_INSTALL; nothing is guessed). Several signals are recorded
+  as the first one only, without a count. A system call interrupted by a deferred
+  signal is retried by Python where Python documents that (PEP 475); an
+  interrupted rename or mkdir would surface as an ordinary write failure.
+  The printed rollback command is itself a writing run and defers interrupts the
+  same way.
 
 `verify` writes nothing and decides by this precedence (the first matching step
 wins): (1) a state file that exists but cannot be used — unreadable, a symlink or
@@ -334,8 +366,17 @@ is rebased under DIR, and the test seams (`--test-barrier DIR`,
 and the single failure-injection option `--test-fault POINT`, POINT one of
 `postimage-read runtime-copy-write interrupt-before-replace
 interrupt-after-replace state-save receipt-save dir-fsync temp-readback
-state-read`) are accepted only together with it; an unknown POINT is refused
-(exit 2) before anything is written.
+state-read signal-before-scope signal-at-scope-entry signal-at-first-write
+signal-after-archive-rename signal-after-disabled-rename
+signal-after-superseded-rename signal-after-receipt-snapshot
+signal-after-final-observation pause-in-scope`) are accepted only together with
+it; an unknown POINT is refused (exit 2) before anything is written. The
+`interrupt-*` points raise KeyboardInterrupt from code, to exercise the failure
+paths; a real signal no longer takes that path. The `signal-*` points send the
+installer SIGINT at that fixed place. `pause-in-scope` waits inside the deferral
+scope, before the state and receipt are written, until `DIR/pause-release`
+exists (at most 30 s) so that a test can send real signals; `--test-barrier`
+waits at most 15 s.
 
 ## Native harness
 

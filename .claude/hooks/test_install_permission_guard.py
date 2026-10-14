@@ -31,6 +31,7 @@ import argparse
 import hashlib
 import json
 import os
+import signal
 import stat
 import subprocess
 import sys
@@ -1042,14 +1043,15 @@ class InstallerTest(unittest.TestCase):
         self.assertFalse(os.path.exists(self.fx.runtime_dir()))
         self.assertTrue(os.path.exists(receipt["temp_path"]))
 
-    def test_f3_sigterm_during_the_transaction_is_a_handled_interrupt(self):
+    def test_f3_sigterm_during_the_transaction_is_deferred(self):
+        """Rewritten for rev18 (S1H-OD-7): the install barrier sits after the first write (the preimage copy), inside the
+        deferral scope, so a real SIGTERM there no longer aborts the run; it is recorded and the install completes."""
         self.fx.write_settings(OTHER_SETTINGS)
-        original = read_bytes(self.fx.settings)
         rc, receipt, err = self.run_with_barrier("install", lambda proc: proc.terminate())
-        self.assertEqual(rc, 7, (receipt, err))
-        self.assertTrue(receipt["interrupted"])
-        self.assertEqual(read_bytes(self.fx.settings), original)
-        self.assertFalse(os.path.exists(self.fx.runtime_dir()))
+        self.assertEqual((rc, receipt["result"]), (0, "INSTALLED"), (receipt, err))
+        self.assertEqual((receipt["interrupt_deferred"], receipt["interrupt_signal"]), (True, "SIGTERM"))
+        self.assertNotIn("interrupted", receipt)
+        self.assert_verify("MATCH")
 
     # rev15 F4, outcome S ----------------------------------------------------------------
     def test_s_install_state_save_failure_is_never_a_success(self):
@@ -1291,6 +1293,192 @@ class InstallerTest(unittest.TestCase):
         with open(self.fx.state_path(), "w") as fh:
             fh.write("{not json")
         self.assert_verify("STATE_UNREADABLE", state_refusal="STATE_MALFORMED")
+
+    # rev18 7.11c (2): interrupt deferral (S1H-OD-7), real signals in a separate process -------------------------------
+    def run_with_pause(self, mode, signals, extra=(), manifest=None):
+        """Run MODE with --test-fault pause-in-scope; once the installer reports it is paused inside the deferral scope,
+        send each real signal in SIGNALS to it, then release the pause and collect the outcome."""
+        reached, release = self.fx.root + "/pause-reached", self.fx.root + "/pause-release"
+        manifest = manifest or (self.fx.promote_manifest if mode == "promote" else self.fx.manifest)
+        argv = [sys.executable, "-I", INSTALLER, mode, "--manifest", manifest,
+                "--expect-sha256", sha256_file(INSTALLER), "--expect-manifest-sha256", sha256_file(manifest),
+                "--test-root", self.fx.root, "--test-fault", "pause-in-scope"] + list(extra)
+        proc = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=self.fx.root)
+        deadline = time.time() + 20
+        while not os.path.exists(reached):
+            if time.time() > deadline or proc.poll() is not None:
+                proc.kill()
+                self.fail("installer never reached pause-in-scope")
+            time.sleep(0.05)
+        for sig in signals:
+            proc.send_signal(sig)
+            time.sleep(0.2)
+        with open(release, "w") as fh:
+            fh.write("go\n")
+        out, err = proc.communicate(timeout=60)
+        lines = [ln for ln in out.decode().splitlines() if ln.strip()]
+        self.assertTrue(lines, err.decode())
+        return proc.returncode, json.loads(lines[-1]), err.decode()
+
+    def assert_deferred(self, receipt, name):
+        self.assertEqual((receipt["interrupt_deferred"], receipt["interrupt_signal"]), (True, name), receipt)
+        state = self.fx.state()
+        self.assertEqual((state["interrupt_deferred"], state["interrupt_signal"]), (True, name), state)
+        self.assertNotIn("interrupted", receipt)
+        # the receipt file on disk carries the same snapshot as the printed receipt (D3)
+        self.assertIn(receipt, [saved for _, saved in self.receipts()])
+
+    def test_t1_install_completes_and_records_a_deferred_sigint(self):
+        rc, receipt, err = self.run_with_pause("install", [signal.SIGINT])
+        self.assertEqual((rc, receipt["result"]), (0, "INSTALLED"), (receipt, err))
+        self.assert_deferred(receipt, "SIGINT")
+        self.assertEqual(stat.S_IMODE(os.stat(self.fx.runtime_path()).st_mode), 0o444)
+        self.assertEqual(sha256_file(self.fx.runtime_path()), self.fx.source_sha)
+        self.assertNotIn("Traceback", err)
+        self.assert_verify("MATCH")
+
+    def test_t2_install_completes_and_records_a_deferred_sigterm_or_sighup(self):
+        for sig, name in ((signal.SIGTERM, "SIGTERM"), (signal.SIGHUP, "SIGHUP")):
+            with self.subTest(signal=name):
+                if os.path.exists(self.fx.settings):  # second round: start again from a rolled-back layout
+                    rc, receipt, out, err = self.fx.run("rollback")
+                    self.assertEqual(rc, 0, receipt)
+                    os.unlink(self.fx.root + "/pause-reached")
+                    os.unlink(self.fx.root + "/pause-release")
+                rc, receipt, err = self.run_with_pause("install", [sig])
+                self.assertEqual((rc, receipt["result"]), (0, "INSTALLED"), (receipt, err))
+                self.assert_deferred(receipt, name)
+                self.assert_verify("MATCH")
+
+    def test_t3_rollback_and_promote_complete_and_record_a_deferred_sigint(self):
+        self.fx.write_settings(OTHER_SETTINGS)
+        preimage = read_bytes(self.fx.settings)
+        self.install_ok()
+        self.fx.write_source(GUARD_V2)
+        self.write_promote_manifest()
+        # signal-at-first-write also puts a SIGINT at the mode's own first write, before main's receipt handling (D1)
+        rc, receipt, err = self.run_with_pause("promote", [signal.SIGINT], extra=self.fault("signal-at-first-write"))
+        self.assertEqual((rc, receipt["result"]), (0, "PROMOTED"), (receipt, err))
+        self.assert_deferred(receipt, "SIGINT")
+        self.fx.write_manifest()  # verify and rollback read the install manifest: re-frozen for the v2 source
+        os.unlink(self.fx.root + "/pause-reached")
+        os.unlink(self.fx.root + "/pause-release")
+        rc, receipt, err = self.run_with_pause("rollback", [signal.SIGINT], extra=self.fault("signal-at-first-write"))
+        self.assertEqual((rc, receipt["result"]), (0, "ROLLED_BACK"), (receipt, err))
+        self.assertEqual((receipt["interrupt_deferred"], receipt["interrupt_signal"]), (True, "SIGINT"))
+        self.assertEqual(self.fx.state()["interrupt_deferred"], True)
+        self.assertEqual(read_bytes(self.fx.settings), preimage)
+
+    def test_t4_signal_after_archive_rename_keeps_the_archive_record(self):
+        self.fx.write_settings(OTHER_SETTINGS)
+        original = read_bytes(self.fx.settings)
+        rc, receipt, out, err = self.fx.run("install", extra=self.fault("runtime-copy-write", "signal-after-archive-rename"))
+        self.assertEqual((rc, receipt["reason"]), (7, "RUNTIME_COPY_FAILED"), (receipt, err))
+        self.assertEqual(len(self.aborted()), 1)
+        self.assertEqual(receipt["runtime_renamed_to"], self.fx.runtime_parent + "/" + self.aborted()[0])
+        self.assertEqual((receipt["interrupt_deferred"], receipt["interrupt_signal"]), (True, "SIGINT"))
+        self.assertEqual(read_bytes(self.fx.settings), original)
+        # a pre-commit failure saves no state (7.11b W/S): "the state" names the archive only when a state is saved
+        self.assertFalse(os.path.exists(self.fx.state_path()))
+        saved = [s for _, s in self.receipts()]
+        self.assertEqual([s["runtime_renamed_to"] for s in saved], [receipt["runtime_renamed_to"]])
+
+    def test_t5_signal_after_disabled_and_superseded_renames_keeps_their_records(self):
+        self.install_ok()
+        old_dir = self.fx.runtime_dir()
+        self.fx.write_source(GUARD_V2)
+        self.write_promote_manifest()
+        rc, receipt, out, err = self.fx.run("promote", extra=self.fault("signal-after-superseded-rename"))
+        self.assertEqual((rc, receipt["result"]), (0, "PROMOTED"), (receipt, err))
+        self.assertTrue(os.path.basename(receipt["previous_runtime_renamed_to"]).startswith(os.path.basename(old_dir) + ".superseded-"))
+        self.assertEqual(self.fx.state()["previous_runtime_renamed_to"], receipt["previous_runtime_renamed_to"])
+        self.assertEqual(receipt["interrupt_deferred"], True)
+        self.fx.write_manifest()  # re-frozen for the v2 source
+        new_dir = self.fx.runtime_dir()
+        rc, receipt, out, err = self.fx.run("rollback", extra=self.fault("signal-after-disabled-rename"))
+        self.assertEqual((rc, receipt["result"]), (0, "ROLLED_BACK"), (receipt, err))
+        self.assertTrue(os.path.basename(receipt["runtime_renamed_to"]).startswith(os.path.basename(new_dir) + ".disabled-"))
+        self.assertEqual(self.fx.state()["runtime_renamed_to"], receipt["runtime_renamed_to"])
+        self.assertTrue(os.path.isdir(receipt["runtime_renamed_to"]))
+
+    def test_t6_signal_at_scope_entry_is_deferred_and_no_signal_mask_is_used(self):
+        rc, receipt, out, err = self.fx.run("install", extra=self.fault("signal-at-scope-entry"))
+        self.assertEqual((rc, receipt["result"]), (0, "INSTALLED"), (receipt, err))
+        self.assertEqual((receipt["interrupt_deferred"], receipt["interrupt_signal"]), (True, "SIGINT"))
+        self.assertNotIn("Traceback", err)
+        with open(INSTALLER) as fh:
+            source = fh.read()
+        self.assertNotIn("pthread_sigmask", source)
+        self.assertNotIn("sigprocmask", source)
+
+    def test_t7_signal_before_scope_ends_the_run_before_any_write(self):
+        self.fx.write_settings(OTHER_SETTINGS)
+        before = snapshot(self.fx.root)
+        rc, receipt, out, err = self.fx.run("install", extra=self.fault("signal-before-scope"))
+        self.assertNotEqual(rc, 0, (out, err))
+        # phase P stays interruptible: the default SIGINT action (KeyboardInterrupt) ended the run, not a refusal
+        self.assertEqual((receipt["result"], receipt["reason"], receipt.get("interrupted")), ("FAILED", "INTERRUPTED", True), receipt)
+        self.assertNotIn("settings_written", receipt)
+        self.assertNotIn("runtime_dir_owned", receipt)
+        after = snapshot(self.fx.root)
+        for path in (self.fx.settings, self.fx.runtime_parent, self.fx.runtime_dir(), self.fx.state_path()):
+            rel = os.path.relpath(path, self.fx.root)
+            self.assertEqual(before.get(rel), after.get(rel), rel)
+        self.assertFalse(os.path.exists(self.fx.runtime_parent))
+        changed = {k for k in set(before) | set(after) if before.get(k) != after.get(k)}
+        receipts = os.path.relpath(self.fx.evidence_dir + "/receipts", self.fx.root)
+        self.assertTrue(all(k == receipts or k.startswith(receipts + "/") for k in changed), changed)
+
+    def test_t8_signal_at_first_write_is_deferred(self):
+        rc, receipt, out, err = self.fx.run("install", extra=self.fault("signal-at-first-write"))
+        self.assertEqual((rc, receipt["result"]), (0, "INSTALLED"), (receipt, err))
+        self.assertEqual((receipt["interrupt_deferred"], receipt["interrupt_signal"]), (True, "SIGINT"))
+        self.assert_verify("MATCH")
+
+    def test_t9_two_signals_are_one_recorded_fact_without_a_count(self):
+        rc, receipt, err = self.run_with_pause("install", [signal.SIGINT, signal.SIGTERM])
+        self.assertEqual((rc, receipt["result"]), (0, "INSTALLED"), (receipt, err))
+        self.assert_deferred(receipt, "SIGINT")
+        self.assertFalse([k for k in receipt if "count" in k], receipt)
+
+    def test_t10_deferred_signal_with_a_failed_state_save(self):
+        rc, receipt, err = self.run_with_pause("install", [signal.SIGINT], extra=self.fault("state-save"))
+        self.assertEqual((rc, receipt["result"]), (7, "INSTALLED_STATE_NOT_SAVED"), (receipt, err))
+        self.assertEqual((receipt["interrupt_deferred"], receipt["interrupt_signal"]), (True, "SIGINT"))
+        self.assertFalse(os.path.exists(self.fx.state_path()))
+
+    def test_t11_signal_after_the_final_receipt_snapshot_is_reported_on_the_console(self):
+        rc, receipt, out, err = self.fx.run("install", extra=self.fault("signal-after-receipt-snapshot"))
+        self.assertEqual((rc, receipt["result"]), (0, "INSTALLED"), (receipt, err))
+        self.assertFalse(receipt["interrupt_deferred"])
+        [(_, saved)] = self.receipts()
+        self.assertFalse(saved["interrupt_deferred"])
+        self.assertTrue(saved["receipt_saved"])
+        notes = [ln for ln in err.splitlines() if "after the final receipt's snapshot" in ln]
+        self.assertEqual(len(notes), 1, err)
+        self.assertIn("SIGINT", notes[0])
+        self.assertIn("saved to disk", notes[0])
+
+    def test_t11b_signal_after_the_final_receipt_snapshot_with_a_failed_receipt_save(self):
+        rc, receipt, out, err = self.fx.run("install", extra=self.fault("signal-after-receipt-snapshot", "receipt-save"))
+        self.assertEqual(rc, 7, (receipt, err))
+        self.assertFalse(receipt["receipt_saved"])
+        self.assertTrue(receipt["state_saved"])
+        self.assertEqual(self.receipts(), [])
+        notes = [ln for ln in err.splitlines() if "after the final receipt's snapshot" in ln]
+        self.assertEqual(len(notes), 1, err)
+        self.assertIn("only printed", notes[0])
+        self.assertNotIn("saved to disk", notes[0])
+
+    def test_t12_signal_after_the_final_observation_changes_nothing(self):
+        rc, receipt, out, err = self.fx.run("install", extra=self.fault("signal-after-final-observation"))
+        self.assertEqual((rc, receipt["result"]), (0, "INSTALLED"), (receipt, err))
+        [(_, saved)] = self.receipts()
+        self.assertFalse(saved["interrupt_deferred"])
+        self.assertEqual(saved, receipt)  # the saved bytes and the printed receipt are the same snapshot
+        self.assertNotIn("after the final receipt's snapshot", err)
+        self.assertNotIn("Traceback", err)
+        self.assert_verify("MATCH")
 
 
 def main():

@@ -38,28 +38,46 @@ the check-to-use window; it does not eliminate it (a process of the same OS acco
 
 Write outcomes (rev15, 7.11b (2)):
   W  once os.replace of the settings target (or, for an ABSENT rollback, its rename) has returned, the
-     write is recorded at once (settings_written / settings_restored, temp_path,
-     intended_postimage_sha256), with SIGINT/SIGTERM blocked across the call and that record; the
-     read-back of the postimage is a later step, and its failure is exit 7 POSTIMAGE_UNREADABLE with
-     postimage_sha256 null. Any refusal after a committed write is FAILED / exit 7 (original_code
-     kept), never a refusal of input. A state whose postimage is null or differs from the intended
-     one is never acted on: rollback and promote refuse POSTIMAGE_UNKNOWN (exit 4) and verify reports
-     DRIFT.
-  A  before the replacement has returned, every handled failure or interrupt after this run's mkdir of
-     <HASH12> renames that directory to <HASH12>.aborted-<UTC>-<pid> exactly once (failed_step and
+     write is recorded in the next statement (settings_written / settings_restored, temp_path,
+     intended_postimage_sha256); the read-back of the postimage is a later step, and its failure is
+     exit 7 POSTIMAGE_UNREADABLE with postimage_sha256 null. Any refusal after a committed write is
+     FAILED / exit 7 (original_code kept), never a refusal of input. A state whose postimage is null or
+     differs from the intended one is never acted on: rollback and promote refuse POSTIMAGE_UNKNOWN
+     (exit 4) and verify reports DRIFT.
+  A  before the replacement has returned, every handled failure after this run's mkdir of <HASH12>
+     renames that directory to <HASH12>.aborted-<UTC>-<pid> exactly once (failed_step and
      runtime_renamed_to in the receipt).
-  F3 after the replacement has returned, no failure, interrupt or SIGTERM touches the runtime directory:
-     the write is recorded, failed_step and interrupted are set, state and receipt are saved, exit 7.
-     Only the first interrupt raises; every later one is recorded as late_interrupt (never exit 0).
+  F3 after the replacement has returned, no failure touches the runtime directory: the write is
+     recorded, failed_step is set, state and receipt are saved, exit 7.
   S  the state file is saved before the receipt; when that save fails the result is
      <RESULT>_STATE_NOT_SAVED with state_saved false and original_result / original_reason kept (exit 7);
      a receipt that cannot be written says receipt_saved false (exit 7 unless a refusal keeps its code).
 
+Interrupts (rev18, 7.11c (2), S1H-OD-7):
+  P  the precondition checks write nothing and keep the default signal behaviour: Ctrl+C there raises
+     KeyboardInterrupt, which ends the run as FAILED / INTERRUPTED (interrupted true, exit 7); SIGTERM and
+     SIGHUP there end the process with no receipt.
+  E  before its first write each writing mode (install, rollback, promote, and main before it writes a
+     receipt) installs one handler for SIGINT, then SIGTERM, then SIGHUP; verify never does. The handler
+     stores the first signal's number and does nothing else: it raises nothing, performs no I/O and is
+     never removed, so from then until the process exits these signals end nothing.
+  W  every write follows E. Each creation or rename is recorded in the statement after it (D5).
+  D3 the state and the final receipt each take ONE snapshot of the deferral, immediately before they are
+     serialized: interrupt_deferred (bool) and interrupt_signal (the first signal's name or null). The
+     printed receipt carries the final receipt's snapshot. A signal that arrives after that snapshot is
+     reported once on stderr at the final console-observation point, saying whether the final receipt
+     was saved to disk or only printed; a signal after that point leaves no trace.
+  D4 a deferred signal never changes the outcome or the exit code.
+  Not covered: SIGKILL, SIGQUIT, SIGSTOP, power loss or a host crash; several signals are recorded as the
+  first one only; a sequence of file operations is not atomic as a whole.
+
 Tests pass --test-root DIR (an existing real directory directly under the system temporary directory):
 every pinned constant, including the manifest paths, is then rebased under DIR, every receipt carries
-`test_root`, and the test seams --test-barrier DIR (contained in DIR), --test-crash-before-replace,
---test-short-write, --test-fail-after-write and --test-fault POINT (POINT from TEST_FAULT_POINTS) are
-accepted only together with it.
+`test_root`, and the test seams --test-barrier DIR (contained in DIR, waits at most 15 s),
+--test-crash-before-replace, --test-short-write, --test-fail-after-write and --test-fault POINT (POINT
+from TEST_FAULT_POINTS) are accepted only together with it. The signal-* points send this process
+SIGINT at a fixed place; pause-in-scope waits at most 30 s inside the scope for DIR/pause-release; the
+interrupt-* points raise KeyboardInterrupt from code, which a real signal no longer does.
 
 Every run prints one JSON receipt as its last stdout line; once the manifest is verified the receipt
 also names the rollback command with both pins. Exit codes:
@@ -121,22 +139,85 @@ EXIT_WRITE_FAILED = 7
 BARRIER_TIMEOUT_SECONDS = 15
 OPEN_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 OPEN_CLOEXEC = getattr(os, "O_CLOEXEC", 0)
-# --test-fault POINT (tests only, with --test-root): the fixed failure-injection points of 7.11b (2)
+# --test-fault POINT (tests only, with --test-root): the fixed failure-injection points of 7.11b (2) and 7.11c (2) D7
 TEST_FAULT_POINTS = ("postimage-read", "runtime-copy-write", "interrupt-before-replace", "interrupt-after-replace",
-                     "state-save", "receipt-save", "dir-fsync", "temp-readback", "state-read")
+                     "state-save", "receipt-save", "dir-fsync", "temp-readback", "state-read",
+                     "signal-before-scope", "signal-at-scope-entry", "signal-at-first-write",
+                     "signal-after-archive-rename", "signal-after-disabled-rename", "signal-after-superseded-rename",
+                     "signal-after-receipt-snapshot", "signal-after-final-observation", "pause-in-scope")
 STEP_AFTER_REPLACE = "after the settings replacement"
-
-
-class Interrupted(BaseException):
-    """SIGINT/SIGTERM during a transaction (or the interrupt test faults); never an Exception."""
+PAUSE_SECONDS = 30  # pause-in-scope (test only) waits at most this long for its release file
 
 
 def inject_fault(seams, point):
-    """Raise the injected failure for POINT when the test asked for it."""
+    """Raise the injected failure for POINT when the test asked for it. The interrupt-* points simulate an unexpected
+    exception inside the scope (a KeyboardInterrupt raised by code); real signals never take that path (D7)."""
     if point in (seams or {}).get("faults", ()):
         if point.startswith("interrupt-"):
-            raise Interrupted("TEST_FAULT " + point)
+            raise KeyboardInterrupt("TEST_FAULT " + point)
         raise OSError(errno.EIO, "TEST_FAULT " + point)
+
+
+def signal_fault(seams, point):
+    """Test only: send SIGINT to this process at POINT (7.11c (2) D7)."""
+    if point in (seams or {}).get("faults", ()):
+        os.kill(os.getpid(), signal.SIGINT)
+
+
+# --- interrupt deferral (7.11c (2), S1H-OD-7) ---------------------------------------------------------------
+# Phase P (precondition checks, nothing written) stays normally interruptible. Phase E installs DEFERRAL_SIGNALS in
+# this order; a signal whose handler is installed is deferred from then until the process exits. Phase W (the first
+# write onward) begins only after all three are installed. The handler never raises, performs no I/O and calls nothing.
+DEFERRAL_SIGNALS = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
+_deferred_signal = None  # the first deferred signal's number, or None
+_scope_entered = False
+_first_write_reached = False  # test seam bookkeeping for signal-at-first-write only
+
+
+def defer_signal(signum, frame):
+    global _deferred_signal
+    if _deferred_signal is None:
+        _deferred_signal = signum
+
+
+def enter_deferral_scope(seams=None):
+    """Phase E: install the deferring handler for SIGINT, then SIGTERM, then SIGHUP. Idempotent. The caller performs the
+    mode's first write only after this returns."""
+    global _scope_entered
+    if _scope_entered:
+        return
+    signal.signal(signal.SIGINT, defer_signal)
+    signal_fault(seams, "signal-at-scope-entry")
+    signal.signal(signal.SIGTERM, defer_signal)
+    signal.signal(signal.SIGHUP, defer_signal)
+    _scope_entered = True
+
+
+def before_first_write(seams):
+    """Called immediately before each statement that can be the run's first write; only the first call counts. Its only
+    effect is the D7 test point signal-at-first-write (inert without --test-fault)."""
+    global _first_write_reached
+    if not _first_write_reached:
+        _first_write_reached = True
+        signal_fault(seams, "signal-at-first-write")
+
+
+def interrupt_snapshot():
+    """ONE observation of the deferral variable, taken immediately before a record is serialized (D3)."""
+    observed = _deferred_signal
+    return {"interrupt_deferred": observed is not None,
+            "interrupt_signal": signal.Signals(observed).name if observed is not None else None}
+
+
+def pause_in_scope(layout, seams):
+    """Test only (pause-in-scope): a bounded wait inside the scope during which the test sends real signals; it ends when
+    <test root>/pause-release appears or after PAUSE_SECONDS (D6)."""
+    if "pause-in-scope" not in (seams or {}).get("faults", ()) or not layout.test_root:
+        return
+    write_new_file(layout.test_root + "/pause-reached", layout.test_root, b"paused\n")
+    deadline = time.monotonic() + PAUSE_SECONDS
+    while not os.path.exists(layout.test_root + "/pause-release") and time.monotonic() < deadline:
+        time.sleep(0.05)
 
 
 class Refusal(Exception):
@@ -208,23 +289,6 @@ def dumps_record(obj):
     """Receipts, the state file and the printed receipt: ASCII-escaped, so no text read from the settings (for example
     a lone-surrogate escape) can make serialization fail after the outcome is decided."""
     return json.dumps(obj, indent=2, ensure_ascii=True, default=str) + "\n"
-
-
-INTERRUPT_SIGNALS = (signal.SIGINT, signal.SIGTERM)
-LATE_INTERRUPTS = []
-
-
-class interrupts_blocked:
-    """Block SIGINT/SIGTERM across a write and the statement that records it (W, A, F3): a signal that arrives in between
-    is delivered when the block ends, after the record exists."""
-
-    def __enter__(self):
-        self.previous = signal.pthread_sigmask(signal.SIG_BLOCK, INTERRUPT_SIGNALS)
-        return self
-
-    def __exit__(self, *exc):
-        signal.pthread_sigmask(signal.SIG_SETMASK, self.previous)
-        return False
 
 
 # --- containment (CT2-CT5) ----------------------------------------------------------------
@@ -397,13 +461,12 @@ def write_atomic(target, root, data, mode, seams=None, progress=None, on_replace
         refusal.code = EXIT_WRITE_FAILED
         refusal.extra.setdefault("temp_path", temp_path)
         raise
-    with interrupts_blocked():  # the replace and its record are one step for SIGINT/SIGTERM (W, F3)
-        try:
-            os.replace(temp_path, target)
-        except OSError as exc:
-            refuse("REPLACE_FAILED", EXIT_WRITE_FAILED, temp_path=temp_path, detail=str(exc))
-        if on_replaced is not None:
-            on_replaced(temp_path)
+    try:
+        os.replace(temp_path, target)
+    except OSError as exc:
+        refuse("REPLACE_FAILED", EXIT_WRITE_FAILED, temp_path=temp_path, detail=str(exc))
+    if on_replaced is not None:  # D5: the record is the next statement after the replace returns
+        on_replaced(temp_path)
     inject_fault(seams, "interrupt-after-replace")
     try:
         inject_fault(seams, "dir-fsync")
@@ -609,6 +672,7 @@ def create_runtime_copy(layout, sha, receipt, seams=None):
     the moment its mkdir returns, so every later failure archives it (invariant A)."""
     if not os.path.lexists(layout.runtime_parent):
         require_real_dir(layout.hooks_dir, "HOOKS_DIR_NOT_REAL_DIRECTORY")
+        before_first_write(seams)
         os.mkdir(layout.runtime_parent)
         receipt["runtime_parent_created"] = True
     require_real_dir(layout.runtime_parent, "RUNTIME_PARENT_NOT_REAL_DIRECTORY")
@@ -617,9 +681,9 @@ def create_runtime_copy(layout, sha, receipt, seams=None):
     if os.path.lexists(runtime_dir):
         refuse("RUNTIME_DIR_EXISTS", EXIT_RUNTIME_EXISTS, runtime_dir=runtime_dir)
     receipt["step"] = "runtime copy"
-    with interrupts_blocked():  # the mkdir and its ownership record are one step for SIGINT/SIGTERM (A)
-        os.mkdir(runtime_dir)
-        receipt["runtime_dir_owned"] = runtime_dir
+    before_first_write(seams)
+    os.mkdir(runtime_dir)
+    receipt["runtime_dir_owned"] = runtime_dir  # D5: recorded in the statement after the mkdir returns (A)
     receipt["runtime_copy_created"] = True
     require_real_dir(runtime_dir, "RUNTIME_DIR_NOT_CONTAINED")
     data = read_regular(layout.source, "SOURCE_NOT_CONTAINED")
@@ -638,7 +702,7 @@ def create_runtime_copy(layout, sha, receipt, seams=None):
     return runtime_dir
 
 
-def archive_failed_runtime(layout, receipt):
+def archive_failed_runtime(layout, receipt, seams=None):
     """Invariant A: a failure before the settings replacement returned renames the runtime dir this run
     created to <HASH12>.aborted-<UTC>-<pid> exactly once (never deleted, never overwritten). After the
     replacement (settings_written) the runtime dir is never touched (F3)."""
@@ -649,7 +713,8 @@ def archive_failed_runtime(layout, receipt):
     archive = f"{runtime_dir}.aborted-{utc_stamp()}-{os.getpid()}"
     try:
         rename_contained(runtime_dir, archive, layout.runtime_parent, "dir")
-        receipt["runtime_renamed_to"] = archive
+        signal_fault(seams, "signal-after-archive-rename")  # D7 test hook only; a deferred signal raises nothing
+        receipt["runtime_renamed_to"] = archive  # D5: recorded in the statement after the rename returns
     except Exception as exc:  # report, never hide: the orphan is then left for the owner (INCOMPLETE_INSTALL)
         receipt["runtime_renamed_to"] = None
         receipt["runtime_archive_error"] = f"{type(exc).__name__}: {exc}"
@@ -749,7 +814,10 @@ def save_receipt(layout, receipt, update_state, seams=None):
         progress = {}
         try:
             inject_fault(seams, "state-save")
-            write_atomic(layout.state_path, layout.evidence_dir, dumps_record(dict(receipt, state_saved=True)).encode("ascii"),
+            state_doc = dict(receipt, state_saved=True)
+            state_doc.update(interrupt_snapshot())  # D3: the state's one snapshot, immediately before it is serialized
+            before_first_write(seams)
+            write_atomic(layout.state_path, layout.evidence_dir, dumps_record(state_doc).encode("ascii"),
                          0o600, progress=progress)
             receipt["state_saved"] = True
             if "dir_fsync_error" in progress:  # F5 for the state write too
@@ -765,11 +833,15 @@ def save_receipt(layout, receipt, update_state, seams=None):
         receipts = layout.evidence_dir + "/" + RECEIPTS_DIR
         if not os.path.lexists(receipts):
             require_contained(receipts, layout.evidence_dir, "dir", "RECEIPTS_DIR_NOT_CONTAINED")
+            before_first_write(seams)
             os.mkdir(receipts)
         require_contained(receipts, layout.evidence_dir, "dir", "RECEIPTS_DIR_NOT_CONTAINED", must_exist=True)
         require_real_dir(receipts, "RECEIPTS_DIR_NOT_CONTAINED")
+        receipt.update(interrupt_snapshot())  # D3: the final receipt's one snapshot (the printed receipt uses it too)
+        signal_fault(seams, "signal-after-receipt-snapshot")
         inject_fault(seams, "receipt-save")
         name = f"{receipt['timestamp_utc']}-{receipt['mode']}-{os.getpid()}.json"
+        before_first_write(seams)
         write_new_file(receipts + "/" + name, receipts, dumps_record(dict(receipt, receipt_saved=True)).encode("ascii"))
         receipt["receipt_saved"] = True
     except Exception as exc:  # never raises: the printed receipt says receipt_saved false
@@ -803,16 +875,20 @@ def do_install(layout, manifest, receipt, seams):
         refuse("RUNTIME_DIR_EXISTS", EXIT_RUNTIME_EXISTS, runtime_dir=runtime_dir)
     if aborted:  # installer-owned archives of handled failures never block a later install (13.2 (e))
         receipt["aborted_archives_present"] = aborted
+    mode = 0o644 if pre_bytes is None else stat.S_IMODE(pre_info.st_mode)
+    # end of phase P (the last precondition check above); phase E, then the first write (the preimage copy)
+    signal_fault(seams, "signal-before-scope")
+    enter_deferral_scope(seams)
 
     if pre_bytes is None:
         receipt["preimage"] = {"status": "ABSENT"}
-        mode = 0o644
     else:
         backup = f"{layout.evidence_dir}/{PREIMAGE_PREFIX}{receipt['timestamp_utc']}-{os.getpid()}"
+        preimage = {"status": "PRESENT", "sha256": sha256_bytes(pre_bytes), "size": pre_info.st_size,
+                    "mode": oct(mode), "mtime": pre_info.st_mtime, "backup_path": backup}
+        before_first_write(seams)
         write_new_file(backup, layout.evidence_dir, pre_bytes)
-        mode = stat.S_IMODE(pre_info.st_mode)
-        receipt["preimage"] = {"status": "PRESENT", "sha256": sha256_bytes(pre_bytes), "size": pre_info.st_size,
-                               "mode": oct(mode), "mtime": pre_info.st_mtime, "backup_path": backup}
+        receipt["preimage"] = preimage  # D5: recorded in the statement after the copy is written
     if seams.get("barrier"):
         receipt["test_barrier"] = seams["barrier"]
         wait_at_barrier(seams["barrier"])
@@ -837,7 +913,7 @@ def do_install(layout, manifest, receipt, seams):
         write_atomic(layout.settings, layout.settings_dir, data, mode, seams, progress=receipt,
                      on_replaced=record_commit(receipt, "settings_written", data))
     except BaseException:
-        archive_failed_runtime(layout, receipt)  # pre-commit only (A); a no-op once settings_written (F3)
+        archive_failed_runtime(layout, receipt, seams)  # pre-commit only (A); a no-op once settings_written (F3)
         raise
     if read_postimage(layout, receipt, seams) != sha256_bytes(data):
         refuse("POSTIMAGE_MISMATCH", EXIT_WRITE_FAILED, expected_postimage_sha256=sha256_bytes(data))
@@ -944,18 +1020,22 @@ def do_rollback(layout, manifest, receipt, seams):
                expected_settings_sha256=state["postimage_sha256"])
     preimage = state["preimage"]
     stamp = receipt["timestamp_utc"]
-    receipt["step"] = "settings restore"
-    if preimage["status"] == "ABSENT":
-        with interrupts_blocked():  # W: the rename and its record are one step; nothing is read back after a rename
-            renamed = rename_contained(layout.settings, f"{layout.settings}.rolled-back-{stamp}", layout.settings_dir,
-                                       "file")
-            receipt.update(settings_restored=True, settings_renamed_to=renamed, postimage_sha256=None,
-                           step=STEP_AFTER_REPLACE)
-    else:
+    if preimage["status"] != "ABSENT":
         data = read_regular(preimage["backup_path"], "STATE_PREIMAGE_NOT_PINNED")
         if sha256_bytes(data) != preimage["sha256"]:
             refuse("PREIMAGE_BACKUP_CORRUPT", backup_path=preimage["backup_path"])
         mode = int(preimage.get("mode", "0o644"), 8)
+    # end of phase P (the last precondition check above); phase E, then the first write
+    signal_fault(seams, "signal-before-scope")
+    enter_deferral_scope(seams)
+    receipt["step"] = "settings restore"
+    before_first_write(seams)
+    if preimage["status"] == "ABSENT":
+        renamed = rename_contained(layout.settings, f"{layout.settings}.rolled-back-{stamp}", layout.settings_dir, "file")
+        # W, D5: recorded in the statement after the rename returns; nothing is read back after a rename
+        receipt.update(settings_restored=True, settings_renamed_to=renamed, postimage_sha256=None,
+                       step=STEP_AFTER_REPLACE)
+    else:
         write_atomic(layout.settings, layout.settings_dir, data, mode, seams, progress=receipt,
                      on_replaced=record_commit(receipt, "settings_restored", data))
         if read_postimage(layout, receipt, seams) != preimage["sha256"]:
@@ -963,8 +1043,9 @@ def do_rollback(layout, manifest, receipt, seams):
     fail_after_write(seams)
     runtime_dir = state["runtime_dir"]
     if os.path.lexists(runtime_dir):
-        receipt["runtime_renamed_to"] = rename_contained(runtime_dir, f"{runtime_dir}.disabled-{stamp}",
-                                                         layout.runtime_parent, "dir")
+        disabled = rename_contained(runtime_dir, f"{runtime_dir}.disabled-{stamp}", layout.runtime_parent, "dir")
+        signal_fault(seams, "signal-after-disabled-rename")  # D7 test hook only; a deferred signal raises nothing
+        receipt["runtime_renamed_to"] = disabled  # D5: recorded in the statement after the rename returns
     receipt.update(result="ROLLED_BACK", exit_code=EXIT_OK, previous_receipt=state)
     return EXIT_OK
 
@@ -1000,6 +1081,9 @@ def do_promote(layout, manifest, receipt, seams):
     data = dumps(new_obj).encode("utf-8")
     receipt["hooks"] = new_obj["hooks"]
     recheck_preimage(layout, pre_bytes)
+    # end of phase P (the last precondition check above); phase E, then the first write (RUNTIME_PARENT or <HASH12>)
+    signal_fault(seams, "signal-before-scope")
+    enter_deferral_scope(seams)
     if seams.get("barrier"):
         receipt["test_barrier"] = seams["barrier"]
         wait_at_barrier(seams["barrier"])
@@ -1010,15 +1094,17 @@ def do_promote(layout, manifest, receipt, seams):
         write_atomic(layout.settings, layout.settings_dir, data, stat.S_IMODE(pre_info.st_mode), seams, progress=receipt,
                      on_replaced=record_commit(receipt, "settings_written", data))
     except BaseException:
-        archive_failed_runtime(layout, receipt)  # pre-commit only (A); a no-op once settings_written (F3)
+        archive_failed_runtime(layout, receipt, seams)  # pre-commit only (A); a no-op once settings_written (F3)
         raise
     if read_postimage(layout, receipt, seams) != sha256_bytes(data):
         refuse("POSTIMAGE_MISMATCH", EXIT_WRITE_FAILED, expected_postimage_sha256=sha256_bytes(data))
     fail_after_write(seams)
     old_runtime_dir = state["runtime_dir"]
     if os.path.lexists(old_runtime_dir):
-        receipt["previous_runtime_renamed_to"] = rename_contained(
-            old_runtime_dir, f"{old_runtime_dir}.superseded-{receipt['timestamp_utc']}", layout.runtime_parent, "dir")
+        superseded = rename_contained(old_runtime_dir, f"{old_runtime_dir}.superseded-{receipt['timestamp_utc']}",
+                                      layout.runtime_parent, "dir")
+        signal_fault(seams, "signal-after-superseded-rename")  # D7 test hook only; a deferred signal raises nothing
+        receipt["previous_runtime_renamed_to"] = superseded  # D5: recorded in the statement after the rename returns
     receipt.update(result="PROMOTED", exit_code=EXIT_OK, previous_receipt=state)
     return EXIT_OK
 
@@ -1034,20 +1120,21 @@ def wait_at_barrier(barrier_dir):
 
 # --- entry point ------------------------------------------------------------------------
 
-def record_late_interrupt(signum, frame):
-    LATE_INTERRUPTS.append(signal.Signals(signum).name)
-
-
-def raise_on_interrupt(signum, frame):
-    """The first SIGINT/SIGTERM of the transaction raises Interrupted once; the handler is switched to recording first,
-    so a second signal during the unwinding (an archive, main's handlers) is recorded, never raised (F3)."""
-    set_interrupt_handlers(record_late_interrupt)
-    raise Interrupted(signal.Signals(signum).name)
-
-
-def set_interrupt_handlers(handler):
-    for sig in INTERRUPT_SIGNALS:
-        signal.signal(sig, handler)
+def report_late_interrupt(receipt):
+    """D3: the final console-observation point, after the final receipt's persistence and output attempts (including
+    their handled failure paths). A deferred interrupt that the final receipt's snapshot did not include is reported on
+    stderr in one line that says truthfully whether that receipt was saved to disk; nothing else happens because of it."""
+    observed = _deferred_signal
+    if observed is None or receipt.get("interrupt_deferred"):
+        return
+    where = ("the final receipt was saved to disk" if receipt.get("receipt_saved")
+             else "the final receipt was only printed (receipt_saved false)")
+    try:
+        sys.stderr.write(f"install_permission_guard: an interrupt ({signal.Signals(observed).name}) was observed after the "
+                         f"final receipt's snapshot; it is not in that receipt and had no effect on the outcome; {where}\n")
+        sys.stderr.flush()
+    except Exception:
+        pass
 
 
 def main():
@@ -1071,47 +1158,43 @@ def main():
              "short_write": opts.test_short_write, "fail_after_write": opts.test_fail_after_write,
              "faults": tuple(opts.test_fault)}
     layout = None
-    try:
-        try:
-            set_interrupt_handlers(raise_on_interrupt)  # SIGTERM/SIGINT become Interrupted for the transaction (F3)
-            test_root = validate_test_root(opts.test_root)
-            if test_root is None and any(seams.values()):
-                refuse("TEST_OPTION_WITHOUT_TEST_ROOT")
-            unknown = [p for p in seams["faults"] if p not in TEST_FAULT_POINTS]
-            if unknown:
-                refuse("TEST_FAULT_UNKNOWN", points=unknown)
-            if test_root is not None:
-                receipt["test_root"] = test_root
-                if seams["faults"]:
-                    receipt["test_faults"] = list(seams["faults"])
-                if seams["barrier"] is not None:
-                    require_contained(seams["barrier"], test_root, "dir", "TEST_BARRIER_NOT_CONTAINED", must_exist=True)
-            layout = Layout(test_root)
-            if not is_hex64(opts.expect_sha256):
-                refuse("INSTALLER_HASH_MISSING")
-            own_sha = sha256_bytes(read_regular(installer_path, "INSTALLER_UNREADABLE"))
-            if own_sha != opts.expect_sha256:
-                refuse("INSTALLER_HASH_MISMATCH", actual_installer_sha256=own_sha)
-            receipt["installer_sha256_verified"] = own_sha
-            manifest = load_manifest(layout, opts.mode, opts.manifest, opts.expect_manifest_sha256, receipt)
-            receipt["settings_target"] = layout.settings
-            receipt["evidence_dir"] = layout.evidence_dir
-            install_manifest_sha = (receipt["manifest_sha256_verified"] if opts.mode != "promote"
-                                    else (sha256_bytes(read_regular(layout.install_manifest, "MANIFEST_MISSING"))
-                                          if os.path.isfile(layout.install_manifest) else None))
-            receipt["rollback_command"] = (
-                f"python3 -I {installer_path} rollback --manifest {layout.install_manifest} --expect-sha256 {own_sha} "
-                f"--expect-manifest-sha256 {install_manifest_sha}" + (f" --test-root {test_root}" if test_root else ""))
-            if opts.mode == "install":
-                do_install(layout, manifest, receipt, seams)
-            elif opts.mode == "verify":
-                do_verify(layout, manifest, receipt, seams)
-            elif opts.mode == "rollback":
-                do_rollback(layout, manifest, receipt, seams)
-            else:
-                do_promote(layout, manifest, receipt, seams)
-        finally:
-            set_interrupt_handlers(record_late_interrupt)  # before any handler below runs: from here only recorded
+    try:  # phase P runs with the default signal behaviour; each writing mode enters the deferral scope itself
+        test_root = validate_test_root(opts.test_root)
+        if test_root is None and any(seams.values()):
+            refuse("TEST_OPTION_WITHOUT_TEST_ROOT")
+        unknown = [p for p in seams["faults"] if p not in TEST_FAULT_POINTS]
+        if unknown:
+            refuse("TEST_FAULT_UNKNOWN", points=unknown)
+        if test_root is not None:
+            receipt["test_root"] = test_root
+            if seams["faults"]:
+                receipt["test_faults"] = list(seams["faults"])
+            if seams["barrier"] is not None:
+                require_contained(seams["barrier"], test_root, "dir", "TEST_BARRIER_NOT_CONTAINED", must_exist=True)
+        layout = Layout(test_root)
+        if not is_hex64(opts.expect_sha256):
+            refuse("INSTALLER_HASH_MISSING")
+        own_sha = sha256_bytes(read_regular(installer_path, "INSTALLER_UNREADABLE"))
+        if own_sha != opts.expect_sha256:
+            refuse("INSTALLER_HASH_MISMATCH", actual_installer_sha256=own_sha)
+        receipt["installer_sha256_verified"] = own_sha
+        manifest = load_manifest(layout, opts.mode, opts.manifest, opts.expect_manifest_sha256, receipt)
+        receipt["settings_target"] = layout.settings
+        receipt["evidence_dir"] = layout.evidence_dir
+        install_manifest_sha = (receipt["manifest_sha256_verified"] if opts.mode != "promote"
+                                else (sha256_bytes(read_regular(layout.install_manifest, "MANIFEST_MISSING"))
+                                      if os.path.isfile(layout.install_manifest) else None))
+        receipt["rollback_command"] = (
+            f"python3 -I {installer_path} rollback --manifest {layout.install_manifest} --expect-sha256 {own_sha} "
+            f"--expect-manifest-sha256 {install_manifest_sha}" + (f" --test-root {test_root}" if test_root else ""))
+        if opts.mode == "install":
+            do_install(layout, manifest, receipt, seams)
+        elif opts.mode == "verify":
+            do_verify(layout, manifest, receipt, seams)
+        elif opts.mode == "rollback":
+            do_rollback(layout, manifest, receipt, seams)
+        else:
+            do_promote(layout, manifest, receipt, seams)
     except Refusal as refusal:
         code = refusal.code
         if (receipt.get("settings_written") or receipt.get("settings_restored")) and code != EXIT_WRITE_FAILED:
@@ -1120,7 +1203,7 @@ def main():
         receipt.update(refusal.extra)
         receipt.update(result="FAILED" if code == EXIT_WRITE_FAILED else "REFUSED", reason=refusal.reason,
                        exit_code=code)
-    except BaseException as exc:  # unexpected error, KeyboardInterrupt, SystemExit, SIGTERM: never a success
+    except BaseException as exc:  # an unexpected error, a test-fault KeyboardInterrupt, or SIGINT in phase P
         interrupted = not isinstance(exc, Exception)
         receipt.update(result="FAILED", reason="INTERRUPTED" if interrupted else "UNEXPECTED_ERROR",
                        exit_code=EXIT_WRITE_FAILED, detail=f"{type(exc).__name__}: {exc}")
@@ -1128,20 +1211,25 @@ def main():
             receipt["interrupted"] = True
     if receipt.get("exit_code") == EXIT_WRITE_FAILED and "step" in receipt:
         receipt.setdefault("failed_step", receipt["step"])
-    if LATE_INTERRUPTS:
-        receipt["late_interrupt"] = list(LATE_INTERRUPTS)
     changed = bool(receipt.get("settings_written") or receipt.get("settings_restored"))
     if layout is not None and opts.mode != "verify":
+        if receipt.get("evidence_verified"):
+            enter_deferral_scope(seams)  # a receipt is a write: it is written only inside the scope (D1)
+        if _scope_entered:
+            try:
+                pause_in_scope(layout, seams)  # test only; before the snapshots of the state and the final receipt
+            except Exception as exc:  # a test seam never decides the outcome; its failure is reported
+                receipt["test_pause_error"] = f"{type(exc).__name__}: {exc}"
         save_receipt(layout, receipt, update_state=changed, seams=seams)  # outcome S; never raises
-    if LATE_INTERRUPTS:
-        receipt["late_interrupt"] = list(LATE_INTERRUPTS)
-        if receipt.get("exit_code") in (None, EXIT_OK):
-            receipt["exit_code"] = EXIT_WRITE_FAILED  # a recorded interrupt never ends in exit 0
+    if opts.mode != "verify" and "interrupt_deferred" not in receipt:
+        receipt.update(interrupt_snapshot())  # the printed receipt's snapshot when no receipt file was attempted
     try:
         sys.stdout.write(json.dumps(receipt, ensure_ascii=True, default=str) + "\n")
         sys.stdout.flush()
     except Exception:
         pass
+    report_late_interrupt(receipt)  # the final console-observation point (D3)
+    signal_fault(seams, "signal-after-final-observation")
     return receipt.get("exit_code", EXIT_WRITE_FAILED)
 
 
