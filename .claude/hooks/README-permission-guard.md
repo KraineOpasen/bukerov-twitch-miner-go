@@ -254,41 +254,54 @@ Write outcomes (all modes that write):
 * **Invariant W (the write is recorded at once).** The moment `os.replace` of the
   settings target (or the rename of an ABSENT rollback) returns, the receipt
   records `settings_written` (install, promote) or `settings_restored` (rollback),
-  the temporary file and `intended_postimage_sha256`. The read-back is a later
-  step: when it fails the run ends with exit 7, POSTIMAGE_UNREADABLE and a null
-  `postimage_sha256`, and the state records the write. A state with a null
-  postimage is never acted on: `rollback` and `promote` refuse POSTIMAGE_UNKNOWN
-  (exit 4, nothing written) and `verify` reports DRIFT with the intended and the
-  current hash.
+  the temporary file and `intended_postimage_sha256`; SIGINT and SIGTERM are
+  blocked across the call and that record, so a signal is delivered only after the
+  record exists (the same holds for the `mkdir` of `<HASH12>` and its ownership
+  record, invariant A). The read-back is a later step: when it fails the run ends
+  with exit 7, POSTIMAGE_UNREADABLE and a null `postimage_sha256`, and the state
+  records the write. Any refusal raised after a committed write is reported as
+  FAILED with exit 7 (its own code kept in `original_code`), never as refused
+  input. A state whose postimage is null, or differs from the intended postimage
+  (POSTIMAGE_MISMATCH, a concurrent writer), is never acted on: `rollback` and
+  `promote` refuse POSTIMAGE_UNKNOWN (exit 4, nothing written) and `verify` reports
+  DRIFT with the intended and the current hash.
 * **F3 (after the replacement).** No failure, KeyboardInterrupt, SystemExit or
   SIGTERM (converted into an exception for the transaction) touches the runtime
   directory the new registration points at; the receipt sets `failed_step` and,
-  for an interrupt, `interrupted`; state and receipt are saved; exit 7. A further
-  interrupt while the outcome is recorded is noted as `late_interrupt` and never
-  ends in exit 0.
+  for an interrupt, `interrupted`; state and receipt are saved; exit 7. Only the
+  first interrupt raises: the handler switches to recording before it raises, so
+  any further interrupt (during an archive, while the outcome is recorded) is
+  noted as `late_interrupt` and never ends in exit 0.
 * **Outcome S (state before receipt).** After a completed write the state file
   `permission-guard-state.json` is saved first; a receipt with a success result
   and exit 0 is persisted only after that save succeeded. When the state save
   fails the result is `<RESULT>_STATE_NOT_SAVED` (for example
   INSTALLED_STATE_NOT_SAVED), exit 7, `state_saved` false, with the original
-  result and reason in `original_result` and `original_reason`. A refusal that
-  wrote nothing saves no state and keeps its own exit code. A receipt file that
-  cannot be written leaves `receipt_saved` false in the printed receipt (exit 7,
-  unless a refusal keeps its own code). A directory fsync failure after the
-  replacement is recorded as `dir_fsync_error`.
+  result and reason in `original_result` and `original_reason` and any leftover
+  temporary state file in `state_save_temp_path`. A refusal that wrote nothing
+  saves no state and keeps its own exit code. A receipt file that cannot be
+  written leaves `receipt_saved` false in the printed receipt (exit 7, unless a
+  refusal keeps its own code). Receipts and the state are written ASCII-escaped,
+  so no text read from the settings can break them. A directory fsync failure
+  after the replacement is recorded as `dir_fsync_error` (for the state write,
+  `state_dir_fsync_error`).
 
 `verify` writes nothing and decides by this precedence (the first matching step
-wins): (1) a state file that exists but cannot be read: STATE_UNREADABLE (exit 1;
-only a missing file means "no state"); (2) a readable state that records a
-committed write: MATCH (exit 0) when the settings hash equals the recorded
-postimage, the runtime hash equals the registered SHA and the registration is
-present exactly once, otherwise DRIFT (exit 1) with both hashes, and always DRIFT
-when the postimage is unknown; a state left stale by a failed state save no
-longer matches the settings target and is DRIFT, never current and never absent;
-(3) no trustworthy state but a registration, a runtime directory or an
-`.aborted-` archive for the hash: INCOMPLETE_INSTALL (exit 1; owner recovery,
-no guessed rollback); (4) NOT_INSTALLED (exit 1). A transaction that ended
-nonzero stays nonzero in its receipt even when a later `verify` returns MATCH.
+wins): (1) a state file that exists but cannot be used — unreadable, a symlink or
+not a regular file, or not valid JSON: STATE_UNREADABLE (exit 1, the cause in
+`state_refusal`; only a missing file means "no state"); (2) a readable state that
+records a committed write: MATCH (exit 0) when the settings hash equals the
+recorded postimage, the runtime hash equals the registered SHA and the
+registration is present exactly once, otherwise DRIFT (exit 1) with both hashes;
+always DRIFT when the postimage is unknown or a file cannot be read
+(`settings_read_error`, `runtime_read_error`); a state left stale by a failed
+state save no longer matches the settings target and is DRIFT, never current and
+never absent; (3) no trustworthy state (none, or one whose paths or hashes fail
+the pinned layout, named in `state_refusal`) but a registration, a runtime
+directory or an `.aborted-` archive for the hash: INCOMPLETE_INSTALL (exit 1;
+owner recovery, no guessed rollback); (4) NOT_INSTALLED (exit 1). A transaction
+that ended nonzero stays nonzero in its receipt even when a later `verify`
+returns MATCH.
 
 Every run prints one JSON receipt (last stdout line); once the manifest has been
 verified the receipt also names the rollback command with both pins (a refusal
@@ -300,9 +313,19 @@ and exits 7; failures before that point (for example the runtime copy, the
 preimage copy or a receipt file) have no temporary settings file to name. After a
 rollback `verify` reports NOT_INSTALLED (INCOMPLETE_INSTALL while an `.aborted-`
 archive for the hash remains, step 3) and `rollback`/`promote` refuse until a
-new `install`. The rollback command is valid while the settings file still hashes
-to the recorded postimage; otherwise the installer reports DRIFT or
-POSTIMAGE_UNKNOWN and the owner decides.
+new `install`.
+
+The printed rollback command works only while all of these hold: the installer
+at `/home/claude/bukerov-twitch-miner-go/.claude/hooks/install_permission_guard.py`
+still hashes to its `--expect-sha256` value, the install manifest still hashes to
+its `--expect-manifest-sha256` value, the guard source at
+`.claude/hooks/permission_guard.py` still hashes to the manifest's
+`source_sha256` (every mode checks all three before it reads the state), and the
+settings file still hashes to the recorded postimage. After a checkout that
+changes or removes those files (for example closing the PR and switching back to
+`release/0.3`), check out `chore/permission-guard` at the installed head first;
+otherwise the installer refuses (exit 2), and a settings change is reported as
+DRIFT or POSTIMAGE_UNKNOWN for the owner to decide.
 
 Tests pass `--test-root DIR` (an existing real directory directly under the
 system temporary directory): every pinned constant, the manifest paths included,

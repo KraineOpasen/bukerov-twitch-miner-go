@@ -88,7 +88,10 @@ def snapshot(root):
             elif os.path.isdir(p):
                 out[rel] = "dir"
             else:
-                out[rel] = sha256_file(p)
+                try:
+                    out[rel] = sha256_file(p)
+                except PermissionError:  # a deliberately unreadable fixture file
+                    out[rel] = "unreadable:" + oct(stat.S_IMODE(os.lstat(p).st_mode))
     return out
 
 
@@ -244,6 +247,17 @@ class InstallerTest(unittest.TestCase):
         self.assertIsNotNone(receipt, f"no JSON receipt: out={out!r} err={err!r}")
         self.assertEqual(receipt.get("reason"), reason, receipt)
         self.assertEqual(rc, code, receipt)
+        return receipt
+
+    def assert_verify(self, result, state_refusal=None):
+        """verify writes nothing and answers by the 11.3 precedence; every non-MATCH outcome exits 1."""
+        before = snapshot(self.fx.root)
+        rc, receipt, out, err = self.fx.run("verify")
+        self.assertIsNotNone(receipt, (out, err))
+        self.assertEqual((rc, receipt.get("result")), (0 if result == "MATCH" else 1, result), receipt)
+        if state_refusal is not None:
+            self.assertEqual(receipt.get("state_refusal"), state_refusal, receipt)
+        self.assertEqual(before, snapshot(self.fx.root))
         return receipt
 
     def settings_obj(self):
@@ -697,7 +711,9 @@ class InstallerTest(unittest.TestCase):
         os.rename(self.fx.state_path(), elsewhere)
         os.symlink(elsewhere, self.fx.state_path())
         installed = read_bytes(self.fx.settings)
-        for mode in ("verify", "rollback", "promote"):
+        # verify: 11.3 step 1, a state file that exists but cannot be used is STATE_UNREADABLE (never acted on)
+        self.assert_verify("STATE_UNREADABLE", state_refusal="STATE_NOT_REGULAR")
+        for mode in ("rollback", "promote"):
             if mode == "promote":
                 self.fx.write_source(GUARD_V2)
                 self.write_promote_manifest()
@@ -716,8 +732,9 @@ class InstallerTest(unittest.TestCase):
                 st["runtime_dir"] = forged
                 st["runtime_path"] = forged + "/permission_guard.py"
             self.fx.edit_state(mutate)
-            for mode in ("verify", "rollback"):
-                self.assert_refused(self.fx.run(mode), 2, "STATE_RUNTIME_NOT_PINNED")
+            # verify: 11.3 step 3, no trustworthy state but a registration and runtime remain
+            self.assert_verify("INCOMPLETE_INSTALL", state_refusal="STATE_RUNTIME_NOT_PINNED")
+            self.assert_refused(self.fx.run("rollback"), 2, "STATE_RUNTIME_NOT_PINNED")
             self.fx.write_source(GUARD_V2)
             self.write_promote_manifest()
             self.assert_refused(self.fx.run("promote"), 2, "STATE_RUNTIME_NOT_PINNED")
@@ -749,7 +766,8 @@ class InstallerTest(unittest.TestCase):
         def mutate(st):
             st["runtime_path"] = self.fx.runtime_dir() + "/../../../../../outside/permission_guard.py"
         self.fx.edit_state(mutate)
-        self.assert_refused(self.fx.run("verify"), 2, "STATE_RUNTIME_NOT_PINNED")
+        self.assert_verify("INCOMPLETE_INSTALL", state_refusal="STATE_RUNTIME_NOT_PINNED")
+        self.assert_refused(self.fx.run("rollback"), 2, "STATE_RUNTIME_NOT_PINNED")
 
     def test_ct_state_settings_target_mismatch_refused(self):
         self.install_ok()
@@ -1194,6 +1212,85 @@ class InstallerTest(unittest.TestCase):
         for path in changed:
             self.assertTrue(any(path == a or path.startswith(a + "/") for a in allowed), path)
         self.assertEqual(first["evidence_dir"], self.fx.evidence_dir)
+
+    # rev15 Q3 round 4 repairs ---------------------------------------------------------------
+    def replace_with_symlink(self, directory):
+        moved = directory + ".moved"
+        os.rename(directory, moved)
+        os.symlink(moved, directory)
+
+    def test_r4_post_commit_refusal_is_a_failed_write_exit_7(self):
+        """R4-4: a refusal raised after the committed write (here the post-commit rename of a runtime dir that is now a
+        symlink) is FAILED / exit 7 with the write recorded, never REFUSED / exit 2, and its state stays usable."""
+        self.fx.write_settings(OTHER_SETTINGS)
+        preimage = read_bytes(self.fx.settings)
+        self.install_ok()
+        self.replace_with_symlink(self.fx.runtime_dir())
+        rc, receipt, out, err = self.fx.run("rollback")
+        self.assertEqual((rc, receipt["result"], receipt["reason"]), (7, "FAILED", "RENAME_SOURCE_NOT_CONTAINED"), receipt)
+        self.assertEqual(receipt["original_code"], 2)
+        self.assertTrue(receipt["settings_restored"])
+        self.assertEqual(read_bytes(self.fx.settings), preimage)
+        state = self.fx.state()
+        self.assertEqual((state["result"], state["settings_restored"]), ("FAILED", True))
+        self.assert_verify("DRIFT")
+
+    def test_r4_post_commit_refusal_in_promote_is_a_failed_write_exit_7(self):
+        self.install_ok()
+        old_dir = self.fx.runtime_dir()
+        self.fx.write_source(GUARD_V2)
+        self.write_promote_manifest()
+        self.replace_with_symlink(old_dir)
+        rc, receipt, out, err = self.fx.run("promote")
+        self.assertEqual((rc, receipt["result"], receipt["reason"]), (7, "FAILED", "RENAME_SOURCE_NOT_CONTAINED"), receipt)
+        self.assertTrue(receipt["settings_written"])
+        self.assertEqual(self.settings_obj()["hooks"]["PermissionRequest"], [self.fx.expected_entry()])
+        state = self.fx.state()
+        self.assertEqual((state["result"], state["settings_written"], state["runtime_dir"]),
+                         ("FAILED", True, self.fx.runtime_dir()))
+
+    def test_r4_postimage_mismatch_is_an_unverified_postimage(self):
+        """R4-5: a state whose recorded postimage differs from the intended postimage (POSTIMAGE_MISMATCH, a concurrent
+        writer) is never MATCH and never acted on, even when the settings now equal that recorded hash."""
+        self.install_ok()
+        with open(self.fx.settings, "a") as fh:
+            fh.write("\n")  # the concurrent writer's bytes
+        foreign = sha256_file(self.fx.settings)
+
+        def mutate(st):
+            st.update(result="FAILED", reason="POSTIMAGE_MISMATCH", exit_code=7, postimage_sha256=foreign)
+        self.fx.edit_state(mutate)
+        self.assertNotEqual(self.fx.state()["intended_postimage_sha256"], foreign)
+        self.assert_verify("DRIFT")
+        before = snapshot(self.fx.root)
+        self.assert_refused(self.fx.run("rollback"), 4, "POSTIMAGE_UNKNOWN")
+        self.unchanged_except_evidence(before)
+
+    def test_r4_unencodable_settings_text_keeps_the_refusal_outcome(self):
+        """R4-6: a lone-surrogate escape in the settings never turns a refusal into a traceback: the receipt is printed
+        and persisted and the refusal keeps its code."""
+        raw = (b'{"hooks": {"PermissionRequest": [{"matcher": "Bash", "hooks": '
+               b'[{"type": "command", "command": "echo \\ud800"}]}]}}\n')
+        self.fx.write_settings(raw=raw)
+        receipt = self.assert_refused(self.fx.run("install"), 3, "FOREIGN_HOOK")
+        self.assertTrue(receipt["receipt_saved"])
+        self.assertEqual([saved["reason"] for _, saved in self.receipts()], ["FOREIGN_HOOK"])
+        self.assertEqual(read_bytes(self.fx.settings), raw)
+
+    def test_r4_verify_step2_read_error_is_drift_and_malformed_state_is_unreadable(self):
+        """R4-8: 11.3 is binding — a read error on a committed state's runtime file is DRIFT (step 2, never a refusal),
+        and a state file that exists but cannot be parsed is STATE_UNREADABLE (step 1)."""
+        self.install_ok()
+        os.chmod(self.fx.runtime_path(), 0o000)
+        try:
+            receipt = self.assert_verify("DRIFT")
+            self.assertIn("runtime_read_error", receipt)
+        finally:
+            os.chmod(self.fx.runtime_path(), 0o444)
+        self.assert_verify("MATCH")
+        with open(self.fx.state_path(), "w") as fh:
+            fh.write("{not json")
+        self.assert_verify("STATE_UNREADABLE", state_refusal="STATE_MALFORMED")
 
 
 def main():

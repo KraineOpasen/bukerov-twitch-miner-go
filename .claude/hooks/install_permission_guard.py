@@ -39,15 +39,18 @@ the check-to-use window; it does not eliminate it (a process of the same OS acco
 Write outcomes (rev15, 7.11b (2)):
   W  once os.replace of the settings target (or, for an ABSENT rollback, its rename) has returned, the
      write is recorded at once (settings_written / settings_restored, temp_path,
-     intended_postimage_sha256); the read-back of the postimage is a later step, and its failure is
-     exit 7 POSTIMAGE_UNREADABLE with postimage_sha256 null, never a refusal of input. A state with a
-     null postimage is never acted on: rollback and promote refuse POSTIMAGE_UNKNOWN (exit 4) and
-     verify reports DRIFT.
+     intended_postimage_sha256), with SIGINT/SIGTERM blocked across the call and that record; the
+     read-back of the postimage is a later step, and its failure is exit 7 POSTIMAGE_UNREADABLE with
+     postimage_sha256 null. Any refusal after a committed write is FAILED / exit 7 (original_code
+     kept), never a refusal of input. A state whose postimage is null or differs from the intended
+     one is never acted on: rollback and promote refuse POSTIMAGE_UNKNOWN (exit 4) and verify reports
+     DRIFT.
   A  before the replacement has returned, every handled failure or interrupt after this run's mkdir of
      <HASH12> renames that directory to <HASH12>.aborted-<UTC>-<pid> exactly once (failed_step and
      runtime_renamed_to in the receipt).
   F3 after the replacement has returned, no failure, interrupt or SIGTERM touches the runtime directory:
      the write is recorded, failed_step and interrupted are set, state and receipt are saved, exit 7.
+     Only the first interrupt raises; every later one is recorded as late_interrupt (never exit 0).
   S  the state file is saved before the receipt; when that save fails the result is
      <RESULT>_STATE_NOT_SAVED with state_saved false and original_result / original_reason kept (exit 7);
      a receipt that cannot be written says receipt_saved false (exit 7 unless a refusal keeps its code).
@@ -72,8 +75,10 @@ also names the rollback command with both pins. Exit codes:
   6 DRIFT_BEFORE_WRITE (settings changed between the preimage and the write)
   7 write failed or interrupted (a temporary settings file, once created, is named in the receipt),
     or a failure after a completed write, or a state or receipt that could not be saved
-verify precedence: STATE_UNREADABLE; a readable state with a committed write (MATCH/DRIFT, DRIFT when
-the postimage is unknown); INCOMPLETE_INSTALL; NOT_INSTALLED.
+verify precedence: STATE_UNREADABLE (unreadable, symlinked, irregular or malformed state); a readable
+state with a committed write (MATCH/DRIFT; DRIFT when the postimage is unknown or a file cannot be read);
+INCOMPLETE_INSTALL (no trustworthy state, but a registration, runtime dir or .aborted- archive remains);
+NOT_INSTALLED. Receipts and the state file are ASCII-escaped JSON.
 A refusal before the evidence directory is verified is printed only (never written to an
 unverified path). The installer never deletes anything: it renames (rollback, promote, a failed
 install's runtime dir -> <HASH12>.aborted-<UTC>-<pid>) and replaces atomically.
@@ -197,6 +202,29 @@ def loads_strict(data):
 
 def dumps(obj):
     return json.dumps(obj, indent=2, ensure_ascii=False) + "\n"
+
+
+def dumps_record(obj):
+    """Receipts, the state file and the printed receipt: ASCII-escaped, so no text read from the settings (for example
+    a lone-surrogate escape) can make serialization fail after the outcome is decided."""
+    return json.dumps(obj, indent=2, ensure_ascii=True, default=str) + "\n"
+
+
+INTERRUPT_SIGNALS = (signal.SIGINT, signal.SIGTERM)
+LATE_INTERRUPTS = []
+
+
+class interrupts_blocked:
+    """Block SIGINT/SIGTERM across a write and the statement that records it (W, A, F3): a signal that arrives in between
+    is delivered when the block ends, after the record exists."""
+
+    def __enter__(self):
+        self.previous = signal.pthread_sigmask(signal.SIG_BLOCK, INTERRUPT_SIGNALS)
+        return self
+
+    def __exit__(self, *exc):
+        signal.pthread_sigmask(signal.SIG_SETMASK, self.previous)
+        return False
 
 
 # --- containment (CT2-CT5) ----------------------------------------------------------------
@@ -364,17 +392,18 @@ def write_atomic(target, root, data, mode, seams=None, progress=None, on_replace
         inject_fault(seams, "interrupt-before-replace")
         require_contained(target, root, "file", "WRITE_TARGET_NOT_CONTAINED")  # CT6: immediately before use
         require_contained(temp_path, root, "file", "TEMP_NOT_CONTAINED", must_exist=True)
-        try:
-            os.replace(temp_path, target)
-        except OSError as exc:
-            refuse("REPLACE_FAILED", EXIT_WRITE_FAILED, detail=str(exc))
     except Refusal as refusal:
         # the temporary file exists: writing had begun, so this is never "refused input" (F6)
         refusal.code = EXIT_WRITE_FAILED
         refusal.extra.setdefault("temp_path", temp_path)
         raise
-    if on_replaced is not None:
-        on_replaced(temp_path)
+    with interrupts_blocked():  # the replace and its record are one step for SIGINT/SIGTERM (W, F3)
+        try:
+            os.replace(temp_path, target)
+        except OSError as exc:
+            refuse("REPLACE_FAILED", EXIT_WRITE_FAILED, temp_path=temp_path, detail=str(exc))
+        if on_replaced is not None:
+            on_replaced(temp_path)
     inject_fault(seams, "interrupt-after-replace")
     try:
         inject_fault(seams, "dir-fsync")
@@ -588,8 +617,9 @@ def create_runtime_copy(layout, sha, receipt, seams=None):
     if os.path.lexists(runtime_dir):
         refuse("RUNTIME_DIR_EXISTS", EXIT_RUNTIME_EXISTS, runtime_dir=runtime_dir)
     receipt["step"] = "runtime copy"
-    os.mkdir(runtime_dir)
-    receipt["runtime_dir_owned"] = runtime_dir
+    with interrupts_blocked():  # the mkdir and its ownership record are one step for SIGINT/SIGTERM (A)
+        os.mkdir(runtime_dir)
+        receipt["runtime_dir_owned"] = runtime_dir
     receipt["runtime_copy_created"] = True
     require_real_dir(runtime_dir, "RUNTIME_DIR_NOT_CONTAINED")
     data = read_regular(layout.source, "SOURCE_NOT_CONTAINED")
@@ -686,6 +716,10 @@ def load_state(layout, seams=None):
         state["postimage_unknown"] = True
     elif not is_hex64(state.get("postimage_sha256")):
         refuse("STATE_HASH_MALFORMED", key="postimage_sha256")
+    intended = state.get("intended_postimage_sha256")
+    if committed and is_hex64(intended) and state.get("postimage_sha256") != intended:
+        # read back but not the bytes this run wrote (POSTIMAGE_MISMATCH, a concurrent writer): unverified (W, 11.3)
+        state["postimage_unknown"] = True
     expected_dir = layout.runtime_parent + "/" + state["runtime_sha256"][:12]
     if state.get("runtime_dir") != expected_dir or state.get("runtime_path") != expected_dir + "/" + GUARD_FILENAME:
         refuse("STATE_RUNTIME_NOT_PINNED")
@@ -712,12 +746,18 @@ def save_receipt(layout, receipt, update_state, seams=None):
     if not receipt.get("evidence_verified"):
         return  # a refusal before the evidence directory is verified is printed only
     if update_state:
+        progress = {}
         try:
             inject_fault(seams, "state-save")
-            write_atomic(layout.state_path, layout.evidence_dir, dumps(dict(receipt, state_saved=True)).encode("utf-8"),
-                         0o600)
+            write_atomic(layout.state_path, layout.evidence_dir, dumps_record(dict(receipt, state_saved=True)).encode("ascii"),
+                         0o600, progress=progress)
             receipt["state_saved"] = True
-        except (OSError, Refusal) as exc:
+            if "dir_fsync_error" in progress:  # F5 for the state write too
+                receipt["state_dir_fsync_error"] = progress["dir_fsync_error"]
+        except Exception as exc:  # outcome S: a failed state save is an outcome, never a crash
+            temp = (getattr(exc, "extra", None) or {}).get("temp_path") or progress.get("temp_path")
+            if temp:
+                receipt["state_save_temp_path"] = temp  # F6 for the state write: the leftover temp file is named
             receipt.update(state_saved=False, state_save_error=getattr(exc, "reason", None) or f"{type(exc).__name__}: {exc}",
                            original_result=receipt.get("result"), original_reason=receipt.get("reason"),
                            result=f"{receipt.get('result')}_STATE_NOT_SAVED", exit_code=EXIT_WRITE_FAILED)
@@ -730,9 +770,9 @@ def save_receipt(layout, receipt, update_state, seams=None):
         require_real_dir(receipts, "RECEIPTS_DIR_NOT_CONTAINED")
         inject_fault(seams, "receipt-save")
         name = f"{receipt['timestamp_utc']}-{receipt['mode']}-{os.getpid()}.json"
-        write_new_file(receipts + "/" + name, receipts, dumps(dict(receipt, receipt_saved=True)).encode("utf-8"))
+        write_new_file(receipts + "/" + name, receipts, dumps_record(dict(receipt, receipt_saved=True)).encode("ascii"))
         receipt["receipt_saved"] = True
-    except (OSError, Refusal) as exc:
+    except Exception as exc:  # never raises: the printed receipt says receipt_saved false
         receipt.update(receipt_saved=False,
                        receipt_save_error=getattr(exc, "reason", None) or f"{type(exc).__name__}: {exc}")
         if receipt.get("exit_code") in (None, EXIT_OK) or update_state:
@@ -825,30 +865,42 @@ def do_verify(layout, manifest, receipt, seams=None):
     when its postimage is unknown, W); (3) no trustworthy state but a registration, runtime dir or
     .aborted- archive for HASH12: INCOMPLETE_INSTALL; (4) NOT_INSTALLED. Writes nothing."""
     sha = manifest["source_sha256"]
+    untrusted = None
     try:
         state = load_state(layout, seams)
     except Refusal as refusal:
-        if refusal.reason == "STATE_UNREADABLE":
-            receipt.update(result="STATE_UNREADABLE", exit_code=EXIT_VERIFY_DRIFT, detail=refusal.extra.get("detail"))
+        if refusal.reason in ("STATE_UNREADABLE", "STATE_NOT_REGULAR", "STATE_MALFORMED"):  # step 1
+            receipt.update(result="STATE_UNREADABLE", exit_code=EXIT_VERIFY_DRIFT, state_refusal=refusal.reason,
+                           detail=refusal.extra.get("detail"))
             return EXIT_VERIFY_DRIFT
         if refusal.reason not in ("STATE_MISSING", "STATE_NOT_INSTALLED"):
-            raise
+            untrusted = refusal.reason  # readable, but its paths or hashes are not trustworthy: steps 3 and 4
         state = None
     if state is None:
         exists, aborted = runtime_entries(layout, sha[:12])
         registered = registration_present(layout, sha, receipt)
+        if untrusted:
+            receipt["state_refusal"] = untrusted
         if exists or aborted or registered:
             receipt.update(result="INCOMPLETE_INSTALL", exit_code=EXIT_VERIFY_DRIFT, runtime_dir_present=exists,
-                           aborted=aborted, registration_present=registered, state_present=False)
+                           aborted=aborted, registration_present=registered, state_present=untrusted is not None)
             return EXIT_VERIFY_DRIFT
         receipt.update(result="NOT_INSTALLED", exit_code=EXIT_VERIFY_DRIFT)
         return EXIT_VERIFY_DRIFT
-    settings_sha = current_settings_sha(layout)
+    try:  # step 2: a read error is DRIFT, never a refusal
+        settings_sha = current_settings_sha(layout)
+    except (OSError, Refusal) as exc:
+        settings_sha = None
+        receipt["settings_read_error"] = getattr(exc, "reason", None) or f"{type(exc).__name__}: {exc}"
     runtime_path = state["runtime_path"]
     runtime_sha = None
-    if os.path.lexists(runtime_path):
-        require_contained(runtime_path, state["runtime_dir"], "file", "STATE_RUNTIME_NOT_PINNED", must_exist=True)
-        runtime_sha = sha256_bytes(read_regular(runtime_path, "STATE_RUNTIME_NOT_PINNED"))
+    try:
+        if os.path.lexists(runtime_path):
+            require_contained(runtime_path, state["runtime_dir"], "file", "STATE_RUNTIME_NOT_PINNED", must_exist=True)
+            runtime_sha = sha256_bytes(read_regular(runtime_path, "STATE_RUNTIME_NOT_PINNED"))
+    except (OSError, Refusal) as exc:
+        runtime_sha = None
+        receipt["runtime_read_error"] = getattr(exc, "reason", None) or f"{type(exc).__name__}: {exc}"
     registration_count = None
     try:
         _, obj, _ = read_settings(layout)
@@ -894,10 +946,11 @@ def do_rollback(layout, manifest, receipt, seams):
     stamp = receipt["timestamp_utc"]
     receipt["step"] = "settings restore"
     if preimage["status"] == "ABSENT":
-        renamed = rename_contained(layout.settings, f"{layout.settings}.rolled-back-{stamp}", layout.settings_dir, "file")
-        # W: recorded the moment the rename has returned; nothing is read back after a rename
-        receipt.update(settings_restored=True, settings_renamed_to=renamed, postimage_sha256=None,
-                       step=STEP_AFTER_REPLACE)
+        with interrupts_blocked():  # W: the rename and its record are one step; nothing is read back after a rename
+            renamed = rename_contained(layout.settings, f"{layout.settings}.rolled-back-{stamp}", layout.settings_dir,
+                                       "file")
+            receipt.update(settings_restored=True, settings_renamed_to=renamed, postimage_sha256=None,
+                           step=STEP_AFTER_REPLACE)
     else:
         data = read_regular(preimage["backup_path"], "STATE_PREIMAGE_NOT_PINNED")
         if sha256_bytes(data) != preimage["sha256"]:
@@ -981,20 +1034,20 @@ def wait_at_barrier(barrier_dir):
 
 # --- entry point ------------------------------------------------------------------------
 
+def record_late_interrupt(signum, frame):
+    LATE_INTERRUPTS.append(signal.Signals(signum).name)
+
+
 def raise_on_interrupt(signum, frame):
+    """The first SIGINT/SIGTERM of the transaction raises Interrupted once; the handler is switched to recording first,
+    so a second signal during the unwinding (an archive, main's handlers) is recorded, never raised (F3)."""
+    set_interrupt_handlers(record_late_interrupt)
     raise Interrupted(signal.Signals(signum).name)
 
 
 def set_interrupt_handlers(handler):
-    for sig in (signal.SIGTERM, signal.SIGINT):
+    for sig in INTERRUPT_SIGNALS:
         signal.signal(sig, handler)
-
-
-def defer_interrupts(receipt):
-    """While the outcome is being recorded, a further SIGINT/SIGTERM is recorded, never acted on."""
-    def record(signum, frame):
-        receipt["late_interrupt"] = signal.Signals(signum).name
-    set_interrupt_handlers(record)
 
 
 def main():
@@ -1019,51 +1072,55 @@ def main():
              "faults": tuple(opts.test_fault)}
     layout = None
     try:
-        set_interrupt_handlers(raise_on_interrupt)  # SIGTERM/SIGINT become Interrupted for the transaction (F3)
-        test_root = validate_test_root(opts.test_root)
-        if test_root is None and any(seams.values()):
-            refuse("TEST_OPTION_WITHOUT_TEST_ROOT")
-        unknown = [p for p in seams["faults"] if p not in TEST_FAULT_POINTS]
-        if unknown:
-            refuse("TEST_FAULT_UNKNOWN", points=unknown)
-        if test_root is not None:
-            receipt["test_root"] = test_root
-            if seams["faults"]:
-                receipt["test_faults"] = list(seams["faults"])
-            if seams["barrier"] is not None:
-                require_contained(seams["barrier"], test_root, "dir", "TEST_BARRIER_NOT_CONTAINED", must_exist=True)
-        layout = Layout(test_root)
-        if not is_hex64(opts.expect_sha256):
-            refuse("INSTALLER_HASH_MISSING")
-        own_sha = sha256_bytes(read_regular(installer_path, "INSTALLER_UNREADABLE"))
-        if own_sha != opts.expect_sha256:
-            refuse("INSTALLER_HASH_MISMATCH", actual_installer_sha256=own_sha)
-        receipt["installer_sha256_verified"] = own_sha
-        manifest = load_manifest(layout, opts.mode, opts.manifest, opts.expect_manifest_sha256, receipt)
-        receipt["settings_target"] = layout.settings
-        receipt["evidence_dir"] = layout.evidence_dir
-        install_manifest_sha = (receipt["manifest_sha256_verified"] if opts.mode != "promote"
-                                else (sha256_bytes(read_regular(layout.install_manifest, "MANIFEST_MISSING"))
-                                      if os.path.isfile(layout.install_manifest) else None))
-        receipt["rollback_command"] = (
-            f"python3 -I {installer_path} rollback --manifest {layout.install_manifest} --expect-sha256 {own_sha} "
-            f"--expect-manifest-sha256 {install_manifest_sha}" + (f" --test-root {test_root}" if test_root else ""))
-        if opts.mode == "install":
-            do_install(layout, manifest, receipt, seams)
-        elif opts.mode == "verify":
-            do_verify(layout, manifest, receipt, seams)
-        elif opts.mode == "rollback":
-            do_rollback(layout, manifest, receipt, seams)
-        else:
-            do_promote(layout, manifest, receipt, seams)
-        defer_interrupts(receipt)
+        try:
+            set_interrupt_handlers(raise_on_interrupt)  # SIGTERM/SIGINT become Interrupted for the transaction (F3)
+            test_root = validate_test_root(opts.test_root)
+            if test_root is None and any(seams.values()):
+                refuse("TEST_OPTION_WITHOUT_TEST_ROOT")
+            unknown = [p for p in seams["faults"] if p not in TEST_FAULT_POINTS]
+            if unknown:
+                refuse("TEST_FAULT_UNKNOWN", points=unknown)
+            if test_root is not None:
+                receipt["test_root"] = test_root
+                if seams["faults"]:
+                    receipt["test_faults"] = list(seams["faults"])
+                if seams["barrier"] is not None:
+                    require_contained(seams["barrier"], test_root, "dir", "TEST_BARRIER_NOT_CONTAINED", must_exist=True)
+            layout = Layout(test_root)
+            if not is_hex64(opts.expect_sha256):
+                refuse("INSTALLER_HASH_MISSING")
+            own_sha = sha256_bytes(read_regular(installer_path, "INSTALLER_UNREADABLE"))
+            if own_sha != opts.expect_sha256:
+                refuse("INSTALLER_HASH_MISMATCH", actual_installer_sha256=own_sha)
+            receipt["installer_sha256_verified"] = own_sha
+            manifest = load_manifest(layout, opts.mode, opts.manifest, opts.expect_manifest_sha256, receipt)
+            receipt["settings_target"] = layout.settings
+            receipt["evidence_dir"] = layout.evidence_dir
+            install_manifest_sha = (receipt["manifest_sha256_verified"] if opts.mode != "promote"
+                                    else (sha256_bytes(read_regular(layout.install_manifest, "MANIFEST_MISSING"))
+                                          if os.path.isfile(layout.install_manifest) else None))
+            receipt["rollback_command"] = (
+                f"python3 -I {installer_path} rollback --manifest {layout.install_manifest} --expect-sha256 {own_sha} "
+                f"--expect-manifest-sha256 {install_manifest_sha}" + (f" --test-root {test_root}" if test_root else ""))
+            if opts.mode == "install":
+                do_install(layout, manifest, receipt, seams)
+            elif opts.mode == "verify":
+                do_verify(layout, manifest, receipt, seams)
+            elif opts.mode == "rollback":
+                do_rollback(layout, manifest, receipt, seams)
+            else:
+                do_promote(layout, manifest, receipt, seams)
+        finally:
+            set_interrupt_handlers(record_late_interrupt)  # before any handler below runs: from here only recorded
     except Refusal as refusal:
-        defer_interrupts(receipt)
-        receipt.update(result="FAILED" if refusal.code == EXIT_WRITE_FAILED else "REFUSED", reason=refusal.reason,
-                       exit_code=refusal.code)
+        code = refusal.code
+        if (receipt.get("settings_written") or receipt.get("settings_restored")) and code != EXIT_WRITE_FAILED:
+            receipt["original_code"] = code  # a failure after a committed write is exit 7, never "refused input" (W)
+            code = EXIT_WRITE_FAILED
         receipt.update(refusal.extra)
+        receipt.update(result="FAILED" if code == EXIT_WRITE_FAILED else "REFUSED", reason=refusal.reason,
+                       exit_code=code)
     except BaseException as exc:  # unexpected error, KeyboardInterrupt, SystemExit, SIGTERM: never a success
-        defer_interrupts(receipt)
         interrupted = not isinstance(exc, Exception)
         receipt.update(result="FAILED", reason="INTERRUPTED" if interrupted else "UNEXPECTED_ERROR",
                        exit_code=EXIT_WRITE_FAILED, detail=f"{type(exc).__name__}: {exc}")
@@ -1071,15 +1128,19 @@ def main():
             receipt["interrupted"] = True
     if receipt.get("exit_code") == EXIT_WRITE_FAILED and "step" in receipt:
         receipt.setdefault("failed_step", receipt["step"])
+    if LATE_INTERRUPTS:
+        receipt["late_interrupt"] = list(LATE_INTERRUPTS)
     changed = bool(receipt.get("settings_written") or receipt.get("settings_restored"))
     if layout is not None and opts.mode != "verify":
         save_receipt(layout, receipt, update_state=changed, seams=seams)  # outcome S; never raises
-    if receipt.get("late_interrupt") and receipt.get("exit_code") in (None, EXIT_OK):
-        receipt["exit_code"] = EXIT_WRITE_FAILED
+    if LATE_INTERRUPTS:
+        receipt["late_interrupt"] = list(LATE_INTERRUPTS)
+        if receipt.get("exit_code") in (None, EXIT_OK):
+            receipt["exit_code"] = EXIT_WRITE_FAILED  # a recorded interrupt never ends in exit 0
     try:
-        sys.stdout.write(json.dumps(receipt, ensure_ascii=False, default=str) + "\n")
+        sys.stdout.write(json.dumps(receipt, ensure_ascii=True, default=str) + "\n")
         sys.stdout.flush()
-    except OSError:
+    except Exception:
         pass
     return receipt.get("exit_code", EXIT_WRITE_FAILED)
 

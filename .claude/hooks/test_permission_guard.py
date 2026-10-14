@@ -898,6 +898,13 @@ class GuardTest(unittest.TestCase):
     def test_5_6_env_bash_func_git_rejects_every_form(self):
         self.assert_function_name_rejects_every_form("BASH_FUNC_git%%")
 
+    def test_5_6_env_shell_startup_and_option_names_reject_every_form(self):
+        """6.1 (rev15): BASH_ENV, ENV, SHELLOPTS and BASHOPTS each -> empty for EVERY form, R1-R6 and A, B, C."""
+        for name in ("BASH_ENV", "ENV", "SHELLOPTS", "BASHOPTS"):
+            with self.subTest(name=name):
+                self.fx.set_record("pr")
+                self.assert_function_name_rejects_every_form(name)
+
     def test_5_4b_env_git_ssh_command_rejects_git_forms_and_writes(self):
         env = {"GIT_SSH_COMMAND": "ssh -x"}
         self.expect_empty("git ls-remote origin release/0.3", env_extra=env)
