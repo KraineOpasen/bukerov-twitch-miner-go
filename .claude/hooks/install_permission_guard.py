@@ -53,21 +53,45 @@ Write outcomes (rev15, 7.11b (2)):
      <RESULT>_STATE_NOT_SAVED with state_saved false and original_result / original_reason kept (exit 7);
      a receipt that cannot be written says receipt_saved false (exit 7 unless a refusal keeps its code).
 
-Interrupts (rev18, 7.11c (2), S1H-OD-7):
+Validation before the first write (rev21, 7.11d (2)):
+  V1 every check that can end a run with a refusal runs in phase P, before the handlers and before any write:
+     the full structure of the existing settings (a `hooks` or `PermissionRequest` value that is null or of
+     another type, or an entry that is not an object, is refused), the new document is built and encoded,
+     the foreign-hook, registration, manifest and source checks, and the prospective containment of every
+     path the run will create, write or rename (require_prospective: existing components as CT4/CT5, missing
+     ones only installer-owned names). After each directory the installer creates (RUNTIME_PARENT, <HASH12>,
+     receipts/) the strict CT2-CT5 checks run again (logged in post_creation_checks); the CT6 rechecks
+     before each write or rename are unchanged.
+  V2 before the first TRANSACTION write (the preimage copy, RUNTIME_PARENT, <HASH12> and anything inside it,
+     the settings target, the state file, an archive or sibling name of them) every outcome keeps its code:
+     0, 2, 3, 4, 5 or 6, with nothing but the refusal receipt written. After one, a refusal is FAILED /
+     exit 7 with original_code, and every write the run made is named (preimage_backup_created,
+     runtime_parent_created, runtime_dir_owned, runtime_renamed_to, temp_path, ...).
+  V3 verify reads a malformed hooks structure as no registration (registration_error) and continues the
+     11.3 precedence; it never exits 2 for it.
+
+Interrupts (rev18, 7.11c (2), S1H-OD-7; rev21 7.11d (1)):
   P  the precondition checks write nothing and keep the default signal behaviour: Ctrl+C there raises
-     KeyboardInterrupt, which ends the run as FAILED / INTERRUPTED (interrupted true, exit 7); SIGTERM and
-     SIGHUP there end the process with no receipt.
-  E  before its first write each writing mode (install, rollback, promote, and main before it writes a
-     receipt) installs one handler for SIGINT, then SIGTERM, then SIGHUP; verify never does. The handler
-     stores the first signal's number and does nothing else: it raises nothing, performs no I/O and is
-     never removed, so from then until the process exits these signals end nothing.
-  W  every write follows E. Each creation or rename is recorded in the statement after it (D5).
-  D3 the state and the final receipt each take ONE snapshot of the deferral, immediately before they are
-     serialized: interrupt_deferred (bool) and interrupt_signal (the first signal's name or null). The
-     printed receipt carries the final receipt's snapshot. A signal that arrives after that snapshot is
-     reported once on stderr at the final console-observation point, saying whether the final receipt
-     was saved to disk or only printed; a signal after that point leaves no trace.
-  D4 a deferred signal never changes the outcome or the exit code.
+     KeyboardInterrupt, which ends the run as FAILED / INTERRUPTED (interrupted true, exit 7), also when it
+     lands while the outcome is being taken over, before the handlers are installed (interrupted_outcome
+     names what it overtook); one that lands before the arguments are parsed, or in the few instructions
+     of that take-over itself, can still end the process with Python's KeyboardInterrupt and no receipt.
+     SIGTERM and SIGHUP there end the process with no receipt. Nothing is written in phase P.
+  E  each writing mode (install, rollback, promote) installs one handler for SIGINT, then SIGTERM, then
+     SIGHUP before its first write, and in every case before it reports its outcome; verify never does and
+     stays plainly interruptible. The handler stores the first signal's number and does nothing else: it
+     raises nothing, performs no I/O and is never removed, so from then until the process exits these
+     signals end nothing.
+  W  every write follows E. Each creation or rename is recorded in the statement after it (D5), a created
+     file the moment os.open returns.
+  D3 the state and the final receipt each record interrupt_deferred (bool) and interrupt_signal (the first
+     signal's name or null) as observed at the record's snapshot, taken immediately before it is
+     serialized. The printed receipt carries the final receipt's snapshot. A signal that arrives after that
+     snapshot is reported once on stderr at the final console-observation point, saying whether the final
+     receipt was saved to disk, only printed, or neither; a signal first observed after that point, or not
+     processed before the process ends, leaves no trace.
+  D4 a deferred signal never changes the outcome or the exit code. A receipt that cannot be printed does not
+     either: the failed stream is pointed at /dev/null so the interpreter's final flush cannot fail.
   Not covered: SIGKILL, SIGQUIT, SIGSTOP, power loss or a host crash; several signals are recorded as the
   first one only; a sequence of file operations is not atomic as a whole.
 
@@ -77,28 +101,34 @@ every pinned constant, including the manifest paths, is then rebased under DIR, 
 --test-crash-before-replace, --test-short-write, --test-fail-after-write and --test-fault POINT (POINT
 from TEST_FAULT_POINTS) are accepted only together with it. The signal-* points send this process
 SIGINT at a fixed place; pause-in-scope waits at most 30 s inside the scope for DIR/pause-release; the
-interrupt-* points raise KeyboardInterrupt from code, which a real signal no longer does.
+interrupt-* points raise KeyboardInterrupt from code, which a real signal no longer does; post-creation-check
+fails the run's first strict check after a directory creation (V1).
 
 Every run prints one JSON receipt as its last stdout line; once the manifest is verified the receipt
 also names the rollback command with both pins. Exit codes:
   0 installed / idempotent / MATCH / rolled back / promoted
   1 verify DRIFT, INCOMPLETE_INSTALL (no trustworthy state but a registration, runtime dir or .aborted-
     archive), NOT_INSTALLED or STATE_UNREADABLE
-  2 refused input: a pin, a manifest value, a flag, a path that fails containment, malformed JSON, an
-    unreadable state file or runtime parent (nothing written)
+  2 refused input: a pin, a manifest value, a flag, a path that fails containment, malformed JSON or a
+    malformed hooks structure, an unreadable state file or runtime parent (nothing written but the
+    refusal receipt)
   3 FOREIGN_HOOK (another PermissionRequest entry present)
   4 rollback or promote refused: settings drifted from the recorded postimage, or POSTIMAGE_UNKNOWN;
     install refused RUNTIME_DRIFT (registration present but the runtime file is not intact)
   5 runtime directory for that hash exists, or promote with the same hash
-  6 DRIFT_BEFORE_WRITE (settings changed between the preimage and the write)
+  6 DRIFT_BEFORE_WRITE (settings changed between the preimage and the write, before any transaction write)
   7 write failed or interrupted (a temporary settings file, once created, is named in the receipt),
-    or a failure after a completed write, or a state or receipt that could not be saved
+    or any refusal or failure after a transaction write (original_code keeps a refusal's own code), or a
+    state or receipt that could not be saved
+  codes 2 to 6 are only ever reported before the run's first transaction write (V2)
 verify precedence: STATE_UNREADABLE (unreadable, symlinked, irregular or malformed state); a readable
 state with a committed write (MATCH/DRIFT; DRIFT when the postimage is unknown or a file cannot be read);
 INCOMPLETE_INSTALL (no trustworthy state, but a registration, runtime dir or .aborted- archive remains);
-NOT_INSTALLED. Receipts and the state file are ASCII-escaped JSON.
+NOT_INSTALLED. Receipts and the state file are ASCII-escaped JSON. A receipt file is written under a
+temporary name in receipts/ and renamed to its final name only after a complete, fsynced write; a leftover
+temporary file is named in receipt_save_temp_path.
 A refusal before the evidence directory is verified is printed only (never written to an
-unverified path). The installer never deletes anything: it renames (rollback, promote, a failed
+unverified path) and says receipt_saved false. The installer never deletes anything: it renames (rollback, promote, a failed
 install's runtime dir -> <HASH12>.aborted-<UTC>-<pid>) and replaces atomically.
 """
 
@@ -139,14 +169,21 @@ EXIT_WRITE_FAILED = 7
 BARRIER_TIMEOUT_SECONDS = 15
 OPEN_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 OPEN_CLOEXEC = getattr(os, "O_CLOEXEC", 0)
-# --test-fault POINT (tests only, with --test-root): the fixed failure-injection points of 7.11b (2) and 7.11c (2) D7
+# --test-fault POINT (tests only, with --test-root): the fixed failure-injection points of 7.11b (2), 7.11c (2) D7 and the
+# single point 7.11d (2) V4 adds (post-creation-check)
 TEST_FAULT_POINTS = ("postimage-read", "runtime-copy-write", "interrupt-before-replace", "interrupt-after-replace",
                      "state-save", "receipt-save", "dir-fsync", "temp-readback", "state-read",
                      "signal-before-scope", "signal-at-scope-entry", "signal-at-first-write",
                      "signal-after-archive-rename", "signal-after-disabled-rename", "signal-after-superseded-rename",
-                     "signal-after-receipt-snapshot", "signal-after-final-observation", "pause-in-scope")
+                     "signal-after-receipt-snapshot", "signal-after-final-observation", "pause-in-scope",
+                     "post-creation-check")
 STEP_AFTER_REPLACE = "after the settings replacement"
 PAUSE_SECONDS = 30  # pause-in-scope (test only) waits at most this long for its release file
+# V2: the receipt records of the transaction writes (each set in the statement after its write, D5). Once one of them is
+# set, a refusal is FAILED / exit 7 with its own code kept in original_code, never REFUSED.
+TRANSACTION_RECORD_KEYS = ("preimage_backup_created", "runtime_parent_created", "runtime_dir_owned", "temp_path",
+                           "settings_written", "settings_restored", "settings_renamed_to", "runtime_renamed_to",
+                           "previous_runtime_renamed_to")
 
 
 def inject_fault(seams, point):
@@ -172,6 +209,7 @@ DEFERRAL_SIGNALS = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
 _deferred_signal = None  # the first deferred signal's number, or None
 _scope_entered = False
 _first_write_reached = False  # test seam bookkeeping for signal-at-first-write only
+_post_creation_fault_used = False  # test seam bookkeeping for post-creation-check only
 
 
 def defer_signal(signum, frame):
@@ -379,12 +417,15 @@ def read_regular(path, reason):
         os.close(fd)
 
 
-def write_new_file(path, root, data, mode=0o600):
-    """Create a new file (O_EXCL|O_NOFOLLOW) inside a contained, verified parent."""
+def write_new_file(path, root, data, mode=0o600, on_created=None):
+    """Create a new file (O_EXCL|O_NOFOLLOW) inside a contained, verified parent. `on_created` records the file the
+    moment it exists, so a write that fails part-way leaves a file the receipt names (D5)."""
     require_contained(path, root, "file", "WRITE_TARGET_NOT_CONTAINED")
     if os.path.lexists(path):
         refuse("WRITE_TARGET_EXISTS", EXIT_WRITE_FAILED, path=path)
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | OPEN_NOFOLLOW | OPEN_CLOEXEC, mode)
+    if on_created is not None:  # D5: recorded in the statement after os.open returns
+        on_created(path)
     try:
         view = memoryview(data)
         written = 0
@@ -394,6 +435,71 @@ def write_new_file(path, root, data, mode=0o600):
     finally:
         os.close(fd)
     return path
+
+
+def require_prospective(path, root, kind, reason, creatable=()):
+    """V1, phase P, read-only: the containment a later creation, write or rename of `path` will need, checked before
+    anything is written. The pinned root must be a real directory (CT1/CT2) and the path CT3-clean below it. Walking down
+    from the root, every EXISTING component is checked as an existing parent is (CT4/CT5: lstat, a real directory, never
+    a symlink, realpath inside the root); the first missing component and everything below it must be plain names the
+    installer itself creates (the installer-owned directories in `creatable`, or the final name). An existing final
+    component must be of `kind` ("file", "dir") and is refused for "new". This adds a phase-P refusal; the strict
+    checks after each creation and the CT6 rechecks before each write still run."""
+    if not path_syntax_ok(path):
+        refuse(reason, path=path, detail="path syntax")
+    require_real_dir(root, reason)
+    if not path.startswith(root + "/"):
+        refuse(reason, path=path, detail="outside root")
+    names = path[len(root) + 1:].split("/")
+    deepest = root
+    current = root
+    for index, name in enumerate(names):
+        current = current + "/" + name
+        final = index == len(names) - 1
+        try:
+            info = os.lstat(current)
+        except FileNotFoundError:
+            if any(missing not in creatable for missing in names[index:-1]):
+                refuse(reason, path=path, detail="a missing component is not an installer-owned directory")
+            break
+        except OSError as exc:
+            refuse(reason, path=path, detail=str(exc))
+        if stat.S_ISLNK(info.st_mode):
+            refuse(reason, path=path, detail="symlink")
+        if not final:
+            if not stat.S_ISDIR(info.st_mode):
+                refuse(reason, path=path, detail="parent component not a real directory")
+            deepest = current
+        elif kind == "new":
+            refuse(reason, path=path, detail="exists")
+        elif kind == "file" and not stat.S_ISREG(info.st_mode):
+            refuse(reason, path=path, detail="not a regular file")
+        elif kind == "dir" and not stat.S_ISDIR(info.st_mode):
+            refuse(reason, path=path, detail="not a directory")
+    real = os.path.realpath(deepest)
+    if real != root and not real.startswith(root + "/"):
+        refuse(reason, path=path, detail="realpath outside root")
+    return path
+
+
+def check_created_dir(path, root, reason, receipt, seams=None):
+    """V1: the strict CT2-CT5 checks, run immediately after the installer created the directory `path` and before
+    anything is written inside it. A failure there follows the post-write rule of V2 (FAILED, exit 7); a passed check is
+    logged in post_creation_checks. The test point post-creation-check fails the first such check of a run."""
+    global _post_creation_fault_used
+    if "post-creation-check" in (seams or {}).get("faults", ()) and not _post_creation_fault_used:
+        _post_creation_fault_used = True
+        refuse(reason, path=path, detail="TEST_FAULT post-creation-check")
+    require_contained(path, root, "dir", reason, must_exist=True)
+    require_real_dir(path, reason)
+    receipt.setdefault("post_creation_checks", []).append(path)
+
+
+def recorder(receipt, key):
+    """An on_created callback that names the created file in the receipt (D5)."""
+    def record(path):
+        receipt[key] = path
+    return record
 
 
 def rename_contained(src, dst, root, kind):
@@ -587,17 +693,36 @@ def read_settings(layout):
 
 
 def permission_request_entries(obj):
-    hooks = obj.get("hooks")
-    if hooks is None:
+    """V1: the PermissionRequest entries, after validating every level of the hooks structure the installer reads or
+    changes. A present key whose value is null or of another unexpected type is malformed (a refusal), never "absent"."""
+    if "hooks" not in obj:
         return []
+    hooks = obj["hooks"]
     if not isinstance(hooks, dict):
         refuse("SETTINGS_HOOKS_NOT_OBJECT")
-    entries = hooks.get("PermissionRequest")
-    if entries is None:
+    if "PermissionRequest" not in hooks:
         return []
+    entries = hooks["PermissionRequest"]
     if not isinstance(entries, list):
         refuse("SETTINGS_PERMISSION_REQUEST_NOT_LIST")
+    for entry in entries:
+        if not isinstance(entry, dict):
+            refuse("SETTINGS_PERMISSION_REQUEST_ENTRY_INVALID", detail="entry not an object")
+        if "hooks" in entry:
+            inner = entry["hooks"]
+            if not isinstance(inner, list) or not all(isinstance(item, dict) for item in inner):
+                refuse("SETTINGS_PERMISSION_REQUEST_ENTRY_INVALID", detail="entry hooks not a list of objects")
+            if any("command" in item and not isinstance(item["command"], str) for item in inner):
+                refuse("SETTINGS_PERMISSION_REQUEST_ENTRY_INVALID", detail="command not a string")
     return entries
+
+
+def build_settings_document(obj):
+    """V1, phase P: the new settings bytes; a document that cannot be encoded is refused before anything is written."""
+    try:
+        return dumps(obj).encode("utf-8")
+    except UnicodeEncodeError as exc:
+        refuse("SETTINGS_NOT_ENCODABLE", detail=str(exc))
 
 
 def registration_for(runtime_path, sha):
@@ -674,7 +799,8 @@ def create_runtime_copy(layout, sha, receipt, seams=None):
         require_real_dir(layout.hooks_dir, "HOOKS_DIR_NOT_REAL_DIRECTORY")
         before_first_write(seams)
         os.mkdir(layout.runtime_parent)
-        receipt["runtime_parent_created"] = True
+        receipt["runtime_parent_created"] = layout.runtime_parent  # D5: recorded in the statement after the mkdir returns
+        check_created_dir(layout.runtime_parent, layout.hooks_dir, "RUNTIME_PARENT_NOT_REAL_DIRECTORY", receipt, seams)
     require_real_dir(layout.runtime_parent, "RUNTIME_PARENT_NOT_REAL_DIRECTORY")
     runtime_dir = layout.runtime_parent + "/" + sha[:12]
     require_contained(runtime_dir, layout.runtime_parent, "dir", "RUNTIME_DIR_NOT_CONTAINED")
@@ -685,7 +811,7 @@ def create_runtime_copy(layout, sha, receipt, seams=None):
     os.mkdir(runtime_dir)
     receipt["runtime_dir_owned"] = runtime_dir  # D5: recorded in the statement after the mkdir returns (A)
     receipt["runtime_copy_created"] = True
-    require_real_dir(runtime_dir, "RUNTIME_DIR_NOT_CONTAINED")
+    check_created_dir(runtime_dir, layout.runtime_parent, "RUNTIME_DIR_NOT_CONTAINED", receipt, seams)
     data = read_regular(layout.source, "SOURCE_NOT_CONTAINED")
     if sha256_bytes(data) != sha:
         refuse("SOURCE_HASH_MISMATCH", EXIT_WRITE_FAILED, actual_source_sha256=sha256_bytes(data))
@@ -707,7 +833,10 @@ def archive_failed_runtime(layout, receipt, seams=None):
     created to <HASH12>.aborted-<UTC>-<pid> exactly once (never deleted, never overwritten). After the
     replacement (settings_written) the runtime dir is never touched (F3)."""
     runtime_dir = receipt.get("runtime_dir_owned")
-    if not runtime_dir or receipt.get("settings_written") or "runtime_renamed_to" in receipt:
+    if receipt.get("settings_written") or "runtime_renamed_to" in receipt:
+        return
+    if not runtime_dir:  # U4a: this run created no <HASH12>, so there is nothing to archive; the receipt says so
+        receipt["runtime_renamed_to"] = None
         return
     receipt["failed_step"] = receipt.get("step")
     archive = f"{runtime_dir}.aborted-{utc_stamp()}-{os.getpid()}"
@@ -808,8 +937,9 @@ def save_receipt(layout, receipt, update_state, seams=None):
     <RESULT>_STATE_NOT_SAVED (exit 7, state_saved false, original_result / original_reason kept); a
     receipt that cannot be written says receipt_saved false (exit 7, except that a refusal keeps its
     own code). Never raises."""
-    if not receipt.get("evidence_verified"):
-        return  # a refusal before the evidence directory is verified is printed only
+    if not receipt.get("evidence_verified"):  # a refusal before the evidence directory is verified is printed only
+        receipt.update(receipt_saved=False, receipt_save_error="EVIDENCE_DIR_NOT_VERIFIED")
+        return
     if update_state:
         progress = {}
         try:
@@ -835,14 +965,20 @@ def save_receipt(layout, receipt, update_state, seams=None):
             require_contained(receipts, layout.evidence_dir, "dir", "RECEIPTS_DIR_NOT_CONTAINED")
             before_first_write(seams)
             os.mkdir(receipts)
+            check_created_dir(receipts, layout.evidence_dir, "RECEIPTS_DIR_NOT_CONTAINED", receipt, seams)
         require_contained(receipts, layout.evidence_dir, "dir", "RECEIPTS_DIR_NOT_CONTAINED", must_exist=True)
         require_real_dir(receipts, "RECEIPTS_DIR_NOT_CONTAINED")
         receipt.update(interrupt_snapshot())  # D3: the final receipt's one snapshot (the printed receipt uses it too)
         signal_fault(seams, "signal-after-receipt-snapshot")
         inject_fault(seams, "receipt-save")
         name = f"{receipt['timestamp_utc']}-{receipt['mode']}-{os.getpid()}.json"
+        data = dumps_record(dict(receipt, receipt_saved=True)).encode("ascii")
+        # the final name appears only after a complete, fsynced write; a leftover temporary file is named (R5a-3)
+        temp = f"{receipts}/.{name}.tmp-{os.getpid()}"
         before_first_write(seams)
-        write_new_file(receipts + "/" + name, receipts, dumps_record(dict(receipt, receipt_saved=True)).encode("ascii"))
+        write_new_file(temp, receipts, data, on_created=recorder(receipt, "receipt_save_temp_path"))
+        rename_contained(temp, receipts + "/" + name, receipts, "file")
+        receipt.pop("receipt_save_temp_path", None)
         receipt["receipt_saved"] = True
     except Exception as exc:  # never raises: the printed receipt says receipt_saved false
         receipt.update(receipt_saved=False,
@@ -853,6 +989,15 @@ def save_receipt(layout, receipt, update_state, seams=None):
 
 # --- modes ----------------------------------------------------------------------------
 
+def require_prospective_records(layout):
+    """V1, phase P: the paths every writing mode writes besides its own (the settings target and its temporary file in
+    the settings directory, the state file, receipts/ and the receipt file in it)."""
+    require_prospective(layout.settings, layout.settings_dir, "file", "WRITE_TARGET_NOT_CONTAINED")
+    require_prospective(layout.state_path, layout.evidence_dir, "file", "WRITE_TARGET_NOT_CONTAINED")
+    require_prospective(layout.evidence_dir + "/" + RECEIPTS_DIR, layout.evidence_dir, "dir",
+                        "RECEIPTS_DIR_NOT_CONTAINED", creatable=(RECEIPTS_DIR,))
+
+
 def do_install(layout, manifest, receipt, seams):
     sha = manifest["source_sha256"]
     runtime_dir = layout.runtime_parent + "/" + sha[:12]
@@ -862,7 +1007,7 @@ def do_install(layout, manifest, receipt, seams):
 
     receipt["step"] = "preimage"
     pre_bytes, pre_obj, pre_info = read_settings(layout)
-    existing = permission_request_entries(pre_obj or {})
+    existing = permission_request_entries(pre_obj or {})  # V1: the whole hooks structure is validated here, in phase P
     if existing:
         if existing == [entry]:
             require_intact_runtime(layout, runtime_dir, runtime_path, sha)
@@ -876,6 +1021,17 @@ def do_install(layout, manifest, receipt, seams):
     if aborted:  # installer-owned archives of handled failures never block a later install (13.2 (e))
         receipt["aborted_archives_present"] = aborted
     mode = 0o644 if pre_bytes is None else stat.S_IMODE(pre_info.st_mode)
+    # V1: build and validate the new document before anything is written
+    new_obj = json.loads(json.dumps(pre_obj)) if pre_obj is not None else {}
+    new_obj.setdefault("hooks", {}).setdefault("PermissionRequest", []).append(entry)
+    data = build_settings_document(new_obj)
+    backup = (None if pre_bytes is None
+              else f"{layout.evidence_dir}/{PREIMAGE_PREFIX}{receipt['timestamp_utc']}-{os.getpid()}")
+    if backup is not None:
+        require_prospective(backup, layout.evidence_dir, "new", "WRITE_TARGET_NOT_CONTAINED")
+    require_prospective(runtime_path, layout.hooks_dir, "new", "RUNTIME_DIR_NOT_CONTAINED",
+                        creatable=(os.path.basename(layout.runtime_parent), sha[:12]))
+    require_prospective_records(layout)
     # end of phase P (the last precondition check above); phase E, then the first write (the preimage copy)
     signal_fault(seams, "signal-before-scope")
     enter_deferral_scope(seams)
@@ -883,23 +1039,14 @@ def do_install(layout, manifest, receipt, seams):
     if pre_bytes is None:
         receipt["preimage"] = {"status": "ABSENT"}
     else:
-        backup = f"{layout.evidence_dir}/{PREIMAGE_PREFIX}{receipt['timestamp_utc']}-{os.getpid()}"
         preimage = {"status": "PRESENT", "sha256": sha256_bytes(pre_bytes), "size": pre_info.st_size,
                     "mode": oct(mode), "mtime": pre_info.st_mtime, "backup_path": backup}
         before_first_write(seams)
-        write_new_file(backup, layout.evidence_dir, pre_bytes)
-        receipt["preimage"] = preimage  # D5: recorded in the statement after the copy is written
+        write_new_file(backup, layout.evidence_dir, pre_bytes, on_created=recorder(receipt, "preimage_backup_created"))
+        receipt["preimage"] = preimage
     if seams.get("barrier"):
         receipt["test_barrier"] = seams["barrier"]
         wait_at_barrier(seams["barrier"])
-
-    # build and validate the new document before anything is created on disk
-    new_obj = json.loads(json.dumps(pre_obj)) if pre_obj is not None else {}
-    hooks = new_obj.setdefault("hooks", {})
-    if not isinstance(hooks, dict):
-        refuse("SETTINGS_HOOKS_NOT_OBJECT")
-    hooks.setdefault("PermissionRequest", []).append(entry)
-    data = dumps(new_obj).encode("utf-8")
     for name in ("crash_before_replace", "short_write", "fail_after_write"):
         if seams.get(name):
             receipt["test_" + name] = True
@@ -923,15 +1070,16 @@ def do_install(layout, manifest, receipt, seams):
 
 
 def registration_present(layout, sha, receipt):
-    """Whether the settings target holds this hash's registration (read-only; a read error is recorded)."""
+    """Whether the settings target holds this hash's registration (read-only). V3: a read error or a malformed hooks
+    structure is recorded in registration_error and counts as no registration, so the 11.3 precedence continues."""
     runtime_path = layout.runtime_parent + "/" + sha[:12] + "/" + GUARD_FILENAME
     _, command = registration_for(runtime_path, sha)
     try:
         _, obj, _ = read_settings(layout)
+        return obj is not None and any(entry_command(e) == command for e in permission_request_entries(obj))
     except Refusal as refusal:
         receipt["registration_error"] = refusal.reason
         return None
-    return obj is not None and any(entry_command(e) == command for e in permission_request_entries(obj))
 
 
 def do_verify(layout, manifest, receipt, seams=None):
@@ -1025,6 +1173,14 @@ def do_rollback(layout, manifest, receipt, seams):
         if sha256_bytes(data) != preimage["sha256"]:
             refuse("PREIMAGE_BACKUP_CORRUPT", backup_path=preimage["backup_path"])
         mode = int(preimage.get("mode", "0o644"), 8)
+    else:  # V1: the sibling an ABSENT rollback renames the settings target to
+        require_prospective(f"{layout.settings}.rolled-back-{stamp}", layout.settings_dir, "new",
+                            "RENAME_TARGET_NOT_CONTAINED")
+    if os.path.lexists(state["runtime_dir"]):  # V1: the .disabled- rename of the runtime directory
+        require_prospective(state["runtime_dir"], layout.runtime_parent, "dir", "RENAME_SOURCE_NOT_CONTAINED")
+        require_prospective(f"{state['runtime_dir']}.disabled-{stamp}", layout.runtime_parent, "new",
+                            "RENAME_TARGET_NOT_CONTAINED")
+    require_prospective_records(layout)
     # end of phase P (the last precondition check above); phase E, then the first write
     signal_fault(seams, "signal-before-scope")
     enter_deferral_scope(seams)
@@ -1078,8 +1234,15 @@ def do_promote(layout, manifest, receipt, seams):
     receipt.update(runtime_dir=new_runtime_dir, runtime_path=new_runtime_path, registration_command=new_command)
     new_obj = json.loads(json.dumps(pre_obj))
     new_obj["hooks"]["PermissionRequest"][matches[0]]["hooks"][0]["command"] = new_command
-    data = dumps(new_obj).encode("utf-8")
+    data = build_settings_document(new_obj)
     receipt["hooks"] = new_obj["hooks"]
+    require_prospective(new_runtime_path, layout.hooks_dir, "new", "RUNTIME_DIR_NOT_CONTAINED",
+                        creatable=(os.path.basename(layout.runtime_parent), sha[:12]))
+    if os.path.lexists(state["runtime_dir"]):  # V1: the .superseded- rename of the old runtime directory
+        require_prospective(state["runtime_dir"], layout.runtime_parent, "dir", "RENAME_SOURCE_NOT_CONTAINED")
+        require_prospective(f"{state['runtime_dir']}.superseded-{receipt['timestamp_utc']}", layout.runtime_parent,
+                            "new", "RENAME_TARGET_NOT_CONTAINED")
+    require_prospective_records(layout)
     recheck_preimage(layout, pre_bytes)
     # end of phase P (the last precondition check above); phase E, then the first write (RUNTIME_PARENT or <HASH12>)
     signal_fault(seams, "signal-before-scope")
@@ -1120,21 +1283,86 @@ def wait_at_barrier(barrier_dir):
 
 # --- entry point ------------------------------------------------------------------------
 
-def report_late_interrupt(receipt):
+def transaction_written(receipt):
+    """V2: whether this run has made a transaction write (each one is recorded in the statement after it, D5)."""
+    return any(receipt.get(key) for key in TRANSACTION_RECORD_KEYS)
+
+
+def record_outcome(receipt, outcome):
+    """The outcome of phase P and the mode. Before any transaction write a refusal keeps its own result, reason and code
+    (V1); after one it is FAILED / exit 7 with its code kept in original_code, never REFUSED (V2, W)."""
+    if outcome is None:
+        return
+    if isinstance(outcome, Refusal):
+        receipt.update(outcome.extra)
+        code = outcome.code
+        if transaction_written(receipt) and code != EXIT_WRITE_FAILED:
+            receipt["original_code"] = code
+            code = EXIT_WRITE_FAILED
+        receipt.update(result="FAILED" if code == EXIT_WRITE_FAILED else "REFUSED", reason=outcome.reason,
+                       exit_code=code)
+        return
+    interrupted = not isinstance(outcome, Exception)  # a test-fault KeyboardInterrupt, or SIGINT in phase P
+    receipt.update(result="FAILED", reason="INTERRUPTED" if interrupted else "UNEXPECTED_ERROR",
+                   exit_code=EXIT_WRITE_FAILED, detail=f"{type(outcome).__name__}: {outcome}")
+    if interrupted:
+        receipt["interrupted"] = True
+
+
+def late_interrupt(receipt, outcome, late):
+    """R5a-2: a Ctrl+C of phase P that lands after the checks ended and before the handlers are installed ends the run as
+    an interrupt (FAILED / INTERRUPTED / exit 7) instead of a traceback; the outcome it overtook is kept in the receipt."""
+    if outcome is not None and not isinstance(outcome, KeyboardInterrupt):
+        receipt["interrupted_outcome"] = getattr(outcome, "reason", None) or type(outcome).__name__
+    elif outcome is None and receipt.get("result"):
+        receipt["interrupted_outcome"] = receipt["result"]
+    return late
+
+
+def silence_console(fd):
+    """Point a console stream whose write failed at /dev/null, so that the interpreter's final flush cannot fail and
+    turn the exit code into 120 (R5a-4)."""
+    try:
+        null = os.open(os.devnull, os.O_WRONLY)
+        try:
+            os.dup2(null, fd)
+        finally:
+            os.close(null)
+    except OSError:
+        pass
+
+
+def print_receipt(receipt):
+    """The receipt as the last stdout line; True when it was printed."""
+    try:
+        sys.stdout.write(json.dumps(receipt, ensure_ascii=True, default=str) + "\n")
+        sys.stdout.flush()
+        return True
+    except Exception:
+        silence_console(1)
+        return False
+
+
+def report_late_interrupt(receipt, printed):
     """D3: the final console-observation point, after the final receipt's persistence and output attempts (including
     their handled failure paths). A deferred interrupt that the final receipt's snapshot did not include is reported on
-    stderr in one line that says truthfully whether that receipt was saved to disk; nothing else happens because of it."""
+    stderr in one line that says truthfully whether that receipt was saved to disk, only printed, or neither; nothing
+    else happens because of it."""
     observed = _deferred_signal
     if observed is None or receipt.get("interrupt_deferred"):
         return
-    where = ("the final receipt was saved to disk" if receipt.get("receipt_saved")
-             else "the final receipt was only printed (receipt_saved false)")
+    if receipt.get("receipt_saved"):
+        where = "the final receipt was saved to disk"
+    elif printed:
+        where = "the final receipt was only printed (receipt_saved false)"
+    else:
+        where = "the final receipt was neither written to disk nor printed (receipt_saved false)"
     try:
         sys.stderr.write(f"install_permission_guard: an interrupt ({signal.Signals(observed).name}) was observed after the "
                          f"final receipt's snapshot; it is not in that receipt and had no effect on the outcome; {where}\n")
         sys.stderr.flush()
     except Exception:
-        pass
+        silence_console(2)
 
 
 def main():
@@ -1157,78 +1385,75 @@ def main():
     seams = {"barrier": opts.test_barrier, "crash_before_replace": opts.test_crash_before_replace,
              "short_write": opts.test_short_write, "fail_after_write": opts.test_fail_after_write,
              "faults": tuple(opts.test_fault)}
+    writing = opts.mode != "verify"
     layout = None
-    try:  # phase P runs with the default signal behaviour; each writing mode enters the deferral scope itself
-        test_root = validate_test_root(opts.test_root)
-        if test_root is None and any(seams.values()):
-            refuse("TEST_OPTION_WITHOUT_TEST_ROOT")
-        unknown = [p for p in seams["faults"] if p not in TEST_FAULT_POINTS]
-        if unknown:
-            refuse("TEST_FAULT_UNKNOWN", points=unknown)
-        if test_root is not None:
-            receipt["test_root"] = test_root
-            if seams["faults"]:
-                receipt["test_faults"] = list(seams["faults"])
-            if seams["barrier"] is not None:
-                require_contained(seams["barrier"], test_root, "dir", "TEST_BARRIER_NOT_CONTAINED", must_exist=True)
-        layout = Layout(test_root)
-        if not is_hex64(opts.expect_sha256):
-            refuse("INSTALLER_HASH_MISSING")
-        own_sha = sha256_bytes(read_regular(installer_path, "INSTALLER_UNREADABLE"))
-        if own_sha != opts.expect_sha256:
-            refuse("INSTALLER_HASH_MISMATCH", actual_installer_sha256=own_sha)
-        receipt["installer_sha256_verified"] = own_sha
-        manifest = load_manifest(layout, opts.mode, opts.manifest, opts.expect_manifest_sha256, receipt)
-        receipt["settings_target"] = layout.settings
-        receipt["evidence_dir"] = layout.evidence_dir
-        install_manifest_sha = (receipt["manifest_sha256_verified"] if opts.mode != "promote"
-                                else (sha256_bytes(read_regular(layout.install_manifest, "MANIFEST_MISSING"))
-                                      if os.path.isfile(layout.install_manifest) else None))
-        receipt["rollback_command"] = (
-            f"python3 -I {installer_path} rollback --manifest {layout.install_manifest} --expect-sha256 {own_sha} "
-            f"--expect-manifest-sha256 {install_manifest_sha}" + (f" --test-root {test_root}" if test_root else ""))
-        if opts.mode == "install":
-            do_install(layout, manifest, receipt, seams)
-        elif opts.mode == "verify":
-            do_verify(layout, manifest, receipt, seams)
-        elif opts.mode == "rollback":
-            do_rollback(layout, manifest, receipt, seams)
-        else:
-            do_promote(layout, manifest, receipt, seams)
-    except Refusal as refusal:
-        code = refusal.code
-        if (receipt.get("settings_written") or receipt.get("settings_restored")) and code != EXIT_WRITE_FAILED:
-            receipt["original_code"] = code  # a failure after a committed write is exit 7, never "refused input" (W)
-            code = EXIT_WRITE_FAILED
-        receipt.update(refusal.extra)
-        receipt.update(result="FAILED" if code == EXIT_WRITE_FAILED else "REFUSED", reason=refusal.reason,
-                       exit_code=code)
-    except BaseException as exc:  # an unexpected error, a test-fault KeyboardInterrupt, or SIGINT in phase P
-        interrupted = not isinstance(exc, Exception)
-        receipt.update(result="FAILED", reason="INTERRUPTED" if interrupted else "UNEXPECTED_ERROR",
-                       exit_code=EXIT_WRITE_FAILED, detail=f"{type(exc).__name__}: {exc}")
-        if interrupted:
-            receipt["interrupted"] = True
+    outcome = None
+    try:
+        try:  # phase P runs with the default signal behaviour; each writing mode enters the deferral scope itself
+            test_root = validate_test_root(opts.test_root)
+            if test_root is None and any(seams.values()):
+                refuse("TEST_OPTION_WITHOUT_TEST_ROOT")
+            unknown = [p for p in seams["faults"] if p not in TEST_FAULT_POINTS]
+            if unknown:
+                refuse("TEST_FAULT_UNKNOWN", points=unknown)
+            if test_root is not None:
+                receipt["test_root"] = test_root
+                if seams["faults"]:
+                    receipt["test_faults"] = list(seams["faults"])
+                if seams["barrier"] is not None:
+                    require_contained(seams["barrier"], test_root, "dir", "TEST_BARRIER_NOT_CONTAINED", must_exist=True)
+            layout = Layout(test_root)
+            if not is_hex64(opts.expect_sha256):
+                refuse("INSTALLER_HASH_MISSING")
+            own_sha = sha256_bytes(read_regular(installer_path, "INSTALLER_UNREADABLE"))
+            if own_sha != opts.expect_sha256:
+                refuse("INSTALLER_HASH_MISMATCH", actual_installer_sha256=own_sha)
+            receipt["installer_sha256_verified"] = own_sha
+            manifest = load_manifest(layout, opts.mode, opts.manifest, opts.expect_manifest_sha256, receipt)
+            receipt["settings_target"] = layout.settings
+            receipt["evidence_dir"] = layout.evidence_dir
+            install_manifest_sha = (receipt["manifest_sha256_verified"] if opts.mode != "promote"
+                                    else (sha256_bytes(read_regular(layout.install_manifest, "MANIFEST_MISSING"))
+                                          if os.path.isfile(layout.install_manifest) else None))
+            receipt["rollback_command"] = (
+                f"python3 -I {installer_path} rollback --manifest {layout.install_manifest} --expect-sha256 {own_sha} "
+                f"--expect-manifest-sha256 {install_manifest_sha}" + (f" --test-root {test_root}" if test_root else ""))
+            if opts.mode == "install":
+                do_install(layout, manifest, receipt, seams)
+            elif opts.mode == "verify":
+                do_verify(layout, manifest, receipt, seams)
+            elif opts.mode == "rollback":
+                do_rollback(layout, manifest, receipt, seams)
+            else:
+                do_promote(layout, manifest, receipt, seams)
+        except BaseException as exc:  # a refusal, an unexpected error, a test-fault KeyboardInterrupt, or SIGINT in phase P
+            outcome = exc
+        if writing:
+            enter_deferral_scope(seams)  # V2, D1: every writing mode reports its outcome inside the scope
+    except KeyboardInterrupt as late:
+        outcome = late_interrupt(receipt, outcome, late)
+    while writing and not _scope_entered:  # completes a scope entry that a late phase-P Ctrl+C interrupted
+        try:
+            enter_deferral_scope(seams)
+        except KeyboardInterrupt as late:
+            outcome = late_interrupt(receipt, outcome, late)
+    record_outcome(receipt, outcome)
     if receipt.get("exit_code") == EXIT_WRITE_FAILED and "step" in receipt:
         receipt.setdefault("failed_step", receipt["step"])
     changed = bool(receipt.get("settings_written") or receipt.get("settings_restored"))
-    if layout is not None and opts.mode != "verify":
-        if receipt.get("evidence_verified"):
-            enter_deferral_scope(seams)  # a receipt is a write: it is written only inside the scope (D1)
-        if _scope_entered:
+    if writing:
+        if layout is not None:
             try:
                 pause_in_scope(layout, seams)  # test only; before the snapshots of the state and the final receipt
             except Exception as exc:  # a test seam never decides the outcome; its failure is reported
                 receipt["test_pause_error"] = f"{type(exc).__name__}: {exc}"
-        save_receipt(layout, receipt, update_state=changed, seams=seams)  # outcome S; never raises
-    if opts.mode != "verify" and "interrupt_deferred" not in receipt:
-        receipt.update(interrupt_snapshot())  # the printed receipt's snapshot when no receipt file was attempted
-    try:
-        sys.stdout.write(json.dumps(receipt, ensure_ascii=True, default=str) + "\n")
-        sys.stdout.flush()
-    except Exception:
-        pass
-    report_late_interrupt(receipt)  # the final console-observation point (D3)
+            save_receipt(layout, receipt, update_state=changed, seams=seams)  # outcome S; never raises
+        else:  # no trusted evidence directory: the receipt is printed only (V2)
+            receipt.update(receipt_saved=False, receipt_save_error="EVIDENCE_DIR_NOT_VERIFIED")
+        if "interrupt_deferred" not in receipt:
+            receipt.update(interrupt_snapshot())  # the printed receipt's snapshot when no receipt file was attempted
+    printed = print_receipt(receipt)
+    report_late_interrupt(receipt, printed)  # the final console-observation point (D3)
     signal_fault(seams, "signal-after-final-observation")
     return receipt.get("exit_code", EXIT_WRITE_FAILED)
 

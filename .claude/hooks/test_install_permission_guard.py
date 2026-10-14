@@ -19,7 +19,8 @@ Installer contract pinned here:
   exit codes: 0 done/idempotent/MATCH, 1 verify DRIFT/INCOMPLETE_INSTALL/NOT_INSTALLED/STATE_UNREADABLE,
               2 refused input (pin, manifest value, flag, path, unreadable state), 3 FOREIGN_HOOK,
               4 rollback/promote drift, POSTIMAGE_UNKNOWN, RUNTIME_DRIFT, 5 runtime dir exists / same hash,
-              6 DRIFT_BEFORE_WRITE, 7 write failed or interrupted, or a failure after a completed write
+              6 DRIFT_BEFORE_WRITE (codes 2-6 only before the first transaction write, rev21 V2),
+              7 write failed or interrupted, or any refusal or failure after a transaction write
   state file <EVIDENCE_DIR>/permission-guard-state.json; receipts <EVIDENCE_DIR>/receipts/
   rev15 (7.11b (2)): invariant W (a completed settings write is recorded at once and never reported as
   refused), invariant A (pre-commit failures archive the new runtime dir exactly once), F3 (after the
@@ -354,7 +355,10 @@ class InstallerTest(unittest.TestCase):
         os.mkdir(self.fx.settings)
         self.assert_refused(self.fx.run("install"), 2, "SETTINGS_DIRECTORY")
 
-    def test_6_2_preimage_changed_before_write_refused(self):
+    def test_6_2_preimage_changed_before_write_is_a_failure_after_the_preimage_copy(self):
+        """Rewritten for rev21 (7.11d (2) V2): the drift is injected at the barrier, after the preimage copy, which is a
+        transaction write; a refusal after a transaction write is FAILED / exit 7 with its own code kept in original_code
+        (it asserted REFUSED / exit 6 before). The backup is kept and nothing else is written."""
         self.fx.write_settings(OTHER_SETTINGS)
         barrier = self.fx.root + "/barrier"
         os.mkdir(barrier)
@@ -376,7 +380,8 @@ class InstallerTest(unittest.TestCase):
         out, err = proc.communicate(timeout=30)
         receipt = json.loads([ln for ln in out.decode().splitlines() if ln.strip()][-1])
         self.assertEqual(receipt["reason"], "DRIFT_BEFORE_WRITE", err.decode())
-        self.assertEqual(proc.returncode, 6)
+        self.assertEqual((proc.returncode, receipt["result"], receipt["original_code"]), (7, "FAILED", 6), receipt)
+        self.assertEqual(receipt["preimage_backup_created"], receipt["preimage"]["backup_path"])
         self.assertEqual(read_bytes(self.fx.settings), mutated_bytes)
         self.assertEqual(read_bytes(receipt["preimage"]["backup_path"]), doc_bytes(OTHER_SETTINGS))
         self.assertFalse(os.path.exists(self.fx.runtime_dir()))
@@ -1221,35 +1226,37 @@ class InstallerTest(unittest.TestCase):
         os.rename(directory, moved)
         os.symlink(moved, directory)
 
-    def test_r4_post_commit_refusal_is_a_failed_write_exit_7(self):
-        """R4-4: a refusal raised after the committed write (here the post-commit rename of a runtime dir that is now a
-        symlink) is FAILED / exit 7 with the write recorded, never REFUSED / exit 2, and its state stays usable."""
+    def test_r4_symlinked_runtime_dir_is_refused_before_the_rollback_writes(self):
+        """Rewritten for rev21 (7.11d (2) V1): a runtime dir that is already a symlink when rollback starts is now refused
+        by the prospective validation of phase P (REFUSED / exit 2, nothing written). It asserted, as R4-4, a refusal of
+        the post-commit rename (FAILED / exit 7); that path still exists only for a change between phase P and the
+        rename, which no seam reaches; the conversion itself is the one U4a-U4c prove (record_outcome, V2/W)."""
         self.fx.write_settings(OTHER_SETTINGS)
-        preimage = read_bytes(self.fx.settings)
         self.install_ok()
+        installed = read_bytes(self.fx.settings)
         self.replace_with_symlink(self.fx.runtime_dir())
+        before = snapshot(self.fx.root)
         rc, receipt, out, err = self.fx.run("rollback")
-        self.assertEqual((rc, receipt["result"], receipt["reason"]), (7, "FAILED", "RENAME_SOURCE_NOT_CONTAINED"), receipt)
-        self.assertEqual(receipt["original_code"], 2)
-        self.assertTrue(receipt["settings_restored"])
-        self.assertEqual(read_bytes(self.fx.settings), preimage)
-        state = self.fx.state()
-        self.assertEqual((state["result"], state["settings_restored"]), ("FAILED", True))
-        self.assert_verify("DRIFT")
+        self.assertEqual((rc, receipt["result"], receipt["reason"]), (2, "REFUSED", "RENAME_SOURCE_NOT_CONTAINED"), receipt)
+        self.assertNotIn("settings_restored", receipt)
+        self.assertEqual(read_bytes(self.fx.settings), installed)
+        self.assert_only_receipts_changed(before)
 
-    def test_r4_post_commit_refusal_in_promote_is_a_failed_write_exit_7(self):
+    def test_r4_symlinked_runtime_dir_is_refused_before_the_promote_writes(self):
+        """Rewritten for rev21 (V1), as the rollback case above: the promote refuses in phase P, nothing written."""
         self.install_ok()
+        installed = read_bytes(self.fx.settings)
         old_dir = self.fx.runtime_dir()
         self.fx.write_source(GUARD_V2)
         self.write_promote_manifest()
         self.replace_with_symlink(old_dir)
+        before = snapshot(self.fx.root)
         rc, receipt, out, err = self.fx.run("promote")
-        self.assertEqual((rc, receipt["result"], receipt["reason"]), (7, "FAILED", "RENAME_SOURCE_NOT_CONTAINED"), receipt)
-        self.assertTrue(receipt["settings_written"])
-        self.assertEqual(self.settings_obj()["hooks"]["PermissionRequest"], [self.fx.expected_entry()])
-        state = self.fx.state()
-        self.assertEqual((state["result"], state["settings_written"], state["runtime_dir"]),
-                         ("FAILED", True, self.fx.runtime_dir()))
+        self.assertEqual((rc, receipt["result"], receipt["reason"]), (2, "REFUSED", "RENAME_SOURCE_NOT_CONTAINED"), receipt)
+        self.assertNotIn("settings_written", receipt)
+        self.assertEqual(read_bytes(self.fx.settings), installed)
+        self.assertFalse(os.path.exists(self.fx.runtime_dir()))
+        self.assert_only_receipts_changed(before)
 
     def test_r4_postimage_mismatch_is_an_unverified_postimage(self):
         """R4-5: a state whose recorded postimage differs from the intended postimage (POSTIMAGE_MISMATCH, a concurrent
@@ -1370,6 +1377,9 @@ class InstallerTest(unittest.TestCase):
         self.assertEqual(read_bytes(self.fx.settings), preimage)
 
     def test_t4_signal_after_archive_rename_keeps_the_archive_record(self):
+        """U7 (7.11d (1) ruling on R5b-2): the archive is named in the receipt; and in the state only when the run saves a
+        state. A pre-commit failure saves none (7.11b), so the test asserts the receipt naming and that this run wrote no
+        state file."""
         self.fx.write_settings(OTHER_SETTINGS)
         original = read_bytes(self.fx.settings)
         rc, receipt, out, err = self.fx.run("install", extra=self.fault("runtime-copy-write", "signal-after-archive-rename"))
@@ -1400,6 +1410,9 @@ class InstallerTest(unittest.TestCase):
         self.assertTrue(os.path.basename(receipt["runtime_renamed_to"]).startswith(os.path.basename(new_dir) + ".disabled-"))
         self.assertEqual(self.fx.state()["runtime_renamed_to"], receipt["runtime_renamed_to"])
         self.assertTrue(os.path.isdir(receipt["runtime_renamed_to"]))
+        # R5b-4: the rollback half proves that its own signal point fired, so its adjacency proof is never vacuous
+        self.assertEqual((receipt["interrupt_deferred"], receipt["interrupt_signal"]), (True, "SIGINT"), receipt)
+        self.assertEqual((self.fx.state()["interrupt_deferred"], self.fx.state()["interrupt_signal"]), (True, "SIGINT"))
 
     def test_t6_signal_at_scope_entry_is_deferred_and_no_signal_mask_is_used(self):
         rc, receipt, out, err = self.fx.run("install", extra=self.fault("signal-at-scope-entry"))
@@ -1415,7 +1428,7 @@ class InstallerTest(unittest.TestCase):
         self.fx.write_settings(OTHER_SETTINGS)
         before = snapshot(self.fx.root)
         rc, receipt, out, err = self.fx.run("install", extra=self.fault("signal-before-scope"))
-        self.assertNotEqual(rc, 0, (out, err))
+        self.assertEqual(rc, 7, (out, err))  # R5b-5 (1): the exit code the README states for a Ctrl+C in phase P
         # phase P stays interruptible: the default SIGINT action (KeyboardInterrupt) ended the run, not a refusal
         self.assertEqual((receipt["result"], receipt["reason"], receipt.get("interrupted")), ("FAILED", "INTERRUPTED", True), receipt)
         self.assertNotIn("settings_written", receipt)
@@ -1469,6 +1482,25 @@ class InstallerTest(unittest.TestCase):
         self.assertEqual(len(notes), 1, err)
         self.assertIn("only printed", notes[0])
         self.assertNotIn("saved to disk", notes[0])
+        # U6 (R5b-1): the deferred signal added no write, retry or recovery beyond the F4 outcome
+        state = self.fx.state()
+        self.assertEqual((state["result"], state["interrupt_deferred"]), ("INSTALLED", False), state)
+        self.assertEqual(self.settings_obj()["hooks"]["PermissionRequest"], [self.fx.expected_entry()])
+        self.assertEqual(stat.S_IMODE(os.stat(self.fx.runtime_path()).st_mode), 0o444)
+        self.assertEqual(sha256_file(self.fx.runtime_path()), self.fx.source_sha)
+        self.assertEqual(self.aborted(), [])
+        self.assertEqual([d for d in os.listdir(self.fx.runtime_parent) if ".disabled-" in d], [])
+        paths = set(snapshot(self.fx.root))
+        twin = Fixture()  # the same run with the receipt-save fault alone, in its own test root
+        try:
+            rc2, receipt2, out2, err2 = twin.run("install", extra=self.fault("receipt-save"))
+            self.assertEqual((rc2, receipt2["receipt_saved"]), (7, False), receipt2)
+            self.assertEqual(paths, set(snapshot(twin.root)))
+        finally:
+            subprocess.run(["chmod", "-R", "u+w", twin.root], capture_output=True)
+            import shutil
+            shutil.rmtree(twin.root, ignore_errors=True)
+        self.assert_verify("MATCH")
 
     def test_t12_signal_after_the_final_observation_changes_nothing(self):
         rc, receipt, out, err = self.fx.run("install", extra=self.fault("signal-after-final-observation"))
@@ -1479,6 +1511,402 @@ class InstallerTest(unittest.TestCase):
         self.assertNotIn("after the final receipt's snapshot", err)
         self.assertNotIn("Traceback", err)
         self.assert_verify("MATCH")
+
+    # rev21 7.11d (2): validate before the first write (V1), no exit 2 after a transaction write (V2), verify (V3) -----
+    MALFORMED_HOOKS = ({"hooks": None}, {"hooks": {"PermissionRequest": None}}, {"hooks": []}, {"hooks": "x"},
+                       {"hooks": {"PermissionRequest": {}}}, {"hooks": {"PermissionRequest": [None]}})
+
+    def changed_paths(self, before):
+        after = snapshot(self.fx.root)
+        return {k for k in set(before) | set(after) if before.get(k) != after.get(k)}
+
+    def normalized_changes(self, fixture, before):
+        """Changed relative paths, with the per-run receipt file name replaced (it carries a timestamp and a pid)."""
+        after = snapshot(fixture.root)
+        receipts = os.path.relpath(fixture.evidence_dir + "/receipts", fixture.root)
+        out = set()
+        for k in set(before) | set(after):
+            if before.get(k) != after.get(k):
+                out.add(receipts + "/<receipt>" if k.startswith(receipts + "/") else k)
+        return out
+
+    def assert_only_receipts_changed(self, before):
+        receipts = os.path.relpath(self.fx.evidence_dir + "/receipts", self.fx.root)
+        changed = self.changed_paths(before)
+        self.assertTrue(all(k == receipts or k.startswith(receipts + "/") for k in changed), changed)
+
+    def make_receipts_unavailable(self):
+        """The receipt destination is unusable: receipts/ is a regular file (the evidence directory stays verified)."""
+        receipts = self.fx.evidence_dir + "/receipts"
+        if os.path.isdir(receipts):
+            os.rename(receipts, receipts + ".moved")
+        with open(receipts, "w") as fh:
+            fh.write("not a directory\n")
+
+    def restore_receipts(self):
+        receipts = self.fx.evidence_dir + "/receipts"
+        os.unlink(receipts)
+        if os.path.isdir(receipts + ".moved"):
+            os.rename(receipts + ".moved", receipts)
+
+    def assert_code_kept_both_ways(self, run, code, reason):
+        """U3e: before any transaction write a refusal keeps its own result, reason and code, with the refusal receipt
+        persisted and with the receipt destination unavailable (printed and marked not saved)."""
+        before = snapshot(self.fx.root)
+        rc, receipt, out, err = run()
+        self.assertEqual((rc, receipt["result"], receipt["reason"]), (code, "REFUSED", reason), receipt)
+        self.assertTrue(receipt["receipt_saved"], receipt)
+        self.assertIn(receipt, [saved for _, saved in self.receipts()])
+        self.assert_only_receipts_changed(before)
+        self.make_receipts_unavailable()
+        try:
+            before = snapshot(self.fx.root)
+            rc, receipt, out, err = run()
+            self.assertEqual((rc, receipt["result"], receipt["reason"]), (code, "REFUSED", reason), receipt)
+            self.assertFalse(receipt["receipt_saved"], receipt)
+            self.assertEqual(before, snapshot(self.fx.root))
+            self.assertNotIn("Traceback", err)
+        finally:
+            self.restore_receipts()
+
+    def test_u1_hooks_null_is_refused_in_phase_p_like_malformed_json(self):
+        self.fx.write_settings({"hooks": None})
+        before = snapshot(self.fx.root)
+        rc, receipt, out, err = self.fx.run("install")
+        self.assertEqual((rc, receipt["result"], receipt["reason"]), (2, "REFUSED", "SETTINGS_HOOKS_NOT_OBJECT"), (receipt, err))
+        self.assertEqual(read_bytes(self.fx.settings), doc_bytes({"hooks": None}))
+        self.assertFalse(os.path.exists(self.fx.runtime_parent))
+        self.assertFalse(os.path.exists(self.fx.state_path()))
+        self.assertFalse([f for f in os.listdir(self.fx.evidence_dir) if f.startswith("settings.local.json.preimage-")])
+        self.assertNotIn("preimage_backup_created", receipt)
+        # exactly what the existing pre-write refusal (malformed JSON, 6.2) writes: one refusal receipt, nothing else
+        twin = Fixture()
+        try:
+            twin.write_settings(raw=b'{"hooks": ')
+            twin_before = snapshot(twin.root)
+            rc2, receipt2, out2, err2 = twin.run("install")
+            self.assertEqual((rc2, receipt2["reason"]), (2, "SETTINGS_MALFORMED"), receipt2)
+            self.assertEqual(self.normalized_changes(self.fx, before), self.normalized_changes(twin, twin_before))
+        finally:
+            import shutil
+            shutil.rmtree(twin.root, ignore_errors=True)
+
+    def test_u2_every_malformed_hooks_shape_is_a_phase_p_refusal(self):
+        for doc in self.MALFORMED_HOOKS:
+            with self.subTest(settings=doc):
+                self.fx.write_settings(doc)
+                before = snapshot(self.fx.root)
+                rc, receipt, out, err = self.fx.run("install")
+                self.assertEqual((rc, receipt["result"]), (2, "REFUSED"), (receipt, err))
+                self.assertTrue(receipt["reason"].startswith("SETTINGS_"), receipt)
+                self.assertNotIn("Traceback", err)
+                self.assert_only_receipts_changed(before)
+                self.assertFalse(os.path.exists(self.fx.runtime_parent))
+
+    def test_u3_source_and_write_target_containment_refused_in_phase_p(self):
+        self.fx.write_settings(OTHER_SETTINGS)
+        # WRITE_TARGET_NOT_CONTAINED: the state file the run would write is a symlink (prospective validation, V1)
+        os.symlink(self.fx.outside + "/sentinel.txt", self.fx.state_path())
+        before = snapshot(self.fx.root)
+        rc, receipt, out, err = self.fx.run("install")
+        self.assertEqual((rc, receipt["result"], receipt["reason"]), (2, "REFUSED", "WRITE_TARGET_NOT_CONTAINED"), receipt)
+        self.assert_only_receipts_changed(before)
+        self.assertFalse(os.path.exists(self.fx.runtime_parent))
+        self.assertEqual(read_bytes(self.fx.outside + "/sentinel.txt"), b"leave me\n")
+        os.unlink(self.fx.state_path())
+        # SOURCE_NOT_CONTAINED: the guard source is a symlink
+        real = self.fx.outside + "/guard.py"
+        with open(real, "wb") as fh:
+            fh.write(GUARD_V1)
+        os.unlink(self.fx.source)
+        os.symlink(real, self.fx.source)
+        before = snapshot(self.fx.root)
+        rc, receipt, out, err = self.fx.run("install")
+        self.assertEqual((rc, receipt["result"], receipt["reason"]), (2, "REFUSED", "SOURCE_NOT_CONTAINED"), receipt)
+        self.assert_only_receipts_changed(before)
+        self.assertFalse(os.path.exists(self.fx.runtime_parent))
+
+    def test_u3b_fresh_install_passes_prospective_validation_and_logs_the_strict_checks(self):
+        self.assertFalse(os.path.exists(self.fx.runtime_parent))
+        self.assertFalse(os.path.exists(self.fx.evidence_dir + "/receipts"))
+        rc, receipt, out, err = self.fx.run("install")
+        self.assertEqual((rc, receipt["result"]), (0, "INSTALLED"), (receipt, err))
+        self.assertEqual(receipt["post_creation_checks"],
+                         [self.fx.runtime_parent, self.fx.runtime_dir(), self.fx.evidence_dir + "/receipts"])
+        self.assertEqual(receipt["runtime_parent_created"], self.fx.runtime_parent)
+        self.assertIn(receipt, [saved for _, saved in self.receipts()])
+        self.assert_verify("MATCH")
+
+    def test_u3c_malformed_settings_refusal_receipt_is_persisted(self):
+        self.fx.write_settings({"hooks": {"PermissionRequest": None}})
+        before = snapshot(self.fx.root)
+        rc, receipt, out, err = self.fx.run("install")
+        self.assertEqual((rc, receipt["reason"]), (2, "SETTINGS_PERMISSION_REQUEST_NOT_LIST"), receipt)
+        self.assertTrue(receipt["receipt_saved"])
+        [(_, saved)] = self.receipts()
+        self.assertEqual(saved, receipt)
+        self.assert_only_receipts_changed(before)
+
+    def test_u3d_malformed_settings_refusal_with_the_receipt_destination_unavailable(self):
+        self.fx.write_settings({"hooks": {"PermissionRequest": None}})
+        self.make_receipts_unavailable()
+        before = snapshot(self.fx.root)
+        rc, receipt, out, err = self.fx.run("install")
+        self.assertEqual((rc, receipt["reason"]), (2, "SETTINGS_PERMISSION_REQUEST_NOT_LIST"), receipt)
+        self.assertFalse(receipt["receipt_saved"])
+        self.assertEqual(before, snapshot(self.fx.root))
+        self.restore_receipts()
+        # the evidence directory itself unavailable: the refusal is printed only and marked not saved
+        os.rename(self.fx.evidence_dir, self.fx.evidence_dir + ".away")
+        try:
+            before = snapshot(self.fx.root)
+            rc, receipt, out, err = self.fx.run("install")
+            self.assertEqual((rc, receipt["result"]), (2, "REFUSED"), receipt)
+            self.assertFalse(receipt["receipt_saved"])
+            self.assertEqual(before, snapshot(self.fx.root))
+        finally:
+            os.rename(self.fx.evidence_dir + ".away", self.fx.evidence_dir)
+
+    def test_u3e_codes_3_4_5_and_0_are_kept_before_any_transaction_write(self):
+        # FOREIGN_HOOK, exit 3 (6.2)
+        self.fx.write_settings({"hooks": {"PermissionRequest": [{"matcher": "Bash", "hooks": [
+            {"type": "command", "command": "echo other"}]}]}})
+        self.assert_code_kept_both_ways(lambda: self.fx.run("install"), 3, "FOREIGN_HOOK")
+        os.unlink(self.fx.settings)
+        # IDEMPOTENT, exit 0, no write but its receipt (11.2)
+        self.install_ok()
+        before = snapshot(self.fx.root)
+        rc, receipt, out, err = self.fx.run("install")
+        self.assertEqual((rc, receipt["result"]), (0, "IDEMPOTENT"), receipt)
+        self.assert_only_receipts_changed(before)
+        # RUNTIME_DRIFT, exit 4 (11.2)
+        os.chmod(self.fx.runtime_path(), 0o644)
+        self.assert_code_kept_both_ways(lambda: self.fx.run("install"), 4, "RUNTIME_DRIFT")
+        os.chmod(self.fx.runtime_path(), 0o444)
+        # SAME_HASH_ALREADY_INSTALLED, exit 5 (11.5)
+        self.write_promote_manifest()
+        self.assert_code_kept_both_ways(lambda: self.fx.run("promote"), 5, "SAME_HASH_ALREADY_INSTALLED")
+        # rollback with drift, exit 4 (11.4)
+        installed = read_bytes(self.fx.settings)
+        with open(self.fx.settings, "ab") as fh:
+            fh.write(b"\n")
+        self.assert_code_kept_both_ways(lambda: self.fx.run("rollback"), 4, "SETTINGS_DRIFT")
+        with open(self.fx.settings, "wb") as fh:
+            fh.write(installed)
+
+    def test_u3e_postimage_unknown_keeps_exit_4_for_rollback_and_promote(self):
+        self.fx.write_settings(OTHER_SETTINGS)
+        rc, receipt, out, err = self.fx.run("install", extra=self.fault("postimage-read"))
+        self.assertEqual((rc, receipt["reason"]), (7, "POSTIMAGE_UNREADABLE"), receipt)
+        self.assert_code_kept_both_ways(lambda: self.fx.run("rollback"), 4, "POSTIMAGE_UNKNOWN")
+        self.fx.write_source(GUARD_V2)
+        self.write_promote_manifest()
+        self.assert_code_kept_both_ways(lambda: self.fx.run("promote"), 4, "POSTIMAGE_UNKNOWN")
+
+    def test_u3e_drift_before_write_keeps_exit_6_when_nothing_was_written(self):
+        """ABSENT preimage: nothing is written before the barrier, so a drift there keeps REFUSED / exit 6."""
+        barrier = self.fx.root + "/barrier"
+        os.mkdir(barrier)
+        argv = [sys.executable, "-I", INSTALLER, "install", "--manifest", self.fx.manifest,
+                "--expect-sha256", sha256_file(INSTALLER), "--expect-manifest-sha256", self.fx.manifest_sha,
+                "--test-root", self.fx.root, "--test-barrier", barrier]
+        proc = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=self.fx.root)
+        deadline = time.time() + 20
+        while not os.path.exists(barrier + "/reached"):
+            if time.time() > deadline or proc.poll() is not None:
+                proc.kill()
+                self.fail("installer never reached the test barrier")
+            time.sleep(0.05)
+        self.fx.write_settings(OTHER_SETTINGS)
+        with open(barrier + "/release", "w") as fh:
+            fh.write("go\n")
+        out, err = proc.communicate(timeout=30)
+        receipt = json.loads([ln for ln in out.decode().splitlines() if ln.strip()][-1])
+        self.assertEqual((proc.returncode, receipt["result"], receipt["reason"]), (6, "REFUSED", "DRIFT_BEFORE_WRITE"), receipt)
+        self.assertFalse(os.path.exists(self.fx.runtime_parent))
+
+    def test_u4a_post_creation_check_failure_after_runtime_parent_is_exit_7(self):
+        self.fx.write_settings(OTHER_SETTINGS)
+        original = read_bytes(self.fx.settings)
+        rc, receipt, out, err = self.fx.run("install", extra=self.fault("post-creation-check"))
+        self.assertEqual((rc, receipt["result"], receipt["original_code"]), (7, "FAILED", 2), (receipt, err))
+        self.assertEqual(receipt["reason"], "RUNTIME_PARENT_NOT_REAL_DIRECTORY")
+        self.assertEqual(receipt["runtime_parent_created"], self.fx.runtime_parent)
+        self.assertIn("runtime_renamed_to", receipt)
+        self.assertIsNone(receipt["runtime_renamed_to"])  # there was no runtime directory to archive
+        self.assertTrue(os.path.isdir(self.fx.runtime_parent))  # nothing is deleted
+        self.assertEqual(os.listdir(self.fx.runtime_parent), [])
+        self.assertEqual(read_bytes(self.fx.settings), original)
+        self.assertIn(receipt, [saved for _, saved in self.receipts()])
+
+    def test_u4b_post_creation_check_failure_after_the_runtime_dir_is_exit_7_and_archived(self):
+        self.fx.write_settings(OTHER_SETTINGS)
+        original = read_bytes(self.fx.settings)
+        os.mkdir(self.fx.runtime_parent)
+        rc, receipt, out, err = self.fx.run("install", extra=self.fault("post-creation-check"))
+        self.assertEqual((rc, receipt["result"], receipt["original_code"]), (7, "FAILED", 2), (receipt, err))
+        self.assertEqual(receipt["reason"], "RUNTIME_DIR_NOT_CONTAINED")
+        self.assertEqual(len(self.aborted()), 1)
+        self.assertEqual(receipt["runtime_renamed_to"], self.fx.runtime_parent + "/" + self.aborted()[0])
+        self.assertFalse(os.path.exists(self.fx.runtime_dir()))
+        self.assertEqual(read_bytes(self.fx.settings), original)
+
+    def test_u4c_source_replaced_after_the_preimage_copy_is_exit_7_with_the_archive_named(self):
+        """R5c-1 (b) with the existing barrier seam: the source becomes a symlink after the preimage copy; the copy step's
+        SOURCE_NOT_CONTAINED (code 2) after the <HASH12> mkdir is FAILED / exit 7, never REFUSED / exit 2."""
+        self.fx.write_settings(OTHER_SETTINGS)
+        rc, receipt, err = self.run_with_barrier_action("install", self.replace_source_by_symlink)
+        self.assertEqual((rc, receipt["result"], receipt["reason"], receipt["original_code"]),
+                         (7, "FAILED", "SOURCE_NOT_CONTAINED", 2), (receipt, err))
+        self.assertEqual(len(self.aborted()), 1)
+        self.assertEqual(receipt["runtime_renamed_to"], self.fx.runtime_parent + "/" + self.aborted()[0])
+        self.assertEqual(receipt["preimage_backup_created"], receipt["preimage"]["backup_path"])
+        self.assertEqual(read_bytes(self.fx.settings), doc_bytes(OTHER_SETTINGS))
+
+    def replace_source_by_symlink(self):
+        real = self.fx.outside + "/guard.py"
+        with open(real, "wb") as fh:
+            fh.write(GUARD_V1)
+        os.unlink(self.fx.source)
+        os.symlink(real, self.fx.source)
+
+    def run_with_barrier_action(self, mode, action):
+        barrier = self.fx.root + "/barrier"
+        os.mkdir(barrier)
+        manifest = self.fx.promote_manifest if mode == "promote" else self.fx.manifest
+        argv = [sys.executable, "-I", INSTALLER, mode, "--manifest", manifest,
+                "--expect-sha256", sha256_file(INSTALLER), "--expect-manifest-sha256", sha256_file(manifest),
+                "--test-root", self.fx.root, "--test-barrier", barrier]
+        proc = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=self.fx.root)
+        deadline = time.time() + 20
+        while not os.path.exists(barrier + "/reached"):
+            if time.time() > deadline or proc.poll() is not None:
+                proc.kill()
+                self.fail("installer never reached the test barrier")
+            time.sleep(0.05)
+        action()
+        with open(barrier + "/release", "w") as fh:
+            fh.write("go\n")
+        out, err = proc.communicate(timeout=30)
+        return proc.returncode, json.loads([ln for ln in out.decode().splitlines() if ln.strip()][-1]), err.decode()
+
+    def test_u5_verify_treats_a_malformed_hooks_structure_as_no_registration(self):
+        self.fx.write_settings({"hooks": []})
+        os.makedirs(self.fx.runtime_dir())
+        receipt = self.assert_verify("INCOMPLETE_INSTALL")
+        self.assertEqual(receipt["registration_error"], "SETTINGS_HOOKS_NOT_OBJECT")
+        os.rename(self.fx.runtime_dir(), self.fx.runtime_dir() + ".aborted-20261014T000000Z-1")
+        self.fx.write_settings({"hooks": None})
+        self.assert_verify("INCOMPLETE_INSTALL")
+        os.rename(self.fx.runtime_parent, self.fx.root + "/runtime-parent-away")
+        for doc in self.MALFORMED_HOOKS:
+            with self.subTest(settings=doc):
+                self.fx.write_settings(doc)
+                rc, receipt, out, err = self.fx.run("verify")
+                self.assertEqual((rc, receipt["result"]), (1, "NOT_INSTALLED"), (receipt, err))
+                self.assertNotIn("Traceback", err)
+
+    def test_r5a2_phase_p_refusal_with_unverified_evidence_still_enters_the_scope(self):
+        """R5a-2 / R5c-4: every writing mode enters the deferral scope after phase P, also when the evidence directory is
+        not verified, so a Ctrl+C while the refusal is reported is deferred instead of ending in a traceback."""
+        os.rename(self.fx.evidence_dir, self.fx.evidence_dir + ".away")
+        try:
+            rc, receipt, err = self.run_with_pause("install", [signal.SIGINT])
+            self.assertEqual((rc, receipt["result"], receipt["reason"]), (2, "REFUSED", "EVIDENCE_DIR_NOT_REAL_DIRECTORY"), receipt)
+            self.assertEqual((receipt["interrupt_deferred"], receipt["interrupt_signal"]), (True, "SIGINT"))
+            self.assertFalse(receipt["receipt_saved"])
+            self.assertNotIn("Traceback", err)
+        finally:
+            os.rename(self.fx.evidence_dir + ".away", self.fx.evidence_dir)
+
+    def test_r5b3_refusal_receipt_is_written_inside_the_scope(self):
+        """R5b-3: main enters the scope before a refusal receipt is written; the refusal keeps its code (D4)."""
+        self.fx.write_settings({"hooks": {"PermissionRequest": [{"matcher": "Bash", "hooks": [
+            {"type": "command", "command": "echo other"}]}]}})
+        original = read_bytes(self.fx.settings)
+        rc, receipt, err = self.run_with_pause("install", [signal.SIGINT])
+        self.assertEqual((rc, receipt["result"], receipt["reason"]), (3, "REFUSED", "FOREIGN_HOOK"), (receipt, err))
+        self.assertEqual((receipt["interrupt_deferred"], receipt["interrupt_signal"]), (True, "SIGINT"))
+        self.assertIn(receipt, [saved for _, saved in self.receipts()])
+        self.assertEqual(read_bytes(self.fx.settings), original)
+
+    def test_r5a3_partial_preimage_copy_and_receipt_are_named(self):
+        """R5a-3 / R5c-5: a write that fails after its file was created leaves a file the receipt names (here the file
+        size limit makes the preimage copy and the receipt file fail part-way)."""
+        import resource
+        self.fx.write_settings(dict(OTHER_SETTINGS, padding="x" * 4096))
+        argv = [sys.executable, "-I", INSTALLER, "install", "--manifest", self.fx.manifest,
+                "--expect-sha256", sha256_file(INSTALLER), "--expect-manifest-sha256", self.fx.manifest_sha,
+                "--test-root", self.fx.root]
+        limit = lambda: resource.setrlimit(resource.RLIMIT_FSIZE, (1024, 1024))
+        proc = subprocess.run(argv, capture_output=True, cwd=self.fx.root, timeout=60, preexec_fn=limit)
+        receipt = json.loads([ln for ln in proc.stdout.decode().splitlines() if ln.strip()][-1])
+        self.assertEqual((proc.returncode, receipt["result"]), (7, "FAILED"), receipt)
+        partial = receipt["preimage_backup_created"]
+        self.assertEqual(os.path.dirname(partial), self.fx.evidence_dir)
+        self.assertTrue(os.path.basename(partial).startswith("settings.local.json.preimage-"))
+        self.assertTrue(os.path.isfile(partial))
+        self.assertFalse(os.path.exists(self.fx.runtime_parent))
+        self.assertFalse(receipt["receipt_saved"])
+        leftover = receipt["receipt_save_temp_path"]
+        self.assertTrue(os.path.isfile(leftover))
+        self.assertEqual(self.receipts_with_final_names(), [])
+
+    def receipts_with_final_names(self):
+        return [name for name, _ in self.receipts_listing() if not name.startswith(".")]
+
+    def receipts_listing(self):
+        directory = self.fx.evidence_dir + "/receipts"
+        return [(name, None) for name in sorted(os.listdir(directory))] if os.path.isdir(directory) else []
+
+    def test_r5a4_a_failed_print_never_changes_the_exit_code(self):
+        """R5a-4 / R5c-3: the receipt cannot be printed (the reader closed stdout); the exit code stays the outcome's and
+        the D3 line says the receipt was neither printed nor, here, the only copy (it was saved)."""
+        reached, release = self.fx.root + "/pause-reached", self.fx.root + "/pause-release"
+        argv = [sys.executable, "-I", INSTALLER, "install", "--manifest", self.fx.manifest,
+                "--expect-sha256", sha256_file(INSTALLER), "--expect-manifest-sha256", self.fx.manifest_sha,
+                "--test-root", self.fx.root, "--test-fault", "pause-in-scope"]
+        proc = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=self.fx.root)
+        deadline = time.time() + 20
+        while not os.path.exists(reached):
+            if time.time() > deadline or proc.poll() is not None:
+                proc.kill()
+                self.fail("installer never reached pause-in-scope")
+            time.sleep(0.05)
+        proc.stdout.close()
+        with open(release, "w") as fh:
+            fh.write("go\n")
+        err = proc.stderr.read().decode()
+        proc.wait(timeout=60)
+        self.assertEqual(proc.returncode, 0, err)
+        self.assertNotIn("Exception ignored", err)
+        self.assertNotIn("Traceback", err)
+        [(_, saved)] = self.receipts()
+        self.assertEqual((saved["result"], saved["exit_code"]), ("INSTALLED", 0))
+
+    def test_r5a4_d3_line_says_neither_saved_nor_printed(self):
+        reached, release = self.fx.root + "/pause-reached", self.fx.root + "/pause-release"
+        argv = [sys.executable, "-I", INSTALLER, "install", "--manifest", self.fx.manifest,
+                "--expect-sha256", sha256_file(INSTALLER), "--expect-manifest-sha256", self.fx.manifest_sha,
+                "--test-root", self.fx.root] + self.fault("pause-in-scope", "signal-after-receipt-snapshot", "receipt-save")
+        proc = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=self.fx.root)
+        deadline = time.time() + 20
+        while not os.path.exists(reached):
+            if time.time() > deadline or proc.poll() is not None:
+                proc.kill()
+                self.fail("installer never reached pause-in-scope")
+            time.sleep(0.05)
+        proc.stdout.close()
+        with open(release, "w") as fh:
+            fh.write("go\n")
+        err = proc.stderr.read().decode()
+        proc.wait(timeout=60)
+        self.assertEqual(proc.returncode, 7, err)
+        notes = [ln for ln in err.splitlines() if "after the final receipt's snapshot" in ln]
+        self.assertEqual(len(notes), 1, err)
+        self.assertIn("neither written to disk nor printed", notes[0])
+        self.assertNotIn("only printed", notes[0])
+        self.assertNotIn("Exception ignored", err)
 
 
 def main():
