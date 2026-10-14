@@ -84,11 +84,15 @@ positional operand means no decision. Program names never imply anything.
 ### Write shapes (main controller only)
 
 Binding for every write shape: `agent_id` absent; `permission_mode` is `default`
-or `auto`; `cwd` is the project; none of `GH_HOST GH_REPO GH_CONFIG_DIR
-GH_ENTERPRISE_TOKEN GITHUB_ENTERPRISE_TOKEN GH_PAGER PAGER GH_FORCE_TTY GIT_DIR
-GIT_WORK_TREE GIT_CONFIG_GLOBAL GIT_CONFIG_SYSTEM GIT_CONFIG_PARAMETERS
-GIT_CONFIG_COUNT GIT_EXTERNAL_DIFF GIT_PAGER GIT_EXEC_PATH` is present in the
-hook's environment; `argv[0]` is exactly `gh`, `shutil.which("gh")` equals the
+or `auto`; `cwd` is the project; none of the gh names `GH_HOST GH_REPO
+GH_CONFIG_DIR GH_ENTERPRISE_TOKEN GITHUB_ENTERPRISE_TOKEN GH_PAGER PAGER
+GH_FORCE_TTY BASH_FUNC_gh%%`, the git names `GIT_DIR GIT_WORK_TREE
+GIT_CONFIG_GLOBAL GIT_CONFIG_SYSTEM GIT_CONFIG_PARAMETERS GIT_CONFIG_COUNT
+GIT_EXTERNAL_DIFF GIT_PAGER GIT_EXEC_PATH GIT_SSH GIT_SSH_COMMAND GIT_ASKPASS
+SSH_ASKPASS BASH_FUNC_git%%` or the shell names `BASH_ENV ENV SHELLOPTS
+BASHOPTS` is present in the hook's environment (the hook sees the environment
+the Bash tool's shell inherits; `BASH_FUNC_<name>%%` is how bash imports an
+exported function that would shadow `gh` or `git`); `argv[0]` is exactly `gh`, `shutil.which("gh")` equals the
 record's `gh_path` and that file hashes to `gh_sha256`; the task record is
 `active`.
 
@@ -117,14 +121,16 @@ T3  @codex security review
 
 ROOTS = the project directory and `<goroot>/src`. An operand must be absolute
 (repository-relative without `..` only where noted), have no symlink component,
-resolve under ROOTS and never under `.git/` except `.git/HEAD`.
+resolve under ROOTS and never under `.git/` except `.git/HEAD`. If any of the
+shell names `BASH_ENV ENV SHELLOPTS BASHOPTS` is present in the hook's
+environment, no form is answered.
 
-* **R1** `gh --version` or `gh version` (GH_* names absent; gh identity checked).
+* **R1** `gh --version` or `gh version` (the gh names above absent; gh identity checked).
 * **R2** `git [-C <project>] config [--local] --get user.name|user.email`.
 * **R3** `grep` with flags only from `-n -c -l -L -i -E -F -w -x -o -h -H -q -s -r -A N -B N -C N -m N -e PATTERN --`; one pattern; one or more files under ROOTS (`-r` only with directories).
 * **R4** `cat (-n -A)`, `head`/`tail (-n N, -c N, -N)`, `wc (-l -c -w -m -L)`, `stat (-c FORMAT, --printf FORMAT; never -L)`, `sha256sum` (no flags), `ls (-l -a -A -1 -d -h -t -r -S --)`; files under ROOTS (`ls` may name directories).
 * **R5** `sed -n N[,M]p FILE`.
-* **R6** `git [-C <project>] <subcommand>` with no other global option, for: `status log show diff rev-parse ls-files cat-file hash-object check-ignore var branch remote worktree describe grep ls-remote`, each with the flag set listed in `permission_guard.py` (`GIT_SUBCOMMANDS`); REV matches `^[A-Za-z0-9._/^~-]{1,120}$`, formats match `^[%A-Za-z0-9 ()<>:,._-]{1,120}$`; any token containing `--output`, `--ext-diff`, `--textconv`, `-O`, `--open-files-in-pager` or `--no-textconv=false` means no decision. GIT_* names must be absent; git identity is checked.
+* **R6** `git [-C <project>] <subcommand>` with no other global option, for: `status log show diff rev-parse ls-files cat-file hash-object check-ignore var branch remote worktree describe grep ls-remote`, each with the flag set listed in `permission_guard.py` (`GIT_SUBCOMMANDS`); REV matches `^[A-Za-z0-9._/^~-]{1,120}$`, formats match `^[%A-Za-z0-9 ()<>:,._-]{1,120}$`; any token containing `--output`, `--ext-diff`, `--textconv`, `-O`, `--open-files-in-pager` or `--no-textconv=false` means no decision. The git names above must be absent (R2 too); git identity is checked.
 
 Narrowings beyond the contract text (each answers "nothing" where the contract would
 have allowed; none widens): a `.git` directory at any depth under either root is
@@ -170,56 +176,87 @@ expecting any auto-allow and closes it at its end.
 
 ## Installer
 
+Owner-run only. Every mode needs both integrity pins: `--expect-sha256` (the
+installer's own SHA-256, checked before anything else is read) and
+`--expect-manifest-sha256` (the manifest's SHA-256, checked before it is parsed).
+
 ```
-python3 -I /home/claude/bukerov-twitch-miner-go/.claude/hooks/install_permission_guard.py install  --manifest <evidence root>/install-manifest.json
-python3 -I /home/claude/bukerov-twitch-miner-go/.claude/hooks/install_permission_guard.py verify   --manifest <evidence root>/install-manifest.json
-python3 -I /home/claude/bukerov-twitch-miner-go/.claude/hooks/install_permission_guard.py rollback --manifest <evidence root>/install-manifest.json
-python3 -I /home/claude/bukerov-twitch-miner-go/.claude/hooks/install_permission_guard.py promote  --manifest <evidence root>/install-manifest.json
+python3 -I /home/claude/bukerov-twitch-miner-go/.claude/hooks/install_permission_guard.py install \
+  --manifest /home/claude/bukerov-twitch-miner-go/.scratch/s1h-20261011T173421Z/r9-install-manifest.json \
+  --expect-sha256 <installer sha256> --expect-manifest-sha256 <manifest sha256>
+# verify and rollback: the same manifest and pins; promote: r9-promote-manifest.json and its pin
 ```
 
-The manifest names `source`, `source_sha256`, `runtime_root` (its parent must
-exist), `settings_target`, `evidence_dir` and the `registration` template (exactly
-the section-4 entry: matcher `Bash`, one `command` hook with the template command
-and an integer `timeout`; any other key, `onFailure` included, is refused); the
-installer touches nothing else and never deletes anything. `install` records the
-preimage (ABSENT, or a byte copy under the evidence directory), refuses any
-foreign `PermissionRequest` entry (exit 3) and is a no-op when the exact
-registration is already present (exit 0), builds and validates the new document
-before anything is created, re-reads the target (DRIFT_BEFORE_WRITE, exit 6),
-creates the 0444 runtime copy (refusing an existing directory, exit 5), re-reads
-once more, and replaces atomically through a temporary file in the same
-directory: the file is written in full, fsynced and hashed before `os.replace`,
-and the postimage on disk is compared with the intended bytes afterwards. Every
-failure of that path names the temporary file (exit 7). `verify` compares the
-settings hash with the recorded postimage, the runtime hash with the registered
-SHA and requires the registration to be present exactly once (MATCH exit 0 /
-DRIFT exit 1); it writes nothing. `rollback` restores the preimage bytes with the
-recorded mode (or renames an ABSENT-preimage file to
+Every destination is a constant in the installer (11.0); the manifest may only
+repeat these exact values and can never widen them:
+
+| name | path |
+| --- | --- |
+| source | `/home/claude/bukerov-twitch-miner-go/.claude/hooks/permission_guard.py` |
+| settings target | `/home/claude/bukerov-twitch-miner-go/.claude/settings.local.json` |
+| hooks directory | `/home/claude/.claude/hooks` (must already exist as a real directory) |
+| runtime root | `/home/claude/.claude/hooks/permission-guard` (plain `mkdir` when absent) |
+| runtime directory | `<runtime root>/<first 12 hex of source_sha256>/` |
+| evidence directory | `/home/claude/bukerov-twitch-miner-go/.scratch/s1h-20261011T173421Z/r9-install` |
+| manifests | `…/s1h-20261011T173421Z/r9-install-manifest.json` (install, verify, rollback), `…/r9-promote-manifest.json` (promote) |
+
+The manifest names `source`, `source_sha256`, `runtime_root`, `settings_target`,
+`evidence_dir` and optionally `registration`, which must equal the section-4
+template exactly (any other key, `onFailure` included, is refused). The source
+must hash to `source_sha256`; that manifest value is not independent authority,
+the manifest pin is.
+
+Containment (CT1–CT6): the roots are the pinned constants and are used only
+when they are existing real directories whose realpath equals their own path;
+every derived path is absolute and normalized, without `.`, `..`, empty
+components or NUL; every existing component from the root down to the parent is
+`lstat`-ed and must be a real directory, `realpath(parent)` must be the root or
+lie below it, the basename is a plain name and a missing parent is a failure; an
+existing target must be a regular file (or, for the installer's own
+directories, a real directory), never a symlink. The checks are repeated
+immediately before each write or rename; temporary files are created in the
+verified parent with `O_EXCL|O_NOFOLLOW` and moved with `os.replace`. This
+narrows the check-to-use window; it does not close it against another process
+of the same OS account.
+
+`install` records the preimage (ABSENT, or a byte copy in the evidence
+directory), is a no-op when the exact registration is already present (IDEMPOTENT,
+exit 0), refuses any foreign `PermissionRequest` entry (exit 3) and an existing
+runtime directory or `.aborted-` archive for the hash (exit 5), builds the new
+document before anything is created, re-reads the target (DRIFT_BEFORE_WRITE,
+exit 6), creates the 0444 runtime copy, re-reads once more and replaces the
+settings atomically (written in full, fsynced and hashed before `os.replace`;
+the postimage is compared with the intended bytes afterwards). A failure before
+the replacement renames the new runtime directory to
+`<HASH12>.aborted-<UTC>-<pid>`; every write failure names its temporary file
+(exit 7). `verify` writes nothing: INCOMPLETE_INSTALL (an `.aborted-` archive,
+or a runtime directory without state), NOT_INSTALLED (no state), MATCH (settings
+hash = recorded postimage, runtime hash = registered SHA, the registration
+present exactly once; exit 0) or DRIFT (exit 1). `rollback` restores the
+preimage bytes with the recorded mode (or renames an ABSENT-preimage file to
 `settings.local.json.rolled-back-<UTC>`) and renames the runtime directory to
 `<HASH12>.disabled-<UTC>`; with drift it refuses (exit 4). `promote` installs a
 repaired guard under its new hash, replaces the registration string once,
 renames the old runtime directory `.superseded-<UTC>` and chains its receipt to
-the previous one. Every path that `verify`, `rollback` and `promote` act on is
-re-checked against the manifest (the settings target must match, runtime
-directories must sit under `runtime_root`, a preimage backup must sit under
-`evidence_dir`); a state file that disagrees is refused (exit 2), never acted on.
+the previous one. Every path read from the state file is re-checked against the
+pinned layout; a state file that disagrees is refused (exit 2), never acted on.
+Nothing is ever deleted.
 
 Every run prints one JSON receipt (last stdout line) that names the rollback
-command. The receipt records progress as it happens: `runtime_copy_created`,
-`settings_written` (install, promote) or `settings_restored` (rollback) with the
-live postimage hash, so a failure after a completed write is never silent; any
-run that changed the settings file updates `<evidence_dir>/permission-guard-state.json`
-even when a later step failed, and `rollback` then works from that live state. A
-failed install may leave `<runtime_root>/<HASH12>/` behind (the receipt names it);
-the owner renames it before retrying — nothing is deleted. After a rollback the
-state file records ROLLED_BACK and `verify`/`rollback`/`promote` refuse with
-STATE_NOT_INSTALLED (exit 2) until a new `install`. A state-file write that fails
-after a successful transaction keeps the transaction's result but exits 7 with
-reason STATE_SAVE_FAILED.
+command with both pins. A refusal before the evidence directory is verified is
+printed only; otherwise the receipt is also written under
+`<evidence directory>/receipts/`. The receipt records progress as it happens
+(`runtime_copy_created`, `settings_written` or `settings_restored` with the live
+postimage hash), so a failure after a completed write is never silent, and any
+run that changed the settings file updates `permission-guard-state.json` even
+when a later step failed. After a rollback `verify` reports NOT_INSTALLED and
+`rollback`/`promote` refuse until a new `install`. The rollback command is valid
+while the settings file still hashes to the recorded postimage; otherwise the
+installer reports DRIFT and the owner decides.
 
-The rollback command printed by the install receipt is valid while the settings
-file still hashes to the recorded postimage; otherwise the installer reports
-DRIFT and the owner decides.
+Tests pass `--test-root DIR` (an existing real directory directly under the
+system temporary directory): every pinned constant, the manifest paths included,
+is rebased under DIR, and the test seams are accepted only together with it.
 
 ## Native harness
 
@@ -246,8 +283,18 @@ harness copies each nested session's `init` inventory (tools, MCP servers,
 plugins, model) into `meta.json` and `receipt.json` for review. The contract's
 `GH_CONFIG_DIR` layer is not used because the guard refuses any hook environment
 that carries that name (5.4 b) — the same check H6 verifies with `GH_HOST`.
-Cases H1–H10 (H11 optional) must all PASS for `NATIVE_INERT_PASS`; a case whose
-first Bash command differs from the requested one is INVALID and retried once.
+Cases H1–H10 (H11 optional) must all PASS for `NATIVE_INERT_PASS`. Verdict rules
+(`evaluate_case`): the stream must hold exactly one Bash tool_use, whose command
+equals the requested one byte for byte, otherwise INVALID (retried once). An
+expected allow needs a non-error tool_result for that tool_use with a
+`FAKE_GH ARGV=` line whose argv equals `shlex.split(COMMAND)[1:]`. An expected
+denial needs no execution evidence, exactly one `is_error` tool_result, and a
+`permission_denied` event or `permission_denials` entry naming the tool_use id;
+without that structure a result text starting with "Permission for this tool use
+was denied." counts and is recorded as DENIAL_BY_RESULT_TEXT; any other error
+result is INVALID. The receipt carries the harness's own SHA-256 and the SHA-256
+of the task record written for each attempt; `ROOT/evidence` (the record's
+`evidence_root`) is created with the project.
 Case H2 (create) runs with a record without `pr`, the others with `pr`
 999999999, because shape A requires the record to carry no PR yet. H10's denial
 proves that without the hook no allow source exists for `gh --version` under the

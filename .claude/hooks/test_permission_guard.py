@@ -859,6 +859,51 @@ class GuardTest(unittest.TestCase):
     def test_5_4b_env_git_dir_does_not_reject_r1(self):
         self.expect_allow("gh --version", env_extra={"GIT_DIR": "/tmp/x"})
 
+    # rev12 5.4(b)/5.6: shell-startup and function names, and the git execution-interception names
+    def test_5_4b_env_bash_env_rejects_every_form(self):
+        env = {"BASH_ENV": "/tmp/x"}
+        self.expect_empty(self.fx.b_cmd(), env_extra=env)
+        self.expect_empty("gh --version", env_extra=env)
+        self.expect_empty("git status --porcelain", env_extra=env)
+        self.expect_empty(f"grep -c git {self.fx.file}", env_extra=env)
+        self.expect_empty(f"cat {self.fx.file}", env_extra=env)
+        self.expect_empty(f"sed -n 1p {self.fx.file}", env_extra=env)
+
+    def test_5_4b_env_shell_option_names_reject_read_forms(self):
+        for name in ("ENV", "SHELLOPTS", "BASHOPTS"):
+            env = {name: "x"}
+            self.expect_empty(f"cat {self.fx.file}", env_extra=env)
+            self.expect_empty(f"grep -c git {self.fx.file}", env_extra=env)
+            self.expect_empty(f"sed -n 1p {self.fx.file}", env_extra=env)
+            self.expect_empty(f"ls -la {self.fx.proj}", env_extra=env)
+
+    def test_5_4b_env_bash_func_gh_rejects_gh_forms_only(self):
+        env = {"BASH_FUNC_gh%%": "() {  echo x\n}"}
+        self.expect_empty(self.fx.b_cmd(), env_extra=env)
+        self.expect_empty(self.fx.c_cmd(), env_extra=env)
+        self.expect_empty("gh --version", env_extra=env)
+        self.expect_allow("git status --porcelain", env_extra=env)
+        self.expect_allow(f"cat {self.fx.file}", env_extra=env)
+
+    def test_5_4b_env_bash_func_git_rejects_git_forms_only(self):
+        env = {"BASH_FUNC_git%%": "() {  echo x\n}"}
+        self.expect_empty("git status --porcelain", env_extra=env)
+        self.expect_empty("git config --get user.name", env_extra=env)
+        self.expect_allow("gh --version", env_extra=env)
+        self.expect_allow(f"cat {self.fx.file}", env_extra=env)
+
+    def test_5_4b_env_git_ssh_command_rejects_git_forms_and_writes(self):
+        env = {"GIT_SSH_COMMAND": "ssh -x"}
+        self.expect_empty("git ls-remote origin release/0.3", env_extra=env)
+        self.expect_empty("git status --porcelain", env_extra=env)
+        self.expect_empty(self.fx.b_cmd(), env_extra=env)
+        self.expect_allow("gh --version", env_extra=env)
+
+    def test_5_4b_env_git_ssh_and_askpass_names_reject_git_forms(self):
+        for name in ("GIT_SSH", "GIT_ASKPASS", "SSH_ASKPASS"):
+            self.expect_empty("git log --oneline -n 1", env_extra={name: "/tmp/x"})
+            self.expect_empty(self.fx.b_cmd(), env_extra={name: "/tmp/x"})
+
     def test_5_4c_gh_resolves_to_another_path(self):
         bin2 = os.path.join(self.fx.tmp, "bin2")
         os.mkdir(bin2)

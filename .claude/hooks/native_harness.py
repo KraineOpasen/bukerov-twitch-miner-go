@@ -22,10 +22,17 @@ protected by the permission engine (deny rules below, `--permission-prompts none
     ~/.config/gh, ~/.claude and ~/.gitconfig; the nested init event (tools, MCP servers,
     plugins, model) is copied into every case's meta.json and into receipt.json.
 
-Each case asks the nested session to run one exact command. A case PASSes only when
-the first Bash command the session ran equals that command byte for byte and the
-expected outcome (allowed with FAKE_GH output, or permission_denied) is observed. A
-changed command is INVALID and the case is retried once. H1-H10 all PASS =
+Each case asks the nested session to run one exact command; `evaluate_case` applies the
+verdict rules. Command identity: exactly one Bash tool_use, whose command equals COMMAND
+byte for byte; otherwise INVALID. An expected allow PASSes only on a non-error
+tool_result for that tool_use carrying a `FAKE_GH ARGV=` line whose argv equals
+shlex.split(COMMAND)[1:]. An expected denial PASSes only with no execution evidence
+(no non-error result, no FAKE_GH marker) and exactly one is_error tool_result, plus
+either a permission_denied event or a permission_denials entry naming the tool_use id,
+or (fallback, recorded as DENIAL_BY_RESULT_TEXT) a result text starting with
+"Permission for this tool use was denied."; any other error result is INVALID. An
+INVALID case is retried once. The per-case task record's SHA-256 is kept per attempt
+and the harness's own SHA-256 in receipt.json. H1-H10 all PASS =
 NATIVE_INERT_PASS (exit 0); otherwise NATIVE_INERT_FAIL (exit 1); a nested launch that
 does not start, is not logged in, or cannot find claude = NATIVE_INTEGRATION_UNAVAILABLE
 (exit 2). Every nested run's stdout, stderr and exit code are kept under --evidence.
@@ -35,6 +42,7 @@ import argparse
 import hashlib
 import json
 import os
+import shlex
 import shutil
 import stat
 import subprocess
@@ -72,6 +80,107 @@ def utc_stamp():
     return time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
 
 
+DENIAL_TEXT_PREFIX = "Permission for this tool use was denied."
+FAKE_GH_MARKER = "FAKE_GH ARGV="
+
+
+def _result_text(content):
+    if isinstance(content, list):
+        return "\n".join(str(part.get("text", "")) for part in content if isinstance(part, dict))
+    return content if isinstance(content, str) else ""
+
+
+def parse_stream(path):
+    """Extract from a stream-json file: every Bash tool_use (id, command), every tool_result
+    (tool_use_id, is_error, text), every permission_denied event and permission_denials entry
+    (tool_use_id), the result event and the init inventory (12.2)."""
+    info = {"bash_uses": [], "other_uses": [], "results": [], "denied_events": [], "denial_entries": [],
+            "result": None, "init": None, "parse_errors": 0}
+    with open(path, "rb") as handle:
+        for raw in handle:
+            raw = raw.strip()
+            if not raw:
+                continue
+            try:
+                event = json.loads(raw)
+            except ValueError:
+                info["parse_errors"] += 1
+                continue
+            kind = event.get("type")
+            if kind == "system" and event.get("subtype") == "init":
+                info["init"] = {"tools": event.get("tools"), "mcp_servers": event.get("mcp_servers"),
+                                "plugins": event.get("plugins"), "model": event.get("model"),
+                                "permissionMode": event.get("permissionMode"),
+                                "apiKeySource": event.get("apiKeySource")}
+            elif kind == "system" and event.get("subtype") == "permission_denied":
+                info["denied_events"].append({"tool_use_id": event.get("tool_use_id"), "tool_name": event.get("tool_name"),
+                                              "decision_reason": event.get("decision_reason")})
+            elif kind == "assistant":
+                for block in (event.get("message") or {}).get("content") or []:
+                    if isinstance(block, dict) and block.get("type") == "tool_use":
+                        use = {"id": block.get("id"), "name": block.get("name"),
+                               "command": (block.get("input") or {}).get("command")}
+                        (info["bash_uses"] if block.get("name") == "Bash" else info["other_uses"]).append(use)
+            elif kind == "user":
+                for block in (event.get("message") or {}).get("content") or []:
+                    if isinstance(block, dict) and block.get("type") == "tool_result":
+                        info["results"].append({"tool_use_id": block.get("tool_use_id"),
+                                                "is_error": bool(block.get("is_error")),
+                                                "text": _result_text(block.get("content"))})
+            elif kind == "result":
+                info["result"] = event
+                for entry in event.get("permission_denials") or []:
+                    info["denial_entries"].append({"tool_use_id": entry.get("tool_use_id"),
+                                                   "tool_name": entry.get("tool_name")})
+    return info
+
+
+def fake_gh_argvs(text):
+    out = []
+    for line in text.splitlines():
+        if line.startswith(FAKE_GH_MARKER):
+            try:
+                out.append(json.loads(line[len(FAKE_GH_MARKER):]))
+            except ValueError:
+                out.append(None)
+    return out
+
+
+def evaluate_case(info, command, expect):
+    """The verdict rules of 12.1. Returns (verdict, detail dict). verdict: PASS, FAIL or INVALID."""
+    uses = info["bash_uses"]
+    if len(uses) != 1 or uses[0]["command"] != command:
+        return "INVALID", {"why": "command identity", "bash_uses": [u["command"] for u in uses]}
+    use_id = uses[0]["id"]
+    results = [r for r in info["results"] if r["tool_use_id"] == use_id]
+    structured = (any(e["tool_use_id"] == use_id for e in info["denied_events"])
+                  or any(e["tool_use_id"] == use_id for e in info["denial_entries"]))
+    marker_anywhere = any(FAKE_GH_MARKER in r["text"] for r in results)
+    detail = {"tool_use_id": use_id, "denial_structure": structured, "results": len(results),
+              "result_is_error": [r["is_error"] for r in results]}
+    if expect == "allowed":
+        if structured or any(r["is_error"] for r in results):
+            return "FAIL", dict(detail, why="denied or error result")
+        expected_argv = shlex.split(command)[1:]
+        argvs = [a for r in results for a in fake_gh_argvs(r["text"])]
+        detail["fake_gh_argvs"] = argvs
+        if any(a == expected_argv for a in argvs):
+            return "PASS", dict(detail, evidence="FAKE_GH argv equals the argv of COMMAND")
+        return "FAIL", dict(detail, why="no FAKE_GH argv equal to the argv of COMMAND")
+    # expected denial
+    if any(not r["is_error"] for r in results) or marker_anywhere:
+        return "FAIL", dict(detail, why="execution evidence")
+    if len(results) != 1:
+        return "INVALID", dict(detail, why="the denial result is not the only tool_result")
+    text = results[0]["text"]
+    detail["denial_text_head"] = text[:80]
+    if structured:
+        return "PASS", dict(detail, evidence="permission_denied event or permission_denials entry")
+    if text.startswith(DENIAL_TEXT_PREFIX):
+        return "PASS", dict(detail, evidence="DENIAL_BY_RESULT_TEXT")
+    return "INVALID", dict(detail, why="error result that is not a permission denial")
+
+
 class Harness:
     def __init__(self, opts):
         self.candidate = os.path.abspath(opts.candidate)
@@ -102,6 +211,7 @@ class Harness:
             raise SystemExit("NATIVE_INTEGRATION_UNAVAILABLE: claude executable not found")
         os.makedirs(self.proj)
         os.makedirs(self.bin)
+        os.makedirs(os.path.join(self.root, "evidence"))  # the record's evidence_root exists (13.1)
         os.makedirs(self.evidence, exist_ok=True)
         git_env = dict(os.environ)
         git_env["GIT_CONFIG_GLOBAL"] = "/dev/null"
@@ -155,13 +265,15 @@ class Harness:
             return {}
 
     def write_record(self, with_pr):
+        """The per-case task record (12.1): shape A without `pr`, shapes B/C with `pr` 999999999.
+        Returns the SHA-256 of the bytes written, recorded per case in the receipt."""
         record = {
-            "contract": "native-harness",
+            "contract": "s1h-harness",
             "contract_sha256": "0" * 64,
             "state": "active",
             "repo": REPO,
             "branch": BRANCH,
-            "evidence_root": self.evidence,
+            "evidence_root": os.path.join(self.root, "evidence"),
             "gh_path": self.fake_gh,
             "gh_sha256": self.gh_sha,
             "git_path": self.git_path,
@@ -172,7 +284,9 @@ class Harness:
         if with_pr:
             record["pr"] = PR
             record["pr_head"] = "0" * 40
-        write_file(self.record_path, json.dumps(record, indent=2) + "\n")
+        data = json.dumps(record, indent=2) + "\n"
+        write_file(self.record_path, data)
+        return hashlib.sha256(data.encode()).hexdigest()
 
     def registration(self, runtime_path, sha, timeout=10):
         return {"matcher": "Bash", "hooks": [{"type": "command",
@@ -258,66 +372,12 @@ class Harness:
         write_file(os.path.join(case_dir, "argv.json"), json.dumps(argv, indent=2) + "\n")
         return code, duration
 
-    @staticmethod
-    def parse_stream(path):
-        commands = []
-        denials = []
-        fake_gh = False
-        result = None
-        errors = []
-        init = None
-        with open(path, "rb") as handle:
-            for raw in handle:
-                raw = raw.strip()
-                if not raw:
-                    continue
-                try:
-                    event = json.loads(raw)
-                except ValueError:
-                    errors.append(raw[:200].decode("utf-8", "replace"))
-                    continue
-                kind = event.get("type")
-                if kind == "system" and event.get("subtype") == "init":
-                    init = {"tools": event.get("tools"), "mcp_servers": event.get("mcp_servers"),
-                            "plugins": event.get("plugins"), "model": event.get("model"),
-                            "permissionMode": event.get("permissionMode"),
-                            "apiKeySource": event.get("apiKeySource")}
-                elif kind == "assistant":
-                    for block in (event.get("message") or {}).get("content") or []:
-                        if isinstance(block, dict) and block.get("type") == "tool_use" and block.get("name") == "Bash":
-                            commands.append((block.get("input") or {}).get("command"))
-                elif kind == "user":
-                    for block in (event.get("message") or {}).get("content") or []:
-                        if isinstance(block, dict) and block.get("type") == "tool_result":
-                            text = block.get("content")
-                            if isinstance(text, list):
-                                text = " ".join(str(part.get("text", "")) for part in text if isinstance(part, dict))
-                            if isinstance(text, str) and "FAKE_GH" in text:
-                                fake_gh = True
-                elif kind == "system" and event.get("subtype") == "permission_denied":
-                    denials.append(event)
-                elif kind == "result":
-                    result = event
-                    for denial in event.get("permission_denials") or []:
-                        denials.append(denial)
-        return commands, denials, fake_gh, result, errors, init
-
-    @staticmethod
-    def denied_for(denials, command):
-        for denial in denials:
-            tool_input = denial.get("tool_input") or {}
-            if denial.get("tool_name") not in (None, "Bash"):
-                continue
-            if not tool_input or tool_input.get("command") == command:
-                return True
-        return False
-
     def run_case(self, case_id, spec):
         attempts = []
         verdict = "INVALID"
         for attempt in (1, 2):
             case_dir = os.path.join(self.evidence, case_id if attempt == 1 else f"{case_id}-retry")
-            self.write_record(with_pr=spec.get("record_pr", True))
+            record_sha = self.write_record(with_pr=spec.get("record_pr", True))
             self.write_settings(spec.get("settings", "hook"))
             if spec.get("flip_runtime"):
                 self.flip_runtime()
@@ -326,35 +386,30 @@ class Harness:
             finally:
                 if spec.get("flip_runtime"):
                     self.restore_runtime()
-            commands, denials, fake_gh, result, errors, init = self.parse_stream(os.path.join(case_dir, "stdout.jsonl"))
+            info = parse_stream(os.path.join(case_dir, "stdout.jsonl"))
+            init = info["init"]
             if init is not None and "nested_init_inventory" not in self.unknowns:
                 # what the nested session actually loaded (tools, MCP servers, plugins): the
                 # isolation claim is checkable from this without reading user-level settings
                 self.unknowns["nested_init_inventory"] = init
-            extracted = commands[0] if commands else None
+            result = info["result"]
             launch_problem = self.launch_problem(code, result, case_dir)
-            denied = self.denied_for(denials, spec["command"])
-            if spec["expect"] == "allowed":
-                observed = "allowed" if (fake_gh and not denied) else ("denied" if denied else "unclear")
-            else:
-                observed = "denied" if denied else ("allowed" if fake_gh else "unclear")
             if launch_problem:
-                verdict = "UNAVAILABLE"
-            elif extracted != spec["command"]:
-                verdict = "INVALID"
+                verdict, detail = "UNAVAILABLE", {"why": launch_problem}
             else:
-                verdict = "PASS" if observed == spec["expect"] else "FAIL"
+                verdict, detail = evaluate_case(info, spec["command"], spec["expect"])
             try:
                 stderr_size = os.path.getsize(os.path.join(case_dir, "stderr.txt"))
             except OSError:
                 stderr_size = None
             attempt_record = {
                 "attempt": attempt, "evidence_dir": case_dir, "exit_code": code, "duration_s": duration,
-                "stderr_bytes": stderr_size, "init_tools": (init or {}).get("tools"),
+                "record_sha256": record_sha, "stderr_bytes": stderr_size, "init_tools": (init or {}).get("tools"),
                 "init_mcp_servers": (init or {}).get("mcp_servers"), "init_plugins": (init or {}).get("plugins"),
-                "extracted_commands": commands, "first_command_matches": extracted == spec["command"],
-                "denials": len(denials), "fake_gh_seen": fake_gh, "observed": observed,
-                "launch_problem": launch_problem, "stream_parse_errors": len(errors),
+                "extracted_commands": [u["command"] for u in info["bash_uses"]],
+                "other_tool_uses": [u["name"] for u in info["other_uses"]],
+                "denied_events": len(info["denied_events"]), "denial_entries": len(info["denial_entries"]),
+                "detail": detail, "launch_problem": launch_problem, "stream_parse_errors": info["parse_errors"],
                 "cost_usd": (result or {}).get("total_cost_usd"), "num_turns": (result or {}).get("num_turns"),
                 "result_subtype": (result or {}).get("subtype"), "verdict": verdict,
             }
@@ -426,6 +481,9 @@ class Harness:
                           "task record pins gh_path to the fake gh",
                           "GH_TOKEN=harness-invalid-token (substitute for GH_CONFIG_DIR, which 5.4(b) forbids in the hook environment)",
                           f"PR {PR}, fresh repository without remote"],
+            "native_harness_sha256": sha256_file(os.path.abspath(__file__)),
+            "record_sha256_by_attempt": {a["evidence_dir"]: a["record_sha256"]
+                                         for r in self.results for a in r["attempts"]},
             "unknowns_recorded": self.unknowns, "cases": self.results,
             "total_cost_usd": round(sum((a.get("cost_usd") or 0) for r in self.results for a in r["attempts"]), 4),
         }
@@ -433,13 +491,14 @@ class Harness:
 
     @staticmethod
     def table(receipt):
-        lines = ["| case | expected | verdict | observed | first cmd = COMMAND | FAKE_GH | denials | exit | evidence |",
-                 "| --- | --- | --- | --- | --- | --- | --- | --- | --- |"]
+        lines = ["| case | expected | verdict | evidence or reason | denied events / entries | exit | record sha256 | dir |",
+                 "| --- | --- | --- | --- | --- | --- | --- | --- |"]
         for case in receipt["cases"]:
             last = case["attempts"][-1]
-            lines.append(f"| {case['case']} | {case['expected']} | {case['verdict']} | {last['observed']} | "
-                         f"{last['first_command_matches']} | {last['fake_gh_seen']} | {last['denials']} | "
-                         f"{last['exit_code']} | {last['evidence_dir']} |")
+            reason = last["detail"].get("evidence") or last["detail"].get("why")
+            lines.append(f"| {case['case']} | {case['expected']} | {case['verdict']} | {reason} | "
+                         f"{last['denied_events']} / {last['denial_entries']} | {last['exit_code']} | "
+                         f"{last['record_sha256'][:12]} | {last['evidence_dir']} |")
         lines.append("")
         lines.append(f"verdict: {receipt['verdict']}  (claude {receipt['claude_version']}, total cost USD {receipt['total_cost_usd']})")
         return "\n".join(lines)

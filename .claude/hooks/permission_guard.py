@@ -23,8 +23,8 @@ never opens a network connection, and never writes anything.
     R6 git [-C <clone>] <read subcommand> (listed flags) ...
 
 Reads only `.git/HEAD`, the task record, the named body file and the two
-executables it hashes; reads only `CLAUDE_PROJECT_DIR` and the *names* of the
-environment variables listed below.
+executables it hashes; reads only `CLAUDE_PROJECT_DIR`, the value of `PATH` (for
+the executable lookup) and the *names* of the environment variables listed below.
 """
 
 import hashlib
@@ -49,10 +49,14 @@ TRIGGERS = frozenset((
     "@codex security review",
 ))
 ENV_GH_NAMES = ("GH_HOST", "GH_REPO", "GH_CONFIG_DIR", "GH_ENTERPRISE_TOKEN",
-                "GITHUB_ENTERPRISE_TOKEN", "GH_PAGER", "PAGER", "GH_FORCE_TTY")
+                "GITHUB_ENTERPRISE_TOKEN", "GH_PAGER", "PAGER", "GH_FORCE_TTY",
+                "BASH_FUNC_gh%%")
 ENV_GIT_NAMES = ("GIT_DIR", "GIT_WORK_TREE", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM",
                  "GIT_CONFIG_PARAMETERS", "GIT_CONFIG_COUNT", "GIT_EXTERNAL_DIFF",
-                 "GIT_PAGER", "GIT_EXEC_PATH")
+                 "GIT_PAGER", "GIT_EXEC_PATH", "GIT_SSH", "GIT_SSH_COMMAND", "GIT_ASKPASS",
+                 "SSH_ASKPASS", "BASH_FUNC_git%%")
+# shell-startup and option names: fail-closed for every form (rev12 5.4(b), 5.6)
+ENV_SHELL_NAMES = ("BASH_ENV", "ENV", "SHELLOPTS", "BASHOPTS")
 RECORD_REL = os.path.join(".scratch", "permission-guard", "task-record.json")
 MAX_STDIN = 1024 * 1024
 MAX_COMMAND = 8192
@@ -226,7 +230,7 @@ class Context:
         require(self.payload.get("permission_mode") in ("default", "auto"), "mode")
         cwd = self.payload.get("cwd")
         require(is_str(cwd) and os.path.realpath(cwd) == self.project, "cwd")
-        self.require_env_absent(ENV_GH_NAMES + ENV_GIT_NAMES)
+        self.require_env_absent(ENV_GH_NAMES + ENV_GIT_NAMES + ENV_SHELL_NAMES)
         require(self.record["state"] == "active", "record not active")
 
     def require_env_absent(self, names):
@@ -363,7 +367,7 @@ def match_gh(tokens, ctx):
         require("~" not in token, "tilde in gh token")  # bash expands ~ after : and = inside words
     args = tokens[1:]
     if args == ["--version"] or args == ["version"]:
-        ctx.require_env_absent(ENV_GH_NAMES)
+        ctx.require_env_absent(ENV_GH_NAMES + ENV_SHELL_NAMES)
         ctx.require_executable("gh")
         return True
     if len(args) >= 2 and args[0] == "pr" and args[1] == "create":
@@ -653,7 +657,7 @@ def match_git(tokens, ctx):
         handler = GIT_SUBCOMMANDS.get(sub)
         require(handler is not None, "git subcommand")
         handler(rest, ctx)
-    ctx.require_env_absent(ENV_GIT_NAMES)
+    ctx.require_env_absent(ENV_GIT_NAMES + ENV_SHELL_NAMES)
     ctx.require_executable("git")
     return True
 
@@ -795,6 +799,7 @@ def decide(argv, stdin, environ):
     require(command.isprintable() and not any(ch in command for ch in FORBIDDEN_RAW_CHARS), "raw")
     tokens = tokenize(command)
     ctx = Context(payload, environ)
+    ctx.require_env_absent(ENV_SHELL_NAMES)  # every form, reads included
     program = tokens[0]
     if program == "gh":
         return match_gh(tokens, ctx)
