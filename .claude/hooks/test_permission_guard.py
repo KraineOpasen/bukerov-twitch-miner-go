@@ -877,20 +877,26 @@ class GuardTest(unittest.TestCase):
             self.expect_empty(f"sed -n 1p {self.fx.file}", env_extra=env)
             self.expect_empty(f"ls -la {self.fx.proj}", env_extra=env)
 
-    def test_5_4b_env_bash_func_gh_rejects_gh_forms_only(self):
-        env = {"BASH_FUNC_gh%%": "() {  echo x\n}"}
-        self.expect_empty(self.fx.b_cmd(), env_extra=env)
-        self.expect_empty(self.fx.c_cmd(), env_extra=env)
-        self.expect_empty("gh --version", env_extra=env)
-        self.expect_allow("git status --porcelain", env_extra=env)
-        self.expect_allow(f"cat {self.fx.file}", env_extra=env)
+    # rev15 5.6: an exported gh or git shell function makes the guard answer nothing for EVERY form
+    def function_name_forms(self):
+        return ["gh --version", "git status --porcelain", "git config --get user.name",
+                f"grep -c git {self.fx.file}", f"cat {self.fx.file}", f"head -n 1 {self.fx.file}",
+                f"ls -la {self.fx.proj}", f"sed -n 1p {self.fx.file}", self.fx.b_cmd(), self.fx.c_cmd()]
 
-    def test_5_4b_env_bash_func_git_rejects_git_forms_only(self):
-        env = {"BASH_FUNC_git%%": "() {  echo x\n}"}
-        self.expect_empty("git status --porcelain", env_extra=env)
-        self.expect_empty("git config --get user.name", env_extra=env)
-        self.expect_allow("gh --version", env_extra=env)
-        self.expect_allow(f"cat {self.fx.file}", env_extra=env)
+    def assert_function_name_rejects_every_form(self, name):
+        env = {name: "() {  echo x\n}"}
+        for command in self.function_name_forms():
+            self.expect_allow(command)  # positive control: allowed without the name
+            self.expect_empty(command, env_extra=env)
+        self.fx.set_record("create")
+        self.expect_allow(self.fx.a_cmd())
+        self.expect_empty(self.fx.a_cmd(), env_extra=env)
+
+    def test_5_6_env_bash_func_gh_rejects_every_form(self):
+        self.assert_function_name_rejects_every_form("BASH_FUNC_gh%%")
+
+    def test_5_6_env_bash_func_git_rejects_every_form(self):
+        self.assert_function_name_rejects_every_form("BASH_FUNC_git%%")
 
     def test_5_4b_env_git_ssh_command_rejects_git_forms_and_writes(self):
         env = {"GIT_SSH_COMMAND": "ssh -x"}

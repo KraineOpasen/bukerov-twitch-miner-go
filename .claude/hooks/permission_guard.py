@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""PermissionRequest guard for unattended Draft-PR work (s1h-contract-rev4, section 5).
+"""PermissionRequest guard for unattended Draft-PR work (S1-H contract, section 5).
 
 Registered in `.claude/settings.local.json` as a PermissionRequest hook for the
 Bash tool (section 4) and run as `python3 -I RUNTIME --expect-sha256 SHA`.
@@ -49,14 +49,13 @@ TRIGGERS = frozenset((
     "@codex security review",
 ))
 ENV_GH_NAMES = ("GH_HOST", "GH_REPO", "GH_CONFIG_DIR", "GH_ENTERPRISE_TOKEN",
-                "GITHUB_ENTERPRISE_TOKEN", "GH_PAGER", "PAGER", "GH_FORCE_TTY",
-                "BASH_FUNC_gh%%")
+                "GITHUB_ENTERPRISE_TOKEN", "GH_PAGER", "PAGER", "GH_FORCE_TTY")
 ENV_GIT_NAMES = ("GIT_DIR", "GIT_WORK_TREE", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM",
                  "GIT_CONFIG_PARAMETERS", "GIT_CONFIG_COUNT", "GIT_EXTERNAL_DIFF",
                  "GIT_PAGER", "GIT_EXEC_PATH", "GIT_SSH", "GIT_SSH_COMMAND", "GIT_ASKPASS",
-                 "SSH_ASKPASS", "BASH_FUNC_git%%")
-# shell-startup and option names: fail-closed for every form (rev12 5.4(b), 5.6)
-ENV_SHELL_NAMES = ("BASH_ENV", "ENV", "SHELLOPTS", "BASHOPTS")
+                 "SSH_ASKPASS")
+# shell-startup, option and exported-function names: fail-closed for every form (5.4(b), 5.6)
+ENV_SHELL_NAMES = ("BASH_ENV", "ENV", "SHELLOPTS", "BASHOPTS", "BASH_FUNC_gh%%", "BASH_FUNC_git%%")
 RECORD_REL = os.path.join(".scratch", "permission-guard", "task-record.json")
 MAX_STDIN = 1024 * 1024
 MAX_COMMAND = 8192

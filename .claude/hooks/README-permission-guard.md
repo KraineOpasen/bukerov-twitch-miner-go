@@ -2,7 +2,7 @@
 
 Six files under `.claude/hooks/` implement, test, install and natively verify a
 `PermissionRequest` hook that answers the routine permission prompts of an
-unattended engineering session on this repository (contract s1h-contract-rev4).
+unattended engineering session on this repository (the S1-H contract).
 
 | file | role |
 | --- | --- |
@@ -33,8 +33,10 @@ hook allow never overrides a matching deny rule.
   (bad JSON, missing record, unreadable file, any exception) is "nothing".
 * It opens no network connection, writes nothing, logs nothing. It reads only
   `.git/HEAD`, the task record, the named body file and the two executables it
-  hashes, plus `CLAUDE_PROJECT_DIR` and the *names* (never values) of the
-  environment variables listed below.
+  hashes; from the environment it reads only the value of `CLAUDE_PROJECT_DIR`,
+  the value of `PATH` (only to look up `gh` and `git`, whose path and SHA-256
+  must equal the task record) and the *names* (never values) of the environment
+  variables listed below.
 * It is pinned to its own bytes: the registration passes `--expect-sha256 SHA`,
   and a copy whose hash differs answers nothing for everything.
 
@@ -86,13 +88,13 @@ positional operand means no decision. Program names never imply anything.
 Binding for every write shape: `agent_id` absent; `permission_mode` is `default`
 or `auto`; `cwd` is the project; none of the gh names `GH_HOST GH_REPO
 GH_CONFIG_DIR GH_ENTERPRISE_TOKEN GITHUB_ENTERPRISE_TOKEN GH_PAGER PAGER
-GH_FORCE_TTY BASH_FUNC_gh%%`, the git names `GIT_DIR GIT_WORK_TREE
-GIT_CONFIG_GLOBAL GIT_CONFIG_SYSTEM GIT_CONFIG_PARAMETERS GIT_CONFIG_COUNT
-GIT_EXTERNAL_DIFF GIT_PAGER GIT_EXEC_PATH GIT_SSH GIT_SSH_COMMAND GIT_ASKPASS
-SSH_ASKPASS BASH_FUNC_git%%` or the shell names `BASH_ENV ENV SHELLOPTS
-BASHOPTS` is present in the hook's environment (the hook sees the environment
-the Bash tool's shell inherits; `BASH_FUNC_<name>%%` is how bash imports an
-exported function that would shadow `gh` or `git`); `argv[0]` is exactly `gh`, `shutil.which("gh")` equals the
+GH_FORCE_TTY`, the git names `GIT_DIR GIT_WORK_TREE GIT_CONFIG_GLOBAL
+GIT_CONFIG_SYSTEM GIT_CONFIG_PARAMETERS GIT_CONFIG_COUNT GIT_EXTERNAL_DIFF
+GIT_PAGER GIT_EXEC_PATH GIT_SSH GIT_SSH_COMMAND GIT_ASKPASS SSH_ASKPASS` or the
+six shell names `BASH_ENV ENV SHELLOPTS BASHOPTS BASH_FUNC_gh%% BASH_FUNC_git%%`
+is present in the hook's environment (the hook sees the environment the Bash
+tool's shell inherits; `BASH_FUNC_<name>%%` is how bash imports an exported
+function that would shadow `gh` or `git`); `argv[0]` is exactly `gh`, `shutil.which("gh")` equals the
 record's `gh_path` and that file hashes to `gh_sha256`; the task record is
 `active`.
 
@@ -122,8 +124,10 @@ T3  @codex security review
 ROOTS = the project directory and `<goroot>/src`. An operand must be absolute
 (repository-relative without `..` only where noted), have no symlink component,
 resolve under ROOTS and never under `.git/` except `.git/HEAD`. If any of the
-shell names `BASH_ENV ENV SHELLOPTS BASHOPTS` is present in the hook's
-environment, no form is answered.
+six shell names `BASH_ENV ENV SHELLOPTS BASHOPTS BASH_FUNC_gh%% BASH_FUNC_git%%`
+is present in the hook's environment, no form at all is answered (R1 to R6 and
+the write shapes A, B, C): an exported shell function for `gh` or `git` is
+refused for every form, not only for its own program.
 
 * **R1** `gh --version` or `gh version` (the gh names above absent; gh identity checked).
 * **R2** `git [-C <project>] config [--local] --get user.name|user.email`.
@@ -220,43 +224,95 @@ narrows the check-to-use window; it does not close it against another process
 of the same OS account.
 
 `install` records the preimage (ABSENT, or a byte copy in the evidence
-directory), is a no-op when the exact registration is already present (IDEMPOTENT,
-exit 0), refuses any foreign `PermissionRequest` entry (exit 3) and an existing
-runtime directory or `.aborted-` archive for the hash (exit 5), builds the new
-document before anything is created, re-reads the target (DRIFT_BEFORE_WRITE,
-exit 6), creates the 0444 runtime copy, re-reads once more and replaces the
-settings atomically (written in full, fsynced and hashed before `os.replace`;
-the postimage is compared with the intended bytes afterwards). A failure before
-the replacement renames the new runtime directory to
-`<HASH12>.aborted-<UTC>-<pid>`; every write failure names its temporary file
-(exit 7). `verify` writes nothing: INCOMPLETE_INSTALL (an `.aborted-` archive,
-or a runtime directory without state), NOT_INSTALLED (no state), MATCH (settings
-hash = recorded postimage, runtime hash = registered SHA, the registration
-present exactly once; exit 0) or DRIFT (exit 1). `rollback` restores the
-preimage bytes with the recorded mode (or renames an ABSENT-preimage file to
-`settings.local.json.rolled-back-<UTC>`) and renames the runtime directory to
-`<HASH12>.disabled-<UTC>`; with drift it refuses (exit 4). `promote` installs a
-repaired guard under its new hash, replaces the registration string once,
-renames the old runtime directory `.superseded-<UTC>` and chains its receipt to
-the previous one. Every path read from the state file is re-checked against the
-pinned layout; a state file that disagrees is refused (exit 2), never acted on.
-Nothing is ever deleted.
+directory). When the exact registration is already present it is a no-op
+(IDEMPOTENT, exit 0) only if the registered runtime file is intact (a regular,
+non-symlink 0444 file with the registered SHA-256); otherwise it refuses
+RUNTIME_DRIFT (exit 4) and writes nothing. It refuses any foreign
+`PermissionRequest` entry (exit 3) and an existing runtime directory for the hash
+(exit 5); an installer-owned `.aborted-` archive of an earlier handled failure
+never blocks it. It builds the new document before anything is created, re-reads
+the target (DRIFT_BEFORE_WRITE, exit 6), creates the 0444 runtime copy, re-reads
+once more and replaces the settings atomically (written in full, fsynced and
+hashed before `os.replace`; the postimage is read back and compared with the
+intended bytes afterwards). `promote` installs a repaired guard under its new
+hash the same way, replaces the registration string once, renames the old
+runtime directory `.superseded-<UTC>` and chains its receipt to the previous one.
+`rollback` restores the preimage bytes with the recorded mode (or renames an
+ABSENT-preimage file to `settings.local.json.rolled-back-<UTC>`; nothing is read
+back after that rename) and renames the runtime directory to
+`<HASH12>.disabled-<UTC>`; with drift it refuses (exit 4). Every path read from
+the state file is re-checked against the pinned layout; a state file that
+disagrees is refused (exit 2), never acted on. Nothing is ever deleted.
 
-Every run prints one JSON receipt (last stdout line) that names the rollback
-command with both pins. A refusal before the evidence directory is verified is
-printed only; otherwise the receipt is also written under
-`<evidence directory>/receipts/`. The receipt records progress as it happens
-(`runtime_copy_created`, `settings_written` or `settings_restored` with the live
-postimage hash), so a failure after a completed write is never silent, and any
-run that changed the settings file updates `permission-guard-state.json` even
-when a later step failed. After a rollback `verify` reports NOT_INSTALLED and
-`rollback`/`promote` refuse until a new `install`. The rollback command is valid
-while the settings file still hashes to the recorded postimage; otherwise the
-installer reports DRIFT and the owner decides.
+Write outcomes (all modes that write):
+
+* **Invariant A (before the replacement).** Every handled failure or interrupt
+  after this run's `mkdir` of `<HASH12>` and before the settings replacement has
+  returned, including failures inside the copy step, renames that directory to
+  `<HASH12>.aborted-<UTC>-<pid>` exactly once; the receipt names `failed_step`
+  and `runtime_renamed_to`, and the settings target stays byte-identical.
+* **Invariant W (the write is recorded at once).** The moment `os.replace` of the
+  settings target (or the rename of an ABSENT rollback) returns, the receipt
+  records `settings_written` (install, promote) or `settings_restored` (rollback),
+  the temporary file and `intended_postimage_sha256`. The read-back is a later
+  step: when it fails the run ends with exit 7, POSTIMAGE_UNREADABLE and a null
+  `postimage_sha256`, and the state records the write. A state with a null
+  postimage is never acted on: `rollback` and `promote` refuse POSTIMAGE_UNKNOWN
+  (exit 4, nothing written) and `verify` reports DRIFT with the intended and the
+  current hash.
+* **F3 (after the replacement).** No failure, KeyboardInterrupt, SystemExit or
+  SIGTERM (converted into an exception for the transaction) touches the runtime
+  directory the new registration points at; the receipt sets `failed_step` and,
+  for an interrupt, `interrupted`; state and receipt are saved; exit 7. A further
+  interrupt while the outcome is recorded is noted as `late_interrupt` and never
+  ends in exit 0.
+* **Outcome S (state before receipt).** After a completed write the state file
+  `permission-guard-state.json` is saved first; a receipt with a success result
+  and exit 0 is persisted only after that save succeeded. When the state save
+  fails the result is `<RESULT>_STATE_NOT_SAVED` (for example
+  INSTALLED_STATE_NOT_SAVED), exit 7, `state_saved` false, with the original
+  result and reason in `original_result` and `original_reason`. A refusal that
+  wrote nothing saves no state and keeps its own exit code. A receipt file that
+  cannot be written leaves `receipt_saved` false in the printed receipt (exit 7,
+  unless a refusal keeps its own code). A directory fsync failure after the
+  replacement is recorded as `dir_fsync_error`.
+
+`verify` writes nothing and decides by this precedence (the first matching step
+wins): (1) a state file that exists but cannot be read: STATE_UNREADABLE (exit 1;
+only a missing file means "no state"); (2) a readable state that records a
+committed write: MATCH (exit 0) when the settings hash equals the recorded
+postimage, the runtime hash equals the registered SHA and the registration is
+present exactly once, otherwise DRIFT (exit 1) with both hashes, and always DRIFT
+when the postimage is unknown; a state left stale by a failed state save no
+longer matches the settings target and is DRIFT, never current and never absent;
+(3) no trustworthy state but a registration, a runtime directory or an
+`.aborted-` archive for the hash: INCOMPLETE_INSTALL (exit 1; owner recovery,
+no guessed rollback); (4) NOT_INSTALLED (exit 1). A transaction that ended
+nonzero stays nonzero in its receipt even when a later `verify` returns MATCH.
+
+Every run prints one JSON receipt (last stdout line); once the manifest has been
+verified the receipt also names the rollback command with both pins (a refusal
+before that point, such as a wrong installer or manifest pin, names none). A
+refusal before the evidence directory is verified is printed only; otherwise the
+receipt is also written under `<evidence directory>/receipts/`. Once the
+temporary settings file has been created, every failure names it in `temp_path`
+and exits 7; failures before that point (for example the runtime copy, the
+preimage copy or a receipt file) have no temporary settings file to name. After a
+rollback `verify` reports NOT_INSTALLED (INCOMPLETE_INSTALL while an `.aborted-`
+archive for the hash remains, step 3) and `rollback`/`promote` refuse until a
+new `install`. The rollback command is valid while the settings file still hashes
+to the recorded postimage; otherwise the installer reports DRIFT or
+POSTIMAGE_UNKNOWN and the owner decides.
 
 Tests pass `--test-root DIR` (an existing real directory directly under the
 system temporary directory): every pinned constant, the manifest paths included,
-is rebased under DIR, and the test seams are accepted only together with it.
+is rebased under DIR, and the test seams (`--test-barrier DIR`,
+`--test-crash-before-replace`, `--test-short-write`, `--test-fail-after-write`
+and the single failure-injection option `--test-fault POINT`, POINT one of
+`postimage-read runtime-copy-write interrupt-before-replace
+interrupt-after-replace state-save receipt-save dir-fsync temp-readback
+state-read`) are accepted only together with it; an unknown POINT is refused
+(exit 2) before anything is written.
 
 ## Native harness
 

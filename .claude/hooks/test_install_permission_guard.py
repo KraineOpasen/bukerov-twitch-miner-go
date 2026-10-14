@@ -16,11 +16,15 @@ collected tests or any skipped test fails the run.
 Installer contract pinned here:
   modes install | verify | rollback | promote; manifest paths pinned per mode (11.0)
   receipt = one JSON object on stdout (the last line)
-  exit codes: 0 done/idempotent/MATCH, 1 verify DRIFT/INCOMPLETE_INSTALL/NOT_INSTALLED,
-              2 refused input (pin, manifest value, flag, path), 3 FOREIGN_HOOK,
-              4 rollback/promote drift, 5 runtime dir or aborted archive exists / same hash,
-              6 DRIFT_BEFORE_WRITE, 7 write failed or interrupted
+  exit codes: 0 done/idempotent/MATCH, 1 verify DRIFT/INCOMPLETE_INSTALL/NOT_INSTALLED/STATE_UNREADABLE,
+              2 refused input (pin, manifest value, flag, path, unreadable state), 3 FOREIGN_HOOK,
+              4 rollback/promote drift, POSTIMAGE_UNKNOWN, RUNTIME_DRIFT, 5 runtime dir exists / same hash,
+              6 DRIFT_BEFORE_WRITE, 7 write failed or interrupted, or a failure after a completed write
   state file <EVIDENCE_DIR>/permission-guard-state.json; receipts <EVIDENCE_DIR>/receipts/
+  rev15 (7.11b (2)): invariant W (a completed settings write is recorded at once and never reported as
+  refused), invariant A (pre-commit failures archive the new runtime dir exactly once), F3 (after the
+  replacement nothing touches the runtime dir), outcome S (state before receipt; a failed state save
+  is the *_STATE_NOT_SAVED outcome), failure injection only through --test-fault POINT.
 """
 
 import argparse
@@ -396,11 +400,17 @@ class InstallerTest(unittest.TestCase):
         self.assertFalse(os.path.exists(self.fx.settings))
 
     def test_6_2_aborted_archive_without_receipt_is_incomplete_install(self):
-        os.makedirs(self.fx.runtime_parent + "/" + self.fx.hash12 + ".aborted-20261014T000000Z-1")
+        archive = self.fx.runtime_parent + "/" + self.fx.hash12 + ".aborted-20261014T000000Z-1"
+        os.makedirs(archive)
         rc, receipt, out, err = self.fx.run("verify")
         self.assertEqual(rc, 1, receipt)
         self.assertEqual(receipt["result"], "INCOMPLETE_INSTALL")
-        self.assert_refused(self.fx.run("install"), 5, "ABORTED_ARCHIVE_EXISTS")
+        # rev15 R3-A2 / 13.2 (e): an installer-owned archive never blocks a later install, and a valid
+        # state decides verify (precedence step 2) even while the archive remains
+        self.install_ok()
+        self.assertTrue(os.path.isdir(archive))
+        rc, receipt, out, err = self.fx.run("verify")
+        self.assertEqual((rc, receipt["result"]), (0, "MATCH"), receipt)
 
     def test_6_2_verify_without_state_is_not_installed(self):
         rc, receipt, out, err = self.fx.run("verify")
@@ -425,7 +435,7 @@ class InstallerTest(unittest.TestCase):
 
     # 11.3 verify -----------------------------------------------------------
     def test_11_3_verify_match_then_drift(self):
-        self.install_ok()
+        installed = self.install_ok()
         rc, receipt, out, err = self.fx.run("verify")
         self.assertEqual((rc, receipt["result"]), (0, "MATCH"), receipt)
         with open(self.fx.settings, "a") as fh:
@@ -433,6 +443,8 @@ class InstallerTest(unittest.TestCase):
         rc, receipt, out, err = self.fx.run("verify")
         self.assertEqual((rc, receipt["result"]), (1, "DRIFT"), receipt)
         self.assertEqual(receipt["settings_sha256"], sha256_file(self.fx.settings))
+        self.assertEqual(receipt["expected_settings_sha256"], installed["postimage_sha256"])
+        self.assertNotEqual(receipt["settings_sha256"], receipt["expected_settings_sha256"])
 
     def test_11_3_verify_runtime_drift(self):
         self.install_ok()
@@ -441,6 +453,9 @@ class InstallerTest(unittest.TestCase):
             fh.write(b"# tampered\n")
         rc, receipt, out, err = self.fx.run("verify")
         self.assertEqual((rc, receipt["result"]), (1, "DRIFT"), receipt)
+        self.assertEqual(receipt["runtime_sha256"], sha256_file(self.fx.runtime_path()))
+        self.assertEqual(receipt["expected_runtime_sha256"], self.fx.source_sha)
+        self.assertEqual(receipt["settings_sha256"], receipt["expected_settings_sha256"])
 
     def test_11_3_verify_never_writes(self):
         self.install_ok()
@@ -526,6 +541,7 @@ class InstallerTest(unittest.TestCase):
     # 11.7 integrity pins -------------------------------------------------------
     def test_11_7_correct_pins_accepted_in_verify(self):
         rc, receipt, out, err = self.fx.run("verify")
+        self.assertEqual((rc, receipt["result"]), (1, "NOT_INSTALLED"), receipt)
         self.assertEqual(receipt["installer_sha256_verified"], sha256_file(INSTALLER))
         self.assertEqual(receipt["manifest_sha256_verified"], self.fx.manifest_sha)
 
@@ -602,7 +618,9 @@ class InstallerTest(unittest.TestCase):
         for mode in ("install", "verify", "rollback", "promote"):
             path = self.fx.promote_manifest if mode == "promote" else self.fx.manifest
             self.fx.write_manifest(overrides={"evidence_dir": dotted}, path=path)
+            before = snapshot(self.fx.root)
             self.assert_refused(self.fx.run(mode), 2, "MANIFEST_EVIDENCE_DIR_NOT_PINNED")
+            self.assertEqual(before, snapshot(self.fx.root), mode)
 
     def test_11_0_registration_differing_from_template_refused(self):
         reg = json.loads(json.dumps(REGISTRATION))
@@ -617,7 +635,9 @@ class InstallerTest(unittest.TestCase):
     def test_11_0_runtime_root_sibling_prefix_refused(self):
         os.makedirs(self.fx.runtime_parent + "-evil")
         self.fx.write_manifest(overrides={"runtime_root": self.fx.runtime_parent + "-evil"})
+        before = snapshot(self.fx.root)
         self.assert_refused(self.fx.run("install"), 2, "MANIFEST_RUNTIME_ROOT_NOT_PINNED")
+        self.assertEqual(before, snapshot(self.fx.root))
 
     # 7.11a (2) containment -------------------------------------------------------
     def test_ct_hooks_dir_absent_refused(self):
@@ -676,8 +696,14 @@ class InstallerTest(unittest.TestCase):
         elsewhere = self.fx.outside + "/state.json"
         os.rename(self.fx.state_path(), elsewhere)
         os.symlink(elsewhere, self.fx.state_path())
-        for mode in ("verify", "rollback"):
+        installed = read_bytes(self.fx.settings)
+        for mode in ("verify", "rollback", "promote"):
+            if mode == "promote":
+                self.fx.write_source(GUARD_V2)
+                self.write_promote_manifest()
             self.assert_refused(self.fx.run(mode), 2, "STATE_NOT_REGULAR")
+            self.assertEqual(read_bytes(self.fx.settings), installed, mode)
+        self.assertFalse(os.path.exists(self.fx.runtime_dir()))  # no v2 runtime dir was created
 
     def test_ct_state_runtime_dir_traversal_refused_in_verify_rollback_promote(self):
         self.install_ok()
@@ -734,7 +760,7 @@ class InstallerTest(unittest.TestCase):
     def test_test_options_refused_without_test_root(self):
         before = snapshot(self.fx.root)
         for flag in (["--test-crash-before-replace"], ["--test-short-write"], ["--test-fail-after-write"],
-                     ["--test-barrier", self.fx.root]):
+                     ["--test-barrier", self.fx.root], ["--test-fault", "state-save"]):
             self.assert_refused(self.fx.run("install", test_root=None, extra=flag), 2, "TEST_OPTION_WITHOUT_TEST_ROOT")
         self.assertEqual(before, snapshot(self.fx.root))
 
@@ -742,6 +768,18 @@ class InstallerTest(unittest.TestCase):
         for barrier in (self.fx.outside + "/../../", tempfile.gettempdir(), self.fx.root + "/x/../outside"):
             self.assert_refused(self.fx.run("install", extra=["--test-barrier", barrier]), 2, "TEST_BARRIER_NOT_CONTAINED")
         self.assertFalse(os.path.exists(self.fx.settings))
+
+    def test_ct_barrier_with_a_missing_intermediate_parent_refused(self):
+        """D-8: CT4 — a non-existent parent below an existing root is a failure, not a created path."""
+        before = snapshot(self.fx.root)
+        self.assert_refused(self.fx.run("install", extra=["--test-barrier", self.fx.root + "/missing/b"]), 2,
+                            "TEST_BARRIER_NOT_CONTAINED")
+        self.assertEqual(before, snapshot(self.fx.root))
+
+    def test_test_fault_unknown_point_refused(self):
+        before = snapshot(self.fx.root)
+        self.assert_refused(self.fx.run("install", extra=["--test-fault", "no-such-point"]), 2, "TEST_FAULT_UNKNOWN")
+        self.assertEqual(before, snapshot(self.fx.root))
 
     def test_ct_barrier_through_a_symlinked_intermediate_directory_refused(self):
         """CT4 per-component lstat walk: an intermediate symlink is refused even when its target stays
@@ -767,6 +805,395 @@ class InstallerTest(unittest.TestCase):
                 self.assert_refused(self.fx.run("verify", test_root=bad), 2, "TEST_ROOT_INVALID")
         finally:
             os.unlink(link)
+
+    # rev15 7.11b (2) helpers ---------------------------------------------------------
+    def fault(self, *points):
+        out = []
+        for point in points:
+            out += ["--test-fault", point]
+        return out
+
+    def receipts(self):
+        directory = self.fx.evidence_dir + "/receipts"
+        if not os.path.isdir(directory):
+            return []
+        out = []
+        for name in sorted(os.listdir(directory)):
+            with open(directory + "/" + name) as fh:
+                out.append((name, json.load(fh)))
+        return out
+
+    def aborted(self, hash12=None):
+        if not os.path.isdir(self.fx.runtime_parent):
+            return []
+        return [d for d in os.listdir(self.fx.runtime_parent) if d.startswith((hash12 or self.fx.hash12) + ".aborted-")]
+
+    def run_with_barrier(self, mode, at_barrier, manifest=None):
+        barrier = self.fx.root + "/barrier"
+        os.mkdir(barrier)
+        manifest = manifest or (self.fx.promote_manifest if mode == "promote" else self.fx.manifest)
+        argv = [sys.executable, "-I", INSTALLER, mode, "--manifest", manifest,
+                "--expect-sha256", sha256_file(INSTALLER), "--expect-manifest-sha256", sha256_file(manifest),
+                "--test-root", self.fx.root, "--test-barrier", barrier]
+        proc = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=self.fx.root)
+        deadline = time.time() + 20
+        while not os.path.exists(barrier + "/reached"):
+            if time.time() > deadline or proc.poll() is not None:
+                proc.kill()
+                self.fail("installer never reached the test barrier")
+            time.sleep(0.05)
+        at_barrier(proc)
+        if proc.poll() is None:
+            with open(barrier + "/release", "w") as fh:
+                fh.write("go\n")
+        out, err = proc.communicate(timeout=30)
+        lines = [ln for ln in out.decode().splitlines() if ln.strip()]
+        self.assertTrue(lines, err.decode())
+        return proc.returncode, json.loads(lines[-1]), err.decode()
+
+    # rev15 F1, invariant W ---------------------------------------------------------
+    def test_w_install_postimage_read_failure_is_a_recorded_write(self):
+        self.fx.write_settings(OTHER_SETTINGS)
+        rc, receipt, out, err = self.fx.run("install", extra=self.fault("postimage-read"))
+        self.assertEqual((rc, receipt["reason"], receipt["result"]), (7, "POSTIMAGE_UNREADABLE", "FAILED"), receipt)
+        self.assertTrue(receipt["settings_written"])
+        self.assertEqual(os.path.dirname(receipt["temp_path"]), self.fx.settings_dir)
+        self.assertIsNone(receipt["postimage_sha256"])
+        self.assertEqual(receipt["intended_postimage_sha256"], sha256_file(self.fx.settings))
+        self.assertEqual(self.settings_obj()["hooks"]["PermissionRequest"], [self.fx.expected_entry()])
+        self.assertTrue(receipt["state_saved"])
+        state = self.fx.state()
+        self.assertTrue(state["settings_written"])
+        self.assertEqual(state["reason"], "POSTIMAGE_UNREADABLE")
+        rc, receipt, out, err = self.fx.run("verify")
+        self.assertEqual((rc, receipt["result"]), (1, "DRIFT"), receipt)
+        self.assertEqual(receipt["intended_postimage_sha256"], sha256_file(self.fx.settings))
+        self.assertEqual(receipt["settings_sha256"], sha256_file(self.fx.settings))
+        before = snapshot(self.fx.root)
+        self.assert_refused(self.fx.run("rollback"), 4, "POSTIMAGE_UNKNOWN")
+        self.unchanged_except_evidence(before)
+        self.fx.write_source(GUARD_V2)
+        self.write_promote_manifest()
+        before = snapshot(self.fx.root)
+        self.assert_refused(self.fx.run("promote"), 4, "POSTIMAGE_UNKNOWN")
+        self.unchanged_except_evidence(before)
+
+    def test_w_promote_postimage_read_failure_is_a_recorded_write(self):
+        self.install_ok()
+        self.fx.write_source(GUARD_V2)
+        self.write_promote_manifest()
+        rc, receipt, out, err = self.fx.run("promote", extra=self.fault("postimage-read"))
+        self.assertEqual((rc, receipt["reason"]), (7, "POSTIMAGE_UNREADABLE"), receipt)
+        self.assertTrue(receipt["settings_written"])
+        self.assertEqual(receipt["intended_postimage_sha256"], sha256_file(self.fx.settings))
+        self.assertEqual(self.settings_obj()["hooks"]["PermissionRequest"], [self.fx.expected_entry()])
+        self.assertTrue(self.fx.state()["settings_written"])
+        self.assertIsNone(self.fx.state()["postimage_sha256"])
+        self.fx.write_manifest()  # verify and rollback read the install manifest: re-frozen for the v2 source
+        rc, receipt, out, err = self.fx.run("verify")
+        self.assertEqual((rc, receipt["result"]), (1, "DRIFT"), receipt)
+        before = snapshot(self.fx.root)
+        self.assert_refused(self.fx.run("rollback"), 4, "POSTIMAGE_UNKNOWN")
+        self.unchanged_except_evidence(before)
+
+    def test_w_rollback_present_preimage_postimage_read_failure(self):
+        self.fx.write_settings(OTHER_SETTINGS)
+        preimage = read_bytes(self.fx.settings)
+        self.install_ok()
+        rc, receipt, out, err = self.fx.run("rollback", extra=self.fault("postimage-read"))
+        self.assertEqual((rc, receipt["reason"]), (7, "POSTIMAGE_UNREADABLE"), receipt)
+        self.assertTrue(receipt["settings_restored"])
+        self.assertEqual(read_bytes(self.fx.settings), preimage)
+        state = self.fx.state()
+        self.assertNotIn(state["result"], ("INSTALLED", "PROMOTED"))
+        self.assertTrue(state["settings_restored"])
+        rc, receipt, out, err = self.fx.run("verify")
+        self.assertEqual((rc, receipt["result"]), (1, "DRIFT"), receipt)
+
+    def test_w_rollback_absent_preimage_has_no_read_back(self):
+        """Recorded behaviour: an ABSENT-preimage rollback renames the target and reads nothing back,
+        so the postimage-read fault point is never reached and the rollback completes."""
+        self.install_ok()
+        rc, receipt, out, err = self.fx.run("rollback", extra=self.fault("postimage-read"))
+        self.assertEqual((rc, receipt["result"]), (0, "ROLLED_BACK"), receipt)
+        self.assertTrue(receipt["settings_restored"])
+        self.assertFalse(os.path.exists(self.fx.settings))
+
+    # rev15 R3-A2, invariant A ---------------------------------------------------------
+    def test_a_install_source_changed_at_barrier_archives_runtime_once(self):
+        self.fx.write_settings(OTHER_SETTINGS)
+        original = read_bytes(self.fx.settings)
+
+        def change_source(proc):
+            with open(self.fx.source, "wb") as fh:  # fixture hashes deliberately left at v1
+                fh.write(GUARD_V2)
+        rc, receipt, err = self.run_with_barrier("install", change_source)
+        self.assertEqual((rc, receipt["reason"]), (7, "SOURCE_HASH_MISMATCH"), (receipt, err))
+        self.assertEqual(receipt["failed_step"], "runtime copy")
+        self.assertEqual(os.path.dirname(receipt["runtime_renamed_to"]), self.fx.runtime_parent)
+        self.assertEqual(len(self.aborted()), 1)
+        self.assertFalse(os.path.exists(self.fx.runtime_dir()))
+        self.assertEqual(read_bytes(self.fx.settings), original)
+        self.fx.write_source(GUARD_V1)  # the manifest pins v1: every mode refuses a different source
+        rc, receipt, out, err = self.fx.run("verify")
+        self.assertEqual((rc, receipt["result"]), (1, "INCOMPLETE_INSTALL"), receipt)
+        self.install_ok()
+        rc, receipt, out, err = self.fx.run("verify")
+        self.assertEqual((rc, receipt["result"]), (0, "MATCH"), receipt)
+        self.assertEqual(len(self.aborted()), 1)
+
+    def test_a_promote_source_changed_at_barrier_archives_new_runtime_once(self):
+        self.install_ok()
+        old_dir = self.fx.runtime_dir()
+        old_snapshot = snapshot(old_dir)
+        installed = read_bytes(self.fx.settings)
+        self.fx.write_source(GUARD_V2)
+        self.write_promote_manifest()
+        new_hash12 = self.fx.hash12
+
+        def change_source(proc):
+            with open(self.fx.source, "wb") as fh:
+                fh.write(b"#!/usr/bin/env python3\n# guard v3\n")
+        rc, receipt, err = self.run_with_barrier("promote", change_source)
+        self.assertEqual((rc, receipt["reason"]), (7, "SOURCE_HASH_MISMATCH"), (receipt, err))
+        self.assertEqual(receipt["failed_step"], "runtime copy")
+        self.assertTrue(os.path.basename(receipt["runtime_renamed_to"]).startswith(new_hash12 + ".aborted-"))
+        self.assertEqual(len(self.aborted(new_hash12)), 1)
+        self.assertFalse(os.path.exists(self.fx.runtime_parent + "/" + new_hash12))
+        self.assertEqual(read_bytes(self.fx.settings), installed)
+        self.assertEqual(snapshot(old_dir), old_snapshot)
+
+    def test_a_runtime_copy_write_fault_archives_runtime_once(self):
+        self.fx.write_settings(OTHER_SETTINGS)
+        original = read_bytes(self.fx.settings)
+        receipt = self.assert_refused(self.fx.run("install", extra=self.fault("runtime-copy-write")), 7,
+                                      "RUNTIME_COPY_FAILED")
+        self.assertEqual(receipt["failed_step"], "runtime copy")
+        self.assertEqual(len(self.aborted()), 1)
+        self.assertEqual(receipt["runtime_renamed_to"], self.fx.runtime_parent + "/" + self.aborted()[0])
+        self.assertFalse(os.path.exists(self.fx.runtime_dir()))
+        self.assertEqual(read_bytes(self.fx.settings), original)
+
+    # rev15 F3, the post-commit boundary --------------------------------------------------
+    def test_f3_install_interrupt_after_replace_never_touches_the_runtime(self):
+        self.fx.write_settings(OTHER_SETTINGS)
+        rc, receipt, out, err = self.fx.run("install", extra=self.fault("interrupt-after-replace"))
+        self.assertEqual(rc, 7, receipt)
+        self.assertTrue(receipt["interrupted"])
+        self.assertTrue(receipt["settings_written"])
+        self.assertEqual(receipt["failed_step"], "after the settings replacement")
+        self.assertTrue(os.path.isdir(self.fx.runtime_dir()))
+        self.assertEqual(stat.S_IMODE(os.stat(self.fx.runtime_path()).st_mode), 0o444)
+        self.assertEqual(sha256_file(self.fx.runtime_path()), self.fx.source_sha)
+        self.assertEqual(self.settings_obj()["hooks"]["PermissionRequest"], [self.fx.expected_entry()])
+        self.assertEqual(self.aborted(), [])
+        state = self.fx.state()
+        self.assertTrue(state["settings_written"])
+        self.assertTrue(state["interrupted"])
+        # the interrupt fires before the read-back, so no postimage was recorded: DRIFT, never MATCH (W)
+        self.assertIsNone(state["postimage_sha256"])
+        rc, receipt, out, err = self.fx.run("verify")
+        self.assertEqual((rc, receipt["result"]), (1, "DRIFT"), receipt)
+
+    def test_f3_promote_interrupt_after_replace_never_touches_the_runtime(self):
+        self.install_ok()
+        self.fx.write_source(GUARD_V2)
+        self.write_promote_manifest()
+        rc, receipt, out, err = self.fx.run("promote", extra=self.fault("interrupt-after-replace"))
+        self.assertEqual(rc, 7, receipt)
+        self.assertTrue(receipt["interrupted"])
+        self.assertTrue(receipt["settings_written"])
+        self.assertEqual(stat.S_IMODE(os.stat(self.fx.runtime_path()).st_mode), 0o444)
+        self.assertEqual(sha256_file(self.fx.runtime_path()), self.fx.source_sha)
+        self.assertEqual(self.settings_obj()["hooks"]["PermissionRequest"], [self.fx.expected_entry()])
+        self.assertEqual(self.aborted(), [])
+        self.assertTrue(self.fx.state()["interrupted"])
+        self.fx.write_manifest()  # verify reads the install manifest: re-frozen for the v2 source
+        rc, receipt, out, err = self.fx.run("verify")
+        self.assertEqual((rc, receipt["result"]), (1, "DRIFT"), receipt)
+
+    def test_f3_interrupt_before_replace_archives_once_and_keeps_settings(self):
+        self.fx.write_settings(OTHER_SETTINGS)
+        original = read_bytes(self.fx.settings)
+        rc, receipt, out, err = self.fx.run("install", extra=self.fault("interrupt-before-replace"))
+        self.assertEqual(rc, 7, receipt)
+        self.assertTrue(receipt["interrupted"])
+        self.assertNotIn("settings_written", receipt)
+        self.assertEqual(read_bytes(self.fx.settings), original)
+        self.assertEqual(len(self.aborted()), 1)
+        self.assertFalse(os.path.exists(self.fx.runtime_dir()))
+        self.assertTrue(os.path.exists(receipt["temp_path"]))
+
+    def test_f3_sigterm_during_the_transaction_is_a_handled_interrupt(self):
+        self.fx.write_settings(OTHER_SETTINGS)
+        original = read_bytes(self.fx.settings)
+        rc, receipt, err = self.run_with_barrier("install", lambda proc: proc.terminate())
+        self.assertEqual(rc, 7, (receipt, err))
+        self.assertTrue(receipt["interrupted"])
+        self.assertEqual(read_bytes(self.fx.settings), original)
+        self.assertFalse(os.path.exists(self.fx.runtime_dir()))
+
+    # rev15 F4, outcome S ----------------------------------------------------------------
+    def test_s_install_state_save_failure_is_never_a_success(self):
+        rc, receipt, out, err = self.fx.run("install", extra=self.fault("state-save"))
+        self.assertEqual((rc, receipt["result"]), (7, "INSTALLED_STATE_NOT_SAVED"), receipt)
+        self.assertFalse(receipt["state_saved"])
+        self.assertEqual(receipt["original_result"], "INSTALLED")
+        self.assertIn("original_reason", receipt)
+        self.assertFalse(os.path.exists(self.fx.state_path()))
+        for name, saved in self.receipts():
+            self.assertFalse(saved.get("result") == "INSTALLED" and saved.get("exit_code") == 0, name)
+        rc, receipt, out, err = self.fx.run("verify")
+        self.assertEqual((rc, receipt["result"]), (1, "INCOMPLETE_INSTALL"), receipt)
+        before = snapshot(self.fx.root)
+        self.assert_refused(self.fx.run("rollback"), 2, "STATE_MISSING")
+        self.unchanged_except_evidence(before)
+
+    def test_s_postimage_and_state_save_faults_together(self):
+        rc, receipt, out, err = self.fx.run("install", extra=self.fault("postimage-read", "state-save"))
+        self.assertEqual((rc, receipt["result"]), (7, "FAILED_STATE_NOT_SAVED"), receipt)
+        self.assertTrue(receipt["settings_written"])
+        self.assertFalse(receipt["state_saved"])
+        self.assertEqual(receipt["original_reason"], "POSTIMAGE_UNREADABLE")
+
+    def test_s_state_save_fault_on_a_foreign_hook_refusal(self):
+        """Recorded behaviour: a refusal with no write saves no state, so the state-save fault point
+        is never reached; the refusal keeps its own exit code and reason."""
+        self.fx.write_settings({"hooks": {"PermissionRequest": [{"matcher": "Bash", "hooks": [
+            {"type": "command", "command": "echo other"}]}]}})
+        receipt = self.assert_refused(self.fx.run("install", extra=self.fault("state-save")), 3, "FOREIGN_HOOK")
+        self.assertNotIn("state_save_error", receipt)
+        self.assertFalse(os.path.exists(self.fx.state_path()))
+
+    def test_s_receipt_save_failure_after_the_state_was_saved(self):
+        rc, receipt, out, err = self.fx.run("install", extra=self.fault("receipt-save"))
+        self.assertEqual(rc, 7, receipt)
+        self.assertFalse(receipt["receipt_saved"])
+        self.assertTrue(receipt["state_saved"])
+        self.assertEqual(self.fx.state()["result"], "INSTALLED")
+        self.assertEqual(self.receipts(), [])
+
+    def test_s_rollback_state_save_failure_leaves_a_detected_stale_state(self):
+        self.fx.write_settings(OTHER_SETTINGS)
+        preimage = read_bytes(self.fx.settings)
+        self.install_ok()
+        rc, receipt, out, err = self.fx.run("rollback", extra=self.fault("state-save"))
+        self.assertEqual((rc, receipt["result"]), (7, "ROLLED_BACK_STATE_NOT_SAVED"), receipt)
+        self.assertEqual(read_bytes(self.fx.settings), preimage)
+        self.assertEqual(self.fx.state()["result"], "INSTALLED")  # stale, not missing
+        rc, receipt, out, err = self.fx.run("verify")
+        self.assertEqual((rc, receipt["result"]), (1, "DRIFT"), receipt)
+        before = snapshot(self.fx.root)
+        self.assert_refused(self.fx.run("rollback"), 4, "SETTINGS_DRIFT")
+        self.unchanged_except_evidence(before)
+
+    # rev15 F5, F6, F7 and IDEMPOTENT -----------------------------------------------------
+    def test_f5_dir_fsync_failure_is_recorded(self):
+        rc, receipt, out, err = self.fx.run("install", extra=self.fault("dir-fsync"))
+        self.assertEqual((rc, receipt["result"]), (0, "INSTALLED"), receipt)
+        self.assertIn("TEST_FAULT", receipt["dir_fsync_error"])
+
+    def test_f6_temp_readback_failure_names_the_temp_file_and_exits_7(self):
+        self.fx.write_settings(OTHER_SETTINGS)
+        original = read_bytes(self.fx.settings)
+        receipt = self.assert_refused(self.fx.run("install", extra=self.fault("temp-readback")), 7,
+                                      "TEMP_READBACK_FAILED")
+        self.assertTrue(os.path.exists(receipt["temp_path"]))
+        self.assertEqual(os.path.dirname(receipt["temp_path"]), self.fx.settings_dir)
+        self.assertEqual(read_bytes(self.fx.settings), original)
+        self.assertEqual(len(self.aborted()), 1)
+
+    def test_f7_state_read_error_is_state_unreadable(self):
+        self.install_ok()
+        rc, receipt, out, err = self.fx.run("verify", extra=self.fault("state-read"))
+        self.assertEqual((rc, receipt["result"]), (1, "STATE_UNREADABLE"), receipt)
+        before = snapshot(self.fx.root)
+        self.assert_refused(self.fx.run("rollback", extra=self.fault("state-read")), 2, "STATE_UNREADABLE")
+        self.unchanged_except_evidence(before)
+
+    def test_idempotent_only_with_an_intact_runtime_file(self):
+        self.install_ok()
+        path = self.fx.runtime_path()
+        for damage in ("moved", "bytes", "mode"):
+            if damage == "moved":
+                os.rename(path, path + ".moved")
+            elif damage == "bytes":
+                os.chmod(path, 0o644)
+                with open(path, "ab") as fh:
+                    fh.write(b"# other\n")
+                os.chmod(path, 0o444)
+            else:
+                os.chmod(path, 0o644)
+            before = snapshot(self.fx.root)
+            self.assert_refused(self.fx.run("install"), 4, "RUNTIME_DRIFT")
+            self.unchanged_except_evidence(before)
+            # restore the intact copy for the next case
+            if os.path.exists(path):
+                os.chmod(path, 0o644)
+                os.unlink(path)
+            if os.path.exists(path + ".moved"):
+                os.rename(path + ".moved", path)
+            else:
+                with open(path, "wb") as fh:
+                    fh.write(GUARD_V1)
+            os.chmod(path, 0o444)
+            rc, receipt, out, err = self.fx.run("install")
+            self.assertEqual((rc, receipt["result"]), (0, "IDEMPOTENT"), (damage, receipt))
+
+    # rev15 R-2: the production-layout sequence ----------------------------------------------
+    def test_r2_production_layout_sequence_all_four_modes(self):
+        self.assertTrue(self.fx.evidence_dir.endswith("/.scratch/" + RUNID_DIR + "/r9-install"))
+        self.assertFalse(os.path.exists(self.fx.evidence_dir + "/receipts"))
+        self.fx.write_settings(OTHER_SETTINGS)
+        preimage = read_bytes(self.fx.settings)
+        start = snapshot(self.fx.root)
+
+        def count(kind):
+            return len([n for n, _ in self.receipts() if f"-{kind}-" in n])
+
+        first = self.install_ok()
+        self.assertEqual((count("install"), self.fx.state()["result"]), (1, "INSTALLED"))
+        listing, state_bytes = self.receipts(), read_bytes(self.fx.state_path())
+        rc, receipt, out, err = self.fx.run("verify")
+        self.assertEqual((rc, receipt["result"]), (0, "MATCH"), receipt)
+        self.assertEqual((self.receipts(), read_bytes(self.fx.state_path())), (listing, state_bytes))
+        rc, receipt, out, err = self.fx.run("rollback")
+        self.assertEqual((rc, receipt["result"]), (0, "ROLLED_BACK"), receipt)
+        self.assertEqual((count("rollback"), self.fx.state()["result"]), (1, "ROLLED_BACK"))
+        self.assertEqual(read_bytes(self.fx.settings), preimage)
+        self.install_ok()
+        self.assertEqual(count("install"), 2)
+        old_dir = self.fx.runtime_dir()
+        self.fx.write_source(GUARD_V2)
+        self.write_promote_manifest()
+        rc, receipt, out, err = self.fx.run("promote")
+        self.assertEqual((rc, receipt["result"]), (0, "PROMOTED"), receipt)
+        self.assertEqual(count("promote"), 1)
+        state = self.fx.state()
+        self.assertEqual((state["result"], state["runtime_dir"]), ("PROMOTED", self.fx.runtime_dir()))
+        self.assertEqual(state["previous_receipt"]["result"], "INSTALLED")
+        self.assertNotEqual(old_dir, self.fx.runtime_dir())
+        self.fx.write_manifest()  # verify and rollback read the install manifest: re-frozen for the v2 source
+        rc, receipt, out, err = self.fx.run("verify")
+        self.assertEqual((rc, receipt["result"]), (0, "MATCH"), receipt)
+        rc, receipt, out, err = self.fx.run("rollback")
+        self.assertEqual((rc, receipt["result"]), (0, "ROLLED_BACK"), receipt)
+        self.assertEqual(read_bytes(self.fx.settings), preimage)
+        self.assertEqual(len([d for d in os.listdir(self.fx.runtime_parent)
+                              if d.startswith(self.fx.hash12 + ".disabled-")]), 1)
+        self.assertEqual(count("rollback"), 2)
+        for _, saved in self.receipts():
+            self.assertEqual(saved["test_root"], self.fx.root)
+            self.assertEqual(saved["evidence_dir"], self.fx.evidence_dir)
+            self.assertEqual(saved["settings_target"], self.fx.settings)
+        allowed = (os.path.relpath(self.fx.evidence_dir, self.fx.root), os.path.relpath(self.fx.settings_dir, self.fx.root),
+                   os.path.relpath(self.fx.runtime_parent, self.fx.root), os.path.relpath(self.fx.source, self.fx.root),
+                   os.path.relpath(self.fx.promote_manifest, self.fx.root), os.path.relpath(self.fx.manifest, self.fx.root))
+        end = snapshot(self.fx.root)
+        changed = {k for k in set(start) | set(end) if start.get(k) != end.get(k)}
+        for path in changed:
+            self.assertTrue(any(path == a or path.startswith(a + "/") for a in allowed), path)
+        self.assertEqual(first["evidence_dir"], self.fx.evidence_dir)
 
 
 def main():
