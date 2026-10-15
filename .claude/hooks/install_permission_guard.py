@@ -111,8 +111,10 @@ Integers, existence checks and post-write facts (rev27, 7.11g (2)):
      the caller's refusal (entry_exists).
   Z4 a written file states only facts complete before its own bytes were written: the state file holds no
      STATE_SAVE_KEYS (state_saved, state_save_error, state_save_temp_path, state_dir_fsync_error, the last known only
-     after the fsync of its directory) and no receipt-only key; a receipt file holds no receipt-only key
-     (receipt_saved, receipt_save_error, receipt_save_temp_path). The printed receipt carries all of them.
+     after the fsync of its directory), no receipt-only key and no STATE_LATE_KEYS (exit_code, which a later failed
+     receipt save sets to 7, and post_creation_checks, which the creation of receipts/ extends; rev27 7.11g (8) BZ1);
+     a receipt file holds no receipt-only key (receipt_saved, receipt_save_error, receipt_save_temp_path). The printed
+     receipt carries all of them.
 
 Interrupts (rev18, 7.11c (2), S1H-OD-7; rev21 7.11d (1)):
   P  the precondition checks write nothing and keep the default signal behaviour: Ctrl+C there raises
@@ -225,6 +227,7 @@ EXIT_WRITE_FAILED = 7
 BARRIER_TIMEOUT_SECONDS = 15
 OPEN_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 OPEN_CLOEXEC = getattr(os, "O_CLOEXEC", 0)
+OPEN_NONBLOCK = getattr(os, "O_NONBLOCK", 0)
 # --test-fault POINT (tests only, with --test-root): the fixed failure-injection points of 7.11b (2), 7.11c (2) D7, the
 # single point 7.11d (2) V4 adds (post-creation-check), the single point 7.11e (2) X1 adds (transaction-boundary), the
 # single point 7.11f (2) U13-write adds (insert-before-serializer) and the single point 7.11g (2) U17 adds (state-dir-fsync)
@@ -249,7 +252,7 @@ PATH_MAX_BYTES = 4096
 MAX_INT_DIGITS = 309
 # Y3 (rev25): the documented key set of each receipt kind (README "Receipt and state fields"), each with the value it has
 # when it does not apply. complete_receipt() is the one place that fills them in; the state file is the receipt of its
-# writing run without the receipt-only keys, plus state_saved.
+# writing run without STATE_FILE_EXCLUDED_KEYS, and a receipt file is the printed receipt without RECEIPT_ONLY_KEYS (Z4).
 _RECEIPT_COMMON = (("mode", None), ("timestamp_utc", None), ("installer", None), ("manifest", None), ("result", None),
                    ("reason", None), ("exit_code", None), ("detail", None), ("installer_sha256_verified", None),
                    ("manifest_sha256_verified", None), ("evidence_verified", False), ("settings_target", None),
@@ -260,7 +263,10 @@ RECEIPT_ONLY_KEYS = ("receipt_saved", "receipt_save_error", "receipt_save_temp_p
 # the results of saving a receipt are never in the receipt file: the printed receipt (the console) carries them all, the
 # receipt file carries the state's.
 STATE_SAVE_KEYS = ("state_saved", "state_save_error", "state_save_temp_path", "state_dir_fsync_error")
-STATE_FILE_EXCLUDED_KEYS = RECEIPT_ONLY_KEYS + STATE_SAVE_KEYS
+# rev27 7.11g (8), BZ1: the run-level values that can still change after the state is written are not in the state file
+# either: a failed receipt save sets exit_code to 7, and the creation of receipts/ adds its post-creation check
+STATE_LATE_KEYS = ("exit_code", "post_creation_checks")
+STATE_FILE_EXCLUDED_KEYS = RECEIPT_ONLY_KEYS + STATE_SAVE_KEYS + STATE_LATE_KEYS
 _RECEIPT_WRITING = (("step", None), ("failed_step", None), ("original_code", None), ("original_result", None),
                     ("original_reason", None), ("interrupted", False), ("interrupted_outcome", None),
                     ("state_saved", False), ("state_save_error", None), ("state_save_temp_path", None),
@@ -578,9 +584,11 @@ def require_contained(candidate, root, kind, reason, must_exist=False):
 
 
 def read_regular(path, reason):
-    """Read a regular file without following a final symlink. Y1: every open or read failure is the caller's refusal."""
+    """Read a regular file without following a final symlink. Y1: every open or read failure is the caller's refusal.
+    BZ3 (rev27 7.11g (8)): the open never blocks (O_NONBLOCK, which a regular file ignores), so a FIFO or another special
+    file reaches the regular-file check below and is refused instead of waiting for a writer."""
     try:
-        fd = os.open(path, os.O_RDONLY | OPEN_NOFOLLOW | OPEN_CLOEXEC)
+        fd = os.open(path, os.O_RDONLY | OPEN_NOFOLLOW | OPEN_CLOEXEC | OPEN_NONBLOCK)
     except (OSError, ValueError) as exc:
         refuse(reason, path=path, detail=str(exc))
     try:
@@ -968,26 +976,34 @@ def entry_command(entry):
     return None
 
 
-def current_settings_sha(layout):
-    """The settings target's hash; None when it is absent or (FACT, documented in r27-existence-checks.md) not a regular
-    file, which every caller compares with a recorded hash. Z3: an unreadable target is a refusal, never None."""
+def settings_hash(layout):
+    """The settings target's hash and, when a present target has none, why: (sha256, None) for a regular file,
+    (None, None) when it is absent, and (None, REASON) when a present entry is not a regular file (SETTINGS_SYMLINK,
+    SETTINGS_DIRECTORY or SETTINGS_NOT_REGULAR, the names read_settings uses). BZ2 (rev27 7.11g (8)): such an entry is
+    never the value for "absent", and every caller names the reason with its null hash. Z3: an unreadable target is a
+    refusal."""
     try:
         info = os.lstat(layout.settings)
     except FileNotFoundError:
-        return None
+        return None, None
     except (OSError, ValueError) as exc:
         refuse("SETTINGS_NOT_REGULAR", detail=os_error_text("lstat", exc))
+    if stat.S_ISLNK(info.st_mode):
+        return None, "SETTINGS_SYMLINK"
+    if stat.S_ISDIR(info.st_mode):
+        return None, "SETTINGS_DIRECTORY"
     if not stat.S_ISREG(info.st_mode):
-        return None
-    return sha256_bytes(read_regular(layout.settings, "SETTINGS_NOT_REGULAR"))
+        return None, "SETTINGS_NOT_REGULAR"
+    return sha256_bytes(read_regular(layout.settings, "SETTINGS_NOT_REGULAR")), None
 
 
 def recheck_preimage(layout, preimage_bytes):
-    current = current_settings_sha(layout)
+    current, problem = settings_hash(layout)
     expected = None if preimage_bytes is None else sha256_bytes(preimage_bytes)
-    if current != expected:
+    if problem is not None or current != expected:  # BZ2: a present non-regular target is drift, never "absent"
+        cause = {} if problem is None else {"settings_read_error": problem}
         refuse("DRIFT_BEFORE_WRITE", EXIT_DRIFT_BEFORE_WRITE, settings_sha256=current,
-               expected_settings_sha256=expected)
+               expected_settings_sha256=expected, **cause)
 
 
 # --- runtime directory --------------------------------------------------------------------
@@ -1093,7 +1109,9 @@ def read_postimage(layout, receipt, seams):
     """The read-back after a recorded write; a failure is exit 7, never a refusal of input (W)."""
     try:
         inject_fault(seams, "postimage-read")
-        post = current_settings_sha(layout)
+        post, problem = settings_hash(layout)
+        if problem is not None:  # BZ2: a present non-regular target has no postimage; its reason is the read error
+            refuse(problem)
     except (OSError, Refusal) as exc:
         receipt["postimage_read_error"] = getattr(exc, "reason", None) or f"{type(exc).__name__}: {exc}"
         refuse("POSTIMAGE_UNREADABLE", EXIT_WRITE_FAILED)
@@ -1192,8 +1210,9 @@ def save_receipt(layout, receipt, update_state, seams=None):
     is persisted only after that save succeeded. A failed state save turns the result into
     <RESULT>_STATE_NOT_SAVED (exit 7, state_saved false, original_result / original_reason kept); a
     receipt that cannot be written says receipt_saved false (exit 7, except that a refusal keeps its
-    own code). Z4: the state file holds no result of saving itself (STATE_SAVE_KEYS) and no receipt-only key, and the
-    receipt file holds no result of saving itself (RECEIPT_ONLY_KEYS); the printed receipt carries them. Never raises."""
+    own code). Z4: the state file holds no result of saving itself (STATE_SAVE_KEYS), no receipt-only key and no value
+    that can still change after it is written (STATE_LATE_KEYS, BZ1), and the receipt file holds no result of saving
+    itself (RECEIPT_ONLY_KEYS); the printed receipt carries them. Never raises."""
     if not receipt.get("evidence_verified"):  # a refusal before the evidence directory is verified is printed only
         receipt.update(receipt_saved=False, receipt_save_error="EVIDENCE_DIR_NOT_VERIFIED", receipt_save_temp_path=None)
         return
@@ -1374,7 +1393,9 @@ def do_verify(layout, manifest, receipt, seams=None):
         receipt.update(result="NOT_INSTALLED", exit_code=EXIT_VERIFY_DRIFT)
         return EXIT_VERIFY_DRIFT
     try:  # step 2: a read error is DRIFT, never a refusal
-        settings_sha = current_settings_sha(layout)
+        settings_sha, problem = settings_hash(layout)
+        if problem is not None:  # BZ2: a null hash of a present target always comes with its cause
+            receipt["settings_read_error"] = problem
     except (OSError, ValueError, Refusal) as exc:
         settings_sha = None
         receipt["settings_read_error"] = getattr(exc, "reason", None) or f"{type(exc).__name__}: {exc}"
@@ -1426,9 +1447,11 @@ def do_rollback(layout, manifest, receipt, seams):
                    runtime_sha256=state["runtime_sha256"], registration_command=state["registration_command"],
                    preimage=state["preimage"], expected_settings_sha256=state["postimage_sha256"])
     refuse_unknown_postimage(state)
-    current = current_settings_sha(layout)
+    current, problem = settings_hash(layout)
     receipt["settings_sha256"] = current
-    if current != state["postimage_sha256"]:
+    if problem is not None:  # BZ2: a present non-regular target is drift with its cause, never "absent"
+        receipt["settings_read_error"] = problem
+    if problem is not None or current != state["postimage_sha256"]:
         refuse("SETTINGS_DRIFT", EXIT_STATE_DRIFT, settings_sha256=current,
                expected_settings_sha256=state["postimage_sha256"])
     preimage = state["preimage"]

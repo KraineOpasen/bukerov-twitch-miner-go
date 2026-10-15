@@ -93,14 +93,18 @@ RECEIPT_ONLY_KEYS = ("receipt_saved", "receipt_save_error", "receipt_save_temp_p
 # saving a file (and the state directory's fsync) are never in that file: a receipt file lacks RECEIPT_ONLY_KEYS (the
 # printed receipt carries them), a state file lacks RECEIPT_ONLY_KEYS and STATE_SAVE_KEYS (the receipts carry them)
 STATE_SAVE_KEYS = ("state_saved", "state_save_error", "state_save_temp_path", "state_dir_fsync_error")
+# rev27 7.11g (8), BZ1 (R5e-a-1): the run-level values that can still change after the state is written (a failed receipt
+# save sets exit_code to 7; the creation of receipts/ adds a post-creation check) are not in the state file either
+STATE_LATE_KEYS = ("exit_code", "post_creation_checks")
+STATE_FILE_EXCLUDED_KEYS = RECEIPT_ONLY_KEYS + STATE_SAVE_KEYS + STATE_LATE_KEYS
 
 
 def missing_documented_keys(record, kind):
     """U11: the documented keys a printed receipt ("receipt"), a receipt file ("receipt-file") or a state file ("state")
-    of its mode lacks, and (rev27 Z4) every key that must not be in that file but is."""
+    of its mode lacks, and (rev27 Z4, BZ1) every key that must not be in that file but is."""
     if not isinstance(record, dict) or record.get("mode") not in RECEIPT_KEYS_BY_MODE:
         return ["<not a receipt of a known mode>"]
-    excluded = {"receipt": (), "receipt-file": RECEIPT_ONLY_KEYS, "state": RECEIPT_ONLY_KEYS + STATE_SAVE_KEYS}[kind]
+    excluded = {"receipt": (), "receipt-file": RECEIPT_ONLY_KEYS, "state": STATE_FILE_EXCLUDED_KEYS}[kind]
     problems = [k for k in RECEIPT_KEYS_BY_MODE[record["mode"]] if k not in excluded and k not in record]
     return problems + ["excluded but present: " + k for k in excluded if k in record]
 
@@ -2601,7 +2605,7 @@ class InstallerTest(unittest.TestCase):
         self.assertEqual(saved["state_dir_fsync_error"], receipt["state_dir_fsync_error"])  # written after the fsync
         state = self.fx.state()
         self.assertNotIn("state_dir_fsync_error", state)
-        documented = set(RECEIPT_KEYS_BY_MODE["install"]) - set(RECEIPT_ONLY_KEYS) - set(STATE_SAVE_KEYS)
+        documented = set(RECEIPT_KEYS_BY_MODE["install"]) - set(STATE_FILE_EXCLUDED_KEYS)
         self.assertEqual({k for k in state if not k.startswith("test_")}, documented)
         self.assert_verify("MATCH")
 
@@ -2626,6 +2630,90 @@ class InstallerTest(unittest.TestCase):
                 self.install_ok()
                 self.append_to_state(token)
                 self.assert_untrustworthy_state_everywhere("STATE_MALFORMED", "state " + token[:4].decode())
+
+    # rev27 7.11g (8): the round-5e repair batch (BZ1 to BZ3) ------------------------------------------------------------
+    def assert_state_holds_only_final_values(self, receipt):
+        """BZ1: the state file holds no key of STATE_LATE_KEYS, and every value it holds equals the run's final value in
+        the printed receipt."""
+        state = self.fx.state()
+        for key in STATE_LATE_KEYS:
+            self.assertNotIn(key, state)
+        differing = {k: (v, receipt.get(k)) for k, v in state.items() if k not in receipt or receipt[k] != v}
+        self.assertEqual(differing, {}, receipt)
+
+    def test_u19_the_state_file_holds_no_value_that_changes_after_it_is_written(self):
+        """BZ1 (R5e-a-1): a receipt save that fails after the state was saved makes the run exit 7, and the run that
+        creates receipts/ adds that check to post_creation_checks; neither value is final when the state is written, so
+        neither key is in the state file, and every value the state does hold equals the run's final printed value."""
+        self.assertFalse(os.path.exists(self.fx.evidence_dir + "/receipts"))
+        rc, receipt, out, err = self.fx.run("install", extra=self.fault("receipt-save"))
+        self.assertEqual((rc, receipt["result"], receipt["exit_code"], receipt["state_saved"], receipt["receipt_saved"]),
+                         (7, "INSTALLED", 7, True, False), (receipt, err))
+        self.assertEqual(receipt["post_creation_checks"][-1], self.fx.evidence_dir + "/receipts")
+        self.assert_state_holds_only_final_values(receipt)
+        with self.subTest(case="control: a complete install"):
+            self.next_fixture()
+            self.assert_state_holds_only_final_values(self.install_ok())
+
+    NON_REGULAR_SETTINGS = (("directory", "SETTINGS_DIRECTORY"), ("symlink", "SETTINGS_SYMLINK"),
+                            ("fifo", "SETTINGS_NOT_REGULAR"))
+
+    def make_non_regular_settings(self, kind):
+        """BZ2: replace the settings target by a present entry that is not a regular file (a file there is kept aside)."""
+        if os.path.lexists(self.fx.settings):
+            os.rename(self.fx.settings, self.fx.settings + ".aside")
+        if kind == "directory":
+            os.mkdir(self.fx.settings)
+        elif kind == "symlink":
+            os.symlink(self.fx.settings + ".aside", self.fx.settings)
+        else:
+            os.mkfifo(self.fx.settings)
+
+    def test_u20_a_present_non_regular_settings_target_is_never_read_as_absent(self):
+        """BZ2 (R5e-a-2, R5e-a-3): a settings target that is present but not a regular file has no hash, and every reader
+        names the cause: verify is DRIFT with settings_read_error; rollback refuses SETTINGS_DRIFT (exit 4) with
+        settings_read_error; an install whose preimage was ABSENT and whose target turns into such an entry after phase P
+        refuses DRIFT_BEFORE_WRITE (exit 6) before any transaction write, never a later write failure."""
+        for kind, reason in self.NON_REGULAR_SETTINGS:
+            with self.subTest(modes="verify, rollback", kind=kind):
+                self.next_fixture()
+                self.fx.write_settings(OTHER_SETTINGS)
+                self.install_ok()
+                self.make_non_regular_settings(kind)
+                rc, receipt, out, err = self.fx.run("verify")
+                self.assertEqual((rc, receipt["result"], receipt["settings_sha256"], receipt["settings_read_error"]),
+                                 (1, "DRIFT", None, reason), (receipt, err))
+                rc, receipt, out, err = self.fx.run("rollback")
+                self.assertEqual((rc, receipt["result"], receipt["reason"], receipt["settings_sha256"],
+                                  receipt.get("settings_read_error")), (4, "REFUSED", "SETTINGS_DRIFT", None, reason),
+                                 (receipt, err))
+                self.assertFalse(receipt["settings_restored"])
+            with self.subTest(mode="install", kind=kind):
+                self.next_fixture()
+                self.assertFalse(os.path.lexists(self.fx.settings))
+                rc, receipt, err = self.run_with_barrier(
+                    "install", lambda proc, kind=kind: self.make_non_regular_settings(kind))
+                self.assertEqual((rc, receipt["result"], receipt["reason"], receipt.get("settings_read_error")),
+                                 (6, "REFUSED", "DRIFT_BEFORE_WRITE", reason), (receipt, err))
+                self.assertFalse(os.path.lexists(self.fx.runtime_parent))
+                self.assertFalse(os.path.lexists(self.fx.state_path()))
+
+    def test_u21_promote_never_blocks_on_a_fifo_at_the_install_manifest_path(self):
+        """BZ3 (R5e-c-1): a FIFO at the install-manifest path is a present entry that is not a regular file; promote
+        refuses it in phase P (MANIFEST_MISSING, exit 2) at once instead of blocking in the open of a FIFO that has no
+        writer, and creates no runtime directory."""
+        self.install_ok()
+        self.fx.write_source(GUARD_V2)
+        self.write_promote_manifest()
+        os.rename(self.fx.manifest, self.fx.manifest + ".aside")
+        os.mkfifo(self.fx.manifest)
+        try:
+            rc, receipt, out, err = self.fx.run("promote", timeout=20)
+        except subprocess.TimeoutExpired:
+            self.fail("promote blocked on the FIFO at the install-manifest path")
+        self.assertEqual((rc, receipt["result"], receipt["reason"]), (2, "REFUSED", "MANIFEST_MISSING"), (receipt, err))
+        self.assertIn("not a regular file", receipt.get("detail") or "", receipt)
+        self.assertFalse(os.path.exists(self.fx.runtime_dir()))
 
 
 def main():

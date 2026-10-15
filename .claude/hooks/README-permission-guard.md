@@ -236,7 +236,9 @@ every path it will create, write or rename (see "Before the first transaction
 write" below). It then copies the preimage, re-reads the target
 (DRIFT_BEFORE_WRITE: exit 6 while nothing has been written, which is the case for
 an ABSENT preimage; after the preimage copy it is FAILED, exit 7, `original_code`
-6), creates the 0444 runtime copy, re-reads
+6; a target that has become a symlink, a directory or another non-regular entry
+is drift too, never "absent", with the cause in `settings_read_error`), creates
+the 0444 runtime copy, re-reads
 once more and replaces the settings atomically (written in full, fsynced and
 hashed before `os.replace`; the postimage is read back and compared with the
 intended bytes afterwards). `promote` installs a repaired guard under its new
@@ -245,7 +247,9 @@ runtime directory `.superseded-<UTC>` and chains its receipt to the previous one
 `rollback` restores the preimage bytes with the recorded mode (or renames an
 ABSENT-preimage file to `settings.local.json.rolled-back-<UTC>`; nothing is read
 back after that rename) and renames the runtime directory to
-`<HASH12>.disabled-<UTC>`; with drift it refuses (exit 4). Every path read from
+`<HASH12>.disabled-<UTC>`; with drift it refuses (exit 4; a settings target
+that is present but not a regular file is drift with `settings_sha256` null and
+the cause in `settings_read_error`). Every path read from
 the state file is re-checked against the pinned layout; a state file that
 disagrees is refused (exit 2), never acted on. Nothing is ever deleted.
 
@@ -344,7 +348,8 @@ Write outcomes (all modes that write):
   "Interrupts" below), nothing can come between an operation and its record. The
   read-back is a later step: when it fails the run ends with exit 7,
   POSTIMAGE_UNREADABLE and a null `postimage_sha256`, and the state records the
-  write. Any refusal raised after a transaction write is reported as FAILED with
+  write (a target that is then present but not a regular file is such a failure,
+  named in `postimage_read_error`). Any refusal raised after a transaction write is reported as FAILED with
   exit 7 (its own code kept in `original_code`), never as refused input. A state whose postimage is null, or differs from the intended postimage
   (POSTIMAGE_MISMATCH, a concurrent writer), is never acted on: `rollback` and
   `promote` refuse POSTIMAGE_UNKNOWN (exit 4, nothing written) and `verify` reports
@@ -426,7 +431,10 @@ always DRIFT when the postimage is unknown or a file cannot be read
 (`settings_read_error`, `runtime_read_error`; a runtime file that cannot even be
 checked, for example because its parent directory is not searchable, is never
 read as absent: `runtime_read_error` names the failed operation and the errno,
-such as `lstat: EACCES (Permission denied)`, and `runtime_sha256` is null); a state left stale by a failed
+such as `lstat: EACCES (Permission denied)`, and `runtime_sha256` is null; a
+settings target that is present but not a regular file is never read as absent
+either: `settings_sha256` is null and `settings_read_error` names it as
+SETTINGS_SYMLINK, SETTINGS_DIRECTORY or SETTINGS_NOT_REGULAR); a state left stale by a failed
 state save no longer matches the settings target and is DRIFT, never current and
 never absent; (3) no trustworthy state (none, or one whose paths or hashes fail
 the pinned layout, named in `state_refusal`) but a registration, a runtime
@@ -504,6 +512,12 @@ test-only `test_*` keys come on top.
     `state_dir_fsync_error`. The receipt file and the printed receipt, both
     produced after the state's save and fsync, carry those four with their real
     values.
+  * **The state file also omits** `exit_code` and `post_creation_checks`, whose
+    values can still change after the state is written: a later failed receipt
+    save sets `exit_code` to 7, and creating `receipts/` adds its check to
+    `post_creation_checks`. Every value the state file does hold is the run's
+    final value. The printed receipt (and a receipt file, when one is saved)
+    carries both keys.
 
 When the booleans become true:
 
