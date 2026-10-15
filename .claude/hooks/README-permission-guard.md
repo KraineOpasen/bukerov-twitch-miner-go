@@ -286,8 +286,9 @@ Before the first transaction write (all modes that write):
   changes (a `hooks` or `PermissionRequest` value that is null, a list where an
   object is expected, a string or a number, or a `PermissionRequest` entry that
   is not an object, is refused with exit 2; a document nested deeper than the JSON
-  decoder can follow, or one holding `NaN`, `Infinity`, `-Infinity` or a number too
-  large for a finite float such as `1e400`, is malformed JSON like any other: for the
+  decoder can follow, or one holding `NaN`, `Infinity`, `-Infinity`, a number too
+  large for a finite float such as `1e400`, or an integer literal outside the
+  finite float range (more than 309 digits, or 309 nines), is malformed JSON like any other: for the
   settings SETTINGS_MALFORMED, exit 2, and the same holds for every file the
   installer parses, a manifest being MANIFEST_MALFORMED and the state STATE_MALFORMED), the new document is built and
   encoded, the foreign-hook, registration, manifest and source checks run, and
@@ -393,7 +394,9 @@ Interrupts (Ctrl+C, SIGTERM, SIGHUP):
   `interrupt_deferred` (true or false) and `interrupt_signal` (the first signal's
   name, such as `SIGINT`, or null) as observed at the record's snapshot, taken
   immediately before the record is written; a later signal is not in them. The
-  printed receipt carries the same values as the receipt file. A signal that
+  printed receipt carries the same values as the receipt file, plus the result of
+  saving that file (`receipt_saved`, `receipt_save_error`,
+  `receipt_save_temp_path`), which the file itself cannot hold (Z4). A signal that
   arrives after the receipt's snapshot is reported once on stderr (the JSON
   receipt stays the last stdout line), saying whether the receipt was saved to
   disk, only printed, or neither. A signal first observed after that report, or
@@ -420,7 +423,10 @@ records a committed write: MATCH (exit 0) when the settings hash equals the
 recorded postimage, the runtime hash equals the registered SHA and the
 registration is present exactly once, otherwise DRIFT (exit 1) with both hashes;
 always DRIFT when the postimage is unknown or a file cannot be read
-(`settings_read_error`, `runtime_read_error`); a state left stale by a failed
+(`settings_read_error`, `runtime_read_error`; a runtime file that cannot even be
+checked, for example because its parent directory is not searchable, is never
+read as absent: `runtime_read_error` names the failed operation and the errno,
+such as `lstat: EACCES (Permission denied)`, and `runtime_sha256` is null); a state left stale by a failed
 state save no longer matches the settings target and is DRIFT, never current and
 never absent; (3) no trustworthy state (none, or one whose paths or hashes fail
 the pinned layout, named in `state_refusal`) but a registration, a runtime
@@ -454,7 +460,7 @@ rollback `verify` reports NOT_INSTALLED (INCOMPLETE_INSTALL while an `.aborted-`
 archive for the hash remains, step 3) and `rollback`/`promote` refuse until a
 new `install`.
 
-Receipt and state fields (Y3, Y4, Y5). Every receipt carries the complete key set
+Receipt and state fields (Y3, Y4, Y5, Z4). Every printed receipt carries the complete key set
 of its kind; a key whose value does not apply is null, an operation that did not
 complete is false, and `post_creation_checks` is an empty list when no check ran.
 Keys named by a particular refusal (such as `path`, `key` or `actual_*`) and the
@@ -488,9 +494,16 @@ test-only `test_*` keys come on top.
   `registration_command`, `registration_count`, `state_result`, `state_reason`,
   `runtime_dir_present`, `aborted`, `registration_present`, `state_present`.
   `verify` saves no receipt, so its `receipt_saved` is false.
-* **The state file** is the receipt of the run that wrote it, without
-  `receipt_saved`, `receipt_save_error` and `receipt_save_temp_path`, plus
-  `state_saved` true.
+* **Files hold only what was known before they were written (Z4).** A file
+  cannot record the result of its own save, and the fsync of the state file's
+  directory runs after the state is written. Therefore:
+  * **The receipt file** is the printed receipt without `receipt_saved`,
+    `receipt_save_error` and `receipt_save_temp_path`.
+  * **The state file** is the receipt of the run that wrote it without those three
+    keys and without `state_saved`, `state_save_error`, `state_save_temp_path` and
+    `state_dir_fsync_error`. The receipt file and the printed receipt, both
+    produced after the state's save and fsync, carry those four with their real
+    values.
 
 When the booleans become true:
 
@@ -507,7 +520,11 @@ When the booleans become true:
   `runtime_dir_owned` name the path the moment it exists.
 
 Every JSON document the installer reads rejects `NaN`, `Infinity`, `-Infinity` and
-numbers that do not fit a finite float. Every document it writes or prints is
+numbers that do not fit a finite float, integer literals included: an integer of
+more than 309 digits, or one whose conversion to a float overflows (such as 309
+nines), is malformed, whatever the interpreter's integer-digit limit. An integer
+inside that range keeps its exact value (9007199254740993 is written back as is).
+Every document it writes or prints is
 serialized so that such a value can never appear: a settings document that would
 need one is refused as SETTINGS_NOT_ENCODABLE before anything is written.
 
@@ -539,14 +556,16 @@ state-read signal-before-scope signal-at-scope-entry signal-at-first-write
 signal-after-archive-rename signal-after-disabled-rename
 signal-after-superseded-rename signal-after-receipt-snapshot
 signal-after-final-observation pause-in-scope post-creation-check
-transaction-boundary insert-before-serializer`) are accepted only together with it; an unknown POINT is
+transaction-boundary insert-before-serializer state-dir-fsync`) are accepted only together with it; an unknown POINT is
 refused (exit 2) before anything is written. `post-creation-check` fails the
 run's first strict check after a directory creation, to exercise the post-write
 rule; `transaction-boundary` records at that first boundary whether the run is
 already in the transaction-write state, then fails there;
 `insert-before-serializer` puts the number written in `DIR/insert-before-serializer`
 into the validated settings document right before it is serialized, to show that
-a non-finite value is never written. `--test-barrier` waits after the checks: in
+a non-finite value is never written; `state-dir-fsync` fails the fsync of the
+state file's directory (and nothing else of that write), to show that its result
+is reported but never written into the state. `--test-barrier` waits after the checks: in
 `install` after the preimage copy, in `promote` and `rollback` before the first
 write. The
 `interrupt-*` points raise KeyboardInterrupt from code, to exercise the failure

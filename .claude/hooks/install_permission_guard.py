@@ -90,13 +90,29 @@ Untrusted state and truthful records (rev25, 7.11f (2)):
      oct() text of a permission mode, preimage.size a non-negative int, preimage.mtime a finite number, never a bool
      where a number is written; postimage_unknown is never in a state file); a failure is an untrustworthy state as in Y1.
   Y3 one place (complete_receipt, RECEIPT_FIELDS) gives every receipt the documented key set of its kind, null or
-     false where a value does not apply; the state file is its writing run's receipt without the receipt-only keys.
+     false where a value does not apply; the receipt file and the state file are that receipt without the keys Z4 keeps
+     out of them.
   Y4 an operation boolean is true only after its operation has completed: runtime_copy_created once the runtime file
      is written in full, 0444 and verified; settings_written / settings_restored once the replacement or rename
      returned; state_saved and receipt_saved once the file is in place.
   Y5 every JSON document read rejects NaN, Infinity, -Infinity and any number that becomes a non-finite float (such
      as 1e400) as malformed; every JSON document written or printed is serialized with allow_nan=False, so a
      non-finite value can never reach a file (a settings document that would need one is SETTINGS_NOT_ENCODABLE).
+
+Integers, existence checks and post-write facts (rev27, 7.11g (2)):
+  Z1/Z2 every JSON integer literal read (settings, state, manifests, the in-memory document copies) goes through
+     _finite_int: more than 309 digits is rejected before any conversion, a shorter one becomes an exact int (never a
+     float), and one whose conversion to float overflows (309 nines) is rejected; the rejection is the reader's
+     ValueError, so it gets the malformed-document outcome of Y5, whatever the interpreter's digit limit.
+  Z3 every existence check whose result enters an outcome, a receipt, a state field or a console line uses path_state
+     (lstat): present, absent (FileNotFoundError only) or unreadable; os.path.exists/lexists/isfile/isdir/islink are
+     never used for one. verify reports an unreadable runtime file in runtime_read_error (the failed operation and the
+     errno name, e.g. "lstat: EACCES (Permission denied)") with runtime_sha256 null; elsewhere an unreadable entry is
+     the caller's refusal (entry_exists).
+  Z4 a written file states only facts complete before its own bytes were written: the state file holds no
+     STATE_SAVE_KEYS (state_saved, state_save_error, state_save_temp_path, state_dir_fsync_error, the last known only
+     after the fsync of its directory) and no receipt-only key; a receipt file holds no receipt-only key
+     (receipt_saved, receipt_save_error, receipt_save_temp_path). The printed receipt carries all of them.
 
 Interrupts (rev18, 7.11c (2), S1H-OD-7; rev21 7.11d (1)):
   P  the precondition checks write nothing and keep the default signal behaviour: Ctrl+C there raises
@@ -136,7 +152,8 @@ interrupt-* points raise KeyboardInterrupt from code, which a real signal no lon
 fails the run's first strict check after a directory creation (V1); transaction-boundary records, at the run's
 first post-creation boundary, whether the run is already in the transaction-write state, then fails there
 (rev23 X1); insert-before-serializer puts the number written in DIR/insert-before-serializer into the validated
-settings document right before the production serializer runs (rev25 Y5). --test-barrier waits after phase P in
+settings document right before the production serializer runs (rev25 Y5); state-dir-fsync fails the fsync of the
+state file's directory, and nothing else of that write (rev27 Z4). --test-barrier waits after phase P in
 install (after the preimage copy), promote and rollback (both before the first write).
 
 Every run prints one JSON receipt as its last stdout line; once the manifest is verified the receipt
@@ -209,14 +226,14 @@ BARRIER_TIMEOUT_SECONDS = 15
 OPEN_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 OPEN_CLOEXEC = getattr(os, "O_CLOEXEC", 0)
 # --test-fault POINT (tests only, with --test-root): the fixed failure-injection points of 7.11b (2), 7.11c (2) D7, the
-# single point 7.11d (2) V4 adds (post-creation-check), the single point 7.11e (2) X1 adds (transaction-boundary) and the
-# single point 7.11f (2) U13-write adds (insert-before-serializer)
+# single point 7.11d (2) V4 adds (post-creation-check), the single point 7.11e (2) X1 adds (transaction-boundary), the
+# single point 7.11f (2) U13-write adds (insert-before-serializer) and the single point 7.11g (2) U17 adds (state-dir-fsync)
 TEST_FAULT_POINTS = ("postimage-read", "runtime-copy-write", "interrupt-before-replace", "interrupt-after-replace",
                      "state-save", "receipt-save", "dir-fsync", "temp-readback", "state-read",
                      "signal-before-scope", "signal-at-scope-entry", "signal-at-first-write",
                      "signal-after-archive-rename", "signal-after-disabled-rename", "signal-after-superseded-rename",
                      "signal-after-receipt-snapshot", "signal-after-final-observation", "pause-in-scope",
-                     "post-creation-check", "transaction-boundary", "insert-before-serializer")
+                     "post-creation-check", "transaction-boundary", "insert-before-serializer", "state-dir-fsync")
 STEP_AFTER_REPLACE = "after the settings replacement"
 PAUSE_SECONDS = 30  # pause-in-scope (test only) waits at most this long for its release file
 # V2: the receipt records of the transaction writes (each set in the statement after its write, D5). Once one of them is
@@ -227,6 +244,9 @@ TRANSACTION_RECORD_KEYS = ("preimage_backup_created", "runtime_parent_created", 
 # Y1 (rev25): limits of a path read from the state, in bytes once encoded (Linux NAME_MAX and PATH_MAX)
 NAME_MAX_BYTES = 255
 PATH_MAX_BYTES = 4096
+# Z1/Z2 (rev27): the most digits a JSON integer inside the finite float range can have (the float maximum, about
+# 1.8e308, has 309); a longer literal is rejected before any conversion
+MAX_INT_DIGITS = 309
 # Y3 (rev25): the documented key set of each receipt kind (README "Receipt and state fields"), each with the value it has
 # when it does not apply. complete_receipt() is the one place that fills them in; the state file is the receipt of its
 # writing run without the receipt-only keys, plus state_saved.
@@ -235,6 +255,12 @@ _RECEIPT_COMMON = (("mode", None), ("timestamp_utc", None), ("installer", None),
                    ("manifest_sha256_verified", None), ("evidence_verified", False), ("settings_target", None),
                    ("evidence_dir", None), ("rollback_command", None), ("rollback_command_unavailable", None))
 RECEIPT_ONLY_KEYS = ("receipt_saved", "receipt_save_error", "receipt_save_temp_path")
+# Z4 (rev27): a written file states only facts complete before its own bytes were written. The results of saving the
+# state (including the fsync of its directory, which follows the state write) are therefore never in the state file, and
+# the results of saving a receipt are never in the receipt file: the printed receipt (the console) carries them all, the
+# receipt file carries the state's.
+STATE_SAVE_KEYS = ("state_saved", "state_save_error", "state_save_temp_path", "state_dir_fsync_error")
+STATE_FILE_EXCLUDED_KEYS = RECEIPT_ONLY_KEYS + STATE_SAVE_KEYS
 _RECEIPT_WRITING = (("step", None), ("failed_step", None), ("original_code", None), ("original_result", None),
                     ("original_reason", None), ("interrupted", False), ("interrupted_outcome", None),
                     ("state_saved", False), ("state_save_error", None), ("state_save_temp_path", None),
@@ -416,13 +442,30 @@ def _finite_float(text):
     return value
 
 
+def _finite_int(text):
+    """Z1/Z2: a JSON integer literal is valid only when it lies in the finite float range. (i) More than
+    MAX_INT_DIGITS digits (sign excluded) is rejected before any conversion; (ii) otherwise it is converted to int
+    exactly, never through float; (iii) a value whose conversion to float overflows (309 nines) is rejected. Every
+    rejection is the ValueError of a malformed document, never an OverflowError."""
+    digits = text[1:] if text.startswith("-") else text
+    if len(digits) > MAX_INT_DIGITS:
+        raise ValueError(f"JSON integer outside the finite float range ({len(digits)} digits)")
+    value = int(text)
+    try:
+        float(value)
+    except OverflowError as exc:
+        raise ValueError(f"JSON integer outside the finite float range ({len(digits)} digits)") from exc
+    return value
+
+
 def loads_strict(data):
     """X2: a document nested deeper than the decoder can follow is invalid JSON like any other (the decoder raises
     RecursionError for it, FACT from r23-x2/repro-on-head.log), never an unexpected error. Y5: NaN, Infinity, -Infinity
-    and any number that becomes a non-finite float (such as 1e400) are invalid JSON too."""
+    and any number that becomes a non-finite float (such as 1e400) are invalid JSON too. Z1/Z2: so is an integer
+    literal outside the finite float range (_finite_int), whatever the interpreter's integer-string digit limit."""
     try:
         return json.loads(data.decode("utf-8"), object_pairs_hook=_reject_duplicate_keys,
-                          parse_constant=_reject_constant, parse_float=_finite_float)
+                          parse_constant=_reject_constant, parse_float=_finite_float, parse_int=_finite_int)
     except RecursionError as exc:
         raise ValueError(f"nesting too deep: {exc}") from exc
 
@@ -506,8 +549,10 @@ def require_contained(candidate, root, kind, reason, must_exist=False):
         current = current + "/" + component
         try:
             info = os.lstat(current)
-        except (OSError, ValueError):
+        except FileNotFoundError:
             refuse(reason, path=candidate, detail="non-existent parent")
+        except (OSError, ValueError) as exc:  # Z3: an unreadable parent is named as such, never as non-existent
+            refuse(reason, path=candidate, detail="parent " + os_error_text("lstat", exc))
         if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
             refuse(reason, path=candidate, detail="parent component not a real directory")
     real_parent = realpath_or_refuse(parent, reason, candidate)
@@ -559,7 +604,7 @@ def write_new_file(path, root, data, mode=0o600, on_created=None):
     """Create a new file (O_EXCL|O_NOFOLLOW) inside a contained, verified parent. `on_created` records the file the
     moment it exists, so a write that fails part-way leaves a file the receipt names (D5)."""
     require_contained(path, root, "file", "WRITE_TARGET_NOT_CONTAINED")
-    if os.path.lexists(path):
+    if entry_exists(path, "WRITE_TARGET_NOT_CONTAINED"):  # Z3: an unreadable entry is never "absent"
         refuse("WRITE_TARGET_EXISTS", EXIT_WRITE_FAILED, path=path)
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | OPEN_NOFOLLOW | OPEN_CLOEXEC, mode)
     if on_created is not None:  # D5: recorded in the statement after os.open returns
@@ -652,7 +697,7 @@ def rename_contained(src, dst, root, kind):
     """Rename an installer-owned entry to a sibling built from pinned roots; never overwrite."""
     require_contained(src, root, kind, "RENAME_SOURCE_NOT_CONTAINED", must_exist=True)
     require_contained(dst, root, kind, "RENAME_TARGET_NOT_CONTAINED")
-    if os.path.lexists(dst):
+    if entry_exists(dst, "RENAME_TARGET_NOT_CONTAINED"):  # Z3: an unreadable entry is never "absent"
         refuse("RENAME_TARGET_EXISTS", EXIT_WRITE_FAILED, path=dst)
     try:
         os.rename(src, dst)
@@ -661,16 +706,34 @@ def rename_contained(src, dst, root, kind):
     return dst
 
 
-def entry_exists(path, reason):
-    """Y1: whether `path` exists (lstat). Only FileNotFoundError means absent; any other OSError or ValueError (EACCES,
-    ENAMETOOLONG, an unencodable name) is the caller's refusal, never read as "absent" the way os.path.lexists would."""
+def os_error_text(operation, exc):
+    """Z3: the failed operation and the errno name, e.g. "lstat: EACCES (Permission denied)"."""
+    if isinstance(exc, OSError) and exc.errno is not None:
+        return f"{operation}: {errno.errorcode.get(exc.errno, str(exc.errno))} ({exc.strerror})"
+    return f"{operation}: {type(exc).__name__}: {exc}"
+
+
+def path_state(path):
+    """Z3: the one existence check behind every decision that enters an outcome, a receipt, a state field or a console
+    line: ("present", None), ("absent", None) for FileNotFoundError only, or ("unreadable", text) for every other OSError
+    or ValueError (EACCES, ELOOP, ENAMETOOLONG, EIO, an unencodable name). os.path.exists, lexists, isfile, isdir and
+    islink are never used for such a decision: they return False on those errors and so hide them."""
     try:
         os.lstat(path)
-        return True
+        return "present", None
     except FileNotFoundError:
-        return False
+        return "absent", None
     except (OSError, ValueError) as exc:
-        refuse(reason, path=path, detail=str(exc))
+        return "unreadable", os_error_text("lstat", exc)
+
+
+def entry_exists(path, reason):
+    """Y1/Z3: whether `path` exists (lstat). Only FileNotFoundError means absent; an unreadable entry is the caller's
+    refusal, never read as "absent"."""
+    status, error = path_state(path)
+    if status == "unreadable":
+        refuse(reason, path=path, detail=error)
+    return status == "present"
 
 
 def write_atomic(target, root, data, mode, seams=None, progress=None, on_replaced=None):
@@ -816,7 +879,7 @@ def load_manifest(layout, mode, manifest_path, expected_sha, receipt):
     if source_sha != manifest["source_sha256"]:
         refuse("SOURCE_HASH_MISMATCH", actual_source_sha256=source_sha)
     require_real_dir(layout.hooks_dir, "HOOKS_DIR_NOT_REAL_DIRECTORY")
-    if os.path.lexists(layout.runtime_parent):
+    if entry_exists(layout.runtime_parent, "RUNTIME_PARENT_NOT_REAL_DIRECTORY"):  # Z3
         require_real_dir(layout.runtime_parent, "RUNTIME_PARENT_NOT_REAL_DIRECTORY")
     require_real_dir(layout.settings_dir, "SETTINGS_DIR_NOT_REAL_DIRECTORY")
     require_contained(layout.evidence_dir, layout.evidence_root, "dir", "EVIDENCE_DIR_NOT_REAL_DIRECTORY",
@@ -837,6 +900,8 @@ def read_settings(layout):
         info = os.lstat(layout.settings)
     except FileNotFoundError:
         return None, None, None
+    except (OSError, ValueError) as exc:  # Z3: unreadable is never "absent"
+        refuse("SETTINGS_NOT_REGULAR", detail=os_error_text("lstat", exc))
     if stat.S_ISLNK(info.st_mode):
         refuse("SETTINGS_SYMLINK")
     if stat.S_ISDIR(info.st_mode):
@@ -904,10 +969,14 @@ def entry_command(entry):
 
 
 def current_settings_sha(layout):
+    """The settings target's hash; None when it is absent or (FACT, documented in r27-existence-checks.md) not a regular
+    file, which every caller compares with a recorded hash. Z3: an unreadable target is a refusal, never None."""
     try:
         info = os.lstat(layout.settings)
     except FileNotFoundError:
         return None
+    except (OSError, ValueError) as exc:
+        refuse("SETTINGS_NOT_REGULAR", detail=os_error_text("lstat", exc))
     if not stat.S_ISREG(info.st_mode):
         return None
     return sha256_bytes(read_regular(layout.settings, "SETTINGS_NOT_REGULAR"))
@@ -925,7 +994,7 @@ def recheck_preimage(layout, preimage_bytes):
 
 def runtime_entries(layout, hash12):
     """(runtime dir exists, list of aborted archives) for one hash; RUNTIME_PARENT verified when present."""
-    if not os.path.lexists(layout.runtime_parent):
+    if not entry_exists(layout.runtime_parent, "RUNTIME_PARENT_UNREADABLE"):  # Z3: unreadable is never "absent"
         return False, []
     require_real_dir(layout.runtime_parent, "RUNTIME_PARENT_NOT_REAL_DIRECTORY")
     try:
@@ -957,7 +1026,7 @@ def create_runtime_copy(layout, sha, receipt, seams=None):
     """Create RUNTIME_PARENT (plain mkdir, only below a real HOOKS_DIR) and RUNTIME_PARENT/<HASH12>,
     copy the source there (0444) and verify the copy. Ownership of <HASH12> is recorded in the receipt
     the moment its mkdir returns, so every later failure archives it (invariant A)."""
-    if not os.path.lexists(layout.runtime_parent):
+    if not entry_exists(layout.runtime_parent, "RUNTIME_PARENT_NOT_REAL_DIRECTORY"):  # Z3
         receipt["step"] = "runtime parent"
         require_real_dir(layout.hooks_dir, "HOOKS_DIR_NOT_REAL_DIRECTORY")
         before_first_write(seams)
@@ -968,7 +1037,7 @@ def create_runtime_copy(layout, sha, receipt, seams=None):
     require_real_dir(layout.runtime_parent, "RUNTIME_PARENT_NOT_REAL_DIRECTORY")
     runtime_dir = layout.runtime_parent + "/" + sha[:12]
     require_contained(runtime_dir, layout.runtime_parent, "dir", "RUNTIME_DIR_NOT_CONTAINED")
-    if os.path.lexists(runtime_dir):
+    if entry_exists(runtime_dir, "RUNTIME_DIR_NOT_CONTAINED"):  # Z3: an unreadable entry is never "absent"
         refuse("RUNTIME_DIR_EXISTS", EXIT_RUNTIME_EXISTS, runtime_dir=runtime_dir)
     before_first_write(seams)
     os.mkdir(runtime_dir)
@@ -1111,7 +1180,8 @@ def load_state(layout, seams=None):
             refuse("STATE_PREIMAGE_MALFORMED", key="preimage.mode")
         if isinstance(size, bool) or not isinstance(size, int) or size < 0:
             refuse("STATE_PREIMAGE_MALFORMED", key="preimage.size")
-        if isinstance(mtime, bool) or not isinstance(mtime, (int, float)) or not math.isfinite(mtime):
+        if (isinstance(mtime, bool) or not isinstance(mtime, (int, float))
+                or (isinstance(mtime, float) and not math.isfinite(mtime))):  # Z1: isfinite only on a float
             refuse("STATE_PREIMAGE_MALFORMED", key="preimage.mtime")
         require_contained(backup, layout.evidence_dir, "file", "STATE_PREIMAGE_NOT_PINNED", must_exist=True)
     return state
@@ -1122,7 +1192,8 @@ def save_receipt(layout, receipt, update_state, seams=None):
     is persisted only after that save succeeded. A failed state save turns the result into
     <RESULT>_STATE_NOT_SAVED (exit 7, state_saved false, original_result / original_reason kept); a
     receipt that cannot be written says receipt_saved false (exit 7, except that a refusal keeps its
-    own code). Never raises."""
+    own code). Z4: the state file holds no result of saving itself (STATE_SAVE_KEYS) and no receipt-only key, and the
+    receipt file holds no result of saving itself (RECEIPT_ONLY_KEYS); the printed receipt carries them. Never raises."""
     if not receipt.get("evidence_verified"):  # a refusal before the evidence directory is verified is printed only
         receipt.update(receipt_saved=False, receipt_save_error="EVIDENCE_DIR_NOT_VERIFIED", receipt_save_temp_path=None)
         return
@@ -1130,11 +1201,13 @@ def save_receipt(layout, receipt, update_state, seams=None):
         progress = {}
         try:
             inject_fault(seams, "state-save")
-            state_doc = dict(receipt, state_saved=True)
+            state_doc = {key: value for key, value in receipt.items() if key not in STATE_FILE_EXCLUDED_KEYS}
             state_doc.update(interrupt_snapshot())  # D3: the state's one snapshot, immediately before it is serialized
             before_first_write(seams)
+            # test only (U17): state-dir-fsync fails the fsync of the state's directory, and nothing else of this write
+            state_seams = {"faults": ("dir-fsync",) if "state-dir-fsync" in (seams or {}).get("faults", ()) else ()}
             write_atomic(layout.state_path, layout.evidence_dir, dumps_record(state_doc).encode("ascii"),
-                         0o600, progress=progress)
+                         0o600, seams=state_seams, progress=progress)
             receipt["state_saved"] = True
             if "dir_fsync_error" in progress:  # F5 for the state write too
                 receipt["state_dir_fsync_error"] = progress["dir_fsync_error"]
@@ -1148,7 +1221,7 @@ def save_receipt(layout, receipt, update_state, seams=None):
     receipt.update(receipt_save_error=None, receipt_save_temp_path=None)  # Y3: the receipt-only keys, not yet applicable
     try:
         receipts = layout.evidence_dir + "/" + RECEIPTS_DIR
-        if not os.path.lexists(receipts):
+        if not entry_exists(receipts, "RECEIPTS_DIR_NOT_CONTAINED"):  # Z3: an unreadable entry is never "absent"
             require_contained(receipts, layout.evidence_dir, "dir", "RECEIPTS_DIR_NOT_CONTAINED")
             before_first_write(seams)
             os.mkdir(receipts)
@@ -1159,7 +1232,8 @@ def save_receipt(layout, receipt, update_state, seams=None):
         signal_fault(seams, "signal-after-receipt-snapshot")
         inject_fault(seams, "receipt-save")
         name = f"{receipt['timestamp_utc']}-{receipt['mode']}-{os.getpid()}.json"
-        data = dumps_record(dict(receipt, receipt_saved=True)).encode("ascii")
+        # Z4: the file holds what is known before its bytes are written; the save result goes to the printed receipt only
+        data = dumps_record({key: value for key, value in receipt.items() if key not in RECEIPT_ONLY_KEYS}).encode("ascii")
         # the final name appears only after a complete, fsynced write; a leftover temporary file is named (R5a-3)
         temp = f"{receipts}/.{name}.tmp-{os.getpid()}"
         before_first_write(seams)
@@ -1209,7 +1283,7 @@ def do_install(layout, manifest, receipt, seams):
         receipt["aborted_archives_present"] = aborted
     mode = 0o644 if pre_bytes is None else stat.S_IMODE(pre_info.st_mode)
     # V1: build and validate the new document before anything is written
-    new_obj = json.loads(json.dumps(pre_obj, allow_nan=False)) if pre_obj is not None else {}
+    new_obj = loads_strict(json.dumps(pre_obj, allow_nan=False).encode("ascii")) if pre_obj is not None else {}
     new_obj.setdefault("hooks", {}).setdefault("PermissionRequest", []).append(entry)
     insert_before_serializer(layout, new_obj, seams)  # test only (U13-write); inert without --test-fault
     data = build_settings_document(new_obj)
@@ -1306,13 +1380,16 @@ def do_verify(layout, manifest, receipt, seams=None):
         receipt["settings_read_error"] = getattr(exc, "reason", None) or f"{type(exc).__name__}: {exc}"
     runtime_path = state["runtime_path"]
     runtime_sha = None
-    try:
-        if os.path.lexists(runtime_path):
+    runtime_status, runtime_error = path_state(runtime_path)  # Z3: present, absent, or unreadable (never hidden)
+    if runtime_status == "unreadable":
+        receipt["runtime_read_error"] = runtime_error  # the failed operation and the errno name; runtime_sha256 null
+    elif runtime_status == "present":
+        try:
             require_contained(runtime_path, state["runtime_dir"], "file", "STATE_RUNTIME_NOT_PINNED", must_exist=True)
             runtime_sha = sha256_bytes(read_regular(runtime_path, "STATE_RUNTIME_NOT_PINNED"))
-    except (OSError, ValueError, Refusal) as exc:
-        runtime_sha = None
-        receipt["runtime_read_error"] = getattr(exc, "reason", None) or f"{type(exc).__name__}: {exc}"
+        except (OSError, ValueError, Refusal) as exc:
+            runtime_sha = None
+            receipt["runtime_read_error"] = getattr(exc, "reason", None) or f"{type(exc).__name__}: {exc}"
     registration_count = None
     try:
         _, obj, _ = read_settings(layout)
@@ -1423,7 +1500,7 @@ def do_promote(layout, manifest, receipt, seams):
     new_runtime_path = new_runtime_dir + "/" + GUARD_FILENAME
     _, new_command = registration_for(new_runtime_path, sha)
     receipt.update(runtime_dir=new_runtime_dir, runtime_path=new_runtime_path, registration_command=new_command)
-    new_obj = json.loads(json.dumps(pre_obj, allow_nan=False))
+    new_obj = loads_strict(json.dumps(pre_obj, allow_nan=False).encode("ascii"))
     new_obj["hooks"]["PermissionRequest"][matches[0]]["hooks"][0]["command"] = new_command
     data = build_settings_document(new_obj)
     receipt["hooks"] = new_obj["hooks"]
@@ -1614,7 +1691,7 @@ def main():
             receipt["evidence_dir"] = layout.evidence_dir
             install_manifest_sha = (receipt["manifest_sha256_verified"] if opts.mode != "promote"
                                     else (sha256_bytes(read_regular(layout.install_manifest, "MANIFEST_MISSING"))
-                                          if os.path.isfile(layout.install_manifest) else None))
+                                          if entry_exists(layout.install_manifest, "MANIFEST_MISSING") else None))
             if install_manifest_sha is None:  # R5b-c-5: no rollback command can be printed without its manifest pin
                 receipt.update(rollback_command=None, rollback_command_unavailable="INSTALL_MANIFEST_MISSING")
             else:
