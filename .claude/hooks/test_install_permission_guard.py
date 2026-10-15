@@ -59,6 +59,60 @@ OTHER_SETTINGS = {
     "enabledPlugins": {"a@synced": False},
 }
 
+# rev25 7.11f (2) Y3 / U11: the documented key set of every receipt kind (README "Receipt and state fields"), kept here
+# as an independent copy of the documentation, never imported from the installer. Every printed receipt, every receipt
+# file and every state file the suite produces must carry each key of its kind (null or false where it does not apply).
+RECEIPT_KEYS_COMMON = ("mode", "timestamp_utc", "installer", "manifest", "result", "reason", "exit_code", "detail",
+                       "installer_sha256_verified", "manifest_sha256_verified", "evidence_verified", "settings_target",
+                       "evidence_dir", "rollback_command", "rollback_command_unavailable", "receipt_saved",
+                       "receipt_save_error", "receipt_save_temp_path")
+RECEIPT_KEYS_WRITING = ("step", "failed_step", "original_code", "original_result", "original_reason", "interrupted",
+                        "interrupted_outcome", "interrupt_deferred", "interrupt_signal", "state_saved", "state_save_error",
+                        "state_save_temp_path", "state_dir_fsync_error", "temp_path", "dir_fsync_error",
+                        "postimage_sha256", "intended_postimage_sha256", "postimage_read_error", "preimage",
+                        "runtime_dir", "runtime_path", "runtime_sha256", "registration_command", "runtime_renamed_to",
+                        "post_creation_checks")
+RECEIPT_KEYS_BY_MODE = {
+    "install": RECEIPT_KEYS_COMMON + RECEIPT_KEYS_WRITING + (
+        "preimage_backup_created", "runtime_parent_created", "runtime_dir_owned", "runtime_copy_created",
+        "settings_written", "hooks", "aborted_archives_present", "runtime_archive_error"),
+    "promote": RECEIPT_KEYS_COMMON + RECEIPT_KEYS_WRITING + (
+        "runtime_parent_created", "runtime_dir_owned", "runtime_copy_created", "settings_written", "hooks",
+        "aborted_archives_present", "runtime_archive_error", "previous_runtime_renamed_to", "previous_receipt",
+        "settings_sha256", "expected_settings_sha256"),
+    "rollback": RECEIPT_KEYS_COMMON + RECEIPT_KEYS_WRITING + (
+        "settings_restored", "settings_renamed_to", "previous_receipt", "settings_sha256", "expected_settings_sha256"),
+    "verify": RECEIPT_KEYS_COMMON + (
+        "state_refusal", "registration_error", "settings_read_error", "runtime_read_error", "settings_sha256",
+        "expected_settings_sha256", "intended_postimage_sha256", "postimage_unknown", "runtime_path", "runtime_sha256",
+        "expected_runtime_sha256", "registration_command", "registration_count", "state_result", "state_reason",
+        "runtime_dir_present", "aborted", "registration_present", "state_present"),
+}
+RECEIPT_ONLY_KEYS = ("receipt_saved", "receipt_save_error", "receipt_save_temp_path")
+
+
+def missing_documented_keys(record, kind):
+    """U11: the documented keys a receipt ("receipt") or a state file ("state") of its mode lacks."""
+    if not isinstance(record, dict) or record.get("mode") not in RECEIPT_KEYS_BY_MODE:
+        return ["<not a receipt of a known mode>"]
+    keys = RECEIPT_KEYS_BY_MODE[record["mode"]]
+    if kind == "state":
+        keys = tuple(k for k in keys if k not in RECEIPT_ONLY_KEYS) + ("state_saved",)
+    return [k for k in keys if k not in record]
+
+
+def strict_json(data):
+    """Y5 oracle: parse JSON text, rejecting NaN, Infinity, -Infinity and any number that becomes a non-finite float."""
+    def reject(token):
+        raise ValueError("non-finite JSON constant " + token)
+
+    def finite(text):
+        value = float(text)
+        if value != value or value in (float("inf"), float("-inf")):
+            raise ValueError("non-finite JSON number " + text)
+        return value
+    return json.loads(data.decode("utf-8"), parse_constant=reject, parse_float=finite)
+
 
 def sha256_bytes(data):
     return hashlib.sha256(data).hexdigest()
@@ -122,6 +176,16 @@ class Fixture:
             fh.write("leave me\n")
         self.write_source(GUARD_V1)
         self.manifest_sha = self.write_manifest()
+        self.collected = []  # U11: ("receipt" | "state", record) for every printed receipt and every saved state
+
+    def collect(self, receipt):
+        """U11: keep a printed receipt and, when the run saved the state, the state file as written by that run."""
+        if receipt is None:
+            return
+        self.collected.append(("receipt", receipt))
+        if receipt.get("state_saved") is True and os.path.isfile(self.state_path()):
+            with open(self.state_path(), "rb") as fh:
+                self.collected.append(("state", json.loads(fh.read().decode())))
 
     # layout helpers -------------------------------------------------------
     def write_source(self, data):
@@ -215,6 +279,7 @@ class Fixture:
                 receipt = json.loads(lines[-1])
             except ValueError:
                 receipt = None
+        self.collect(receipt)
         return proc.returncode, receipt, proc.stdout.decode(), proc.stderr.decode()
 
 
@@ -224,6 +289,11 @@ class InstallerTest(unittest.TestCase):
         self.fx = Fixture()
 
     def tearDown(self):
+        violations = getattr(self, "retired_violations", []) + self.retire_fixture()
+        self.assertEqual(violations, [], "U11: a receipt or state lacks documented keys of its kind")
+
+    def retire_fixture(self):
+        """Restore permissions, check the fixture's receipts and states (U11), remove its tree; returns the violations."""
         for root, dirs, files in os.walk(self.fx.root):
             for name in dirs + files:
                 p = os.path.join(root, name)
@@ -233,8 +303,36 @@ class InstallerTest(unittest.TestCase):
                     except OSError:
                         pass
         subprocess.run(["chmod", "-R", "u+w", self.fx.root], capture_output=True)
-        import shutil
-        shutil.rmtree(self.fx.root, ignore_errors=True)
+        try:
+            return self.documented_key_violations()
+        finally:
+            import shutil
+            shutil.rmtree(self.fx.root, ignore_errors=True)
+
+    def next_fixture(self):
+        """A fresh pinned layout for the next case of a grid test; the current one is checked (U11) and removed first."""
+        self.retired_violations = getattr(self, "retired_violations", []) + self.retire_fixture()
+        self.fx = Fixture()
+
+    def documented_key_violations(self):
+        """U11 (rev25 Y3): every printed receipt and saved state this test produced, and every final-named receipt file
+        under receipts/, carries the documented key set of its kind."""
+        found = []
+        for kind, record in self.fx.collected:
+            missing = missing_documented_keys(record, kind)
+            if missing:
+                found.append((kind, (record or {}).get("mode"), (record or {}).get("result"), missing))
+        directory = self.fx.evidence_dir + "/receipts"
+        if os.path.isdir(directory):
+            for name in sorted(os.listdir(directory)):
+                if name.startswith("."):  # a leftover temporary receipt is not authoritative (README)
+                    continue
+                with open(directory + "/" + name, "rb") as fh:
+                    record = json.loads(fh.read().decode())
+                missing = missing_documented_keys(record, "receipt")
+                if missing:
+                    found.append(("receipt file " + name, record.get("mode"), record.get("result"), missing))
+        return found
 
     # helpers ---------------------------------------------------------------
     def install_ok(self):
@@ -409,7 +507,7 @@ class InstallerTest(unittest.TestCase):
         receipt = self.assert_refused(self.fx.run("install", extra=["--test-short-write"]), 7, "TEMP_HASH_MISMATCH")
         self.assertEqual(read_bytes(self.fx.settings), original)
         self.assertTrue(os.path.exists(receipt["temp_path"]))
-        self.assertNotIn("settings_written", receipt)
+        self.assertIs(receipt["settings_written"], False)  # rev25 Y3/Y4: documented, false until the write completed
 
     def test_6_2_simulated_abrupt_kill_orphan_is_incomplete_install(self):
         os.makedirs(self.fx.runtime_dir())
@@ -875,7 +973,9 @@ class InstallerTest(unittest.TestCase):
         out, err = proc.communicate(timeout=30)
         lines = [ln for ln in out.decode().splitlines() if ln.strip()]
         self.assertTrue(lines, err.decode())
-        return proc.returncode, json.loads(lines[-1]), err.decode()
+        receipt = json.loads(lines[-1])
+        self.fx.collect(receipt)
+        return proc.returncode, receipt, err.decode()
 
     # rev15 F1, invariant W ---------------------------------------------------------
     def test_w_install_postimage_read_failure_is_a_recorded_write(self):
@@ -1044,7 +1144,7 @@ class InstallerTest(unittest.TestCase):
         rc, receipt, out, err = self.fx.run("install", extra=self.fault("interrupt-before-replace"))
         self.assertEqual(rc, 7, receipt)
         self.assertTrue(receipt["interrupted"])
-        self.assertNotIn("settings_written", receipt)
+        self.assertIs(receipt["settings_written"], False)  # rev25 Y3/Y4
         self.assertEqual(read_bytes(self.fx.settings), original)
         self.assertEqual(len(self.aborted()), 1)
         self.assertFalse(os.path.exists(self.fx.runtime_dir()))
@@ -1057,7 +1157,7 @@ class InstallerTest(unittest.TestCase):
         rc, receipt, err = self.run_with_barrier("install", lambda proc: proc.terminate())
         self.assertEqual((rc, receipt["result"]), (0, "INSTALLED"), (receipt, err))
         self.assertEqual((receipt["interrupt_deferred"], receipt["interrupt_signal"]), (True, "SIGTERM"))
-        self.assertNotIn("interrupted", receipt)
+        self.assertIs(receipt["interrupted"], False)  # rev25 Y3/Y4
         self.assert_verify("MATCH")
 
     # rev15 F4, outcome S ----------------------------------------------------------------
@@ -1089,7 +1189,8 @@ class InstallerTest(unittest.TestCase):
         self.fx.write_settings({"hooks": {"PermissionRequest": [{"matcher": "Bash", "hooks": [
             {"type": "command", "command": "echo other"}]}]}})
         receipt = self.assert_refused(self.fx.run("install", extra=self.fault("state-save")), 3, "FOREIGN_HOOK")
-        self.assertNotIn("state_save_error", receipt)
+        self.assertIsNone(receipt["state_save_error"])  # rev25 Y3: documented, null when no state save was attempted
+        self.assertIs(receipt["state_saved"], False)
         self.assertFalse(os.path.exists(self.fx.state_path()))
 
     def test_s_receipt_save_failure_after_the_state_was_saved(self):
@@ -1240,7 +1341,7 @@ class InstallerTest(unittest.TestCase):
         before = snapshot(self.fx.root)
         rc, receipt, out, err = self.fx.run("rollback")
         self.assertEqual((rc, receipt["result"], receipt["reason"]), (2, "REFUSED", "RENAME_SOURCE_NOT_CONTAINED"), receipt)
-        self.assertNotIn("settings_restored", receipt)
+        self.assertIs(receipt["settings_restored"], False)  # rev25 Y3/Y4
         self.assertEqual(read_bytes(self.fx.settings), installed)
         self.assert_only_receipts_changed(before)
 
@@ -1255,7 +1356,7 @@ class InstallerTest(unittest.TestCase):
         before = snapshot(self.fx.root)
         rc, receipt, out, err = self.fx.run("promote")
         self.assertEqual((rc, receipt["result"], receipt["reason"]), (2, "REFUSED", "RENAME_SOURCE_NOT_CONTAINED"), receipt)
-        self.assertNotIn("settings_written", receipt)
+        self.assertIs(receipt["settings_written"], False)  # rev25 Y3/Y4
         self.assertEqual(read_bytes(self.fx.settings), installed)
         self.assertFalse(os.path.exists(self.fx.runtime_dir()))
         self.assert_only_receipts_changed(before)
@@ -1327,13 +1428,15 @@ class InstallerTest(unittest.TestCase):
         out, err = proc.communicate(timeout=60)
         lines = [ln for ln in out.decode().splitlines() if ln.strip()]
         self.assertTrue(lines, err.decode())
-        return proc.returncode, json.loads(lines[-1]), err.decode()
+        receipt = json.loads(lines[-1])
+        self.fx.collect(receipt)
+        return proc.returncode, receipt, err.decode()
 
     def assert_deferred(self, receipt, name):
         self.assertEqual((receipt["interrupt_deferred"], receipt["interrupt_signal"]), (True, name), receipt)
         state = self.fx.state()
         self.assertEqual((state["interrupt_deferred"], state["interrupt_signal"]), (True, name), state)
-        self.assertNotIn("interrupted", receipt)
+        self.assertIs(receipt["interrupted"], False)  # rev25 Y3/Y4
         # the receipt file on disk carries the same snapshot as the printed receipt (D3)
         self.assertIn(receipt, [saved for _, saved in self.receipts()])
 
@@ -1433,9 +1536,9 @@ class InstallerTest(unittest.TestCase):
         self.assertEqual(rc, 7, (out, err))  # R5b-5 (1): the exit code the README states for a Ctrl+C in phase P
         # phase P stays interruptible: the default SIGINT action (KeyboardInterrupt) ended the run, not a refusal
         self.assertEqual((receipt["result"], receipt["reason"], receipt.get("interrupted")), ("FAILED", "INTERRUPTED", True), receipt)
-        self.assertNotIn("settings_written", receipt)
-        self.assertNotIn("runtime_dir_owned", receipt)
-        self.assertNotIn("failed_step", receipt)  # R5b-c-3: nothing was written, so no write step failed
+        self.assertIs(receipt["settings_written"], False)  # rev25 Y3/Y4: documented keys, no write recorded
+        self.assertIsNone(receipt["runtime_dir_owned"])
+        self.assertIsNone(receipt["failed_step"])  # R5b-c-3: nothing was written, so no write step failed
         after = snapshot(self.fx.root)
         for path in (self.fx.settings, self.fx.runtime_parent, self.fx.runtime_dir(), self.fx.state_path()):
             rel = os.path.relpath(path, self.fx.root)
@@ -1581,7 +1684,7 @@ class InstallerTest(unittest.TestCase):
         self.assertFalse(os.path.exists(self.fx.runtime_parent))
         self.assertFalse(os.path.exists(self.fx.state_path()))
         self.assertFalse([f for f in os.listdir(self.fx.evidence_dir) if f.startswith("settings.local.json.preimage-")])
-        self.assertNotIn("preimage_backup_created", receipt)
+        self.assertIsNone(receipt["preimage_backup_created"])  # rev25 Y3: documented, null when nothing was copied
         # exactly what the existing pre-write refusal (malformed JSON, 6.2) writes: one refusal receipt, nothing else
         twin = Fixture()
         try:
@@ -1805,7 +1908,9 @@ class InstallerTest(unittest.TestCase):
         with open(barrier + "/release", "w") as fh:
             fh.write("go\n")
         out, err = proc.communicate(timeout=30)
-        return proc.returncode, json.loads([ln for ln in out.decode().splitlines() if ln.strip()][-1]), err.decode()
+        receipt = json.loads([ln for ln in out.decode().splitlines() if ln.strip()][-1])
+        self.fx.collect(receipt)
+        return proc.returncode, receipt, err.decode()
 
     def test_u5_verify_treats_a_malformed_hooks_structure_as_no_registration(self):
         self.fx.write_settings({"hooks": []})
@@ -1858,7 +1963,10 @@ class InstallerTest(unittest.TestCase):
         limit = lambda: resource.setrlimit(resource.RLIMIT_FSIZE, (1024, 1024))
         proc = subprocess.run(argv, capture_output=True, cwd=self.fx.root, timeout=60, preexec_fn=limit)
         receipt = json.loads([ln for ln in proc.stdout.decode().splitlines() if ln.strip()][-1])
+        self.fx.collect(receipt)  # U11 covers this part-way preimage copy failure too
         self.assertEqual((proc.returncode, receipt["result"]), (7, "FAILED"), receipt)
+        self.assertIn("runtime_renamed_to", receipt)  # rev25 Y3 (R5c-c-3): documented, null: nothing to archive
+        self.assertIsNone(receipt["runtime_renamed_to"])
         partial = receipt["preimage_backup_created"]
         self.assertEqual(os.path.dirname(partial), self.fx.evidence_dir)
         self.assertTrue(os.path.basename(partial).startswith("settings.local.json.preimage-"))
@@ -1928,7 +2036,7 @@ class InstallerTest(unittest.TestCase):
         rc, receipt, out, err = self.fx.run("install", extra=self.fault("post-creation-check"))
         self.assertEqual((rc, receipt["result"], receipt["reason"], receipt["original_code"]),
                          (7, "FAILED", "RUNTIME_PARENT_NOT_REAL_DIRECTORY", 2), (receipt, err))
-        self.assertNotIn("preimage_backup_created", receipt)  # nothing else can stand in for the parent creation
+        self.assertIsNone(receipt["preimage_backup_created"])  # nothing else can stand in for the parent creation
         self.assertEqual(receipt["runtime_parent_created"], self.fx.runtime_parent)
         self.assertIsNone(receipt["runtime_renamed_to"])
         self.assertEqual(receipt["failed_step"], "runtime parent")  # R5b-c-3
@@ -1948,21 +2056,35 @@ class InstallerTest(unittest.TestCase):
         boundary = receipt["test_transaction_boundary"]
         self.assertEqual((boundary["path"], boundary["transaction_written"], boundary["outcome_if_refused_here"]),
                          (self.fx.runtime_dir(), True, "FAILED"), (receipt, err))
-        self.assertNotIn("runtime_parent_created", receipt)  # the parent is not attributed to this run
-        self.assertNotIn("preimage_backup_created", receipt)
+        self.assertIsNone(receipt["runtime_parent_created"])  # the parent is not attributed to this run
+        self.assertIsNone(receipt["preimage_backup_created"])
 
     def test_u4e_child_only_failure_archives_the_runtime_dir_once(self):
         """X1, archive integration: the U4d fixture run to its end; the archive assertions here never stand in for U4d."""
         os.mkdir(self.fx.runtime_parent)
+        self.assertFalse(os.path.exists(self.fx.settings))
+        before = snapshot(self.fx.root)
         rc, receipt, out, err = self.fx.run("install", extra=self.fault("post-creation-check"))
         self.assertEqual((rc, receipt["result"], receipt["reason"], receipt["original_code"]),
                          (7, "FAILED", "RUNTIME_DIR_NOT_CONTAINED", 2), (receipt, err))
         self.assertEqual(len(self.aborted()), 1)
         self.assertEqual(receipt["runtime_renamed_to"], self.fx.runtime_parent + "/" + self.aborted()[0])
-        self.assertNotIn("runtime_parent_created", receipt)
+        self.assertIsNone(receipt["runtime_parent_created"])  # rev25 Y3: documented, null (not created by this run)
         self.assertTrue(os.path.isdir(self.fx.runtime_parent))
         self.assertFalse(os.path.exists(self.fx.runtime_dir()))
         self.assertEqual(receipt["failed_step"], "runtime copy")  # R5b-c-3
+        # R5c-a-5: nothing deleted and nothing else created: apart from receipts/, the only change is the <HASH12>
+        # archive (an empty directory), and no settings target or state file appeared
+        self.assertFalse(os.path.exists(self.fx.settings))
+        self.assertFalse(os.path.exists(self.fx.state_path()))
+        after = snapshot(self.fx.root)
+        self.assertEqual([k for k in before if k not in after], [])  # nothing deleted
+        archive = os.path.relpath(receipt["runtime_renamed_to"], self.fx.root)
+        added = sorted(k for k in after if k not in before)
+        self.assertEqual([k for k in added if not k.startswith(os.path.relpath(self.fx.evidence_dir, self.fx.root)
+                                                               + "/receipts")], [archive])
+        self.assertEqual(after[archive], "dir")
+        self.assertEqual({k: v for k, v in before.items()}, {k: after[k] for k in before})
 
     def test_u8_deep_settings_in_verify_keeps_the_precedence(self):
         """X2: a settings document nested deeper than the recursion limit is unparseable JSON, never an unexpected error."""
@@ -2059,6 +2181,306 @@ class InstallerTest(unittest.TestCase):
         self.assertEqual((rc, receipt["result"]), (0, "PROMOTED"), (receipt, err))
         self.assertIsNone(receipt["rollback_command"])
         self.assertEqual(receipt["rollback_command_unavailable"], "INSTALL_MANIFEST_MISSING")
+
+    # rev25 7.11f (2): Y1 to Y5 (U9 to U13) and the closures of the round-5c re-examination ---------------------------
+    BAD_PATH_SHAPES = (
+        ("314-character basename", lambda p: os.path.dirname(p) + "/" + (os.path.basename(p) + "x" * 314)[:314]),
+        ("lone high surrogate U+D800", lambda p: p + "\ud800"),
+        ("lone low surrogate U+DC80", lambda p: p + "\udc80"),
+        ("NUL", lambda p: p + "\x00"),
+        ("relative path", lambda p: p.lstrip("/")),
+        ("`..` component", lambda p: (os.path.dirname(p) + "/../" + os.path.basename(os.path.dirname(p)) + "/"
+                                      + os.path.basename(p))),
+    )
+
+    def install_then_damage_state(self, keys, damage):
+        """A PRESENT preimage install, then DAMAGE applied to the state field at the key path KEYS."""
+        self.fx.write_settings(OTHER_SETTINGS)
+        self.install_ok()
+
+        def mutate(state):
+            holder = state
+            for key in keys[:-1]:
+                holder = holder[key]
+            holder[keys[-1]] = damage(holder.get(keys[-1]))
+        self.fx.edit_state(mutate)
+
+    def assert_untrustworthy_state_everywhere(self, reason, label):
+        """Y1/Y2: verify gives an untrustworthy-state outcome (exit 1, the cause in state_refusal), rollback and promote
+        refuse in phase P with REASON (exit 2); never UNEXPECTED_ERROR, never a traceback, nothing written but receipts."""
+        before = snapshot(self.fx.root)
+        rc, receipt, out, err = self.fx.run("verify")
+        self.assertEqual((rc, receipt["state_refusal"]), (1, reason), (label, receipt, err))
+        self.assertIn(receipt["result"], ("STATE_UNREADABLE", "INCOMPLETE_INSTALL"), (label, receipt))
+        self.assertNotIn("Traceback", err)
+        self.assertEqual(before, snapshot(self.fx.root), label)  # verify writes nothing
+        rc, receipt, out, err = self.fx.run("rollback")
+        self.assertEqual((rc, receipt["result"], receipt["reason"]), (2, "REFUSED", reason), (label, receipt, err))
+        self.assertNotIn("Traceback", err)
+        self.assert_only_receipts_changed(before)
+        self.fx.write_source(GUARD_V2)
+        self.write_promote_manifest()
+        before = snapshot(self.fx.root)
+        rc, receipt, out, err = self.fx.run("promote")
+        self.assertEqual((rc, receipt["result"], receipt["reason"]), (2, "REFUSED", reason), (label, receipt, err))
+        self.assertNotIn("Traceback", err)
+        self.assert_only_receipts_changed(before)
+
+    def test_u9_untrusted_state_paths_are_an_untrustworthy_state_in_every_mode(self):
+        """Y1: every path read from the state, damaged in each adversarial shape, is an untrustworthy state in verify,
+        rollback and promote before any transaction write."""
+        fields = ((("settings_target",), "STATE_SETTINGS_TARGET_MISMATCH"),
+                  (("runtime_dir",), "STATE_RUNTIME_NOT_PINNED"),
+                  (("runtime_path",), "STATE_RUNTIME_NOT_PINNED"),
+                  (("preimage", "backup_path"), "STATE_PREIMAGE_NOT_PINNED"))
+        for keys, reason in fields:
+            for shape, damage in self.BAD_PATH_SHAPES:
+                label = ".".join(keys) + " / " + shape
+                with self.subTest(case=label):
+                    self.next_fixture()
+                    self.install_then_damage_state(keys, damage)
+                    self.assert_untrustworthy_state_everywhere(reason, label)
+
+    def test_u9b_a_state_path_recheck_failing_after_the_restore_is_failed_exit_7(self):
+        """Y1 (R24-B01): the state-derived runtime directory passes phase P; at the barrier (after phase P, before the
+        restore) it becomes a symlink; the restore commits, then the rename's recheck refuses (code 2) -> FAILED / exit 7
+        with original_code 2 and the completed restore recorded in the receipt and the state, never a phase-P refusal."""
+        self.fx.write_settings(OTHER_SETTINGS)
+        original = read_bytes(self.fx.settings)
+        self.install_ok()
+        runtime_dir = self.fx.runtime_dir()
+        rc, receipt, err = self.run_with_barrier_action("rollback", lambda: self.replace_with_symlink(runtime_dir))
+        self.assertEqual((rc, receipt["result"], receipt["reason"], receipt["original_code"]),
+                         (7, "FAILED", "RENAME_SOURCE_NOT_CONTAINED", 2), (receipt, err))
+        self.assertIs(receipt["settings_restored"], True)
+        self.assertEqual(receipt["postimage_sha256"], sha256_bytes(original))
+        self.assertIsNone(receipt["runtime_renamed_to"])  # the rename did not happen
+        self.assertEqual(read_bytes(self.fx.settings), original)  # the restore stands
+        state = self.fx.state()
+        self.assertEqual((state["mode"], state["result"], state["settings_restored"]), ("rollback", "FAILED", True))
+        self.assertTrue(os.path.islink(runtime_dir))  # nothing deleted or renamed after the refusal
+
+    def test_u9c_a_lone_low_surrogate_naming_an_existing_file_is_still_untrustworthy(self):
+        """Y1, the surrogate check itself: U+DC80 encodes under surrogateescape to the byte 0x80, so a state can name a
+        real file (here a byte-identical copy of the preimage backup); the path is refused for its code point alone."""
+        self.fx.write_settings(OTHER_SETTINGS)
+        self.install_ok()
+        backup = self.fx.state()["preimage"]["backup_path"]
+        twin = backup + "\udc80"
+        with open(os.fsencode(twin), "wb") as fh:
+            fh.write(read_bytes(backup))
+        self.fx.edit_state(lambda st: st["preimage"].update(backup_path=twin))
+        self.assert_untrustworthy_state_everywhere("STATE_PREIMAGE_NOT_PINNED", "existing file named with U+DC80")
+
+    def test_u9d_an_unsearchable_evidence_parent_is_a_refusal_never_an_unexpected_error(self):
+        """Y1, every lstat failure handled: with .scratch readable but not searchable, the evidence root cannot be lstat'ed
+        (EACCES) -> a refusal (exit 2), in every mode, never FAILED / UNEXPECTED_ERROR / exit 7."""
+        self.install_ok()
+        os.chmod(self.fx.evidence_parent, 0o600)
+        try:
+            for mode in ("verify", "install", "rollback"):
+                rc, receipt, out, err = self.fx.run(mode, manifest_sha=self.fx.manifest_sha)
+                self.assertEqual((rc, receipt["result"], receipt["reason"]),
+                                 (2, "REFUSED", "EVIDENCE_ROOT_NOT_REAL_DIRECTORY"), (mode, receipt, err))
+        finally:
+            os.chmod(self.fx.evidence_parent, 0o700)
+
+    def test_u9e_an_unsearchable_runtime_parent_never_lets_rollback_skip_the_runtime_rename(self):
+        """Y1: an existence check of the state's runtime directory that fails for another reason than "absent" (EACCES) is
+        a refusal before anything is written, never read as "absent" (which would roll back the settings, keep the runtime
+        directory active-named and report ROLLED_BACK, exit 0)."""
+        self.fx.write_settings(OTHER_SETTINGS)
+        self.install_ok()
+        installed = read_bytes(self.fx.settings)
+        os.chmod(self.fx.runtime_parent, 0o600)
+        try:
+            rc, receipt, out, err = self.fx.run("rollback")
+        finally:
+            os.chmod(self.fx.runtime_parent, 0o755)
+        self.assertEqual((rc, receipt["result"], receipt["reason"]), (2, "REFUSED", "RENAME_SOURCE_NOT_CONTAINED"),
+                         (receipt, err))
+        self.assertEqual(read_bytes(self.fx.settings), installed)
+        self.assertTrue(os.path.isdir(self.fx.runtime_dir()))
+        self.assert_verify("MATCH")
+
+    def test_u10_malformed_state_values_are_an_untrustworthy_state(self):
+        """Y2: every non-path value read from the state must have the exact type and format the installer writes."""
+        cases = [(("preimage", "mode"), value, "STATE_PREIMAGE_MALFORMED")
+                 for value in ("rw", 420, None, "0o77777777777", True, "0o0644", "644", "0o10000")]
+        cases += [(("preimage", "size"), value, "STATE_PREIMAGE_MALFORMED") for value in (True, -1, "12", 1.5)]
+        cases += [(("preimage", "mtime"), value, "STATE_PREIMAGE_MALFORMED") for value in (True, "x", None)]
+        cases += [(("preimage", "status"), "X", "STATE_PREIMAGE_MALFORMED"),
+                  (("preimage", "sha256"), 1, "STATE_PREIMAGE_NOT_PINNED"),
+                  (("settings_written",), "yes", "STATE_MALFORMED"),
+                  (("settings_restored",), 1, "STATE_MALFORMED"),
+                  (("result",), 5, "STATE_MALFORMED"),
+                  (("reason",), 5, "STATE_MALFORMED"),
+                  (("postimage_unknown",), True, "STATE_MALFORMED"),
+                  (("postimage_sha256",), 123, "STATE_HASH_MALFORMED"),
+                  (("intended_postimage_sha256",), True, "STATE_HASH_MALFORMED"),
+                  (("runtime_sha256",), None, "STATE_HASH_MALFORMED"),
+                  (("registration_command",), 5, "STATE_REGISTRATION_MISSING")]
+        for keys, value, reason in cases:
+            label = ".".join(keys) + " = " + repr(value)
+            with self.subTest(case=label):
+                self.next_fixture()
+                self.install_then_damage_state(keys, lambda _old, value=value: value)
+                self.assert_untrustworthy_state_everywhere(reason, label)
+
+    def test_u12_runtime_copy_created_is_true_only_for_a_complete_verified_copy(self):
+        """Y4: runtime_copy_created is true only once the runtime file is written in full and verified, and the archived
+        <HASH12> holds exactly what the receipt says."""
+        def no_copy(fault=None, parent=False, barrier_action=None):
+            if parent:
+                os.mkdir(self.fx.runtime_parent)
+            if barrier_action is not None:
+                rc, receipt, err = self.run_with_barrier_action("install", barrier_action)
+            else:
+                rc, receipt, out, err = self.fx.run("install", extra=self.fault(fault))
+            return rc, receipt, err
+        cases = (("strict check after the <HASH12> mkdir", dict(fault="post-creation-check", parent=True)),
+                 ("runtime copy write fault", dict(fault="runtime-copy-write")),
+                 ("source changed before the copy", dict(barrier_action=lambda: self.fx.write_source(GUARD_V2))))
+        for label, kwargs in cases:
+            with self.subTest(case=label):
+                self.next_fixture()
+                self.fx.write_settings(OTHER_SETTINGS)
+                rc, receipt, err = no_copy(**kwargs)
+                self.assertEqual((rc, receipt["result"]), (7, "FAILED"), (label, receipt, err))
+                self.assertIs(receipt["runtime_copy_created"], False, (label, receipt))
+                self.assertIsNone(receipt["runtime_sha256"], (label, receipt))
+                self.assertEqual(os.listdir(receipt["runtime_renamed_to"]), [], (label, receipt))
+        # positive controls: a failure after the verified copy, and a success
+        self.next_fixture()
+        self.fx.write_settings(OTHER_SETTINGS)
+        rc, receipt, out, err = self.fx.run("install", extra=self.fault("interrupt-before-replace"))
+        self.assertEqual((rc, receipt["result"], receipt["runtime_copy_created"]), (7, "FAILED", True), (receipt, err))
+        archived = receipt["runtime_renamed_to"] + "/permission_guard.py"
+        self.assertEqual(os.listdir(receipt["runtime_renamed_to"]), ["permission_guard.py"])
+        self.assertEqual((sha256_file(archived), stat.S_IMODE(os.lstat(archived).st_mode)), (self.fx.source_sha, 0o444))
+        self.next_fixture()
+        receipt = self.install_ok()
+        self.assertIs(receipt["runtime_copy_created"], True)
+        self.assertEqual(sha256_file(self.fx.runtime_path()), self.fx.source_sha)
+
+    NONFINITE_SETTINGS = (b'{"x": 1e400}\n', b'{"x": -1e400}\n', b'{"x": NaN}\n', b'{"x": Infinity}\n',
+                          b'{"x": -Infinity}\n')
+
+    def test_u13_read_non_finite_numbers_are_malformed_settings(self):
+        """Y5 on read: NaN, Infinity, -Infinity and numbers that become non-finite floats are malformed JSON."""
+        for raw in self.NONFINITE_SETTINGS:
+            with self.subTest(document=raw):
+                self.next_fixture()
+                self.fx.write_settings(raw=raw)
+                before = snapshot(self.fx.root)
+                rc, receipt, out, err = self.fx.run("install")
+                self.assertEqual((rc, receipt["result"], receipt["reason"]), (2, "REFUSED", "SETTINGS_MALFORMED"),
+                                 (raw, receipt, err))
+                self.assertEqual(read_bytes(self.fx.settings), raw)
+                self.assert_only_receipts_changed(before)
+                receipt = self.assert_verify("NOT_INSTALLED")  # 11.3 step 4: nothing on disk
+                self.assertEqual(receipt["registration_error"], "SETTINGS_MALFORMED")
+                os.unlink(self.fx.settings)
+                self.install_ok()
+                self.fx.write_settings(raw=raw)
+                receipt = self.assert_verify("DRIFT")  # 11.3 step 2: a committed state
+                self.assertEqual(receipt["registration_error"], "SETTINGS_MALFORMED")
+
+    def test_u13_read_non_finite_numbers_in_the_state_and_the_manifest(self):
+        """Y5 on read for the state file and the manifests (with R5c-a-4 / R5c-b-8: every parsed file)."""
+        for token in (b"NaN", b"Infinity", b"-Infinity", b"1e400", b"-1e400"):
+            with self.subTest(state_token=token):
+                self.next_fixture()
+                self.install_ok()
+                data = read_bytes(self.fx.state_path()).rstrip()
+                self.assertTrue(data.endswith(b"}"))
+                with open(self.fx.state_path(), "wb") as fh:
+                    fh.write(data[:-1] + b', "x": ' + token + b"}\n")
+                self.assert_untrustworthy_state_everywhere("STATE_MALFORMED", "state " + token.decode())
+            with self.subTest(manifest_token=token):
+                self.next_fixture()
+                doc = json.dumps(self.fx.manifest_doc(), indent=2).encode().rstrip()
+                self.fx.write_manifest(raw=doc[:-1] + b', "x": ' + token + b"}\n")
+                for mode in ("install", "verify", "rollback"):
+                    self.assert_refused(self.fx.run(mode), 2, "MANIFEST_MALFORMED")
+                self.fx.write_manifest(raw=doc[:-1] + b', "x": ' + token + b"}\n", path=self.fx.promote_manifest)
+                self.assert_refused(self.fx.run("promote"), 2, "MANIFEST_MALFORMED")
+
+    def assert_no_non_finite_token_anywhere(self):
+        """U13-write: no file under the test root holds a NaN or Infinity token, and every JSON file there is strict."""
+        for root, dirs, files in os.walk(self.fx.root):
+            for name in files:
+                path = os.path.join(root, name)
+                if os.path.islink(path) or name == "insert-before-serializer":
+                    continue
+                data = read_bytes(path)
+                self.assertNotIn(b"Infinity", data, path)
+                self.assertNotIn(b"NaN", data, path)
+                if name.endswith(".json") and not name.startswith("."):
+                    strict_json(data)
+
+    def test_u13_write_the_serializer_refuses_a_non_finite_value_on_the_production_path(self):
+        """Y5 on write (R24-C01): the test point insert-before-serializer puts the value read from
+        <test root>/insert-before-serializer into the validated in-memory settings document immediately before the
+        production serializer runs; input validation stays in force."""
+        for text in ("inf", "-inf", "nan"):
+            with self.subTest(value=text):
+                self.next_fixture()
+                self.fx.write_settings(OTHER_SETTINGS)
+                with open(self.fx.root + "/insert-before-serializer", "w") as fh:
+                    fh.write(text + "\n")
+                before = snapshot(self.fx.root)
+                rc, receipt, out, err = self.fx.run("install", extra=self.fault("insert-before-serializer"))
+                self.assertEqual((rc, receipt["result"], receipt["reason"]), (2, "REFUSED", "SETTINGS_NOT_ENCODABLE"),
+                                 (text, receipt, err))
+                self.assert_only_receipts_changed(before)
+                self.assert_no_non_finite_token_anywhere()
+        self.next_fixture()  # a finite control value through the same path is written
+        self.fx.write_settings(OTHER_SETTINGS)
+        with open(self.fx.root + "/insert-before-serializer", "w") as fh:
+            fh.write("1.5\n")
+        rc, receipt, out, err = self.fx.run("install", extra=self.fault("insert-before-serializer"))
+        self.assertEqual((rc, receipt["result"]), (0, "INSTALLED"), (receipt, err))
+        self.assertEqual(strict_json(read_bytes(self.fx.settings))["test_inserted_value"], 1.5)
+        self.assert_no_non_finite_token_anywhere()
+        self.assert_verify("MATCH")
+
+    def test_r5c_b1_depth_between_the_recursion_limit_and_the_decoder_limit_installs(self):
+        """R5c-b-1: a document deeper than the interpreter's recursion limit (1000) that the decoder can follow is valid
+        JSON: install re-encodes it and writes it, verify reads it back (MATCH)."""
+        self.fx.write_settings(raw=b'{"x": ' + b"[" * 5000 + b"]" * 5000 + b"}\n")
+        rc, receipt, out, err = self.fx.run("install")
+        self.assertEqual((rc, receipt["result"]), (0, "INSTALLED"), (receipt, err))
+        self.assert_verify("MATCH")
+
+    def test_r5c_b3_promote_failure_after_it_created_the_runtime_parent_names_that_step(self):
+        """R5c-b-3 (R5b-c-3 scenario (b)): promote creates RUNTIME_PARENT itself and its strict check fails."""
+        self.install_ok()
+        os.rename(self.fx.runtime_parent, self.fx.root + "/parent-away")
+        self.fx.write_source(GUARD_V2)
+        self.write_promote_manifest()
+        installed = read_bytes(self.fx.settings)
+        rc, receipt, out, err = self.fx.run("promote", extra=self.fault("post-creation-check"))
+        self.assertEqual((rc, receipt["result"], receipt["reason"], receipt["original_code"]),
+                         (7, "FAILED", "RUNTIME_PARENT_NOT_REAL_DIRECTORY", 2), (receipt, err))
+        self.assertEqual(receipt["failed_step"], "runtime parent")
+        self.assertEqual(receipt["runtime_parent_created"], self.fx.runtime_parent)
+        self.assertIsNone(receipt["runtime_renamed_to"])
+        self.assertEqual(read_bytes(self.fx.settings), installed)
+
+    def test_r5c_a4_deep_nesting_in_the_manifest_and_the_state_is_refused_in_every_mode(self):
+        """R5c-a-4 / R5c-b-8: the deep-nesting rule of X2 for the manifests (every mode) and the state (rollback, promote)."""
+        deep = b'{"a": ' + b"[" * 100000 + b"]" * 100000 + b"}\n"
+        self.fx.write_manifest(raw=deep)
+        for mode in ("install", "verify", "rollback"):
+            self.assert_refused(self.fx.run(mode), 2, "MANIFEST_MALFORMED")
+        self.fx.write_manifest(raw=deep, path=self.fx.promote_manifest)
+        self.assert_refused(self.fx.run("promote"), 2, "MANIFEST_MALFORMED")
+        self.next_fixture()
+        self.install_ok()
+        with open(self.fx.state_path(), "wb") as fh:
+            fh.write(deep)
+        self.assert_untrustworthy_state_everywhere("STATE_MALFORMED", "deep state")
 
 
 def main():

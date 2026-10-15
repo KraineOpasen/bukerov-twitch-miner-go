@@ -249,6 +249,35 @@ back after that rename) and renames the runtime directory to
 the state file is re-checked against the pinned layout; a state file that
 disagrees is refused (exit 2), never acted on. Nothing is ever deleted.
 
+The state file is treated as untrusted input:
+
+* **Paths (Y1).** Every path read from it (`settings_target`, `runtime_dir`,
+  `runtime_path`, `preimage.backup_path`) must be absolute and normalized, with no
+  `.`, `..` or empty component, no NUL and no surrogate code point
+  (U+D800 to U+DFFF). It must be encodable, with at most 255 bytes per component
+  and 4096 bytes in all, before the installer compares or uses it. The containment
+  checks turn every file-system error (a name too long, a loop, a permission
+  error, an unencodable name) into their own refusal, a failed rename is
+  RENAME_FAILED, exit 7, and a check whether the runtime directory exists that
+  fails for another reason than "absent" (a permission error, for example) is a
+  refusal too, never read as "absent".
+* **Values (Y2).** Every other value read from the state has the exact type and
+  format the installer writes:
+  * `result` is a string and `reason` a string or null;
+  * `settings_written` and `settings_restored` are booleans;
+  * the hashes are 64 lowercase hex characters;
+  * `preimage.mode` is the `0o…` text of a permission mode;
+  * `preimage.size` is a non-negative integer and `preimage.mtime` a finite number,
+    and a boolean never stands in for a number;
+  * `postimage_unknown` never appears in a state file.
+* **Outcome.** A state that fails either check is untrustworthy. `rollback` and
+  `promote` refuse it before anything is written (exit 2, a STATE_* reason), and
+  `verify` reports it by its precedence (STATE_UNREADABLE for STATE_MALFORMED,
+  otherwise INCOMPLETE_INSTALL or NOT_INSTALLED, the cause in `state_refusal`). A
+  check that passes before the first write but fails when it is repeated after a
+  write (for example a runtime directory replaced by a symlink while `rollback`
+  restores the settings) is FAILED, exit 7, with the completed write recorded.
+
 Before the first transaction write (all modes that write):
 
 * **Every refusal is checked first (phase P).** Every check that can end a run
@@ -257,8 +286,10 @@ Before the first transaction write (all modes that write):
   changes (a `hooks` or `PermissionRequest` value that is null, a list where an
   object is expected, a string or a number, or a `PermissionRequest` entry that
   is not an object, is refused with exit 2; a document nested deeper than the JSON
-  decoder can follow is malformed JSON like any other, SETTINGS_MALFORMED, exit 2,
-  and this holds for every file the installer parses), the new document is built and
+  decoder can follow, or one holding `NaN`, `Infinity`, `-Infinity` or a number too
+  large for a finite float such as `1e400`, is malformed JSON like any other: for the
+  settings SETTINGS_MALFORMED, exit 2, and the same holds for every file the
+  installer parses, a manifest being MANIFEST_MALFORMED and the state STATE_MALFORMED), the new document is built and
   encoded, the foreign-hook, registration, manifest and source checks run, and
   the containment of every path the run will create, write or rename is checked
   prospectively: the existing part of each path as an existing parent is
@@ -280,9 +311,10 @@ Before the first transaction write (all modes that write):
   then is FAILED, exit 7, with its own code in `original_code`, and the receipt
   names every write the run made (`preimage_backup_created`,
   `runtime_parent_created`, `runtime_dir_owned`, `runtime_renamed_to`, which is
-  null when a failure before the settings replacement found no `<HASH12>` of this
-  run to archive, `temp_path`, `settings_written`, `settings_restored`), and
-  `failed_step` names the step that failed. The creation of RUNTIME_PARENT and the
+  null whenever the run archived no `<HASH12>`, for example after a failure of the
+  preimage copy itself or when it created none, `temp_path`, `settings_written`,
+  `settings_restored`), and `failed_step` names the step that failed (null when no
+  transaction write was made). The creation of RUNTIME_PARENT and the
   creation of `<HASH12>` each count on their own: with no settings file before the
   run (no preimage copy), a failure right after the installer created
   RUNTIME_PARENT is already FAILED, exit 7, and RUNTIME_PARENT stays in place. A
@@ -422,6 +454,63 @@ rollback `verify` reports NOT_INSTALLED (INCOMPLETE_INSTALL while an `.aborted-`
 archive for the hash remains, step 3) and `rollback`/`promote` refuse until a
 new `install`.
 
+Receipt and state fields (Y3, Y4, Y5). Every receipt carries the complete key set
+of its kind; a key whose value does not apply is null, an operation that did not
+complete is false, and `post_creation_checks` is an empty list when no check ran.
+Keys named by a particular refusal (such as `path`, `key` or `actual_*`) and the
+test-only `test_*` keys come on top.
+
+* **Every mode:** `mode`, `timestamp_utc`, `installer`, `manifest`, `result`,
+  `reason`, `exit_code`, `detail`, `installer_sha256_verified`,
+  `manifest_sha256_verified`, `evidence_verified`, `settings_target`,
+  `evidence_dir`, `rollback_command`, `rollback_command_unavailable`,
+  `receipt_saved`, `receipt_save_error`, `receipt_save_temp_path`.
+* **`install`, `rollback` and `promote` add:** `step`, `failed_step`,
+  `original_code`, `original_result`, `original_reason`, `interrupted`,
+  `interrupted_outcome`, `interrupt_deferred`, `interrupt_signal`, `state_saved`,
+  `state_save_error`, `state_save_temp_path`, `state_dir_fsync_error`,
+  `temp_path`, `dir_fsync_error`, `postimage_sha256`,
+  `intended_postimage_sha256`, `postimage_read_error`, `preimage`, `runtime_dir`,
+  `runtime_path`, `runtime_sha256`, `registration_command`, `runtime_renamed_to`,
+  `post_creation_checks`.
+* **`install` and `promote` add:** `runtime_parent_created`, `runtime_dir_owned`,
+  `runtime_copy_created`, `settings_written`, `hooks`,
+  `aborted_archives_present`, `runtime_archive_error`.
+  * `install` also has `preimage_backup_created`.
+  * `promote` also has `previous_runtime_renamed_to`, `previous_receipt`,
+    `settings_sha256` and `expected_settings_sha256`.
+* **`rollback` adds:** `settings_restored`, `settings_renamed_to`,
+  `previous_receipt`, `settings_sha256`, `expected_settings_sha256`.
+* **`verify` adds:** `state_refusal`, `registration_error`,
+  `settings_read_error`, `runtime_read_error`, `settings_sha256`,
+  `expected_settings_sha256`, `intended_postimage_sha256`, `postimage_unknown`,
+  `runtime_path`, `runtime_sha256`, `expected_runtime_sha256`,
+  `registration_command`, `registration_count`, `state_result`, `state_reason`,
+  `runtime_dir_present`, `aborted`, `registration_present`, `state_present`.
+  `verify` saves no receipt, so its `receipt_saved` is false.
+* **The state file** is the receipt of the run that wrote it, without
+  `receipt_saved`, `receipt_save_error` and `receipt_save_temp_path`, plus
+  `state_saved` true.
+
+When the booleans become true:
+
+* **Operation booleans.** Each one becomes true only once its operation has
+  completed:
+  * `runtime_copy_created` once the runtime file is written in full, set to 0444
+    and verified by its hash. An archived `<HASH12>` of a run whose receipt says
+    false holds no verified copy.
+  * `settings_written` and `settings_restored` once the replacement (or the rename
+    of an ABSENT rollback) has returned.
+  * `state_saved` once the state file is in place, and `receipt_saved` once the
+    receipt file is.
+* **Paths of writes.** `preimage_backup_created`, `runtime_parent_created` and
+  `runtime_dir_owned` name the path the moment it exists.
+
+Every JSON document the installer reads rejects `NaN`, `Infinity`, `-Infinity` and
+numbers that do not fit a finite float. Every document it writes or prints is
+serialized so that such a value can never appear: a settings document that would
+need one is refused as SETTINGS_NOT_ENCODABLE before anything is written.
+
 The printed rollback command works only while all of these hold: the installer
 at `/home/claude/bukerov-twitch-miner-go/.claude/hooks/install_permission_guard.py`
 still hashes to its `--expect-sha256` value, the install manifest still hashes to
@@ -432,7 +521,12 @@ settings file still hashes to the recorded postimage. After a checkout that
 changes or removes those files (for example closing the PR and switching back to
 `release/0.3`), check out `chore/permission-guard` at the installed head first;
 otherwise the installer refuses (exit 2), and a settings change is reported as
-DRIFT or POSTIMAGE_UNKNOWN for the owner to decide.
+DRIFT or POSTIMAGE_UNKNOWN for the owner to decide. After a `promote` the
+printed rollback command, like `verify`, pins the install manifest, whose
+`source_sha256` still names the earlier guard: it works only after the install
+manifest has been frozen again for the promoted source (best before the promote, so
+that the printed pin is that new manifest's); otherwise it refuses with
+SOURCE_HASH_MISMATCH (exit 2) and writes nothing.
 
 Tests pass `--test-root DIR` (an existing real directory directly under the
 system temporary directory): every pinned constant, the manifest paths included,
@@ -445,11 +539,16 @@ state-read signal-before-scope signal-at-scope-entry signal-at-first-write
 signal-after-archive-rename signal-after-disabled-rename
 signal-after-superseded-rename signal-after-receipt-snapshot
 signal-after-final-observation pause-in-scope post-creation-check
-transaction-boundary`) are accepted only together with it; an unknown POINT is
+transaction-boundary insert-before-serializer`) are accepted only together with it; an unknown POINT is
 refused (exit 2) before anything is written. `post-creation-check` fails the
 run's first strict check after a directory creation, to exercise the post-write
 rule; `transaction-boundary` records at that first boundary whether the run is
-already in the transaction-write state, then fails there. The
+already in the transaction-write state, then fails there;
+`insert-before-serializer` puts the number written in `DIR/insert-before-serializer`
+into the validated settings document right before it is serialized, to show that
+a non-finite value is never written. `--test-barrier` waits after the checks: in
+`install` after the preimage copy, in `promote` and `rollback` before the first
+write. The
 `interrupt-*` points raise KeyboardInterrupt from code, to exercise the failure
 paths; a real signal no longer takes that path. The `signal-*` points send the
 installer SIGINT at that fixed place. `pause-in-scope` waits inside the deferral
