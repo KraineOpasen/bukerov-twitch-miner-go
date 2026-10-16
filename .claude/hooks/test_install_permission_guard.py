@@ -32,6 +32,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import signal
 import stat
 import subprocess
@@ -58,6 +59,19 @@ OTHER_SETTINGS = {
     "hooks": {"SessionStart": [{"hooks": [{"type": "command", "command": "sh /x/start.sh"}]}]},
     "enabledPlugins": {"a@synced": False},
 }
+GUARD_V3 = b"#!/usr/bin/env python3\n# guard v3\nprint()\n"
+# rev31 7.11i (2), S1H-OD-12: a foreign hook command that carries this marker stands for a token or a private URL. It may
+# remain in the data-preservation set D (the settings document, its replacement, a restored or rolled-back settings file and
+# the private preimage backup) and must never reach a reporting sink S (stdout, stderr, a receipt, the state file, a
+# previous_receipt chain, a refusal field or a diagnostic).
+MARKER = "S1H-CANARY-5f0c3a9e71d2b864"
+MARKER_SETTINGS = {
+    "permissions": {"allow": ["Bash(ls *)"]},
+    "hooks": {"SessionStart": [{"hooks": [{"type": "command",
+                                           "command": "curl -s -H 'Authorization: Bearer " + MARKER
+                                                      + "' https://hooks.example.invalid/start"}]}],
+              "PostToolUse": [{"matcher": "Bash", "hooks": [{"type": "command", "command": "sh /x/post.sh"}]}]},
+}
 
 # rev25 7.11f (2) Y3 / U11: the documented key set of every receipt kind (README "Receipt and state fields"), kept here
 # as an independent copy of the documentation, never imported from the installer. Every printed receipt, every receipt
@@ -72,14 +86,14 @@ RECEIPT_KEYS_WRITING = ("step", "failed_step", "original_code", "original_result
                         "postimage_sha256", "intended_postimage_sha256", "postimage_read_error", "preimage",
                         "runtime_dir", "runtime_path", "runtime_sha256", "registration_command", "runtime_renamed_to",
                         "post_creation_checks")
-RECEIPT_KEYS_BY_MODE = {
+RECEIPT_KEYS_BY_MODE = {  # rev31 P1: `hooks` is replaced by `hooks_summary` and `registration_entry`
     "install": RECEIPT_KEYS_COMMON + RECEIPT_KEYS_WRITING + (
         "preimage_backup_created", "runtime_parent_created", "runtime_dir_owned", "runtime_copy_created",
-        "settings_written", "hooks", "aborted_archives_present", "runtime_archive_error"),
+        "settings_written", "hooks_summary", "registration_entry", "aborted_archives_present", "runtime_archive_error"),
     "promote": RECEIPT_KEYS_COMMON + RECEIPT_KEYS_WRITING + (
-        "runtime_parent_created", "runtime_dir_owned", "runtime_copy_created", "settings_written", "hooks",
-        "aborted_archives_present", "runtime_archive_error", "previous_runtime_renamed_to", "previous_receipt",
-        "settings_sha256", "expected_settings_sha256"),
+        "runtime_parent_created", "runtime_dir_owned", "runtime_copy_created", "settings_written", "hooks_summary",
+        "registration_entry", "aborted_archives_present", "runtime_archive_error", "previous_runtime_renamed_to",
+        "previous_receipt", "settings_sha256", "expected_settings_sha256"),
     "rollback": RECEIPT_KEYS_COMMON + RECEIPT_KEYS_WRITING + (
         "settings_restored", "settings_renamed_to", "previous_receipt", "settings_sha256", "expected_settings_sha256"),
     "verify": RECEIPT_KEYS_COMMON + (
@@ -293,6 +307,1213 @@ class Fixture:
                 receipt = None
         self.collect(receipt)
         return proc.returncode, receipt, proc.stdout.decode(), proc.stderr.decode()
+
+
+# rev31 7.11i (2) T-COMPAT (P3): legacy layouts written by the installer at b985dc05c2b05013e61db6139b014c3e538f61f2, whose
+# state files hold the raw settings `hooks` (L2 also nested in previous_receipt), with the expected outcome of that legacy
+# installer for verify, rollback and promote on each. Generated once by r31-compat/generate.py in the run's evidence root
+# (producer, command and output hashes in r31-compat-fixtures.md) and embedded here, so this suite needs no other revision.
+# Tokens: @@ROOT@@ is the test root, @@INSTALLER@@ the producer's path, @@SHA256:<name>@@ the SHA-256 of that fixture
+# text (a file, or a "virtual" text that existed only between two legacy runs) once its own tokens are substituted.
+LEGACY_FIXTURES = json.loads(r'''{
+ "producer": {
+  "installer": "r31-rollback/install_permission_guard.py",
+  "sha256": "ad7ffabd67d1eda8b1c79c73edd71ffee9620269e8e2abcb81e3c40f49c37e00",
+  "head": "b985dc05c2b05013e61db6139b014c3e538f61f2"
+ },
+ "fixtures": {
+  "L1": {
+   "dirs": [
+    "home",
+    "home/claude",
+    "home/claude/.claude",
+    "home/claude/bukerov-twitch-miner-go",
+    "home/claude/.claude/hooks",
+    "home/claude/.claude/hooks/permission-guard",
+    "home/claude/.claude/hooks/permission-guard/d53f820def51",
+    "home/claude/bukerov-twitch-miner-go/.claude",
+    "home/claude/bukerov-twitch-miner-go/.scratch",
+    "home/claude/bukerov-twitch-miner-go/.claude/hooks",
+    "home/claude/bukerov-twitch-miner-go/.scratch/s1h-20261011T173421Z",
+    "home/claude/bukerov-twitch-miner-go/.scratch/s1h-20261011T173421Z/r9-install"
+   ],
+   "files": {
+    "home/claude/.claude/hooks/permission-guard/d53f820def51/permission_guard.py": {
+     "mode": "0o444",
+     "lines": [
+      "#!/usr/bin/env python3",
+      "# guard v1",
+      "print()",
+      ""
+     ]
+    },
+    "home/claude/bukerov-twitch-miner-go/.claude/settings.local.json": {
+     "mode": "0o664",
+     "lines": [
+      "{",
+      "  \"permissions\": {",
+      "    \"allow\": [",
+      "      \"Bash(ls *)\"",
+      "    ]",
+      "  },",
+      "  \"hooks\": {",
+      "    \"SessionStart\": [",
+      "      {",
+      "        \"hooks\": [",
+      "          {",
+      "            \"type\": \"command\",",
+      "            \"command\": \"curl -s -H 'Authorization: Bearer S1H-CANARY-5f0c3a9e71d2b864' https://hooks.example.invalid/start\"",
+      "          }",
+      "        ]",
+      "      }",
+      "    ],",
+      "    \"PostToolUse\": [",
+      "      {",
+      "        \"matcher\": \"Bash\",",
+      "        \"hooks\": [",
+      "          {",
+      "            \"type\": \"command\",",
+      "            \"command\": \"sh /x/post.sh\"",
+      "          }",
+      "        ]",
+      "      }",
+      "    ],",
+      "    \"PermissionRequest\": [",
+      "      {",
+      "        \"matcher\": \"Bash\",",
+      "        \"hooks\": [",
+      "          {",
+      "            \"type\": \"command\",",
+      "            \"command\": \"python3 -I @@ROOT@@/home/claude/.claude/hooks/permission-guard/d53f820def51/permission_guard.py --expect-sha256 d53f820def51ff64f3f2bd3edaf630322afdbfe8a6755d1092ef674fc0010951\",",
+      "            \"timeout\": 10",
+      "          }",
+      "        ]",
+      "      }",
+      "    ]",
+      "  }",
+      "}",
+      ""
+     ]
+    },
+    "home/claude/bukerov-twitch-miner-go/.claude/hooks/permission_guard.py": {
+     "mode": "0o664",
+     "lines": [
+      "#!/usr/bin/env python3",
+      "# guard v1",
+      "print()",
+      ""
+     ]
+    },
+    "home/claude/bukerov-twitch-miner-go/.scratch/s1h-20261011T173421Z/r9-install-manifest.json": {
+     "mode": "0o664",
+     "lines": [
+      "{",
+      "  \"source\": \"@@ROOT@@/home/claude/bukerov-twitch-miner-go/.claude/hooks/permission_guard.py\",",
+      "  \"source_sha256\": \"d53f820def51ff64f3f2bd3edaf630322afdbfe8a6755d1092ef674fc0010951\",",
+      "  \"runtime_root\": \"@@ROOT@@/home/claude/.claude/hooks/permission-guard\",",
+      "  \"settings_target\": \"@@ROOT@@/home/claude/bukerov-twitch-miner-go/.claude/settings.local.json\",",
+      "  \"evidence_dir\": \"@@ROOT@@/home/claude/bukerov-twitch-miner-go/.scratch/s1h-20261011T173421Z/r9-install\",",
+      "  \"registration\": {",
+      "    \"matcher\": \"Bash\",",
+      "    \"hooks\": [",
+      "      {",
+      "        \"type\": \"command\",",
+      "        \"command\": \"python3 -I RUNTIME --expect-sha256 SHA\",",
+      "        \"timeout\": 10",
+      "      }",
+      "    ]",
+      "  }",
+      "}",
+      ""
+     ]
+    },
+    "home/claude/bukerov-twitch-miner-go/.scratch/s1h-20261011T173421Z/r9-install/permission-guard-state.json": {
+     "mode": "0o600",
+     "lines": [
+      "{",
+      "  \"mode\": \"install\",",
+      "  \"timestamp_utc\": \"20261016T075444Z\",",
+      "  \"installer\": \"@@INSTALLER@@\",",
+      "  \"manifest\": \"@@ROOT@@/home/claude/bukerov-twitch-miner-go/.scratch/s1h-20261011T173421Z/r9-install-manifest.json\",",
+      "  \"test_root\": \"@@ROOT@@\",",
+      "  \"installer_sha256_verified\": \"ad7ffabd67d1eda8b1c79c73edd71ffee9620269e8e2abcb81e3c40f49c37e00\",",
+      "  \"manifest_sha256_verified\": \"@@SHA256:home/claude/bukerov-twitch-miner-go/.scratch/s1h-20261011T173421Z/r9-install-manifest.json@@\",",
+      "  \"evidence_verified\": true,",
+      "  \"settings_target\": \"@@ROOT@@/home/claude/bukerov-twitch-miner-go/.claude/settings.local.json\",",
+      "  \"evidence_dir\": \"@@ROOT@@/home/claude/bukerov-twitch-miner-go/.scratch/s1h-20261011T173421Z/r9-install\",",
+      "  \"rollback_command\": \"python3 -I @@INSTALLER@@ rollback --manifest @@ROOT@@/home/claude/bukerov-twitch-miner-go/.scratch/s1h-20261011T173421Z/r9-install-manifest.json --expect-sha256 ad7ffabd67d1eda8b1c79c73edd71ffee9620269e8e2abcb81e3c40f49c37e00 --expect-manifest-sha256 @@SHA256:home/claude/bukerov-twitch-miner-go/.scratch/s1h-20261011T173421Z/r9-install-manifest.json@@ --test-root @@ROOT@@\",",
+      "  \"runtime_dir\": \"@@ROOT@@/home/claude/.claude/hooks/permission-guard/d53f820def51\",",
+      "  \"runtime_path\": \"@@ROOT@@/home/claude/.claude/hooks/permission-guard/d53f820def51/permission_guard.py\",",
+      "  \"registration_command\": \"python3 -I @@ROOT@@/home/claude/.claude/hooks/permission-guard/d53f820def51/permission_guard.py --expect-sha256 d53f820def51ff64f3f2bd3edaf630322afdbfe8a6755d1092ef674fc0010951\",",
+      "  \"step\": \"after the settings replacement\",",
+      "  \"preimage_backup_created\": \"@@ROOT@@/home/claude/bukerov-twitch-miner-go/.scratch/s1h-20261011T173421Z/r9-install/settings.local.json.preimage-20261016T075444Z-2360291\",",
+      "  \"preimage\": {",
+      "    \"status\": \"PRESENT\",",
+      "    \"sha256\": \"0d784168278fa2ac16d9e80c0c8700e5177d848fa155b5477ebca679cd15521a\",",
+      "    \"size\": 531,",
+      "    \"mode\": \"0o664\",",
+      "    \"mtime\": 1792137284.3895946,",
+      "    \"backup_path\": \"@@ROOT@@/home/claude/bukerov-twitch-miner-go/.scratch/s1h-20261011T173421Z/r9-install/settings.local.json.preimage-20261016T075444Z-2360291\"",
+      "  },",
+      "  \"hooks\": {",
+      "    \"SessionStart\": [",
+      "      {",
+      "        \"hooks\": [",
+      "          {",
+      "            \"type\": \"command\",",
+      "            \"command\": \"curl -s -H 'Authorization: Bearer S1H-CANARY-5f0c3a9e71d2b864' https://hooks.example.invalid/start\"",
+      "          }",
+      "        ]",
+      "      }",
+      "    ],",
+      "    \"PostToolUse\": [",
+      "      {",
+      "        \"matcher\": \"Bash\",",
+      "        \"hooks\": [",
+      "          {",
+      "            \"type\": \"command\",",
+      "            \"command\": \"sh /x/post.sh\"",
+      "          }",
+      "        ]",
+      "      }",
+      "    ],",
+      "    \"PermissionRequest\": [",
+      "      {",
+      "        \"matcher\": \"Bash\",",
+      "        \"hooks\": [",
+      "          {",
+      "            \"type\": \"command\",",
+      "            \"command\": \"python3 -I @@ROOT@@/home/claude/.claude/hooks/permission-guard/d53f820def51/permission_guard.py --expect-sha256 d53f820def51ff64f3f2bd3edaf630322afdbfe8a6755d1092ef674fc0010951\",",
+      "            \"timeout\": 10",
+      "          }",
+      "        ]",
+      "      }",
+      "    ]",
+      "  },",
+      "  \"runtime_parent_created\": \"@@ROOT@@/home/claude/.claude/hooks/permission-guard\",",
+      "  \"runtime_dir_owned\": \"@@ROOT@@/home/claude/.claude/hooks/permission-guard/d53f820def51\",",
+      "  \"runtime_sha256\": \"d53f820def51ff64f3f2bd3edaf630322afdbfe8a6755d1092ef674fc0010951\",",
+      "  \"runtime_copy_created\": true,",
+      "  \"temp_path\": \"@@ROOT@@/home/claude/bukerov-twitch-miner-go/.claude/.settings.local.json.tmp-2360291-22c9dcf09012\",",
+      "  \"settings_written\": true,",
+      "  \"intended_postimage_sha256\": \"@@SHA256:home/claude/bukerov-twitch-miner-go/.claude/settings.local.json@@\",",
+      "  \"postimage_sha256\": \"@@SHA256:home/claude/bukerov-twitch-miner-go/.claude/settings.local.json@@\",",
+      "  \"result\": \"INSTALLED\",",
+      "  \"reason\": null,",
+      "  \"detail\": null,",
+      "  \"rollback_command_unavailable\": null,",
+      "  \"failed_step\": null,",
+      "  \"original_code\": null,",
+      "  \"original_result\": null,",
+      "  \"original_reason\": null,",
+      "  \"interrupted\": false,",
+      "  \"interrupted_outcome\": null,",
+      "  \"dir_fsync_error\": null,",
+      "  \"postimage_read_error\": null,",
+      "  \"runtime_renamed_to\": null,",
+      "  \"aborted_archives_present\": null,",
+      "  \"runtime_archive_error\": null,",
+      "  \"interrupt_deferred\": false,",
+      "  \"interrupt_signal\": null",
+      "}",
+      ""
+     ]
+    },
+    "home/claude/bukerov-twitch-miner-go/.scratch/s1h-20261011T173421Z/r9-install/settings.local.json.preimage-20261016T075444Z-2360291": {
+     "mode": "0o600",
+     "lines": [
+      "{",
+      "  \"permissions\": {",
+      "    \"allow\": [",
+      "      \"Bash(ls *)\"",
+      "    ]",
+      "  },",
+      "  \"hooks\": {",
+      "    \"SessionStart\": [",
+      "      {",
+      "        \"hooks\": [",
+      "          {",
+      "            \"type\": \"command\",",
+      "            \"command\": \"curl -s -H 'Authorization: Bearer S1H-CANARY-5f0c3a9e71d2b864' https://hooks.example.invalid/start\"",
+      "          }",
+      "        ]",
+      "      }",
+      "    ],",
+      "    \"PostToolUse\": [",
+      "      {",
+      "        \"matcher\": \"Bash\",",
+      "        \"hooks\": [",
+      "          {",
+      "            \"type\": \"command\",",
+      "            \"command\": \"sh /x/post.sh\"",
+      "          }",
+      "        ]",
+      "      }",
+      "    ]",
+      "  }",
+      "}",
+      ""
+     ]
+    }
+   },
+   "virtual": {}
+  },
+  "L2": {
+   "dirs": [
+    "home",
+    "home/claude",
+    "home/claude/.claude",
+    "home/claude/bukerov-twitch-miner-go",
+    "home/claude/.claude/hooks",
+    "home/claude/.claude/hooks/permission-guard",
+    "home/claude/.claude/hooks/permission-guard/15770bbedcd0",
+    "home/claude/.claude/hooks/permission-guard/d53f820def51.superseded-20261016T075444Z",
+    "home/claude/bukerov-twitch-miner-go/.claude",
+    "home/claude/bukerov-twitch-miner-go/.scratch",
+    "home/claude/bukerov-twitch-miner-go/.claude/hooks",
+    "home/claude/bukerov-twitch-miner-go/.scratch/s1h-20261011T173421Z",
+    "home/claude/bukerov-twitch-miner-go/.scratch/s1h-20261011T173421Z/r9-install"
+   ],
+   "files": {
+    "home/claude/.claude/hooks/permission-guard/15770bbedcd0/permission_guard.py": {
+     "mode": "0o444",
+     "lines": [
+      "#!/usr/bin/env python3",
+      "# guard v2",
+      "print()",
+      ""
+     ]
+    },
+    "home/claude/.claude/hooks/permission-guard/d53f820def51.superseded-20261016T075444Z/permission_guard.py": {
+     "mode": "0o444",
+     "lines": [
+      "#!/usr/bin/env python3",
+      "# guard v1",
+      "print()",
+      ""
+     ]
+    },
+    "home/claude/bukerov-twitch-miner-go/.claude/settings.local.json": {
+     "mode": "0o664",
+     "lines": [
+      "{",
+      "  \"permissions\": {",
+      "    \"allow\": [",
+      "      \"Bash(ls *)\"",
+      "    ]",
+      "  },",
+      "  \"hooks\": {",
+      "    \"SessionStart\": [",
+      "      {",
+      "        \"hooks\": [",
+      "          {",
+      "            \"type\": \"command\",",
+      "            \"command\": \"curl -s -H 'Authorization: Bearer S1H-CANARY-5f0c3a9e71d2b864' https://hooks.example.invalid/start\"",
+      "          }",
+      "        ]",
+      "      }",
+      "    ],",
+      "    \"PostToolUse\": [",
+      "      {",
+      "        \"matcher\": \"Bash\",",
+      "        \"hooks\": [",
+      "          {",
+      "            \"type\": \"command\",",
+      "            \"command\": \"sh /x/post.sh\"",
+      "          }",
+      "        ]",
+      "      }",
+      "    ],",
+      "    \"PermissionRequest\": [",
+      "      {",
+      "        \"matcher\": \"Bash\",",
+      "        \"hooks\": [",
+      "          {",
+      "            \"type\": \"command\",",
+      "            \"command\": \"python3 -I @@ROOT@@/home/claude/.claude/hooks/permission-guard/15770bbedcd0/permission_guard.py --expect-sha256 15770bbedcd07369e175f8be68c935522eb0364c45bb23f712fe2a7084848520\",",
+      "            \"timeout\": 10",
+      "          }",
+      "        ]",
+      "      }",
+      "    ]",
+      "  }",
+      "}",
+      ""
+     ]
+    },
+    "home/claude/bukerov-twitch-miner-go/.claude/hooks/permission_guard.py": {
+     "mode": "0o644",
+     "lines": [
+      "#!/usr/bin/env python3",
+      "# guard v2",
+      "print()",
+      ""
+     ]
+    },
+    "home/claude/bukerov-twitch-miner-go/.scratch/s1h-20261011T173421Z/r9-install-manifest.json": {
+     "mode": "0o664",
+     "lines": [
+      "{",
+      "  \"source\": \"@@ROOT@@/home/claude/bukerov-twitch-miner-go/.claude/hooks/permission_guard.py\",",
+      "  \"source_sha256\": \"15770bbedcd07369e175f8be68c935522eb0364c45bb23f712fe2a7084848520\",",
+      "  \"runtime_root\": \"@@ROOT@@/home/claude/.claude/hooks/permission-guard\",",
+      "  \"settings_target\": \"@@ROOT@@/home/claude/bukerov-twitch-miner-go/.claude/settings.local.json\",",
+      "  \"evidence_dir\": \"@@ROOT@@/home/claude/bukerov-twitch-miner-go/.scratch/s1h-20261011T173421Z/r9-install\",",
+      "  \"registration\": {",
+      "    \"matcher\": \"Bash\",",
+      "    \"hooks\": [",
+      "      {",
+      "        \"type\": \"command\",",
+      "        \"command\": \"python3 -I RUNTIME --expect-sha256 SHA\",",
+      "        \"timeout\": 10",
+      "      }",
+      "    ]",
+      "  }",
+      "}",
+      ""
+     ]
+    },
+    "home/claude/bukerov-twitch-miner-go/.scratch/s1h-20261011T173421Z/r9-promote-manifest.json": {
+     "mode": "0o664",
+     "lines": [
+      "{",
+      "  \"source\": \"@@ROOT@@/home/claude/bukerov-twitch-miner-go/.claude/hooks/permission_guard.py\",",
+      "  \"source_sha256\": \"15770bbedcd07369e175f8be68c935522eb0364c45bb23f712fe2a7084848520\",",
+      "  \"runtime_root\": \"@@ROOT@@/home/claude/.claude/hooks/permission-guard\",",
+      "  \"settings_target\": \"@@ROOT@@/home/claude/bukerov-twitch-miner-go/.claude/settings.local.json\",",
+      "  \"evidence_dir\": \"@@ROOT@@/home/claude/bukerov-twitch-miner-go/.scratch/s1h-20261011T173421Z/r9-install\",",
+      "  \"registration\": {",
+      "    \"matcher\": \"Bash\",",
+      "    \"hooks\": [",
+      "      {",
+      "        \"type\": \"command\",",
+      "        \"command\": \"python3 -I RUNTIME --expect-sha256 SHA\",",
+      "        \"timeout\": 10",
+      "      }",
+      "    ]",
+      "  }",
+      "}",
+      ""
+     ]
+    },
+    "home/claude/bukerov-twitch-miner-go/.scratch/s1h-20261011T173421Z/r9-install/permission-guard-state.json": {
+     "mode": "0o600",
+     "lines": [
+      "{",
+      "  \"mode\": \"promote\",",
+      "  \"timestamp_utc\": \"20261016T075444Z\",",
+      "  \"installer\": \"@@INSTALLER@@\",",
+      "  \"manifest\": \"@@ROOT@@/home/claude/bukerov-twitch-miner-go/.scratch/s1h-20261011T173421Z/r9-promote-manifest.json\",",
+      "  \"test_root\": \"@@ROOT@@\",",
+      "  \"installer_sha256_verified\": \"ad7ffabd67d1eda8b1c79c73edd71ffee9620269e8e2abcb81e3c40f49c37e00\",",
+      "  \"manifest_sha256_verified\": \"@@SHA256:home/claude/bukerov-twitch-miner-go/.scratch/s1h-20261011T173421Z/r9-promote-manifest.json@@\",",
+      "  \"evidence_verified\": true,",
+      "  \"settings_target\": \"@@ROOT@@/home/claude/bukerov-twitch-miner-go/.claude/settings.local.json\",",
+      "  \"evidence_dir\": \"@@ROOT@@/home/claude/bukerov-twitch-miner-go/.scratch/s1h-20261011T173421Z/r9-install\",",
+      "  \"rollback_command\": \"python3 -I @@INSTALLER@@ rollback --manifest @@ROOT@@/home/claude/bukerov-twitch-miner-go/.scratch/s1h-20261011T173421Z/r9-install-manifest.json --expect-sha256 ad7ffabd67d1eda8b1c79c73edd71ffee9620269e8e2abcb81e3c40f49c37e00 --expect-manifest-sha256 902b71e32671d3e952f559c905883fd97c67e9bb7200b2b7136b3b6786f029c4 --test-root @@ROOT@@\",",
+      "  \"settings_sha256\": \"@@SHA256:virtual/settings-after-install@@\",",
+      "  \"expected_settings_sha256\": \"@@SHA256:virtual/settings-after-install@@\",",
+      "  \"preimage\": {",
+      "    \"status\": \"PRESENT\",",
+      "    \"sha256\": \"0d784168278fa2ac16d9e80c0c8700e5177d848fa155b5477ebca679cd15521a\",",
+      "    \"size\": 531,",
+      "    \"mode\": \"0o664\",",
+      "    \"mtime\": 1792137284.4387765,",
+      "    \"backup_path\": \"@@ROOT@@/home/claude/bukerov-twitch-miner-go/.scratch/s1h-20261011T173421Z/r9-install/settings.local.json.preimage-20261016T075444Z-2360292\"",
+      "  },",
+      "  \"runtime_dir\": \"@@ROOT@@/home/claude/.claude/hooks/permission-guard/15770bbedcd0\",",
+      "  \"runtime_path\": \"@@ROOT@@/home/claude/.claude/hooks/permission-guard/15770bbedcd0/permission_guard.py\",",
+      "  \"registration_command\": \"python3 -I @@ROOT@@/home/claude/.claude/hooks/permission-guard/15770bbedcd0/permission_guard.py --expect-sha256 15770bbedcd07369e175f8be68c935522eb0364c45bb23f712fe2a7084848520\",",
+      "  \"hooks\": {",
+      "    \"SessionStart\": [",
+      "      {",
+      "        \"hooks\": [",
+      "          {",
+      "            \"type\": \"command\",",
+      "            \"command\": \"curl -s -H 'Authorization: Bearer S1H-CANARY-5f0c3a9e71d2b864' https://hooks.example.invalid/start\"",
+      "          }",
+      "        ]",
+      "      }",
+      "    ],",
+      "    \"PostToolUse\": [",
+      "      {",
+      "        \"matcher\": \"Bash\",",
+      "        \"hooks\": [",
+      "          {",
+      "            \"type\": \"command\",",
+      "            \"command\": \"sh /x/post.sh\"",
+      "          }",
+      "        ]",
+      "      }",
+      "    ],",
+      "    \"PermissionRequest\": [",
+      "      {",
+      "        \"matcher\": \"Bash\",",
+      "        \"hooks\": [",
+      "          {",
+      "            \"type\": \"command\",",
+      "            \"command\": \"python3 -I @@ROOT@@/home/claude/.claude/hooks/permission-guard/15770bbedcd0/permission_guard.py --expect-sha256 15770bbedcd07369e175f8be68c935522eb0364c45bb23f712fe2a7084848520\",",
+      "            \"timeout\": 10",
+      "          }",
+      "        ]",
+      "      }",
+      "    ]",
+      "  },",
+      "  \"step\": \"after the settings replacement\",",
+      "  \"runtime_dir_owned\": \"@@ROOT@@/home/claude/.claude/hooks/permission-guard/15770bbedcd0\",",
+      "  \"runtime_sha256\": \"15770bbedcd07369e175f8be68c935522eb0364c45bb23f712fe2a7084848520\",",
+      "  \"runtime_copy_created\": true,",
+      "  \"temp_path\": \"@@ROOT@@/home/claude/bukerov-twitch-miner-go/.claude/.settings.local.json.tmp-2360293-5ef6ad41f228\",",
+      "  \"settings_written\": true,",
+      "  \"intended_postimage_sha256\": \"@@SHA256:home/claude/bukerov-twitch-miner-go/.claude/settings.local.json@@\",",
+      "  \"postimage_sha256\": \"@@SHA256:home/claude/bukerov-twitch-miner-go/.claude/settings.local.json@@\",",
+      "  \"previous_runtime_renamed_to\": \"@@ROOT@@/home/claude/.claude/hooks/permission-guard/d53f820def51.superseded-20261016T075444Z\",",
+      "  \"result\": \"PROMOTED\",",
+      "  \"previous_receipt\": {",
+      "    \"mode\": \"install\",",
+      "    \"timestamp_utc\": \"20261016T075444Z\",",
+      "    \"installer\": \"@@INSTALLER@@\",",
+      "    \"manifest\": \"@@ROOT@@/home/claude/bukerov-twitch-miner-go/.scratch/s1h-20261011T173421Z/r9-install-manifest.json\",",
+      "    \"test_root\": \"@@ROOT@@\",",
+      "    \"installer_sha256_verified\": \"ad7ffabd67d1eda8b1c79c73edd71ffee9620269e8e2abcb81e3c40f49c37e00\",",
+      "    \"manifest_sha256_verified\": \"902b71e32671d3e952f559c905883fd97c67e9bb7200b2b7136b3b6786f029c4\",",
+      "    \"evidence_verified\": true,",
+      "    \"settings_target\": \"@@ROOT@@/home/claude/bukerov-twitch-miner-go/.claude/settings.local.json\",",
+      "    \"evidence_dir\": \"@@ROOT@@/home/claude/bukerov-twitch-miner-go/.scratch/s1h-20261011T173421Z/r9-install\",",
+      "    \"rollback_command\": \"python3 -I @@INSTALLER@@ rollback --manifest @@ROOT@@/home/claude/bukerov-twitch-miner-go/.scratch/s1h-20261011T173421Z/r9-install-manifest.json --expect-sha256 ad7ffabd67d1eda8b1c79c73edd71ffee9620269e8e2abcb81e3c40f49c37e00 --expect-manifest-sha256 902b71e32671d3e952f559c905883fd97c67e9bb7200b2b7136b3b6786f029c4 --test-root @@ROOT@@\",",
+      "    \"runtime_dir\": \"@@ROOT@@/home/claude/.claude/hooks/permission-guard/d53f820def51\",",
+      "    \"runtime_path\": \"@@ROOT@@/home/claude/.claude/hooks/permission-guard/d53f820def51/permission_guard.py\",",
+      "    \"registration_command\": \"python3 -I @@ROOT@@/home/claude/.claude/hooks/permission-guard/d53f820def51/permission_guard.py --expect-sha256 d53f820def51ff64f3f2bd3edaf630322afdbfe8a6755d1092ef674fc0010951\",",
+      "    \"step\": \"after the settings replacement\",",
+      "    \"preimage_backup_created\": \"@@ROOT@@/home/claude/bukerov-twitch-miner-go/.scratch/s1h-20261011T173421Z/r9-install/settings.local.json.preimage-20261016T075444Z-2360292\",",
+      "    \"preimage\": {",
+      "      \"status\": \"PRESENT\",",
+      "      \"sha256\": \"0d784168278fa2ac16d9e80c0c8700e5177d848fa155b5477ebca679cd15521a\",",
+      "      \"size\": 531,",
+      "      \"mode\": \"0o664\",",
+      "      \"mtime\": 1792137284.4387765,",
+      "      \"backup_path\": \"@@ROOT@@/home/claude/bukerov-twitch-miner-go/.scratch/s1h-20261011T173421Z/r9-install/settings.local.json.preimage-20261016T075444Z-2360292\"",
+      "    },",
+      "    \"hooks\": {",
+      "      \"SessionStart\": [",
+      "        {",
+      "          \"hooks\": [",
+      "            {",
+      "              \"type\": \"command\",",
+      "              \"command\": \"curl -s -H 'Authorization: Bearer S1H-CANARY-5f0c3a9e71d2b864' https://hooks.example.invalid/start\"",
+      "            }",
+      "          ]",
+      "        }",
+      "      ],",
+      "      \"PostToolUse\": [",
+      "        {",
+      "          \"matcher\": \"Bash\",",
+      "          \"hooks\": [",
+      "            {",
+      "              \"type\": \"command\",",
+      "              \"command\": \"sh /x/post.sh\"",
+      "            }",
+      "          ]",
+      "        }",
+      "      ],",
+      "      \"PermissionRequest\": [",
+      "        {",
+      "          \"matcher\": \"Bash\",",
+      "          \"hooks\": [",
+      "            {",
+      "              \"type\": \"command\",",
+      "              \"command\": \"python3 -I @@ROOT@@/home/claude/.claude/hooks/permission-guard/d53f820def51/permission_guard.py --expect-sha256 d53f820def51ff64f3f2bd3edaf630322afdbfe8a6755d1092ef674fc0010951\",",
+      "              \"timeout\": 10",
+      "            }",
+      "          ]",
+      "        }",
+      "      ]",
+      "    },",
+      "    \"runtime_parent_created\": \"@@ROOT@@/home/claude/.claude/hooks/permission-guard\",",
+      "    \"runtime_dir_owned\": \"@@ROOT@@/home/claude/.claude/hooks/permission-guard/d53f820def51\",",
+      "    \"runtime_sha256\": \"d53f820def51ff64f3f2bd3edaf630322afdbfe8a6755d1092ef674fc0010951\",",
+      "    \"runtime_copy_created\": true,",
+      "    \"temp_path\": \"@@ROOT@@/home/claude/bukerov-twitch-miner-go/.claude/.settings.local.json.tmp-2360292-60545eb7f014\",",
+      "    \"settings_written\": true,",
+      "    \"intended_postimage_sha256\": \"@@SHA256:virtual/settings-after-install@@\",",
+      "    \"postimage_sha256\": \"@@SHA256:virtual/settings-after-install@@\",",
+      "    \"result\": \"INSTALLED\",",
+      "    \"reason\": null,",
+      "    \"detail\": null,",
+      "    \"rollback_command_unavailable\": null,",
+      "    \"failed_step\": null,",
+      "    \"original_code\": null,",
+      "    \"original_result\": null,",
+      "    \"original_reason\": null,",
+      "    \"interrupted\": false,",
+      "    \"interrupted_outcome\": null,",
+      "    \"dir_fsync_error\": null,",
+      "    \"postimage_read_error\": null,",
+      "    \"runtime_renamed_to\": null,",
+      "    \"aborted_archives_present\": null,",
+      "    \"runtime_archive_error\": null,",
+      "    \"interrupt_deferred\": false,",
+      "    \"interrupt_signal\": null",
+      "  },",
+      "  \"reason\": null,",
+      "  \"detail\": null,",
+      "  \"rollback_command_unavailable\": null,",
+      "  \"failed_step\": null,",
+      "  \"original_code\": null,",
+      "  \"original_result\": null,",
+      "  \"original_reason\": null,",
+      "  \"interrupted\": false,",
+      "  \"interrupted_outcome\": null,",
+      "  \"dir_fsync_error\": null,",
+      "  \"postimage_read_error\": null,",
+      "  \"runtime_renamed_to\": null,",
+      "  \"runtime_parent_created\": null,",
+      "  \"aborted_archives_present\": null,",
+      "  \"runtime_archive_error\": null,",
+      "  \"interrupt_deferred\": false,",
+      "  \"interrupt_signal\": null",
+      "}",
+      ""
+     ]
+    },
+    "home/claude/bukerov-twitch-miner-go/.scratch/s1h-20261011T173421Z/r9-install/settings.local.json.preimage-20261016T075444Z-2360292": {
+     "mode": "0o600",
+     "lines": [
+      "{",
+      "  \"permissions\": {",
+      "    \"allow\": [",
+      "      \"Bash(ls *)\"",
+      "    ]",
+      "  },",
+      "  \"hooks\": {",
+      "    \"SessionStart\": [",
+      "      {",
+      "        \"hooks\": [",
+      "          {",
+      "            \"type\": \"command\",",
+      "            \"command\": \"curl -s -H 'Authorization: Bearer S1H-CANARY-5f0c3a9e71d2b864' https://hooks.example.invalid/start\"",
+      "          }",
+      "        ]",
+      "      }",
+      "    ],",
+      "    \"PostToolUse\": [",
+      "      {",
+      "        \"matcher\": \"Bash\",",
+      "        \"hooks\": [",
+      "          {",
+      "            \"type\": \"command\",",
+      "            \"command\": \"sh /x/post.sh\"",
+      "          }",
+      "        ]",
+      "      }",
+      "    ]",
+      "  }",
+      "}",
+      ""
+     ]
+    }
+   },
+   "virtual": {
+    "virtual/settings-after-install": [
+     "{",
+     "  \"permissions\": {",
+     "    \"allow\": [",
+     "      \"Bash(ls *)\"",
+     "    ]",
+     "  },",
+     "  \"hooks\": {",
+     "    \"SessionStart\": [",
+     "      {",
+     "        \"hooks\": [",
+     "          {",
+     "            \"type\": \"command\",",
+     "            \"command\": \"curl -s -H 'Authorization: Bearer S1H-CANARY-5f0c3a9e71d2b864' https://hooks.example.invalid/start\"",
+     "          }",
+     "        ]",
+     "      }",
+     "    ],",
+     "    \"PostToolUse\": [",
+     "      {",
+     "        \"matcher\": \"Bash\",",
+     "        \"hooks\": [",
+     "          {",
+     "            \"type\": \"command\",",
+     "            \"command\": \"sh /x/post.sh\"",
+     "          }",
+     "        ]",
+     "      }",
+     "    ],",
+     "    \"PermissionRequest\": [",
+     "      {",
+     "        \"matcher\": \"Bash\",",
+     "        \"hooks\": [",
+     "          {",
+     "            \"type\": \"command\",",
+     "            \"command\": \"python3 -I @@ROOT@@/home/claude/.claude/hooks/permission-guard/d53f820def51/permission_guard.py --expect-sha256 d53f820def51ff64f3f2bd3edaf630322afdbfe8a6755d1092ef674fc0010951\",",
+     "            \"timeout\": 10",
+     "          }",
+     "        ]",
+     "      }",
+     "    ]",
+     "  }",
+     "}",
+     ""
+    ]
+   }
+  }
+ },
+ "expected": {
+  "L1": {
+   "verify": {
+    "outcome": [
+     0,
+     "MATCH",
+     null
+    ],
+    "tree": {
+     "home/claude/bukerov-twitch-miner-go/.claude/settings.local.json": [
+      "file",
+      "0o664",
+      [
+       "{",
+       "  \"permissions\": {",
+       "    \"allow\": [",
+       "      \"Bash(ls *)\"",
+       "    ]",
+       "  },",
+       "  \"hooks\": {",
+       "    \"SessionStart\": [",
+       "      {",
+       "        \"hooks\": [",
+       "          {",
+       "            \"type\": \"command\",",
+       "            \"command\": \"curl -s -H 'Authorization: Bearer S1H-CANARY-5f0c3a9e71d2b864' https://hooks.example.invalid/start\"",
+       "          }",
+       "        ]",
+       "      }",
+       "    ],",
+       "    \"PostToolUse\": [",
+       "      {",
+       "        \"matcher\": \"Bash\",",
+       "        \"hooks\": [",
+       "          {",
+       "            \"type\": \"command\",",
+       "            \"command\": \"sh /x/post.sh\"",
+       "          }",
+       "        ]",
+       "      }",
+       "    ],",
+       "    \"PermissionRequest\": [",
+       "      {",
+       "        \"matcher\": \"Bash\",",
+       "        \"hooks\": [",
+       "          {",
+       "            \"type\": \"command\",",
+       "            \"command\": \"python3 -I @@ROOT@@/home/claude/.claude/hooks/permission-guard/d53f820def51/permission_guard.py --expect-sha256 d53f820def51ff64f3f2bd3edaf630322afdbfe8a6755d1092ef674fc0010951\",",
+       "            \"timeout\": 10",
+       "          }",
+       "        ]",
+       "      }",
+       "    ]",
+       "  }",
+       "}",
+       ""
+      ]
+     ],
+     "home/claude/.claude/hooks/permission-guard/d53f820def51": [
+      "dir",
+      "0o775"
+     ],
+     "home/claude/.claude/hooks/permission-guard/d53f820def51/permission_guard.py": [
+      "file",
+      "0o444",
+      [
+       "#!/usr/bin/env python3",
+       "# guard v1",
+       "print()",
+       ""
+      ]
+     ]
+    }
+   },
+   "rollback": {
+    "outcome": [
+     0,
+     "ROLLED_BACK",
+     null
+    ],
+    "tree": {
+     "home/claude/bukerov-twitch-miner-go/.claude/settings.local.json": [
+      "file",
+      "0o664",
+      [
+       "{",
+       "  \"permissions\": {",
+       "    \"allow\": [",
+       "      \"Bash(ls *)\"",
+       "    ]",
+       "  },",
+       "  \"hooks\": {",
+       "    \"SessionStart\": [",
+       "      {",
+       "        \"hooks\": [",
+       "          {",
+       "            \"type\": \"command\",",
+       "            \"command\": \"curl -s -H 'Authorization: Bearer S1H-CANARY-5f0c3a9e71d2b864' https://hooks.example.invalid/start\"",
+       "          }",
+       "        ]",
+       "      }",
+       "    ],",
+       "    \"PostToolUse\": [",
+       "      {",
+       "        \"matcher\": \"Bash\",",
+       "        \"hooks\": [",
+       "          {",
+       "            \"type\": \"command\",",
+       "            \"command\": \"sh /x/post.sh\"",
+       "          }",
+       "        ]",
+       "      }",
+       "    ]",
+       "  }",
+       "}",
+       ""
+      ]
+     ],
+     "home/claude/.claude/hooks/permission-guard/d53f820def51.disabled-<UTC>": [
+      "dir",
+      "0o775"
+     ],
+     "home/claude/.claude/hooks/permission-guard/d53f820def51.disabled-<UTC>/permission_guard.py": [
+      "file",
+      "0o444",
+      [
+       "#!/usr/bin/env python3",
+       "# guard v1",
+       "print()",
+       ""
+      ]
+     ]
+    }
+   },
+   "promote": {
+    "outcome": [
+     0,
+     "PROMOTED",
+     null
+    ],
+    "tree": {
+     "home/claude/bukerov-twitch-miner-go/.claude/settings.local.json": [
+      "file",
+      "0o664",
+      [
+       "{",
+       "  \"permissions\": {",
+       "    \"allow\": [",
+       "      \"Bash(ls *)\"",
+       "    ]",
+       "  },",
+       "  \"hooks\": {",
+       "    \"SessionStart\": [",
+       "      {",
+       "        \"hooks\": [",
+       "          {",
+       "            \"type\": \"command\",",
+       "            \"command\": \"curl -s -H 'Authorization: Bearer S1H-CANARY-5f0c3a9e71d2b864' https://hooks.example.invalid/start\"",
+       "          }",
+       "        ]",
+       "      }",
+       "    ],",
+       "    \"PostToolUse\": [",
+       "      {",
+       "        \"matcher\": \"Bash\",",
+       "        \"hooks\": [",
+       "          {",
+       "            \"type\": \"command\",",
+       "            \"command\": \"sh /x/post.sh\"",
+       "          }",
+       "        ]",
+       "      }",
+       "    ],",
+       "    \"PermissionRequest\": [",
+       "      {",
+       "        \"matcher\": \"Bash\",",
+       "        \"hooks\": [",
+       "          {",
+       "            \"type\": \"command\",",
+       "            \"command\": \"python3 -I @@ROOT@@/home/claude/.claude/hooks/permission-guard/15770bbedcd0/permission_guard.py --expect-sha256 15770bbedcd07369e175f8be68c935522eb0364c45bb23f712fe2a7084848520\",",
+       "            \"timeout\": 10",
+       "          }",
+       "        ]",
+       "      }",
+       "    ]",
+       "  }",
+       "}",
+       ""
+      ]
+     ],
+     "home/claude/.claude/hooks/permission-guard/15770bbedcd0": [
+      "dir",
+      "0o775"
+     ],
+     "home/claude/.claude/hooks/permission-guard/d53f820def51.superseded-<UTC>": [
+      "dir",
+      "0o775"
+     ],
+     "home/claude/.claude/hooks/permission-guard/d53f820def51.superseded-<UTC>/permission_guard.py": [
+      "file",
+      "0o444",
+      [
+       "#!/usr/bin/env python3",
+       "# guard v1",
+       "print()",
+       ""
+      ]
+     ],
+     "home/claude/.claude/hooks/permission-guard/15770bbedcd0/permission_guard.py": [
+      "file",
+      "0o444",
+      [
+       "#!/usr/bin/env python3",
+       "# guard v2",
+       "print()",
+       ""
+      ]
+     ]
+    }
+   }
+  },
+  "L2": {
+   "verify": {
+    "outcome": [
+     0,
+     "MATCH",
+     null
+    ],
+    "tree": {
+     "home/claude/bukerov-twitch-miner-go/.claude/settings.local.json": [
+      "file",
+      "0o664",
+      [
+       "{",
+       "  \"permissions\": {",
+       "    \"allow\": [",
+       "      \"Bash(ls *)\"",
+       "    ]",
+       "  },",
+       "  \"hooks\": {",
+       "    \"SessionStart\": [",
+       "      {",
+       "        \"hooks\": [",
+       "          {",
+       "            \"type\": \"command\",",
+       "            \"command\": \"curl -s -H 'Authorization: Bearer S1H-CANARY-5f0c3a9e71d2b864' https://hooks.example.invalid/start\"",
+       "          }",
+       "        ]",
+       "      }",
+       "    ],",
+       "    \"PostToolUse\": [",
+       "      {",
+       "        \"matcher\": \"Bash\",",
+       "        \"hooks\": [",
+       "          {",
+       "            \"type\": \"command\",",
+       "            \"command\": \"sh /x/post.sh\"",
+       "          }",
+       "        ]",
+       "      }",
+       "    ],",
+       "    \"PermissionRequest\": [",
+       "      {",
+       "        \"matcher\": \"Bash\",",
+       "        \"hooks\": [",
+       "          {",
+       "            \"type\": \"command\",",
+       "            \"command\": \"python3 -I @@ROOT@@/home/claude/.claude/hooks/permission-guard/15770bbedcd0/permission_guard.py --expect-sha256 15770bbedcd07369e175f8be68c935522eb0364c45bb23f712fe2a7084848520\",",
+       "            \"timeout\": 10",
+       "          }",
+       "        ]",
+       "      }",
+       "    ]",
+       "  }",
+       "}",
+       ""
+      ]
+     ],
+     "home/claude/.claude/hooks/permission-guard/15770bbedcd0": [
+      "dir",
+      "0o775"
+     ],
+     "home/claude/.claude/hooks/permission-guard/d53f820def51.superseded-<UTC>": [
+      "dir",
+      "0o775"
+     ],
+     "home/claude/.claude/hooks/permission-guard/d53f820def51.superseded-<UTC>/permission_guard.py": [
+      "file",
+      "0o444",
+      [
+       "#!/usr/bin/env python3",
+       "# guard v1",
+       "print()",
+       ""
+      ]
+     ],
+     "home/claude/.claude/hooks/permission-guard/15770bbedcd0/permission_guard.py": [
+      "file",
+      "0o444",
+      [
+       "#!/usr/bin/env python3",
+       "# guard v2",
+       "print()",
+       ""
+      ]
+     ]
+    }
+   },
+   "rollback": {
+    "outcome": [
+     0,
+     "ROLLED_BACK",
+     null
+    ],
+    "tree": {
+     "home/claude/bukerov-twitch-miner-go/.claude/settings.local.json": [
+      "file",
+      "0o664",
+      [
+       "{",
+       "  \"permissions\": {",
+       "    \"allow\": [",
+       "      \"Bash(ls *)\"",
+       "    ]",
+       "  },",
+       "  \"hooks\": {",
+       "    \"SessionStart\": [",
+       "      {",
+       "        \"hooks\": [",
+       "          {",
+       "            \"type\": \"command\",",
+       "            \"command\": \"curl -s -H 'Authorization: Bearer S1H-CANARY-5f0c3a9e71d2b864' https://hooks.example.invalid/start\"",
+       "          }",
+       "        ]",
+       "      }",
+       "    ],",
+       "    \"PostToolUse\": [",
+       "      {",
+       "        \"matcher\": \"Bash\",",
+       "        \"hooks\": [",
+       "          {",
+       "            \"type\": \"command\",",
+       "            \"command\": \"sh /x/post.sh\"",
+       "          }",
+       "        ]",
+       "      }",
+       "    ]",
+       "  }",
+       "}",
+       ""
+      ]
+     ],
+     "home/claude/.claude/hooks/permission-guard/15770bbedcd0.disabled-<UTC>": [
+      "dir",
+      "0o775"
+     ],
+     "home/claude/.claude/hooks/permission-guard/d53f820def51.superseded-<UTC>": [
+      "dir",
+      "0o775"
+     ],
+     "home/claude/.claude/hooks/permission-guard/15770bbedcd0.disabled-<UTC>/permission_guard.py": [
+      "file",
+      "0o444",
+      [
+       "#!/usr/bin/env python3",
+       "# guard v2",
+       "print()",
+       ""
+      ]
+     ],
+     "home/claude/.claude/hooks/permission-guard/d53f820def51.superseded-<UTC>/permission_guard.py": [
+      "file",
+      "0o444",
+      [
+       "#!/usr/bin/env python3",
+       "# guard v1",
+       "print()",
+       ""
+      ]
+     ]
+    }
+   },
+   "promote": {
+    "outcome": [
+     0,
+     "PROMOTED",
+     null
+    ],
+    "tree": {
+     "home/claude/bukerov-twitch-miner-go/.claude/settings.local.json": [
+      "file",
+      "0o664",
+      [
+       "{",
+       "  \"permissions\": {",
+       "    \"allow\": [",
+       "      \"Bash(ls *)\"",
+       "    ]",
+       "  },",
+       "  \"hooks\": {",
+       "    \"SessionStart\": [",
+       "      {",
+       "        \"hooks\": [",
+       "          {",
+       "            \"type\": \"command\",",
+       "            \"command\": \"curl -s -H 'Authorization: Bearer S1H-CANARY-5f0c3a9e71d2b864' https://hooks.example.invalid/start\"",
+       "          }",
+       "        ]",
+       "      }",
+       "    ],",
+       "    \"PostToolUse\": [",
+       "      {",
+       "        \"matcher\": \"Bash\",",
+       "        \"hooks\": [",
+       "          {",
+       "            \"type\": \"command\",",
+       "            \"command\": \"sh /x/post.sh\"",
+       "          }",
+       "        ]",
+       "      }",
+       "    ],",
+       "    \"PermissionRequest\": [",
+       "      {",
+       "        \"matcher\": \"Bash\",",
+       "        \"hooks\": [",
+       "          {",
+       "            \"type\": \"command\",",
+       "            \"command\": \"python3 -I @@ROOT@@/home/claude/.claude/hooks/permission-guard/bf2652143a15/permission_guard.py --expect-sha256 bf2652143a15366137501769cd85d829e4163cd4203582d2ce57302cc930c978\",",
+       "            \"timeout\": 10",
+       "          }",
+       "        ]",
+       "      }",
+       "    ]",
+       "  }",
+       "}",
+       ""
+      ]
+     ],
+     "home/claude/.claude/hooks/permission-guard/15770bbedcd0.superseded-<UTC>": [
+      "dir",
+      "0o775"
+     ],
+     "home/claude/.claude/hooks/permission-guard/bf2652143a15": [
+      "dir",
+      "0o775"
+     ],
+     "home/claude/.claude/hooks/permission-guard/d53f820def51.superseded-<UTC>": [
+      "dir",
+      "0o775"
+     ],
+     "home/claude/.claude/hooks/permission-guard/15770bbedcd0.superseded-<UTC>/permission_guard.py": [
+      "file",
+      "0o444",
+      [
+       "#!/usr/bin/env python3",
+       "# guard v2",
+       "print()",
+       ""
+      ]
+     ],
+     "home/claude/.claude/hooks/permission-guard/bf2652143a15/permission_guard.py": [
+      "file",
+      "0o444",
+      [
+       "#!/usr/bin/env python3",
+       "# guard v3",
+       "print()",
+       ""
+      ]
+     ],
+     "home/claude/.claude/hooks/permission-guard/d53f820def51.superseded-<UTC>/permission_guard.py": [
+      "file",
+      "0o444",
+      [
+       "#!/usr/bin/env python3",
+       "# guard v1",
+       "print()",
+       ""
+      ]
+     ]
+    }
+   }
+  }
+ }
+}''')
+LEGACY_PROMOTE_GUARDS = {"L1": GUARD_V2, "L2": GUARD_V3}  # the guard each T-COMPAT promote installs
+
+
+def legacy_text(fixture, text, root, installer):
+    """The fixture text with the root and installer tokens substituted (hash tokens are substituted by legacy_texts)."""
+    return text.replace("@@ROOT@@", root).replace("@@INSTALLER@@", installer)
+
+
+def legacy_texts(fixture, root, installer):
+    """Every file and virtual text of a legacy fixture (each stored as its list of lines) with all tokens substituted:
+    first the root and installer, then each @@SHA256:<name>@@ by the hash of the named text as substituted (the hash
+    sources hold no hash token)."""
+    files = {name: legacy_text(fixture, "\n".join(entry["lines"]), root, installer)
+             for name, entry in fixture["files"].items()}
+    virtual = {name: legacy_text(fixture, "\n".join(lines), root, installer) for name, lines in fixture["virtual"].items()}
+    hashes = {name: sha256_bytes(text.encode()) for name, text in list(files.items()) + list(virtual.items())}
+
+    def resolve(text):
+        for name, digest in hashes.items():
+            text = text.replace("@@SHA256:" + name + "@@", digest)
+        return text
+    return {legacy_text(fixture, name, root, installer): resolve(text) for name, text in files.items()}
+
+
+def materialize_legacy(fx, fixture, installer):
+    """Write a legacy fixture into the fixture's test root: its directories, then its files with their recorded modes
+    (a file the Fixture already wrote, such as the guard source or the install manifest, is replaced)."""
+    for rel in fixture["dirs"]:
+        os.makedirs(os.path.join(fx.root, legacy_text(fixture, rel, fx.root, installer)), exist_ok=True)
+    texts = legacy_texts(fixture, fx.root, installer)
+    for name, entry in fixture["files"].items():
+        path = os.path.join(fx.root, legacy_text(fixture, name, fx.root, installer))
+        if os.path.lexists(path):
+            os.chmod(path, 0o600)
+            os.unlink(path)
+        with open(path, "wb") as fh:
+            fh.write(texts[legacy_text(fixture, name, fx.root, installer)].encode())
+        os.chmod(path, int(entry["mode"], 8))
+    fx.source_sha = sha256_file(fx.source)
+    fx.hash12 = fx.source_sha[:12]
+    fx.manifest_sha = sha256_file(fx.manifest)
+
+
+UTC_STAMP = re.compile(r"\d{8}T\d{6}Z")
+
+
+def normalized_tree(fx):
+    """T-COMPAT: the settings and runtime behaviour of a run, comparable across roots and runs: every entry under the
+    settings directory and RUNTIME_PARENT (UTC stamps in names replaced by <UTC>) with its kind, mode and content (the
+    test root in a file's text replaced by @@ROOT@@). The evidence directory, which differs by design, is not part of it."""
+    out = {}
+    for top in (fx.settings_dir, fx.runtime_parent):
+        if not os.path.isdir(top):
+            continue
+        for dirpath, dirnames, filenames in os.walk(top):
+            for name in sorted(dirnames + filenames):
+                path = os.path.join(dirpath, name)
+                rel = UTC_STAMP.sub("<UTC>", os.path.relpath(path, fx.root))
+                if rel.startswith(os.path.relpath(fx.hooks_src_dir, fx.root)):
+                    continue  # the guard source and the other tracked files are inputs, not behaviour
+                info = os.lstat(path)
+                if stat.S_ISDIR(info.st_mode):
+                    out[rel] = ["dir", oct(stat.S_IMODE(info.st_mode))]
+                else:
+                    out[rel] = ["file", oct(stat.S_IMODE(info.st_mode)),
+                                read_bytes(path).decode().replace(fx.root, "@@ROOT@@").split("\n")]
+    return out
 
 
 class InstallerTest(unittest.TestCase):
@@ -1453,6 +2674,9 @@ class InstallerTest(unittest.TestCase):
         self.assertTrue(lines, err.decode())
         receipt = json.loads(lines[-1])
         self.fx.collect(receipt)
+        # rev31 7.11i (3): the signals were sent while the installer was paused only if the release file, not the bound,
+        # ended the pause; an expired pause fails here instead of letting a later assertion pass for another reason
+        self.assertIs(receipt.get("test_pause_released"), True, receipt)
         return proc.returncode, receipt, err.decode()
 
     def assert_deferred(self, receipt, name):
@@ -2044,6 +3268,9 @@ class InstallerTest(unittest.TestCase):
         _, err = proc.communicate(timeout=60)
         if os.path.isfile(self.fx.state_path()):
             self.fx.collect_state()  # U11 (R5d-b-6): no printed receipt, but the state the run wrote is checked
+        # rev31 7.11i (3): stdout was closed while the installer was paused only if the release file ended the pause; an
+        # expired pause would let the print succeed and the run still exit 0 (E3 showed it), so it fails here
+        self.assertIs(self.fx.state().get("test_pause_released"), True)
         return proc.returncode, err.decode()
 
     def test_r5a4_d3_line_says_neither_saved_nor_printed(self):
@@ -2714,6 +3941,332 @@ class InstallerTest(unittest.TestCase):
         self.assertEqual((rc, receipt["result"], receipt["reason"]), (2, "REFUSED", "MANIFEST_MISSING"), (receipt, err))
         self.assertIn("not a regular file", receipt.get("detail") or "", receipt)
         self.assertFalse(os.path.exists(self.fx.runtime_dir()))
+
+    # rev31 7.11i (2): receipt privacy (S1H-OD-12), tests K1 to K8, P1, P2 and T-COMPAT -------------------------------
+    def d_paths(self):
+        """D: the settings target, a rolled-back sibling of it and every private preimage backup. Their content follows
+        the install, rollback and promote rules, so the marker may be there."""
+        keep = {self.fx.settings}
+        for directory, prefix in ((self.fx.settings_dir, "settings.local.json.rolled-back-"),
+                                  (self.fx.evidence_dir, "settings.local.json.preimage-")):
+            if os.path.isdir(directory):
+                keep.update(directory + "/" + name for name in os.listdir(directory) if name.startswith(prefix))
+        return keep
+
+    def leaks(self, before, out, err, fragments=(MARKER,)):
+        """S: every place this invocation wrote that holds a fragment of the settings document: stdout, stderr and each file
+        under the test root that it created or changed, the D paths excepted. A file it left as it was (such as a legacy
+        state before a rollback replaced it, snapshot in `before`) is not its output."""
+        places = [name for name, text in (("stdout", out), ("stderr", err)) if any(f in text for f in fragments)]
+        keep = self.d_paths()
+        for rel, value in sorted(snapshot(self.fx.root).items()):
+            path = os.path.join(self.fx.root, rel)
+            if value in ("dir", "symlink") or before.get(rel) == value or path in keep:
+                continue
+            data = read_bytes(path)
+            if any(f.encode() in data for f in fragments):
+                places.append(rel)
+        return places
+
+    def run_checked(self, mode, fragments=(MARKER,), **kwargs):
+        """Run MODE and assert that no reporting sink of this invocation holds a fragment of the settings document."""
+        before = snapshot(self.fx.root)
+        rc, receipt, out, err = self.fx.run(mode, **kwargs)
+        self.assertEqual(self.leaks(before, out, err, fragments), [], (mode, rc, receipt))
+        return rc, receipt, out, err
+
+    @staticmethod
+    def chain(record):
+        """A receipt or state and every record nested in its previous_receipt chain, outermost first."""
+        out = []
+        while isinstance(record, dict):
+            out.append(record)
+            record = record.get("previous_receipt")
+        return out
+
+    def preimage_backups(self):
+        return sorted(n for n in os.listdir(self.fx.evidence_dir) if n.startswith("settings.local.json.preimage-"))
+
+    NULL_SUMMARY = {"permission_request_entries": None, "total_entries": None}
+
+    def test_k1_malformed_settings_next_to_the_marker_are_refused_without_quoting_them(self):
+        """K1, fresh install: no preimage backup existed, and the refusal, which comes before any transaction write,
+        creates none. Each document holds the marker next to the point where the decoder or the encoder rejects it; no
+        sink quotes the marker or the rejected text (a key name, a byte, a number or a character)."""
+        m = MARKER.encode()
+        cases = (
+            ("duplicate key", b'{"' + m + b'": 1, "' + m + b'": 2}\n', "SETTINGS_MALFORMED", (MARKER,)),
+            ("syntax error", b'{"hooks": {"SessionStart": [{"hooks": [{"type": "command", "command": "' + m
+             + b'"}]}]},}\n', "SETTINGS_MALFORMED", (MARKER,)),
+            ("invalid UTF-8", b'{"x": "' + m + b'\xff"}\n', "SETTINGS_MALFORMED", (MARKER, "0xff")),
+            ("non-finite number", b'{"' + m + b'": 1e400}\n', "SETTINGS_MALFORMED", (MARKER, "1e400")),
+            ("non-finite constant", b'{"' + m + b'": NaN}\n', "SETTINGS_MALFORMED", (MARKER, "NaN")),
+            ("unencodable text", b'{"x": "' + m + b'\\ud800"}\n', "SETTINGS_NOT_ENCODABLE", (MARKER, "\\ud800")),
+        )
+        for name, raw, reason, fragments in cases:
+            with self.subTest(case=name):
+                self.next_fixture()
+                self.fx.write_settings(raw=raw)
+                self.assertIn(m, read_bytes(self.fx.settings))  # positive control: the fixture holds the marker
+                rc, receipt, out, err = self.run_checked("install", fragments=fragments)
+                self.assertEqual((rc, receipt["result"], receipt["reason"]), (2, "REFUSED", reason), receipt)
+                self.assertEqual(read_bytes(self.fx.settings), raw)
+                self.assertEqual(self.preimage_backups(), [])
+                self.assertFalse(os.path.lexists(self.fx.runtime_parent))
+                self.assertFalse(os.path.lexists(self.fx.state_path()))
+
+    def test_k2_foreign_hook_refusal_names_no_foreign_entry(self):
+        """K2, fresh install over a foreign PermissionRequest entry that carries the marker: no preimage backup existed,
+        and the FOREIGN_HOOK refusal (exit 3, before any transaction write) creates none; the receipt counts the foreign
+        entries and no sink holds one."""
+        foreign = {"hooks": {"PermissionRequest": [{"matcher": "Bash", "hooks": [
+            {"type": "command", "command": "python3 /x/other-guard.py --token " + MARKER}]}]}}
+        self.fx.write_settings(foreign)
+        self.assertIn(MARKER.encode(), read_bytes(self.fx.settings))
+        rc, receipt, out, err = self.run_checked("install")
+        self.assertEqual((rc, receipt["result"], receipt["reason"]), (3, "REFUSED", "FOREIGN_HOOK"), receipt)
+        self.assertEqual(receipt["existing_entries_count"], 1)
+        self.assertNotIn("existing_entries", receipt)
+        self.assertEqual(read_bytes(self.fx.settings), doc_bytes(foreign))
+        self.assertEqual(self.preimage_backups(), [])
+        self.assertFalse(os.path.lexists(self.fx.runtime_parent))
+
+    def test_k3_install_over_a_present_preimage_reports_only_counts(self):
+        """K3, PRESENT preimage holding the foreign hook: no backup existed before, and this install creates one (mode
+        0600, holding the marker: D). The written settings keep the foreign hook (D); no sink holds it; hooks_summary
+        counts the written document and registration_entry is the guard's own entry."""
+        self.fx.write_settings(MARKER_SETTINGS)
+        preimage = read_bytes(self.fx.settings)
+        self.assertIn(MARKER.encode(), preimage)
+        self.assertEqual(self.preimage_backups(), [])
+        rc, receipt, out, err = self.run_checked("install")
+        self.assertEqual((rc, receipt["result"]), (0, "INSTALLED"), receipt)
+        backup = receipt["preimage"]["backup_path"]
+        self.assertEqual(read_bytes(backup), preimage)
+        self.assertEqual(stat.S_IMODE(os.stat(backup).st_mode), 0o600)
+        written = self.settings_obj()
+        self.assertEqual(written["hooks"]["SessionStart"], MARKER_SETTINGS["hooks"]["SessionStart"])
+        self.assertIn(MARKER.encode(), read_bytes(self.fx.settings))
+        hooks = written["hooks"]
+        self.assertEqual(receipt["hooks_summary"], {"permission_request_entries": len(hooks["PermissionRequest"]),
+                                                    "total_entries": sum(len(v) for v in hooks.values())})
+        self.assertEqual(receipt["hooks_summary"], {"permission_request_entries": 1, "total_entries": 3})
+        self.assertEqual(receipt["registration_entry"], self.fx.expected_entry())
+        self.assertNotIn("hooks", receipt)
+        state = self.fx.state()
+        self.assertNotIn("hooks", state)
+        self.assertEqual((state["hooks_summary"], state["registration_entry"]),
+                         (receipt["hooks_summary"], receipt["registration_entry"]))
+
+    def test_k4_second_install_and_verify_report_no_settings_content(self):
+        """K4, after an install over a PRESENT preimage (its backup exists before these invocations): the second install
+        is IDEMPOTENT (exit 0; it writes no settings and creates no backup) and verify is MATCH; neither puts the marker
+        in a sink. The IDEMPOTENT receipt counts nothing and names no entry, because it wrote no document."""
+        self.fx.write_settings(MARKER_SETTINGS)
+        self.install_ok()
+        backups = self.preimage_backups()
+        rc, receipt, out, err = self.run_checked("install")
+        self.assertEqual((rc, receipt["result"]), (0, "IDEMPOTENT"), receipt)
+        self.assertEqual((receipt["hooks_summary"], receipt["registration_entry"]), (self.NULL_SUMMARY, None))
+        self.assertEqual(self.preimage_backups(), backups)
+        rc, receipt, out, err = self.run_checked("verify")
+        self.assertEqual((rc, receipt["result"]), (0, "MATCH"), receipt)
+
+    def test_k5_verify_drift_after_the_settings_changed_reports_no_settings_content(self):
+        """K5, after an install (its backup exists before verify), the owner adds a foreign hook that carries the marker:
+        verify is DRIFT (exit 1; it writes nothing and creates no backup) and puts no marker in a sink."""
+        self.fx.write_settings(OTHER_SETTINGS)
+        self.install_ok()
+        obj = self.settings_obj()
+        obj["hooks"]["SessionStart"].append(MARKER_SETTINGS["hooks"]["SessionStart"][0])
+        self.fx.write_settings(obj)
+        rc, receipt, out, err = self.run_checked("verify")
+        self.assertEqual((rc, receipt["result"]), (1, "DRIFT"), receipt)
+
+    def test_k6_rollback_restores_the_marker_settings_and_reports_none_of_them(self):
+        """K6, PRESENT preimage: the backup the install created exists before the rollback, which creates none. The
+        restored settings equal the preimage bytes (the marker in D); no sink holds the marker, previous_receipt at every
+        depth included, and no record in the chain has a raw `hooks` key."""
+        self.fx.write_settings(MARKER_SETTINGS)
+        preimage = read_bytes(self.fx.settings)
+        self.install_ok()
+        backups = self.preimage_backups()
+        rc, receipt, out, err = self.run_checked("rollback")
+        self.assertEqual((rc, receipt["result"]), (0, "ROLLED_BACK"), receipt)
+        self.assertEqual(read_bytes(self.fx.settings), preimage)
+        self.assertEqual(self.preimage_backups(), backups)
+        for record in self.chain(receipt) + self.chain(self.fx.state()):
+            self.assertNotIn("hooks", record)
+        self.assertEqual(self.chain(receipt)[1]["hooks_summary"], {"permission_request_entries": 1, "total_entries": 3})
+
+    def test_k7_promote_chains_keep_the_foreign_hook_out_of_every_sink(self):
+        """K7, PRESENT preimage: the install's backup exists before both promotes, which create none. Each promote keeps
+        the foreign hook in the written settings (D) and puts it in no sink; the chain install, promote, promote nests
+        previous_receipt twice, with no raw `hooks` key at any depth."""
+        self.fx.write_settings(MARKER_SETTINGS)
+        self.install_ok()
+        backups = self.preimage_backups()
+        for guard in (GUARD_V2, GUARD_V3):
+            self.fx.write_source(guard)
+            self.write_promote_manifest()
+            rc, receipt, out, err = self.run_checked("promote")
+            self.assertEqual((rc, receipt["result"]), (0, "PROMOTED"), receipt)
+            written = self.settings_obj()
+            self.assertEqual(written["hooks"]["SessionStart"], MARKER_SETTINGS["hooks"]["SessionStart"])
+            self.assertEqual(written["hooks"]["PermissionRequest"], [self.fx.expected_entry()])
+            self.assertEqual(receipt["registration_entry"], self.fx.expected_entry())
+            self.assertEqual(receipt["hooks_summary"], {"permission_request_entries": 1, "total_entries": 3})
+        self.assertEqual(self.preimage_backups(), backups)
+        chain = self.chain(receipt)
+        self.assertEqual([record["mode"] for record in chain], ["promote", "promote", "install"])
+        for record in chain + self.chain(self.fx.state()):
+            self.assertNotIn("hooks", record)
+
+    def test_k8_settings_and_state_read_failures_quote_no_content(self):
+        """K8, read failures whose exception text could carry content, after an install (its backup exists before these
+        invocations, which create none): the state gets (a) a duplicate key named by the marker or (b) a 401-digit integer
+        under a marker key (the strict reader's integer rule, Z1); verify, rollback and promote each reject that state
+        and put no marker in a sink. (c) The settings get a duplicate marker key: verify is DRIFT and names only the
+        reason."""
+        m = MARKER.encode()
+        # the integer case also looks for a run of 40 of its zeros: a diagnostic that quoted the literal would hold one
+        for name, prefix, fragments in (("duplicate key", b'{"' + m + b'": 1, "' + m + b'": 2, ', (MARKER,)),
+                                        ("integer rule", b'{"' + m + b'": 1' + b"0" * 400 + b", ", (MARKER, "0" * 40))):
+            for mode, expected in (("verify", (1, "STATE_UNREADABLE")), ("rollback", (2, "REFUSED")),
+                                   ("promote", (2, "REFUSED"))):
+                with self.subTest(case=name, mode=mode):
+                    self.next_fixture()
+                    self.fx.write_settings(OTHER_SETTINGS)
+                    self.install_ok()
+                    if mode == "promote":
+                        self.fx.write_source(GUARD_V2)
+                        self.write_promote_manifest()
+                    raw = read_bytes(self.fx.state_path())
+                    with open(self.fx.state_path(), "wb") as fh:
+                        fh.write(prefix + raw[1:])
+                    rc, receipt, out, err = self.run_checked(mode, fragments=fragments)
+                    self.assertEqual((rc, receipt["result"]), expected, receipt)
+                    self.assertEqual(receipt.get("state_refusal") or receipt["reason"], "STATE_MALFORMED", receipt)
+        with self.subTest(case="settings duplicate key", mode="verify"):
+            self.next_fixture()
+            self.fx.write_settings(OTHER_SETTINGS)
+            self.install_ok()
+            self.fx.write_settings(raw=b'{"' + m + b'": 1, "' + m + b'": 2}\n')
+            rc, receipt, out, err = self.run_checked("verify")
+            self.assertEqual((rc, receipt["result"], receipt["registration_error"]), (1, "DRIFT", "SETTINGS_MALFORMED"),
+                             receipt)
+
+    def test_p1_hooks_summary_counts_only_a_written_document(self):
+        """P1: hooks_summary and registration_entry describe the document this run wrote. A pre-commit failure (the runtime
+        copy fails after the backup was created; the settings are not written) reports null counts and no entry; a
+        failure after the replacement (interrupt-after-replace) reports the written document's counts and the entry; a
+        written document whose other hook events are not all arrays is counted as null, never as zero."""
+        self.fx.write_settings(OTHER_SETTINGS)
+        rc, receipt, out, err = self.run_checked("install", extra=self.fault("runtime-copy-write"))
+        self.assertEqual((rc, receipt["settings_written"]), (7, False), receipt)
+        self.assertEqual((receipt["hooks_summary"], receipt["registration_entry"]), (self.NULL_SUMMARY, None))
+        with self.subTest(case="failure after the replacement"):
+            self.next_fixture()
+            self.fx.write_settings(OTHER_SETTINGS)
+            rc, receipt, out, err = self.run_checked("install", extra=self.fault("interrupt-after-replace"))
+            self.assertEqual((rc, receipt["settings_written"]), (7, True), receipt)
+            self.assertEqual(receipt["hooks_summary"], {"permission_request_entries": 1, "total_entries": 2})
+            self.assertEqual(receipt["registration_entry"], self.fx.expected_entry())
+        with self.subTest(case="an event that is not an array"):
+            self.next_fixture()
+            self.fx.write_settings({"hooks": {"SessionStart": "sh /x/start.sh " + MARKER}})
+            rc, receipt, out, err = self.run_checked("install")
+            self.assertEqual((rc, receipt["result"]), (0, "INSTALLED"), receipt)
+            self.assertEqual((receipt["hooks_summary"], receipt["registration_entry"]),
+                             (self.NULL_SUMMARY, self.fx.expected_entry()))
+
+    def test_p1_an_unexpected_error_names_only_its_type(self):
+        """P1: an unexpected exception's message is not the installer's own text and could quote settings or state
+        content, so UNEXPECTED_ERROR names only the exception type (and, for an OSError with an errno, the errno name).
+        --test-fail-after-write raises an errno-less OSError whose message is TEST_FAIL_AFTER_WRITE after the write; the
+        backup this install creates holds the preimage (D)."""
+        self.fx.write_settings(OTHER_SETTINGS)
+        rc, receipt, out, err = self.run_checked("install", fragments=("TEST_FAIL_AFTER_WRITE",),
+                                                 extra=["--test-fail-after-write"])
+        self.assertEqual((rc, receipt["result"], receipt["reason"], receipt["detail"]),
+                         (7, "FAILED", "UNEXPECTED_ERROR", "OSError"), receipt)
+
+    def test_p2_a_malformed_hooks_summary_or_registration_entry_in_the_state_is_a_malformed_state(self):
+        """P2: a state whose hooks_summary does not match the P1 schema, or whose registration_entry is not the guard's own
+        entry, is refused like any malformed state (verify STATE_UNREADABLE; rollback and promote STATE_MALFORMED, exit 2,
+        nothing written), and none of its text reaches a sink."""
+        bad = (("hooks_summary", "x"), ("hooks_summary", []), ("hooks_summary", {"permission_request_entries": 1}),
+               ("hooks_summary", {"permission_request_entries": -1, "total_entries": 1}),
+               ("hooks_summary", {"permission_request_entries": True, "total_entries": 1}),
+               ("hooks_summary", {"permission_request_entries": 1, "total_entries": 1, "hooks": MARKER}),
+               ("registration_entry", {"matcher": "Bash", "hooks": [{"type": "command", "command": MARKER,
+                                                                      "timeout": 10}]}),
+               ("registration_entry", MARKER))
+        for key, value in bad:
+            for mode, expected in (("verify", (1, "STATE_UNREADABLE")), ("rollback", (2, "REFUSED")),
+                                   ("promote", (2, "REFUSED"))):
+                with self.subTest(key=key, value=value, mode=mode):
+                    self.next_fixture()
+                    self.fx.write_settings(OTHER_SETTINGS)
+                    self.install_ok()
+                    if mode == "promote":
+                        self.fx.write_source(GUARD_V2)
+                        self.write_promote_manifest()
+                    self.fx.edit_state(lambda st: st.__setitem__(key, value))
+                    before = snapshot(self.fx.root)
+                    rc, receipt, out, err = self.run_checked(mode)
+                    self.assertEqual((rc, receipt["result"]), expected, receipt)
+                    self.assertEqual(receipt.get("state_refusal") or receipt["reason"], "STATE_MALFORMED", receipt)
+                    self.unchanged_except_evidence(before)
+
+    def legacy_fixture(self, name):
+        if LEGACY_FIXTURES is None:
+            self.fail("T-COMPAT: the legacy fixtures are not embedded")
+        self.next_fixture()
+        materialize_legacy(self.fx, LEGACY_FIXTURES["fixtures"][name], INSTALLER)
+        state = read_bytes(self.fx.state_path())
+        self.assertIn(MARKER.encode(), state)  # positive control: the legacy state holds the raw settings hooks
+        return LEGACY_FIXTURES["expected"][name], state
+
+    def test_tcompat_verify_accepts_legacy_states_and_leaves_them_unchanged(self):
+        """T-COMPAT (P3), verify: a state written by the installer at b985dc05 with raw `hooks` (L1), or with them also in
+        previous_receipt (L2), its preimage backup present: the same result, reason and exit code as that installer gave,
+        the state bytes unchanged, nothing written, and no marker in stdout or stderr."""
+        for name in ("L1", "L2"):
+            with self.subTest(legacy=name):
+                expected, state = self.legacy_fixture(name)
+                rc, receipt, out, err = self.run_checked("verify")
+                self.assertEqual([rc, receipt["result"], receipt["reason"]], expected["verify"]["outcome"], receipt)
+                self.assertEqual(read_bytes(self.fx.state_path()), state)
+                self.assertEqual(normalized_tree(self.fx), expected["verify"]["tree"])
+
+    def test_tcompat_rollback_of_a_legacy_state_matches_the_legacy_installer(self):
+        """T-COMPAT (P3), rollback with a PRESENT preimage (the legacy backup exists; the rollback creates none): the same
+        result, reason, exit code, restored settings and runtime renames as the installer at b985dc05 gave; the new state
+        and receipt hold no marker and no raw `hooks` at any depth."""
+        for name in ("L1", "L2"):
+            with self.subTest(legacy=name):
+                expected, state = self.legacy_fixture(name)
+                rc, receipt, out, err = self.run_checked("rollback")
+                self.assertEqual([rc, receipt["result"], receipt["reason"]], expected["rollback"]["outcome"], receipt)
+                self.assertEqual(normalized_tree(self.fx), expected["rollback"]["tree"])
+                for record in self.chain(receipt) + self.chain(self.fx.state()):
+                    self.assertNotIn("hooks", record)
+
+    def test_tcompat_promote_of_a_legacy_state_matches_the_legacy_installer(self):
+        """T-COMPAT (P3), promote (the legacy backup exists; the promote creates none): the same result, reason, exit code,
+        written settings and runtime directories as the installer at b985dc05 gave; the new state and receipt hold no
+        marker and no raw `hooks` at any depth."""
+        for name in ("L1", "L2"):
+            with self.subTest(legacy=name):
+                expected, state = self.legacy_fixture(name)
+                self.fx.write_source(LEGACY_PROMOTE_GUARDS[name])
+                self.write_promote_manifest()
+                rc, receipt, out, err = self.run_checked("promote")
+                self.assertEqual([rc, receipt["result"], receipt["reason"]], expected["promote"]["outcome"], receipt)
+                self.assertEqual(normalized_tree(self.fx), expected["promote"]["tree"])
+                for record in self.chain(receipt) + self.chain(self.fx.state()):
+                    self.assertNotIn("hooks", record)
 
 
 def main():

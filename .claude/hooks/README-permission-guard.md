@@ -488,8 +488,9 @@ test-only `test_*` keys come on top.
   `runtime_path`, `runtime_sha256`, `registration_command`, `runtime_renamed_to`,
   `post_creation_checks`.
 * **`install` and `promote` add:** `runtime_parent_created`, `runtime_dir_owned`,
-  `runtime_copy_created`, `settings_written`, `hooks`,
-  `aborted_archives_present`, `runtime_archive_error`.
+  `runtime_copy_created`, `settings_written`, `hooks_summary`,
+  `registration_entry`, `aborted_archives_present`, `runtime_archive_error`
+  (see "Receipt privacy" below).
   * `install` also has `preimage_backup_created`.
   * `promote` also has `previous_runtime_renamed_to`, `previous_receipt`,
     `settings_sha256` and `expected_settings_sha256`.
@@ -518,6 +519,39 @@ test-only `test_*` keys come on top.
     `post_creation_checks`. Every value the state file does hold is the run's
     final value. The printed receipt (and a receipt file, when one is saved)
     carries both keys.
+
+Receipt privacy (rev31, S1H-OD-12). A foreign hook command in the settings may
+carry a token or a private URL. So no value taken from the settings document,
+other than the guard's own registration entry, reaches stdout, stderr, a
+receipt, the state file or a temporary file of either:
+
+* **Hooks.** Receipts and the state no longer copy the settings `hooks`.
+  `install` and `promote` report `hooks_summary`, with `permission_request_entries`
+  (the length of the `PermissionRequest` array) and `total_entries` (the sum of
+  the lengths of all event arrays), counted on the document the run wrote. Each
+  is null, never 0, when the run wrote no document (an IDEMPOTENT install or a
+  failure before the replacement, for example) or when the document's `hooks` is
+  not an object of arrays. `registration_entry` is the guard's own entry, built
+  from the template, and is null unless this run wrote it.
+* **Refusals.** A FOREIGN_HOOK refusal names only `existing_entries_count`.
+* **Diagnostics.** A diagnostic from reading or parsing the settings or the
+  state names a reason, a path or a position, never content of the document: no
+  key name, number text, byte or character.
+* **Chains.** `previous_receipt` (`rollback`, `promote`) is the previous state
+  with `hooks` removed at every depth of its chain. A `hooks_summary` or
+  `registration_entry` in the state that does not have the form above is
+  STATE_MALFORMED.
+* **Older states.** A state written before this change, with the raw `hooks`
+  (possibly nested), gives the same outcomes as before, and its hooks are never
+  reported.
+* **Preimage backup.** The private preimage backup stays as it is: a byte copy,
+  mode 0600, in the git-ignored evidence directory. It is never printed and never
+  embedded in a receipt.
+
+Not covered: after a `rollback` whose recorded preimage was ABSENT, the renamed
+`.claude/settings.local.json.rolled-back-<UTC>` is a full copy of the settings,
+and it is not git-ignored, so a broad `git add` could stage it. The fix belongs to
+the separate `.gitignore` concern.
 
 When the booleans become true:
 
@@ -586,8 +620,11 @@ write. The
 paths; a real signal no longer takes that path. The `signal-*` points send the
 installer SIGINT at that fixed place. `pause-in-scope` waits inside the deferral
 scope, before the state and receipt are written, until `DIR/pause-release`
-exists (at most 30 s) so that a test can send real signals; `--test-barrier`
-waits at most 15 s.
+exists (at most 30 s) so that a test can send real signals, and records in
+`test_pause_released` whether that file ended the wait; the tests require it to
+be true, so a pause that ran out its bound fails the test instead of passing it
+for another reason. `--test-barrier` waits at most 15 s and refuses
+TEST_BARRIER_TIMEOUT (exit 7) when its bound runs out.
 
 ## Native harness
 

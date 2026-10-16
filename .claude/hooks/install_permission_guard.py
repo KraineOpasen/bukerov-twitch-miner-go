@@ -116,6 +116,20 @@ Integers, existence checks and post-write facts (rev27, 7.11g (2)):
      a receipt file holds no receipt-only key (receipt_saved, receipt_save_error, receipt_save_temp_path). The printed
      receipt carries all of them.
 
+Reporting privacy (rev31, 7.11i (2), S1H-OD-12). A foreign hook command may carry a token or a private URL, so:
+  P1 no value taken from the settings document other than the guard's own registration entry reaches a reporting sink
+     (stdout, stderr, a refusal field or diagnostic, a receipt or the state file and their temporary files). install and
+     promote report hooks_summary = {permission_request_entries, total_entries}, counted on the document the run wrote
+     (each null, never 0, when no document was written or its `hooks` is not an object of arrays), and
+     registration_entry, the guard's own entry (null unless this run wrote it); a FOREIGN_HOOK refusal names only
+     existing_entries_count. A diagnostic from reading or parsing the settings or the state names a reason, a path or a
+     position, never document content (no key name, number text, byte or character of it).
+  P2 previous_receipt (rollback, promote) is the previous state with `hooks` removed at every depth of its chain; a
+     hooks_summary or registration_entry in the state that does not match P1 makes it STATE_MALFORMED.
+  P3 a state written before rev31 (raw `hooks`, possibly nested) gives the same outcomes as before; its hooks never
+     reach a sink.
+  P4 the private preimage backup (mode 0600 in the git-ignored evidence directory) is never printed or embedded.
+
 Interrupts (rev18, 7.11c (2), S1H-OD-7; rev21 7.11d (1)):
   P  the precondition checks write nothing and keep the default signal behaviour: Ctrl+C there raises
      KeyboardInterrupt, which ends the run as FAILED / INTERRUPTED (interrupted true, exit 7), also when it
@@ -149,7 +163,8 @@ every pinned constant, including the manifest paths, is then rebased under DIR, 
 `test_root`, and the test seams --test-barrier DIR (contained in DIR, waits at most 15 s),
 --test-crash-before-replace, --test-short-write, --test-fail-after-write and --test-fault POINT (POINT
 from TEST_FAULT_POINTS) are accepted only together with it. The signal-* points send this process
-SIGINT at a fixed place; pause-in-scope waits at most 30 s inside the scope for DIR/pause-release; the
+SIGINT at a fixed place; pause-in-scope waits at most 30 s inside the scope for DIR/pause-release and records in
+test_pause_released whether that file ended the wait (rev31: a test tells its hand-off from the expired bound); the
 interrupt-* points raise KeyboardInterrupt from code, which a real signal no longer does; post-creation-check
 fails the run's first strict check after a directory creation (V1); transaction-boundary records, at the run's
 first post-creation boundary, whether the run is already in the transaction-write state, then fails there
@@ -274,9 +289,11 @@ _RECEIPT_WRITING = (("step", None), ("failed_step", None), ("original_code", Non
                     ("postimage_sha256", None), ("intended_postimage_sha256", None), ("postimage_read_error", None),
                     ("preimage", None), ("runtime_dir", None), ("runtime_path", None), ("runtime_sha256", None),
                     ("registration_command", None), ("runtime_renamed_to", None), ("post_creation_checks", []))
+# rev31 P1: the counts of the written document's hooks, each null (never 0) when no document was written
+NULL_HOOKS_SUMMARY = {"permission_request_entries": None, "total_entries": None}
 _RECEIPT_NEW_RUNTIME = (("runtime_parent_created", None), ("runtime_dir_owned", None), ("runtime_copy_created", False),
-                        ("settings_written", False), ("hooks", None), ("aborted_archives_present", None),
-                        ("runtime_archive_error", None))
+                        ("settings_written", False), ("hooks_summary", NULL_HOOKS_SUMMARY), ("registration_entry", None),
+                        ("aborted_archives_present", None), ("runtime_archive_error", None))
 RECEIPT_FIELDS = {
     "install": _RECEIPT_COMMON + _RECEIPT_WRITING + _RECEIPT_NEW_RUNTIME + (("preimage_backup_created", None),),
     "promote": _RECEIPT_COMMON + _RECEIPT_WRITING + _RECEIPT_NEW_RUNTIME + (
@@ -359,15 +376,17 @@ def interrupt_snapshot():
             "interrupt_signal": signal.Signals(observed).name if observed is not None else None}
 
 
-def pause_in_scope(layout, seams):
+def pause_in_scope(layout, seams, receipt):
     """Test only (pause-in-scope): a bounded wait inside the scope during which the test sends real signals; it ends when
-    <test root>/pause-release appears or after PAUSE_SECONDS (D6)."""
+    <test root>/pause-release appears or after PAUSE_SECONDS (D6). rev31 7.11i (3): the receipt records in
+    test_pause_released whether the release file ended it, so a test can tell its hand-off from an expired bound."""
     if "pause-in-scope" not in (seams or {}).get("faults", ()) or not layout.test_root:
         return
     write_new_file(layout.test_root + "/pause-reached", layout.test_root, b"paused\n")
     deadline = time.monotonic() + PAUSE_SECONDS
     while not os.path.exists(layout.test_root + "/pause-release") and time.monotonic() < deadline:
         time.sleep(0.05)
+    receipt["test_pause_released"] = path_state(layout.test_root + "/pause-release")[0] == "present"  # Z3: lstat
 
 
 def insert_before_serializer(layout, document, seams):
@@ -432,19 +451,19 @@ def _reject_duplicate_keys(pairs):
     result = {}
     for key, value in pairs:
         if key in result:
-            raise ValueError("duplicate key: " + key)
+            raise ValueError("duplicate key")  # P1: the key name is document content and is never quoted
         result[key] = value
     return result
 
 
 def _reject_constant(name):
-    raise ValueError(f"non-finite JSON constant {name}")
+    raise ValueError("non-finite JSON constant")
 
 
 def _finite_float(text):
     value = float(text)
     if not math.isfinite(value):
-        raise ValueError(f"JSON number out of range: {text[:40]}")
+        raise ValueError("JSON number out of range")
     return value
 
 
@@ -452,7 +471,8 @@ def _finite_int(text):
     """Z1/Z2: a JSON integer literal is valid only when it lies in the finite float range. (i) More than
     MAX_INT_DIGITS digits (sign excluded) is rejected before any conversion; (ii) otherwise it is converted to int
     exactly, never through float; (iii) a value whose conversion to float overflows (309 nines) is rejected. Every
-    rejection is the ValueError of a malformed document, never an OverflowError."""
+    rejection is the ValueError of a malformed document, never an OverflowError; it names the digit count, never the
+    digits (P1)."""
     digits = text[1:] if text.startswith("-") else text
     if len(digits) > MAX_INT_DIGITS:
         raise ValueError(f"JSON integer outside the finite float range ({len(digits)} digits)")
@@ -468,12 +488,20 @@ def loads_strict(data):
     """X2: a document nested deeper than the decoder can follow is invalid JSON like any other (the decoder raises
     RecursionError for it, FACT from r23-x2/repro-on-head.log), never an unexpected error. Y5: NaN, Infinity, -Infinity
     and any number that becomes a non-finite float (such as 1e400) are invalid JSON too. Z1/Z2: so is an integer
-    literal outside the finite float range (_finite_int), whatever the interpreter's integer-string digit limit."""
+    literal outside the finite float range (_finite_int), whatever the interpreter's integer-string digit limit.
+    P1 (rev31): every rejection is a ValueError whose text names the reason and, where the decoder reports one, the
+    position, never content of the document: the decoder's own message is not used, because a decoder message can quote
+    the rejected character (the pure-Python scanner's "Invalid control character" does) and a UnicodeDecodeError quotes
+    the rejected byte."""
     try:
         return json.loads(data.decode("utf-8"), object_pairs_hook=_reject_duplicate_keys,
                           parse_constant=_reject_constant, parse_float=_finite_float, parse_int=_finite_int)
-    except RecursionError as exc:
-        raise ValueError(f"nesting too deep: {exc}") from exc
+    except RecursionError:
+        raise ValueError("nesting too deep") from None
+    except UnicodeDecodeError as exc:
+        raise ValueError(f"invalid UTF-8 at byte {exc.start}") from None
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"invalid JSON at line {exc.lineno} column {exc.colno} (char {exc.pos})") from None
 
 
 def json_text(obj, ensure_ascii, indent=2, default=None):
@@ -956,8 +984,10 @@ def build_settings_document(obj):
     non-finite number) is refused before anything is written."""
     try:
         return dumps(obj).encode("utf-8")
-    except ValueError as exc:  # UnicodeEncodeError is a ValueError
-        refuse("SETTINGS_NOT_ENCODABLE", detail=str(exc))
+    except UnicodeEncodeError as exc:  # P1: the position only; the codec's message quotes the character
+        refuse("SETTINGS_NOT_ENCODABLE", detail=f"not encodable as UTF-8 at character {exc.start}")
+    except ValueError:  # Y5: a non-finite number; the serializer's message may quote the value (P1)
+        refuse("SETTINGS_NOT_ENCODABLE", detail="non-finite number")
 
 
 def registration_for(runtime_path, sha):
@@ -974,6 +1004,46 @@ def entry_command(entry):
     if isinstance(hooks, list) and hooks and isinstance(hooks[0], dict):
         return hooks[0].get("command")
     return None
+
+
+def hooks_summary(document):
+    """P1: the only report of a settings document's hooks: how many entries its PermissionRequest array and all its event
+    arrays hold. Both are null (never 0) when the document's `hooks` is not an object whose every value is an array."""
+    hooks = document.get("hooks") if isinstance(document, dict) else None
+    if not isinstance(hooks, dict) or not all(isinstance(entries, list) for entries in hooks.values()):
+        return dict(NULL_HOOKS_SUMMARY)
+    return {"permission_request_entries": len(hooks.get("PermissionRequest", [])),
+            "total_entries": sum(len(entries) for entries in hooks.values())}
+
+
+def without_settings_hooks(state):
+    """P2: the previous state as previous_receipt carries it: a copy of every record of its previous_receipt chain with
+    the raw settings `hooks` removed (a state written before rev31 holds them, possibly at several depths)."""
+    if not isinstance(state, dict):
+        return state
+    copy = {key: value for key, value in state.items() if key != "hooks"}
+    if "previous_receipt" in copy:
+        copy["previous_receipt"] = without_settings_hooks(copy["previous_receipt"])
+    return copy
+
+
+def require_reporting_schema(state):
+    """P2: a hooks_summary or registration_entry in a state record, or in any record of its previous_receipt chain, has
+    exactly the P1 form: hooks_summary the two counts, each a non-negative int (never a bool) or null; registration_entry
+    null or the guard's own entry for that record's registration_command. Anything else is STATE_MALFORMED."""
+    record = state
+    while isinstance(record, dict):
+        if "hooks_summary" in record:
+            summary = record["hooks_summary"]
+            if (not isinstance(summary, dict) or set(summary) != set(NULL_HOOKS_SUMMARY)
+                    or any(value is not None and (isinstance(value, bool) or not isinstance(value, int) or value < 0)
+                           for value in summary.values())):
+                refuse("STATE_MALFORMED", key="hooks_summary")
+        entry = record.get("registration_entry")
+        if entry is not None and entry != {"matcher": "Bash", "hooks": [
+                {"type": "command", "command": record.get("registration_command"), "timeout": 10}]}:
+            refuse("STATE_MALFORMED", key="registration_entry")
+        record = record.get("previous_receipt")
 
 
 def settings_hash(layout):
@@ -1097,11 +1167,13 @@ def archive_failed_runtime(layout, receipt, seams=None):
         receipt["runtime_archive_error"] = f"{type(exc).__name__}: {exc}"
 
 
-def record_commit(receipt, flag, data):
-    """Invariant W: the settings write is recorded the moment its os.replace has returned."""
+def record_commit(receipt, flag, data, written=None):
+    """Invariant W: the settings write is recorded the moment its os.replace has returned. `written` (install and
+    promote) holds the P1 report of the document just written, computed before the write, so the record stays one
+    statement after the call (D5)."""
     def on_replaced(temp_path):
         receipt.update({flag: True, "temp_path": temp_path, "intended_postimage_sha256": sha256_bytes(data),
-                        "postimage_sha256": None, "step": STEP_AFTER_REPLACE})
+                        "postimage_sha256": None, "step": STEP_AFTER_REPLACE, **(written or {})})
     return on_replaced
 
 
@@ -1202,6 +1274,9 @@ def load_state(layout, seams=None):
                 or (isinstance(mtime, float) and not math.isfinite(mtime))):  # Z1: isfinite only on a float
             refuse("STATE_PREIMAGE_MALFORMED", key="preimage.mtime")
         require_contained(backup, layout.evidence_dir, "file", "STATE_PREIMAGE_NOT_PINNED", must_exist=True)
+    # P2, after every earlier check so that their reasons stay as they were (P5); a state written before rev31 has neither
+    # key and passes unchanged (P3)
+    require_reporting_schema(state)
     return state
 
 
@@ -1291,10 +1366,10 @@ def do_install(layout, manifest, receipt, seams):
     if existing:
         if existing == [entry]:
             require_intact_runtime(layout, runtime_dir, runtime_path, sha)
-            receipt.update(result="IDEMPOTENT", exit_code=EXIT_OK, hooks=pre_obj.get("hooks"),
-                           postimage_sha256=sha256_bytes(pre_bytes))
+            # P1: no document written, so hooks_summary and registration_entry keep their null defaults
+            receipt.update(result="IDEMPOTENT", exit_code=EXIT_OK, postimage_sha256=sha256_bytes(pre_bytes))
             return EXIT_OK
-        refuse("FOREIGN_HOOK", EXIT_FOREIGN_HOOK, existing_entries=existing)
+        refuse("FOREIGN_HOOK", EXIT_FOREIGN_HOOK, existing_entries_count=len(existing))  # P1: a count, never an entry
     exists, aborted = runtime_entries(layout, sha[:12])
     if exists:
         refuse("RUNTIME_DIR_EXISTS", EXIT_RUNTIME_EXISTS, runtime_dir=runtime_dir)
@@ -1332,14 +1407,14 @@ def do_install(layout, manifest, receipt, seams):
         if seams.get(name):
             receipt["test_" + name] = True
 
-    receipt["hooks"] = new_obj["hooks"]
+    written = {"hooks_summary": hooks_summary(new_obj), "registration_entry": entry}  # P1, recorded with the write (W)
     try:  # every pre-commit failure from here on goes through the archive rule (A), which records runtime_renamed_to
         recheck_preimage(layout, pre_bytes)
         create_runtime_copy(layout, sha, receipt, seams)
         receipt["step"] = "settings replacement"
         recheck_preimage(layout, pre_bytes)
         write_atomic(layout.settings, layout.settings_dir, data, mode, seams, progress=receipt,
-                     on_replaced=record_commit(receipt, "settings_written", data))
+                     on_replaced=record_commit(receipt, "settings_written", data, written))
     except BaseException:
         archive_failed_runtime(layout, receipt, seams)  # pre-commit only (A); a no-op once settings_written (F3)
         raise
@@ -1493,7 +1568,7 @@ def do_rollback(layout, manifest, receipt, seams):
         disabled = rename_contained(runtime_dir, f"{runtime_dir}.disabled-{stamp}", layout.runtime_parent, "dir")
         signal_fault(seams, "signal-after-disabled-rename")  # D7 test hook only; a deferred signal raises nothing
         receipt["runtime_renamed_to"] = disabled  # D5: recorded in the statement after the rename returns
-    receipt.update(result="ROLLED_BACK", exit_code=EXIT_OK, previous_receipt=state)
+    receipt.update(result="ROLLED_BACK", exit_code=EXIT_OK, previous_receipt=without_settings_hooks(state))  # P2
     return EXIT_OK
 
 
@@ -1521,12 +1596,14 @@ def do_promote(layout, manifest, receipt, seams):
         receipt["aborted_archives_present"] = aborted
     new_runtime_dir = layout.runtime_parent + "/" + sha[:12]
     new_runtime_path = new_runtime_dir + "/" + GUARD_FILENAME
-    _, new_command = registration_for(new_runtime_path, sha)
+    new_entry, new_command = registration_for(new_runtime_path, sha)
     receipt.update(runtime_dir=new_runtime_dir, runtime_path=new_runtime_path, registration_command=new_command)
     new_obj = loads_strict(json.dumps(pre_obj, allow_nan=False).encode("ascii"))
     new_obj["hooks"]["PermissionRequest"][matches[0]]["hooks"][0]["command"] = new_command
     data = build_settings_document(new_obj)
-    receipt["hooks"] = new_obj["hooks"]
+    # P1: the report of the document this promote writes: its counts and the guard's own entry, built from the template
+    # (never copied from the document), recorded with the write (W)
+    written = {"hooks_summary": hooks_summary(new_obj), "registration_entry": new_entry}
     require_prospective(new_runtime_path, layout.hooks_dir, "new", "RUNTIME_DIR_NOT_CONTAINED",
                         creatable=(os.path.basename(layout.runtime_parent), sha[:12]))
     if entry_exists(state["runtime_dir"], "RENAME_SOURCE_NOT_CONTAINED"):  # V1: the .superseded- rename (Y1: strict)
@@ -1546,7 +1623,7 @@ def do_promote(layout, manifest, receipt, seams):
         receipt["step"] = "settings replacement"
         recheck_preimage(layout, pre_bytes)
         write_atomic(layout.settings, layout.settings_dir, data, stat.S_IMODE(pre_info.st_mode), seams, progress=receipt,
-                     on_replaced=record_commit(receipt, "settings_written", data))
+                     on_replaced=record_commit(receipt, "settings_written", data, written))
     except BaseException:
         archive_failed_runtime(layout, receipt, seams)  # pre-commit only (A); a no-op once settings_written (F3)
         raise
@@ -1559,7 +1636,7 @@ def do_promote(layout, manifest, receipt, seams):
                                       layout.runtime_parent, "dir")
         signal_fault(seams, "signal-after-superseded-rename")  # D7 test hook only; a deferred signal raises nothing
         receipt["previous_runtime_renamed_to"] = superseded  # D5: recorded in the statement after the rename returns
-    receipt.update(result="PROMOTED", exit_code=EXIT_OK, previous_receipt=state)
+    receipt.update(result="PROMOTED", exit_code=EXIT_OK, previous_receipt=without_settings_hooks(state))  # P2
     return EXIT_OK
 
 
@@ -1580,7 +1657,8 @@ def complete_receipt(receipt):
     list of passed checks). A key the run has set keeps its value. Called once, after the outcome is recorded."""
     for key, default in RECEIPT_FIELDS.get(receipt.get("mode"), ()):
         if key not in receipt:
-            receipt[key] = list(default) if isinstance(default, list) else default
+            receipt[key] = (list(default) if isinstance(default, list)
+                            else dict(default) if isinstance(default, dict) else default)
 
 
 def transaction_written(receipt):
@@ -1603,8 +1681,14 @@ def record_outcome(receipt, outcome):
                        exit_code=code)
         return
     interrupted = not isinstance(outcome, Exception)  # a test-fault KeyboardInterrupt, or SIGINT in phase P
+    if interrupted:  # the installer's own text (a TEST_FAULT point) or none
+        detail = f"{type(outcome).__name__}: {outcome}"
+    elif isinstance(outcome, OSError) and outcome.errno is not None:  # the errno name, never a message (P1)
+        detail = os_error_text("unexpected", outcome)
+    else:  # P1: an unexpected exception's message is not ours and could quote settings or state content
+        detail = type(outcome).__name__
     receipt.update(result="FAILED", reason="INTERRUPTED" if interrupted else "UNEXPECTED_ERROR",
-                   exit_code=EXIT_WRITE_FAILED, detail=f"{type(outcome).__name__}: {outcome}")
+                   exit_code=EXIT_WRITE_FAILED, detail=detail)
     if interrupted:
         receipt["interrupted"] = True
 
@@ -1748,7 +1832,7 @@ def main():
     if writing:
         if layout is not None:
             try:
-                pause_in_scope(layout, seams)  # test only; before the snapshots of the state and the final receipt
+                pause_in_scope(layout, seams, receipt)  # test only; before the snapshots of the state and the final receipt
             except Exception as exc:  # a test seam never decides the outcome; its failure is reported
                 receipt["test_pause_error"] = f"{type(exc).__name__}: {exc}"
             save_receipt(layout, receipt, update_state=changed, seams=seams)  # outcome S; never raises
