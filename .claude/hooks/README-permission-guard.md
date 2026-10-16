@@ -548,10 +548,11 @@ receipt, the state file or a temporary file of either:
   mode 0600, in the git-ignored evidence directory. It is never printed and never
   embedded in a receipt.
 
-Not covered: after a `rollback` whose recorded preimage was ABSENT, the renamed
-`.claude/settings.local.json.rolled-back-<UTC>` is a full copy of the settings,
-and it is not git-ignored, so a broad `git add` could stage it. The fix belongs to
-the separate `.gitignore` concern.
+After a `rollback` whose recorded preimage was ABSENT, the renamed
+`.claude/settings.local.json.rolled-back-<UTC>` is a full copy of the settings.
+The `.gitignore` line `.claude/settings.local.json.rolled-back-*` keeps a broad
+`git add` from staging it. A temporary file `.claude/.settings.local.json.tmp-*`
+left by an interrupted write is not git-ignored.
 
 When the booleans become true:
 

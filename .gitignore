@@ -44,6 +44,7 @@ __debug_bin*
 
 # Claude Code local files
 .claude/settings.local.json
+.claude/settings.local.json.rolled-back-*
 CLAUDE.local.md
 .scratch/
 .claude/scheduled_tasks.lock
