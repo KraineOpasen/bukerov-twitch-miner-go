@@ -52,8 +52,11 @@ with drops, predictions, a web dashboard and optional notifications.
   rather than crashing the miner when a provider is unavailable.
 - Templates/static assets are embedded under `internal/web/templates` and `static`.
   Tailwind generates `static/css/app.css` from `input.css`; do not hand-edit the generated
-  CSS. JS is vendored; there is no separate JS bundler. Version is injected through build
-  ldflags (`internal/version.Version`), not hardcoded elsewhere.
+  CSS. JS is vendored; there is no separate JS bundler. Project settings deny edits of
+  `static/css/app.css` and `static/js/*.min.js` by Claude's file tools, by Bash file
+  commands Claude Code recognizes and by redirections; programs that write files
+  themselves, such as the Tailwind CLI run by `make tailwind`, are not blocked. Version is
+  injected through build ldflags (`internal/version.Version`), not hardcoded elsewhere.
 - Owner deployment choices: the trusted home-LAN dashboard intentionally uses
   `DASHBOARD_INSECURE_NO_AUTH=true`; lifecycle mutations are authorized through
   `DASHBOARD_TRUSTED_LAN_CIDRS` using only the connection's `RemoteAddr`, never forwarded
@@ -67,47 +70,63 @@ independent oracle. Tests should assert public behavior at approved seams. Equiv
 mutants do not demonstrate weak tests; mutation/security/browser checks are risk-specific,
 not routine requirements for documentation changes. Never weaken tests or CI to get green.
 
-On the final integrated candidate run:
+On the final integrated candidate run all seven commands and record their real exit codes:
 
 ```bash
 git diff --check
-go mod verify
-go vet ./...
-go build ./...
-TZ=UTC go test -race -count=1 ./...
-make lint
+GOTOOLCHAIN=local go mod verify
+GOTOOLCHAIN=local go vet ./...
+GOTOOLCHAIN=local go build ./...
+TZ=UTC GOTOOLCHAIN=local go test -race -count=1 ./...
+TZ=UTC GOTOOLCHAIN=local go test -count=1 ./...
+GOTOOLCHAIN=local make lint
 ```
+
+Both test runs are mandatory: test files constrained with `//go:build !race` (for example
+in `internal/analytics` and `internal/pubsub`) run only without `-race`.
 
 Validate changed data/config formats, changed paths and references. Run existing Docker,
 Compose and generated-file checks when relevant. Missing execution/tool evidence is
 UNKNOWN/UNVERIFIED, never PASS. Resolve actionable findings before publication.
 
-## PR review order
+## PR review lanes
 
-1. Wait for natural CI; do not rerun workflows without owner authority.
-2. Obtain CodeRabbit FULL, then independent Codex FULL on the exact current head.
-   Verify/classify findings and repair every TRUE in-scope actionable finding. A repair
-   push needs fresh local acceptance, natural CI and current-head ordinary reviews again.
-3. Request Copilot only when CI is green and both ordinary lanes have no unresolved
-   actionable findings on the intended final head. Use an existing automatic exact-head
-   full review rather than duplicating it. Copilot is a scarce-quota final-head reviewer.
-4. Request Codex Security FULL only after Copilot is also clean on that same intended
-   final head. Security is the last lane. If either final reviewer finds a TRUE issue,
-   repair it and repeat local checks, CI, ordinary reviews and the final lanes on the new head.
+1. Wait for natural CI on the exact head. Never rerun or dispatch workflows without owner
+   authority.
+2. Run exactly three FULL review-only lanes on the entire PR at the exact base and head:
+   CodeRabbit (`@coderabbitai full review`), Codex code review (`@codex review` with
+   full-scope, review-only wording) and Codex Security (`@codex security review`). Their
+   order is not an acceptance gate. Prefer requesting Codex Security after the findings of
+   the other two lanes on that head are dispositioned; a qualifying exact-head Security task
+   that `@codex review` already started counts and is never duplicated.
+3. Inspect existing exact-head tasks before every trigger; send at most one qualifying
+   request per service and head. A request, reaction or comment is not a verdict. Missing,
+   stale, incremental-only, partial or quota-limited results are PENDING or UNAVAILABLE,
+   never PASS.
+4. Classify every finding as TRUE, FALSE, STALE or OUT_OF_SCOPE with evidence. Repair TRUE
+   in-scope findings in the same PR within the active contract's severity classes and
+   repair limits; findings the contract defers go to the PR body. Each repair push renews
+   local checks, natural CI and all three lanes on the new head.
+5. Copilot is optional automatic information only: never request it, wait for it or block
+   on it; triage its findings if they appear. Post only the trigger texts above, never bot
+   autofix, fix-ci, approve or resolve commands.
 
-At most one full request per reviewer per head; observe a running review without duplication.
-If Copilot is unavailable/quota-exhausted, record UNAVAILABLE and stop before spending
-Security quota unless the owner explicitly says otherwise. Security unavailability is
-also UNAVAILABLE, never PASS. Pending lanes require an exact-head checkpoint. Keep the PR
-Draft unless the owner separately authorizes Ready/merge.
+Keep the PR Draft. Ready, merge and release are owner decisions.
 
 ## Optional plugins and native controls
 
 Optional skills/plugins remain account-owned. Project native settings disable the audited
 synced plugins by default; use a disabled optional plugin only after explicit owner/task
-selection. Do not silently edit settings to enable one for an unrelated task.
+selection. Do not silently edit settings to enable one for an unrelated task. Plugin
+enablement on the owner's NUC lives in the git-ignored `.claude/settings.local.json`; the
+tracked `enabledPlugins` entries stay `false`.
 
-`.claude/settings.json` uses native permissions and disables bypass mode; no custom hook.
+`.claude/settings.json` uses native permissions, disables bypass mode and registers no hook.
+On the owner's NUC the owner-run installer registered a `PermissionRequest` guard in the
+git-ignored `.claude/settings.local.json` (installed 2026-10-15). It answers only exact
+routine `gh`, `git` and read forms, and nothing unless the active contract's task record
+allows it; see `.claude/hooks/README-permission-guard.md`. Checking out the repository
+does not install the guard; check any other environment on its own.
 Native tool/command string matching is not a complete sandbox. Actual permission matching,
 project plugin loading and managed-policy precedence require the separately authorized
 runtime cutover/pilot; static settings validation does not establish runtime enforcement.
