@@ -4268,6 +4268,44 @@ class InstallerTest(unittest.TestCase):
                 for record in self.chain(receipt) + self.chain(self.fx.state()):
                     self.assertNotIn("hooks", record)
 
+    DEEP_CHAIN = 1200  # deeper than the interpreter's default recursion limit (1000); the installer's writer handles it
+
+    def write_deep_chain_state(self):
+        """A state whose previous_receipt chain is DEEP_CHAIN records deep, every record holding a raw `hooks` with the
+        marker, as about DEEP_CHAIN promotes by the installer at b985dc05 would leave it. The chain is written as text,
+        because the test process's own json encoder may not reach that depth."""
+        state = self.fx.state()
+        state.pop("previous_receipt", None)
+        # a small raw `hooks` per record: the installer writes the chain with indent=2, so the files grow with depth squared
+        record = '{"mode": "promote", "result": "PROMOTED", "hooks": {"SessionStart": "' + MARKER + '"}, '
+        chain = (record + '"previous_receipt": ') * self.DEEP_CHAIN + "null" + "}" * self.DEEP_CHAIN
+        with open(self.fx.state_path(), "w") as fh:
+            fh.write(json.dumps(state)[:-1] + ', "previous_receipt": ' + chain + "}")
+
+    def test_r5g_c1_a_deep_previous_receipt_chain_keeps_its_outcome_and_loses_its_hooks(self):
+        """R5g-c-1 (Q3 round 5g, the one repair batch): rollback and promote of a state whose previous_receipt chain is
+        deeper than the interpreter's recursion limit keep the outcome the installer at b985dc05 gave (ROLLED_BACK and
+        PROMOTED, exit 0; FACT from r31-q3-round5g/checks/check_5g-run2.log: H gave (0, ROLLED_BACK) at depths 1000 and
+        1200), keep every record of the chain, and remove the raw `hooks` at every depth (P2, P3). The install's backup
+        exists before both invocations, which create none."""
+        for mode in ("rollback", "promote"):
+            with self.subTest(mode=mode):
+                self.next_fixture()
+                self.fx.write_settings(OTHER_SETTINGS)
+                self.install_ok()
+                if mode == "promote":
+                    self.fx.write_source(GUARD_V2)
+                    self.write_promote_manifest()
+                self.write_deep_chain_state()
+                backups = self.preimage_backups()
+                rc, receipt, out, err = self.run_checked(mode)
+                self.assertEqual((rc, receipt["result"], receipt["reason"]),
+                                 (0, "ROLLED_BACK" if mode == "rollback" else "PROMOTED", None), (receipt, err))
+                self.assertEqual(self.preimage_backups(), backups)
+                chain = self.chain(receipt)
+                self.assertEqual(len(chain), self.DEEP_CHAIN + 2)  # the receipt, the previous state and its chain
+                self.assertEqual([record for record in chain if "hooks" in record], [])
+
 
 def main():
     parser = argparse.ArgumentParser(add_help=False)

@@ -1018,13 +1018,18 @@ def hooks_summary(document):
 
 def without_settings_hooks(state):
     """P2: the previous state as previous_receipt carries it: a copy of every record of its previous_receipt chain with
-    the raw settings `hooks` removed (a state written before rev31 holds them, possibly at several depths)."""
+    the raw settings `hooks` removed (a state written before rev31 holds them, possibly at several depths). The chain is
+    walked in a loop, never by recursion, so a chain deeper than the interpreter's recursion limit (one record per
+    promote) is copied like any other (Q3 round 5g, R5g-c-1)."""
     if not isinstance(state, dict):
         return state
-    copy = {key: value for key, value in state.items() if key != "hooks"}
-    if "previous_receipt" in copy:
-        copy["previous_receipt"] = without_settings_hooks(copy["previous_receipt"])
-    return copy
+    top = {key: value for key, value in state.items() if key != "hooks"}
+    current = top
+    while isinstance(current.get("previous_receipt"), dict):
+        child = {key: value for key, value in current["previous_receipt"].items() if key != "hooks"}
+        current["previous_receipt"] = child
+        current = child
+    return top
 
 
 def require_reporting_schema(state):
