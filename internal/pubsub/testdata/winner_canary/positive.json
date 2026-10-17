@@ -1,0 +1,133 @@
+{
+  "description": "Synthetic predictions-channel-v1 event-updated RESOLVED frames whose winning_outcome_id names exactly one valid same-frame outcome. Hand-written for the P4 winner canary tests; not captured from Twitch, so they prove the implementation, never a live payload. Every SENTINEL value and every synthetic- id must stay out of the canary record. Hashes were computed independently with printf|sha256sum and Python hashlib over \"p4-winner-canary/v2\\u0000event\\u0000\" + id.",
+  "cases": [
+    {
+      "name": "binary round, winner names the second outcome",
+      "topic": "predictions-channel-v1.synthetic-channel-4417",
+      "message": {
+        "type": "event-updated",
+        "data": {
+          "timestamp": "2026-09-23T12:00:00Z",
+          "event": {
+            "id": "synthetic-event-0001",
+            "channel_id": "SENTINEL-CHANNEL-9d2a",
+            "auth_token": "SENTINEL-SECRET-oauth-7d1f",
+            "created_at": "2026-09-23T11:55:00Z",
+            "created_by": {"type": "USER", "user_id": "SENTINEL-CREATOR-ID-44e1", "user_display_name": "SENTINEL-CREATOR-44e1"},
+            "ended_at": "2026-09-23T11:59:30Z",
+            "ended_by": {"type": "USER", "user_id": "SENTINEL-ENDER-ID-0b17", "user_display_name": "SENTINEL-ENDER-0b17"},
+            "locked_at": "2026-09-23T11:58:00Z",
+            "outcomes": [
+              {
+                "id": "synthetic-outcome-a",
+                "color": "BLUE",
+                "title": "SENTINEL-OUTCOME-TITLE-A",
+                "auth_token": "SENTINEL-SECRET-outcome-2c9b",
+                "total_points": 1200,
+                "total_users": 7,
+                "top_predictors": [
+                  {"user_id": "SENTINEL-PREDICTOR-ID-51c0", "user_display_name": "SENTINEL-PREDICTOR-51c0", "points": 500}
+                ]
+              },
+              {
+                "id": "synthetic-outcome-b",
+                "color": "PINK",
+                "title": "SENTINEL-OUTCOME-TITLE-B",
+                "total_points": 800,
+                "total_users": 5,
+                "top_predictors": []
+              }
+            ],
+            "prediction_window_seconds": 120,
+            "status": "RESOLVED",
+            "title": "SENTINEL-TITLE-3b8f",
+            "winning_outcome_id": "synthetic-outcome-b",
+            "SENTINEL_UNKNOWN_KEY_77aa": {"SENTINEL_NESTED_KEY_77aa": "SENTINEL-UNKNOWN-VALUE-77aa"}
+          }
+        }
+      },
+      "record": true,
+      "want": {
+        "winner_field_presence": "PRESENT",
+        "winner_field_json_type": "string",
+        "winner_value_empty": false,
+        "outcomes_presence": "PRESENT",
+        "outcome_count": 2,
+        "outcome_ids_valid": true,
+        "winner_match_count": 1,
+        "winner_index": 1,
+        "event_key_hash": "sha256:b691aded51cd9b59dc0a2634ee71304714dda4419daad8d965158fa75767c08d",
+        "result": "WINNER_FIELD_OBSERVED"
+      }
+    },
+    {
+      "name": "binary round, winner names the first outcome",
+      "topic": "predictions-channel-v1.synthetic-channel-4417",
+      "message": {
+        "type": "event-updated",
+        "data": {
+          "timestamp": "2026-09-23T12:00:05Z",
+          "event": {
+            "id": "synthetic-event-0001",
+            "outcomes": [
+              {"id": "synthetic-outcome-a", "title": "SENTINEL-OUTCOME-TITLE-A", "total_points": 1200, "total_users": 7},
+              {"id": "synthetic-outcome-b", "title": "SENTINEL-OUTCOME-TITLE-B", "total_points": 800, "total_users": 5}
+            ],
+            "status": "RESOLVED",
+            "title": "SENTINEL-TITLE-3b8f",
+            "winning_outcome_id": "synthetic-outcome-a"
+          }
+        }
+      },
+      "record": true,
+      "want": {
+        "winner_field_presence": "PRESENT",
+        "winner_field_json_type": "string",
+        "winner_value_empty": false,
+        "outcomes_presence": "PRESENT",
+        "outcome_count": 2,
+        "outcome_ids_valid": true,
+        "winner_match_count": 1,
+        "winner_index": 0,
+        "event_key_hash": "sha256:b691aded51cd9b59dc0a2634ee71304714dda4419daad8d965158fa75767c08d",
+        "result": "WINNER_FIELD_OBSERVED"
+      }
+    },
+    {
+      "name": "nonbinary round of five outcomes, winner names the fourth",
+      "topic": "predictions-channel-v1.synthetic-channel-4417",
+      "message": {
+        "type": "event-updated",
+        "data": {
+          "timestamp": "2026-09-23T12:01:00Z",
+          "event": {
+            "id": "synthetic-event-0002",
+            "outcomes": [
+              {"id": "synthetic-outcome-a", "color": "BLUE", "title": "SENTINEL-OUTCOME-TITLE-A", "total_points": 10, "total_users": 1},
+              {"id": "synthetic-outcome-b", "color": "PINK", "title": "SENTINEL-OUTCOME-TITLE-B", "total_points": 20, "total_users": 2},
+              {"id": "synthetic-outcome-c", "color": "BLUE", "title": "SENTINEL-OUTCOME-TITLE-C", "total_points": 30, "total_users": 3},
+              {"id": "synthetic-outcome-d", "color": "PINK", "title": "SENTINEL-OUTCOME-TITLE-D", "total_points": 40, "total_users": 4},
+              {"id": "synthetic-outcome-e", "color": "BLUE", "title": "SENTINEL-OUTCOME-TITLE-E", "total_points": 50, "total_users": 5}
+            ],
+            "status": "RESOLVED",
+            "title": "SENTINEL-TITLE-5e61",
+            "winning_outcome_id": "synthetic-outcome-d"
+          }
+        }
+      },
+      "record": true,
+      "want": {
+        "winner_field_presence": "PRESENT",
+        "winner_field_json_type": "string",
+        "winner_value_empty": false,
+        "outcomes_presence": "PRESENT",
+        "outcome_count": 5,
+        "outcome_ids_valid": true,
+        "winner_match_count": 1,
+        "winner_index": 3,
+        "event_key_hash": "sha256:481637c78b6ee02a5ddc5b1d461679a7b21427e07e25ad9cfaad9e23cf6de903",
+        "result": "WINNER_FIELD_OBSERVED"
+      }
+    }
+  ]
+}
