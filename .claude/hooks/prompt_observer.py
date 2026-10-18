@@ -13,15 +13,19 @@ Two entry modes, chosen by argv:
   Explain mode — offline, for one Bash command:
       python3 -I prompt_observer.py explain --command-file PATH [--project DIR] [--cwd DIR]
           [--permission-mode MODE] [--subagent] [--test-root DIR]
-    Prints one JSON line {"decision", "reason", "guard_sha256", "shape"} and writes nothing.
-    No option names a guard file or a hash.
+    Prints one JSON line {"decision", "reason", "guard_sha256", "shape", "scope", "switch"} and
+    writes nothing. No option names a guard file or a hash. "scope" is always "guard_function"
+    (what the registered guard function answers IF Claude Code invokes it); "switch" names the
+    readable settings file that decided disableAllHooks ("local", "project" or "unset").
 
 Neither mode emits a value of a command: every string that leaves the process is a member of a
 constant set below, a single-character short flag, "-N", "-?", "?", "?op", "OTHER", "mcp", a fixed
 field value, or a guard reason that passes sanitize().
 
-The guard is executed only when it is the one registered PermissionRequest runtime copy at its
-installer-defined path (HOOKS_ROOT/permission-guard/<HASH12>/permission_guard.py), owned by the
+The guard is executed only when it is the one registered PermissionRequest runtime copy (matcher
+"Bash", hook type "command", no guard-shaped command anywhere else under PermissionRequest, and
+disableAllHooks not true in the local or project settings) at its installer-defined path
+(HOOKS_ROOT/permission-guard/<HASH12>/permission_guard.py), owned by the
 effective uid and not group/other writable, whose bytes hash to the registered SHA-256 AND whose
 SHA-256 is in KNOWN_GUARD_SHA256. Its bytes are read once, hashed, compiled and executed from
 memory: no import system, no sys.modules entry, no bytecode file.
@@ -144,6 +148,11 @@ OPS = frozenset((";", "&", "&&", "|", "||", "(", ")", "<", ">", ">>", "<<", "&>"
 REDIRECTS = frozenset(("<", ">", ">>", "<<", "&>", ">&"))
 
 MODES = frozenset(("default", "auto", "plan", "acceptEdits", "dontAsk", "bypassPermissions"))
+
+# explain's "scope" and "switch" values and the hooks-switch reasons (guard-g1-repair-rev6 3.1)
+SCOPES = frozenset(("guard_function",))
+SWITCH_SOURCES = frozenset(("local", "project", "unset"))
+SWITCH_REASONS = frozenset(("hooks_disabled", "hooks_switch_invalid", "hooks_switch_unknown"))
 
 EXPLAIN_SESSION_ID = "explain"
 EXPLAIN_SUBAGENT_ID = "explain-subagent"
@@ -361,41 +370,80 @@ class _NotEvaluated(Exception):
         self.sha = sha
 
 
+def _read_settings_doc(path):
+    """A settings file: lstat regular (not a symlink), at most 1 MiB, strict JSON. Returns the parsed
+    document; FileNotFoundError when absent; OSError/ValueError/RecursionError otherwise."""
+    info = os.lstat(path)
+    if not stat.S_ISREG(info.st_mode):
+        raise OSError("not a regular file")
+    data, _ = _read_regular(path, MAX_SETTINGS)
+    return loads_strict(data)
+
+
 def registered_guard(project, hooks_root):
-    """The one PermissionRequest command `python3 -I PATH --expect-sha256 SHA` whose PATH is exactly
-    hooks_root/permission-guard/SHA[:12]/permission_guard.py. Returns (PATH, SHA)."""
+    """The one PermissionRequest registration Claude Code would invoke for a Bash call: an entry
+    with matcher exactly "Bash" whose inner hook has type exactly "command" and the command
+    `python3 -I PATH --expect-sha256 SHA` with PATH exactly
+    hooks_root/permission-guard/SHA[:12]/permission_guard.py. A command of that pattern under any
+    other matcher (or none) or in a hook of another type makes the registration ambiguous.
+    Returns (PATH, SHA, the parsed local settings document)."""
     path = os.path.join(project, ".claude", "settings.local.json")
     try:
-        info = os.lstat(path)
-        if not stat.S_ISREG(info.st_mode):
-            raise _NotEvaluated("no_registration")
-        data, _ = _read_regular(path, MAX_SETTINGS)
-        doc = loads_strict(data)
+        doc = _read_settings_doc(path)
     except (OSError, ValueError, RecursionError):
         raise _NotEvaluated("no_registration") from None
-    commands = []
+    seen = 0
+    candidates = []
+    misplaced = False
     hooks = doc.get("hooks") if isinstance(doc, dict) else None
     entries = hooks.get("PermissionRequest") if isinstance(hooks, dict) else None
     if isinstance(entries, list):
         for entry in entries:
             inner = entry.get("hooks") if isinstance(entry, dict) else None
-            if isinstance(inner, list):
-                for hook in inner:
-                    if isinstance(hook, dict) and isinstance(hook.get("command"), str):
-                        commands.append(hook["command"])
-    if not commands:
+            if not isinstance(inner, list):
+                continue
+            for hook in inner:
+                if not (isinstance(hook, dict) and isinstance(hook.get("command"), str)):
+                    continue
+                seen += 1
+                match = REGISTRATION_RE.fullmatch(hook["command"])
+                if match is None:
+                    continue
+                if entry.get("matcher") != "Bash" or hook.get("type") != "command":
+                    misplaced = True
+                    continue
+                guard_path, sha = match.group(1), match.group(2)
+                if guard_path == hooks_root + "/permission-guard/" + sha[:12] + "/permission_guard.py":
+                    candidates.append((guard_path, sha))
+    if not seen:
         raise _NotEvaluated("no_registration")
-    matches = []
-    for command in commands:
-        match = REGISTRATION_RE.fullmatch(command)
-        if match is None:
-            continue
-        guard_path, sha = match.group(1), match.group(2)
-        if guard_path == hooks_root + "/permission-guard/" + sha[:12] + "/permission_guard.py":
-            matches.append((guard_path, sha))
-    if len(matches) != 1:
+    if misplaced or len(candidates) != 1:
         raise _NotEvaluated("registration_shape")
-    return matches[0]
+    return candidates[0][0], candidates[0][1], doc
+
+
+def hooks_switch(project, local_doc):
+    """disableAllHooks as the readable settings decide it: the local document when it has the
+    key, else <project>/.claude/settings.json when it has the key, else unset. The user, flag and
+    policy sources are never read. Returns (deciding source, None when hooks stay enabled, else
+    the NOT_EVALUATED reason: hooks_switch_unknown, hooks_switch_invalid or hooks_disabled)."""
+    try:
+        project_doc = _read_settings_doc(os.path.join(project, ".claude", "settings.json"))
+    except FileNotFoundError:
+        project_doc = {}
+    except (OSError, ValueError, RecursionError):
+        return "unset", "hooks_switch_unknown"
+    if not isinstance(project_doc, dict):
+        return "unset", "hooks_switch_unknown"
+    if isinstance(local_doc, dict) and "disableAllHooks" in local_doc:
+        source, value = "local", local_doc["disableAllHooks"]
+    elif "disableAllHooks" in project_doc:
+        source, value = "project", project_doc["disableAllHooks"]
+    else:
+        return "unset", None
+    if not isinstance(value, bool):
+        return source, "hooks_switch_invalid"
+    return source, ("hooks_disabled" if value else None)
 
 
 def load_guard(path, sha):
@@ -431,11 +479,17 @@ def load_guard(path, sha):
     return decide, no_decision
 
 
-def evaluate(command, project, cwd, mode, session_id, subagent, hooks_root, environ):
-    """What the registered known-hash guard answers for one Bash command.
-    Returns (decision, reason, guard_sha256)."""
+def evaluate(command, project, cwd, mode, session_id, subagent, hooks_root, environ, switch_out=None):
+    """What the registered known-hash guard answers for one Bash command, when the readable
+    settings leave hooks enabled. Returns (decision, reason, guard_sha256); the deciding
+    hooks-switch source ("local", "project", "unset") is appended to `switch_out` once read."""
     try:
-        path, sha = registered_guard(project, hooks_root)
+        path, sha, local_doc = registered_guard(project, hooks_root)
+        source, disabled = hooks_switch(project, local_doc)
+        if switch_out is not None:
+            switch_out.append(source)
+        if disabled is not None:
+            raise _NotEvaluated(disabled)
         decide, no_decision = load_guard(path, sha)
     except _NotEvaluated as exc:
         return "NOT_EVALUATED", exc.reason, exc.sha
@@ -735,9 +789,11 @@ def explain_main(argv, environ):
         sys.stderr.write(EXPLAIN_USAGE_LINE + "\n")
         return 2
     try:
+        switch = []
         decision, reason, sha = evaluate(command, project, cwd, opts["mode"], EXPLAIN_SESSION_ID,
-                                         opts["subagent"], hooks_root, environ)
-        out = {"decision": decision, "reason": reason, "guard_sha256": sha, "shape": shape(command)}
+                                         opts["subagent"], hooks_root, environ, switch_out=switch)
+        out = {"decision": decision, "reason": reason, "guard_sha256": sha, "shape": shape(command),
+               "scope": "guard_function", "switch": switch[0] if switch else "unset"}
         if opts["test_root"] is not None:
             out["test_root"] = True
         line = json.dumps(out, sort_keys=True, ensure_ascii=True, separators=(",", ":")) + "\n"

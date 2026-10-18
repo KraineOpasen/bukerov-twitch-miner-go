@@ -64,7 +64,7 @@ TIMEOUT = 60
 FIXED_REASONS = frozenset((
     "no_registration", "registration_shape", "guard_hash", "guard_unknown", "guard_import",
     "not_bash", "no_command", "no matching shape", "unlisted_reason", "ambiguous", "binding",
-    "truncated", "error",
+    "truncated", "error", "hooks_disabled", "hooks_switch_invalid", "hooks_switch_unknown",
 ))
 ERROR_REASON_RE = re.compile(r"error:[A-Za-z]{1,40}")
 TS_RE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z")
@@ -72,7 +72,7 @@ SHORT_FLAG_RE = re.compile(r"-[A-Za-z0-9]")
 FIELD_STRINGS = frozenset((
     # keys of the hook record, the explain line, SHAPE and its segments (3.1 (b), 3.2, 3.4)
     "v", "ts", "event", "session", "source", "pending", "tool", "shape", "guard", "reason", "mode",
-    "decision", "guard_sha256", "test_root", "oversize",
+    "decision", "guard_sha256", "test_root", "oversize", "scope", "switch",
     "segments", "ops", "more_segments", "unparsed", "expansion",
     "program", "sub", "flags", "operands", "assign", "flag_count",
     # fixed field values of 3.4
@@ -155,7 +155,8 @@ def guard_reason_literals(path=GUARD_SOURCE):
 def allowed_strings():
     m = obs()
     allowed = set(FIELD_STRINGS) | FIXED_REASONS
-    for name in ("PROGRAMS", "GIT_SUBS", "GH_TOP", "GO_SUBS", "FLAG_VOCAB", "TOOLS", "OPS"):
+    for name in ("PROGRAMS", "GIT_SUBS", "GH_TOP", "GO_SUBS", "FLAG_VOCAB", "TOOLS", "OPS", "SCOPES",
+                 "SWITCH_SOURCES", "SWITCH_REASONS"):
         allowed |= set(getattr(m, name))
     for values in m.GH_SECOND.values():
         allowed |= set(values)
@@ -1314,7 +1315,8 @@ class TestExplainCli(WorldCase):
         self.assertTrue(out.endswith("\n"))
         for value in ("98765", "secretrepoXYZ", "tokenvalue", "ghp_abcdef123456"):
             self.assertNotIn(value, out)
-        self.assertEqual(set(json.loads(out)), {"decision", "reason", "guard_sha256", "shape", "test_root"})
+        self.assertEqual(set(json.loads(out)), {"decision", "reason", "guard_sha256", "shape", "test_root", "scope",
+                                                "switch"})
 
     def test_TO_8_writes_nothing(self):
         path = self.w.write_command("gh --version")
@@ -1348,6 +1350,140 @@ class TestSanitize(unittest.TestCase):
         for literal in literals:
             with self.subTest(literal=literal):
                 self.assertEqual(obs().sanitize(literal), literal)
+
+
+# --- G1 repair B2 (guard-g1-repair-rev6 3.1, 3.4): TR-B2a to TR-B2h --------------------------------
+#
+# Classes (RED, CONTROL, SCHEMA) are in the docstrings; a test of one class never asserts another's.
+
+class TestRegistrationRepair(WorldCase):
+    def guard_hook(self, hook_type="command"):
+        return {"type": hook_type, "command": f"python3 -I {self.w.guard_path} --expect-sha256 {self.w.guard_sha}",
+                "timeout": 10}
+
+    def registered(self, **extra):
+        doc = {"hooks": {"PermissionRequest": [{"matcher": "Bash", "hooks": [self.guard_hook()]}]}}
+        doc.update(extra)
+        return doc
+
+    def project_settings(self, data=None, symlink=False):
+        path = os.path.join(self.w.proj, ".claude", "settings.json")
+        if symlink:
+            target = os.path.join(self.w.tmp, "project-settings-target.json")
+            with open(target, "wb") as fh:
+                fh.write(data)
+            os.symlink(target, path)
+        else:
+            with open(path, "wb") as fh:
+                fh.write(data)
+
+    def explain(self):
+        proc = self.w.run_explain("gh --version")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        return json.loads(proc.stdout)
+
+    def hook_record(self):
+        return self.one_record(self.w.notification(SID, self.w.pending_bash("gh --version")))
+
+    def assert_not_evaluated(self, reason):
+        out = self.explain()
+        self.assertEqual((out["decision"], out["reason"]), ("NOT_EVALUATED", reason))
+        rec = self.hook_record()
+        self.assertEqual((rec["guard"], rec["reason"]), ("NOT_EVALUATED", reason))
+
+    def test_TR_B2a_wrong_matcher_alone(self):
+        """RED: a guard command under another matcher, or under no matcher, is not a registration."""
+        for entry in ({"matcher": "Edit", "hooks": [self.guard_hook()]}, {"hooks": [self.guard_hook()]}):
+            with self.subTest(entry=entry.get("matcher")):
+                self.w.write_settings({"hooks": {"PermissionRequest": [entry]}})
+                self.assert_not_evaluated("registration_shape")
+
+    def test_TR_B2a_wrong_matcher_next_to_valid(self):
+        """CONTROL: a second guard command under another matcher next to a valid one is refused."""
+        self.w.write_settings({"hooks": {"PermissionRequest": [
+            {"matcher": "Bash", "hooks": [self.guard_hook()]}, {"matcher": "Edit", "hooks": [self.guard_hook()]}]}})
+        self.assert_not_evaluated("registration_shape")
+
+    def test_TR_B2b_hook_type_not_command(self):
+        """RED: an inner hook whose type is not "command" is not a registration."""
+        self.w.write_settings({"hooks": {"PermissionRequest": [
+            {"matcher": "Bash", "hooks": [self.guard_hook("prompt")]}]}})
+        self.assert_not_evaluated("registration_shape")
+
+    def test_TR_B2c_local_hooks_disabled(self):
+        """RED: disableAllHooks true in the local settings means the guard is never invoked."""
+        self.w.write_settings(self.registered(disableAllHooks=True))
+        self.assert_not_evaluated("hooks_disabled")
+
+    def test_TR_B2c_switch_local(self):
+        """SCHEMA: the local settings decided the switch."""
+        self.w.write_settings(self.registered(disableAllHooks=True))
+        out = self.explain()
+        self.assertIn("switch", out)
+        self.assertEqual(out["switch"], "local")
+
+    def test_TR_B2d_project_hooks_disabled(self):
+        """RED: disableAllHooks true in the project settings, absent locally, disables the guard."""
+        self.project_settings(b'{"disableAllHooks": true}\n')
+        self.assert_not_evaluated("hooks_disabled")
+
+    def test_TR_B2d_switch_project(self):
+        """SCHEMA: the project settings decided the switch."""
+        self.project_settings(b'{"disableAllHooks": true}\n')
+        out = self.explain()
+        self.assertIn("switch", out)
+        self.assertEqual(out["switch"], "project")
+
+    def test_TR_B2e_local_false_wins(self):
+        """CONTROL: local false over project true still evaluates the guard (ALLOW)."""
+        self.w.write_settings(self.registered(disableAllHooks=False))
+        self.project_settings(b'{"disableAllHooks": true}\n')
+        out = self.explain()
+        self.assertEqual((out["decision"], out["reason"]), ("ALLOW", None))
+        self.assertEqual(self.hook_record()["guard"], "ALLOW")
+
+    def test_TR_B2e_switch_local(self):
+        """SCHEMA: local false decides, so the switch source is local."""
+        self.w.write_settings(self.registered(disableAllHooks=False))
+        self.project_settings(b'{"disableAllHooks": true}\n')
+        out = self.explain()
+        self.assertIn("switch", out)
+        self.assertEqual(out["switch"], "local")
+
+    def test_TR_B2f_switch_not_boolean(self):
+        """RED: a non-boolean value in the deciding source is hooks_switch_invalid."""
+        with self.subTest(source="local"):
+            self.w.write_settings(self.registered(disableAllHooks="yes"))
+            self.assert_not_evaluated("hooks_switch_invalid")
+        with self.subTest(source="project"):
+            self.w.write_settings(self.registered())
+            self.project_settings(b'{"disableAllHooks": 1}\n')
+            self.assert_not_evaluated("hooks_switch_invalid")
+
+    def test_TR_B2g_project_settings_unreadable(self):
+        """RED: a symlinked or invalid project settings file is hooks_switch_unknown."""
+        for case in ("symlink", "invalid"):
+            with self.subTest(case=case):
+                path = os.path.join(self.w.proj, ".claude", "settings.json")
+                if os.path.lexists(path):
+                    os.unlink(path)
+                if case == "symlink":
+                    self.project_settings(b"{}\n", symlink=True)
+                else:
+                    self.project_settings(b"{not json\n")
+                self.assert_not_evaluated("hooks_switch_unknown")
+
+    def test_TR_B2h_no_switch_anywhere(self):
+        """CONTROL: no disableAllHooks key anywhere evaluates the guard (ALLOW)."""
+        out = self.explain()
+        self.assertEqual((out["decision"], out["reason"]), ("ALLOW", None))
+
+    def test_TR_B2h_schema(self):
+        """SCHEMA: switch unset and scope guard_function."""
+        out = self.explain()
+        self.assertIn("switch", out)
+        self.assertIn("scope", out)
+        self.assertEqual((out["switch"], out["scope"]), ("unset", "guard_function"))
 
 
 def main():
