@@ -1051,6 +1051,10 @@ class TestRepairB3(RepairCase):
         self.assertIn(INSTALL_PROTOCOL, text)
         self.assertIsNone(re.search(r"PENDING_UNINSTALL`?: \*\*run `uninstall`", text))
         self.assertIsNone(re.search(r"completes the\s+same transition from wherever it stopped", text))
+        # Q3 CR-1: a change lost in the residual window is in neither copy; restoring one is unsafe
+        self.assertIsNone(re.search(r"recoverable\s+only\s+from", text))
+        self.assertIn("neither the preimage copy", text)
+        self.assertIn("Never copy either\nback over the settings file", text)
 
     def test_TR_B3e_journal_precedes_runtime(self):
         """RED: an interruption at the first journal write leaves no runtime directory."""
@@ -1196,6 +1200,50 @@ class TestRepairB3(RepairCase):
         code, out, _ = r.run("install")
         self.assertEqual((code, out.get("reason")), (4, "OBSERVER_ENTRY_EXISTS"), out)
         self.assertEqual(r.snapshot(), before)
+
+    UNSERIALISABLE = (b"1e400", b'"\\ud800"')
+
+    def with_foreign_fragment(self, r, fragment):
+        raw = r.pre_bytes()
+        marker = b'"permissions": {'
+        self.assertEqual(raw.count(marker), 1)
+        with open(r.settings, "wb") as fh:
+            fh.write(raw.replace(marker, b'"q3Foreign": ' + fragment + b", " + marker))
+
+    def test_TR_Q1_remove_entry_unserialisable_foreign_value(self):
+        """RED (Q3 SF-1): a foreign value the installer cannot write back is an owner-review refusal, not a crash."""
+        for fragment in self.UNSERIALISABLE:
+            with self.subTest(fragment=fragment):
+                r = self.root()
+                self.install(r)
+                self.with_foreign_fragment(r, fragment)
+                # stimulus: the file still parses and the entry is still registered
+                self.assertEqual(len(observer_commands(json.loads(r.pre_bytes()))), 1)
+                before = r.snapshot()
+                code, out, proc = r.run("remove-entry")
+                self.assertNotIn(b"Traceback", proc.stderr)
+                self.assertEqual(len(proc.stdout.decode().splitlines()), 1, proc.stderr)
+                self.assertEqual((code, out["reason"], out["next_step"]),
+                                 (3, "SETTINGS_NOT_SERIALISABLE", "owner-review"))
+                self.assertEqual(r.snapshot(), before)
+                code, out = r.status()
+                self.assertEqual((code, out["result"], out["reason"], out["next_step"]),
+                                 (4, "BLOCKED", "SETTINGS_INVALID", "owner-review"))
+
+    def test_TR_Q1_install_unserialisable_preimage(self):
+        """RED (Q3 CR-5): install refuses a preimage it could not write back, before any write."""
+        for fragment in self.UNSERIALISABLE:
+            with self.subTest(fragment=fragment):
+                r = self.root()
+                self.with_foreign_fragment(r, fragment)
+                before = r.snapshot()
+                code, out, proc = r.run("install")
+                self.assertNotIn(b"Traceback", proc.stderr)
+                self.assertEqual(len(proc.stdout.decode().splitlines()), 1, proc.stderr)
+                self.assertEqual((code, out["reason"], out["next_step"]),
+                                 (3, "SETTINGS_NOT_SERIALISABLE", "owner-review"))
+                self.assertEqual(r.snapshot(), before)
+                self.assertFalse(os.path.lexists(r.obs_root))
 
 
 class TestRepairB4(RepairCase):

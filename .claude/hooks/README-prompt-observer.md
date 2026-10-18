@@ -230,9 +230,18 @@ immediately before the atomic rename and aborts with `DRIFT_BEFORE_WRITE` when
 it changed; a writer that does not take the installer lock and changes the
 file inside the remaining interval between that re-read and the rename — a
 logical interval of a few system calls, not bounded in time — can still be
-overwritten, and its change is then recoverable only from the preimage copy
-`settings-preimage-<UTC>.json` or the backup copy
-`settings-before-remove-<UTC>.json` in `prompt-observer/`.
+overwritten. That change is then lost: neither the preimage copy
+`settings-preimage-<UTC>.json` nor the backup copy
+`settings-before-remove-<UTC>.json` in `prompt-observer/` contains it, because
+both hold the bytes from before the installer's own change. Never copy either
+back over the settings file while a journal or an observer entry exists; after
+`remove-entry` that re-adds the entry without a journal (status BLOCKED
+`ORPHAN_ENTRY`).
+
+A settings file that parses but that the installer could not write back (a
+number such as `1e400`, a lone surrogate escape, nesting deeper than Python can
+copy) is refused as a precondition (`SETTINGS_NOT_SERIALISABLE`, exit 3,
+owner-review; `status`: BLOCKED `SETTINGS_INVALID`).
 
 ## Installer lock and directory chain
 

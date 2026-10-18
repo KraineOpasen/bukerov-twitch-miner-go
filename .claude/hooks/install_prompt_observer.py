@@ -336,6 +336,10 @@ def read_settings(layout):
         raise Refusal(EXIT_PRECONDITION, "HOOKS_NOT_OBJECT")
     if "Notification" in obj.get("hooks", {}) and not isinstance(obj["hooks"]["Notification"], list):
         raise Refusal(EXIT_PRECONDITION, "NOTIFICATION_NOT_LIST")
+    try:  # a document this installer could not write back (1e400, a lone surrogate, deep nesting)
+        dumps_settings(copy.deepcopy(obj))
+    except (ValueError, RecursionError):
+        raise Refusal(EXIT_PRECONDITION, "SETTINGS_NOT_SERIALISABLE") from None
     return data, obj, stat.S_IMODE(info.st_mode)
 
 
