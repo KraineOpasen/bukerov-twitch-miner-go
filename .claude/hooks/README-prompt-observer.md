@@ -243,6 +243,17 @@ number such as `1e400`, a lone surrogate escape, nesting deeper than Python can
 copy) is refused as a precondition (`SETTINGS_NOT_SERIALISABLE`, exit 3,
 owner-review; `status`: BLOCKED `SETTINGS_INVALID`).
 
+The installer never writes a settings file larger than the 1 MiB it reads.
+`install` and `remove-entry` write the re-serialised file with indent 2 when
+that fits, else in the compact JSON form (the same keys and values without
+spaces or line breaks); when even the compact form exceeds 1 MiB they refuse
+before writing anything except the lock file (`SETTINGS_RESULT_TOO_LARGE`,
+exit 3, owner-review as defined above). After such an `install` refusal
+`status` prints NOT_INSTALLED; after such a `remove-entry` refusal it still
+names `remove-entry`, which refuses again, so the REMOVAL PROTOCOL ends at its
+bound and stops as for owner-review. `uninstall` writes the preimage bytes,
+which were read under the same limit.
+
 ## Installer lock and directory chain
 
 `install`, `uninstall` and `remove-entry` hold the advisory lock

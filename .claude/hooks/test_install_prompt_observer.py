@@ -1613,6 +1613,124 @@ class TestRepairState(RepairCase):
                 self.assertEqual(r.snapshot(), before)
 
 
+# --- G1 repair TA2-2 (guard-g1-repair-rev7 3.2 serialisation bound): TR-Q2 ---------------------------
+#
+# The installer reads a settings file of at most 1 MiB, so it must never write a larger one: the
+# indent-2 form when it fits, else the compact form, else SETTINGS_RESULT_TOO_LARGE before any write.
+# Each test asserts first that its input has the size property it is about (stimulus reached).
+
+MAX_SETTINGS = 1024 * 1024
+
+
+def indent2(obj):
+    return (json.dumps(obj, indent=2, ensure_ascii=False, allow_nan=False) + "\n").encode("utf-8")
+
+
+def compact(obj):
+    return (json.dumps(obj, separators=(",", ":"), ensure_ascii=False, allow_nan=False) + "\n").encode("utf-8")
+
+
+def bulk(count):
+    """A flat object that grows by half when indented (12 compact bytes, 18 indented, per key)."""
+    return {f"k{i:06d}": 1 for i in range(count)}
+
+
+class TestRepairSize(RepairCase):
+    def expected_post(self, r, pre_obj):
+        post = json.loads(json.dumps(pre_obj))
+        post.setdefault("hooks", {}).setdefault("Notification", []).append(
+            {"matcher": "permission_prompt", "hooks": [{"type": "command", "command": r.command, "timeout": 10}]})
+        return post
+
+    def test_TR_Q2a_install_compact_when_indented_postimage_too_large(self):
+        """RED: an indent-2 postimage over 1 MiB is written compact (at most 1 MiB); uninstall restores the preimage."""
+        doc = base_settings()
+        doc["q2Bulk"] = bulk(65000)
+        raw = compact(doc)
+        r = self.root(raw_settings=raw)
+        post_obj = self.expected_post(r, doc)
+        # stimulus: an accepted preimage whose indent-2 postimage exceeds the read limit, the compact one not
+        self.assertLessEqual(len(raw), MAX_SETTINGS)
+        self.assertGreater(len(indent2(post_obj)), MAX_SETTINGS)
+        self.assertLessEqual(len(compact(post_obj)), MAX_SETTINGS)
+        code, out, proc = r.run("install")
+        self.assertEqual((code, (out or {}).get("result")), (0, "INSTALLED"), proc.stdout + proc.stderr)
+        self.assertLessEqual(os.lstat(r.settings).st_size, MAX_SETTINGS)
+        self.assertEqual(r.settings_obj(), post_obj)
+        code, out = r.status()
+        self.assertEqual((code, out["result"]), (0, "MATCH"), out)
+        code, out, _ = r.run("uninstall")
+        self.assertEqual((code, out["result"]), (0, "UNINSTALLED"), out)
+        self.assertEqual(r.pre_bytes(), raw)
+
+    def test_TR_Q2b_install_refuses_when_compact_postimage_too_large(self):
+        """RED: when even the compact postimage exceeds 1 MiB, install refuses before any write."""
+        doc = base_settings()
+        doc["q2Bulk"] = bulk(60000)
+        doc["q2Pad"] = ""
+        doc["q2Pad"] = "x" * (MAX_SETTINGS - 64 - len(compact(doc)))
+        raw = compact(doc)
+        r = self.root(raw_settings=raw)
+        post_obj = self.expected_post(r, doc)
+        # stimulus: an accepted preimage (at most 1 MiB) whose postimage exceeds 1 MiB in every form
+        self.assertLessEqual(len(raw), MAX_SETTINGS)
+        self.assertGreater(len(compact(post_obj)), MAX_SETTINGS)
+        before = r.snapshot()
+        code, out, proc = r.run("install")
+        self.assertNotIn(b"Traceback", proc.stderr)
+        self.assertEqual((code, (out or {}).get("reason"), (out or {}).get("next_step")),
+                         (3, "SETTINGS_RESULT_TOO_LARGE", "owner-review"), out)
+        self.assertEqual(r.snapshot(), before)
+        self.assertFalse(os.path.lexists(r.obs_root))
+        code, out = r.status()
+        self.assertEqual((code, out["result"]), (3, "NOT_INSTALLED"), out)
+
+    def test_TR_Q2c_remove_entry_compact_when_indented_result_too_large(self):
+        """RED: remove-entry writes the compact form when the indent-2 result exceeds 1 MiB."""
+        r = self.root()
+        self.install(r)
+        obj = r.settings_obj()
+        obj["q2Bulk"] = bulk(65000)
+        foreign = compact(obj)
+        with open(r.settings, "wb") as fh:
+            fh.write(foreign)
+        expected = json.loads(foreign)
+        expected["hooks"] = {k: v for k, v in obj["hooks"].items() if k != "Notification"}
+        # stimulus: the entry is registered once, the file fits, the indent-2 result does not
+        self.assertEqual(len(observer_commands(obj)), 1)
+        self.assertLessEqual(len(foreign), MAX_SETTINGS)
+        self.assertGreater(len(indent2(expected)), MAX_SETTINGS)
+        self.assertLessEqual(len(compact(expected)), MAX_SETTINGS)
+        code, out, proc = r.run("remove-entry")
+        self.assertEqual((code, (out or {}).get("result")), (0, "ENTRY_REMOVED"), proc.stdout + proc.stderr)
+        self.assertLessEqual(os.lstat(r.settings).st_size, MAX_SETTINGS)
+        self.assertEqual(r.settings_obj(), expected)
+        code, out = r.status()
+        self.assertEqual((code, out["result"]), (3, "NOT_INSTALLED"), out)
+
+    def test_TR_Q2c_remove_entry_refuses_when_compact_result_too_large(self):
+        """RED: numbers that expand on re-serialisation (1e9) make remove-entry refuse before any write."""
+        r = self.root()
+        self.install(r)
+        obj = r.settings_obj()
+        foreign = b'{"q2Floats":[' + b",".join([b"1e9"] * 220000) + b"]," + compact(obj)[1:]
+        with open(r.settings, "wb") as fh:
+            fh.write(foreign)
+        parsed = json.loads(foreign)
+        result = json.loads(foreign)
+        result["hooks"] = {k: v for k, v in result["hooks"].items() if k != "Notification"}
+        # stimulus: the file fits and still registers the entry; its compact re-serialisation does not fit
+        self.assertLessEqual(len(foreign), MAX_SETTINGS)
+        self.assertEqual(len(observer_commands(parsed)), 1)
+        self.assertGreater(len(compact(result)), MAX_SETTINGS)
+        before = r.snapshot()
+        code, out, proc = r.run("remove-entry")
+        self.assertNotIn(b"Traceback", proc.stderr)
+        self.assertEqual((code, (out or {}).get("reason"), (out or {}).get("next_step")),
+                         (3, "SETTINGS_RESULT_TOO_LARGE", "owner-review"), out)
+        self.assertEqual(r.snapshot(), before)
+
+
 def main():
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("--installer", default=DEFAULT_INSTALLER)

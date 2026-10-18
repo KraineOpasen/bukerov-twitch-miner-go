@@ -26,7 +26,9 @@ DRIFT_BEFORE_WRITE, restoring the journal and leaving the settings file as it fo
 `uninstall` restores the exact preimage bytes and mode while the settings file is byte-identical
 to the installed postimage; after a foreign change it refuses and `remove-entry` removes exactly
 the observer entry (the file is then re-serialised), or only finishes when the entry is already
-gone. `status` is read-only and prints the next_step of the README's REMOVAL and INSTALL
+gone. A re-serialised settings file is written with indent 2 when that fits the 1 MiB read limit,
+else compact, else refused (SETTINGS_RESULT_TOO_LARGE), so no written file exceeds what the
+installer reads back. `status` is read-only and prints the next_step of the README's REMOVAL and INSTALL
 PROTOCOL. The only deletion is of this run's own temporary files: runtime copies and journals are
 renamed .aborted-, .disabled-, .orphaned-, .uninstalled-. Every run prints one JSON line with
 "result" and "next_step"; receipts print counts per hook event, never another hook command or any
@@ -157,6 +159,19 @@ def loads_strict(data):
 def dumps_settings(obj):
     """Serialised exactly as the guard installer serialises the settings document."""
     return (json.dumps(obj, indent=2, ensure_ascii=False, allow_nan=False) + "\n").encode("utf-8")
+
+
+def dumps_settings_bounded(obj):
+    """The bytes install and remove-entry write: the indent-2 form when it fits MAX_SETTINGS, else
+    the compact form; when neither fits, SETTINGS_RESULT_TOO_LARGE (exit 3) before any write. So the
+    installer never writes a settings file larger than it can read back (rev7 3.2, TA2-2)."""
+    data = dumps_settings(obj)
+    if len(data) <= MAX_SETTINGS:
+        return data
+    data = (json.dumps(obj, separators=(",", ":"), ensure_ascii=False, allow_nan=False) + "\n").encode("utf-8")
+    if len(data) <= MAX_SETTINGS:
+        return data
+    raise Refusal(EXIT_PRECONDITION, "SETTINGS_RESULT_TOO_LARGE")
 
 
 def dumps_record(obj):
@@ -704,7 +719,7 @@ def do_install(layout, self_sha, source, source_sha):
     pre_sha = sha256_bytes(pre_bytes)
     command = registration_command(layout, source_sha)
     post_obj = build_postimage(pre_obj, command)
-    post_bytes = dumps_settings(post_obj)
+    post_bytes = dumps_settings_bounded(post_obj)
     post_sha = sha256_bytes(post_bytes)
 
     created_runtime = None  # (st_dev, st_ino) of the runtime directory this run created
@@ -808,7 +823,7 @@ def do_remove_entry(layout):
     new_obj, undo = remove_observer(cur_obj, command)
     if undo_removal(new_obj, undo) != cur_obj or command in notification_commands(new_obj):
         raise Refusal(EXIT_CONFLICT, "REMOVAL_NOT_EXACT")
-    new_bytes = dumps_settings(new_obj)
+    new_bytes = dumps_settings_bounded(new_obj)
     backup = unique_path(os.path.join(layout.obs_root, f"settings-before-remove-{utc_stamp()}.json"))
     write_new_file(backup, cur_bytes, 0o600)
     pending = dict(state, status="pending_uninstall", removal_sha256=sha256_bytes(new_bytes), removal_backup=backup)
