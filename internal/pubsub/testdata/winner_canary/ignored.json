@@ -1,0 +1,363 @@
+{
+  "description": "Synthetic frames that are not canary candidates: another topic, another message type, any status other than exactly RESOLVED, or an absent/invalid data or event envelope. Most carry a body that would be a positive record if it qualified, so their silence proves the gate rather than the body. None may produce a record. Hand-written; not Twitch captures.",
+  "cases": [
+    {
+      "name": "predictions-user-v1 topic carrying a qualifying body",
+      "topic": "predictions-user-v1.synthetic-user-5520",
+      "message": {
+        "type": "event-updated",
+        "data": {
+          "timestamp": "2026-09-23T12:06:00Z",
+          "event": {
+            "id": "synthetic-event-0001",
+            "outcomes": [{"id": "synthetic-outcome-a"}, {"id": "synthetic-outcome-b"}],
+            "status": "RESOLVED",
+            "winning_outcome_id": "synthetic-outcome-b"
+          }
+        }
+      },
+      "record": false
+    },
+    {
+      "name": "raid topic carrying a qualifying body",
+      "topic": "raid.synthetic-channel-4417",
+      "message": {
+        "type": "event-updated",
+        "data": {
+          "timestamp": "2026-09-23T12:06:05Z",
+          "event": {
+            "id": "synthetic-event-0001",
+            "outcomes": [{"id": "synthetic-outcome-a"}, {"id": "synthetic-outcome-b"}],
+            "status": "RESOLVED",
+            "winning_outcome_id": "synthetic-outcome-b"
+          }
+        }
+      },
+      "record": false
+    },
+    {
+      "name": "event-created with a RESOLVED status",
+      "topic": "predictions-channel-v1.synthetic-channel-4417",
+      "message": {
+        "type": "event-created",
+        "data": {
+          "timestamp": "2026-09-23T12:06:10Z",
+          "event": {
+            "id": "synthetic-event-0001",
+            "outcomes": [{"id": "synthetic-outcome-a"}, {"id": "synthetic-outcome-b"}],
+            "status": "RESOLVED",
+            "winning_outcome_id": "synthetic-outcome-b"
+          }
+        }
+      },
+      "record": false
+    },
+    {
+      "name": "status RESOLVE_PENDING",
+      "topic": "predictions-channel-v1.synthetic-channel-4417",
+      "message": {
+        "type": "event-updated",
+        "data": {
+          "timestamp": "2026-09-23T12:06:15Z",
+          "event": {
+            "id": "synthetic-event-0001",
+            "outcomes": [{"id": "synthetic-outcome-a"}, {"id": "synthetic-outcome-b"}],
+            "status": "RESOLVE_PENDING",
+            "winning_outcome_id": "synthetic-outcome-b"
+          }
+        }
+      },
+      "record": false
+    },
+    {
+      "name": "status CANCELED",
+      "topic": "predictions-channel-v1.synthetic-channel-4417",
+      "message": {
+        "type": "event-updated",
+        "data": {
+          "timestamp": "2026-09-23T12:06:20Z",
+          "event": {
+            "id": "synthetic-event-0001",
+            "outcomes": [{"id": "synthetic-outcome-a"}, {"id": "synthetic-outcome-b"}],
+            "status": "CANCELED",
+            "winning_outcome_id": "synthetic-outcome-b"
+          }
+        }
+      },
+      "record": false
+    },
+    {
+      "name": "status LOCKED",
+      "topic": "predictions-channel-v1.synthetic-channel-4417",
+      "message": {
+        "type": "event-updated",
+        "data": {
+          "timestamp": "2026-09-23T12:06:25Z",
+          "event": {
+            "id": "synthetic-event-0001",
+            "outcomes": [{"id": "synthetic-outcome-a"}, {"id": "synthetic-outcome-b"}],
+            "status": "LOCKED"
+          }
+        }
+      },
+      "record": false
+    },
+    {
+      "name": "status ACTIVE",
+      "topic": "predictions-channel-v1.synthetic-channel-4417",
+      "message": {
+        "type": "event-updated",
+        "data": {
+          "timestamp": "2026-09-23T12:06:30Z",
+          "event": {
+            "id": "synthetic-event-0001",
+            "outcomes": [{"id": "synthetic-outcome-a"}, {"id": "synthetic-outcome-b"}],
+            "status": "ACTIVE"
+          }
+        }
+      },
+      "record": false
+    },
+    {
+      "name": "status resolved in lower case",
+      "topic": "predictions-channel-v1.synthetic-channel-4417",
+      "message": {
+        "type": "event-updated",
+        "data": {
+          "timestamp": "2026-09-23T12:06:35Z",
+          "event": {
+            "id": "synthetic-event-0001",
+            "outcomes": [{"id": "synthetic-outcome-a"}, {"id": "synthetic-outcome-b"}],
+            "status": "resolved",
+            "winning_outcome_id": "synthetic-outcome-b"
+          }
+        }
+      },
+      "record": false
+    },
+    {
+      "name": "status with a leading space",
+      "topic": "predictions-channel-v1.synthetic-channel-4417",
+      "message": {
+        "type": "event-updated",
+        "data": {
+          "timestamp": "2026-09-23T12:06:40Z",
+          "event": {
+            "id": "synthetic-event-0001",
+            "outcomes": [{"id": "synthetic-outcome-a"}, {"id": "synthetic-outcome-b"}],
+            "status": " RESOLVED",
+            "winning_outcome_id": "synthetic-outcome-b"
+          }
+        }
+      },
+      "record": false
+    },
+    {
+      "name": "status with a trailing space",
+      "topic": "predictions-channel-v1.synthetic-channel-4417",
+      "message": {
+        "type": "event-updated",
+        "data": {
+          "timestamp": "2026-09-23T12:06:45Z",
+          "event": {
+            "id": "synthetic-event-0001",
+            "outcomes": [{"id": "synthetic-outcome-a"}, {"id": "synthetic-outcome-b"}],
+            "status": "RESOLVED ",
+            "winning_outcome_id": "synthetic-outcome-b"
+          }
+        }
+      },
+      "record": false
+    },
+    {
+      "name": "status missing",
+      "topic": "predictions-channel-v1.synthetic-channel-4417",
+      "message": {
+        "type": "event-updated",
+        "data": {
+          "timestamp": "2026-09-23T12:06:50Z",
+          "event": {
+            "id": "synthetic-event-0001",
+            "outcomes": [{"id": "synthetic-outcome-a"}, {"id": "synthetic-outcome-b"}],
+            "winning_outcome_id": "synthetic-outcome-b"
+          }
+        }
+      },
+      "record": false
+    },
+    {
+      "name": "status null",
+      "topic": "predictions-channel-v1.synthetic-channel-4417",
+      "message": {
+        "type": "event-updated",
+        "data": {
+          "timestamp": "2026-09-23T12:06:55Z",
+          "event": {
+            "id": "synthetic-event-0001",
+            "outcomes": [{"id": "synthetic-outcome-a"}, {"id": "synthetic-outcome-b"}],
+            "status": null,
+            "winning_outcome_id": "synthetic-outcome-b"
+          }
+        }
+      },
+      "record": false
+    },
+    {
+      "name": "status is a number",
+      "topic": "predictions-channel-v1.synthetic-channel-4417",
+      "message": {
+        "type": "event-updated",
+        "data": {
+          "timestamp": "2026-09-23T12:07:00Z",
+          "event": {
+            "id": "synthetic-event-0001",
+            "outcomes": [{"id": "synthetic-outcome-a"}, {"id": "synthetic-outcome-b"}],
+            "status": 3,
+            "winning_outcome_id": "synthetic-outcome-b"
+          }
+        }
+      },
+      "record": false
+    },
+    {
+      "name": "event is null",
+      "topic": "predictions-channel-v1.synthetic-channel-4417",
+      "message": {
+        "type": "event-updated",
+        "data": {
+          "timestamp": "2026-09-23T12:07:05Z",
+          "event": null
+        }
+      },
+      "record": false
+    },
+    {
+      "name": "event is an array",
+      "topic": "predictions-channel-v1.synthetic-channel-4417",
+      "message": {
+        "type": "event-updated",
+        "data": {
+          "timestamp": "2026-09-23T12:07:10Z",
+          "event": [
+            {
+              "id": "synthetic-event-0001",
+              "outcomes": [{"id": "synthetic-outcome-a"}, {"id": "synthetic-outcome-b"}],
+              "status": "RESOLVED",
+              "winning_outcome_id": "synthetic-outcome-b"
+            }
+          ]
+        }
+      },
+      "record": false
+    },
+    {
+      "name": "event is a string",
+      "topic": "predictions-channel-v1.synthetic-channel-4417",
+      "message": {
+        "type": "event-updated",
+        "data": {
+          "timestamp": "2026-09-23T12:07:15Z",
+          "event": "RESOLVED"
+        }
+      },
+      "record": false
+    },
+    {
+      "name": "data without an event key",
+      "topic": "predictions-channel-v1.synthetic-channel-4417",
+      "message": {
+        "type": "event-updated",
+        "data": {
+          "timestamp": "2026-09-23T12:07:20Z",
+          "status": "RESOLVED",
+          "winning_outcome_id": "synthetic-outcome-b"
+        }
+      },
+      "record": false
+    },
+    {
+      "name": "message without a data key",
+      "topic": "predictions-channel-v1.synthetic-channel-4417",
+      "message": {
+        "type": "event-updated"
+      },
+      "record": false
+    },
+    {
+      "name": "data explicitly null",
+      "topic": "predictions-channel-v1.synthetic-channel-4417",
+      "message": {
+        "type": "event-updated",
+        "data": null
+      },
+      "record": false
+    },
+    {
+      "name": "message type missing",
+      "topic": "predictions-channel-v1.synthetic-channel-4417",
+      "message": {
+        "data": {
+          "timestamp": "2026-09-23T12:07:25Z",
+          "event": {
+            "id": "synthetic-event-0001",
+            "outcomes": [{"id": "synthetic-outcome-a"}, {"id": "synthetic-outcome-b"}],
+            "status": "RESOLVED",
+            "winning_outcome_id": "synthetic-outcome-b"
+          }
+        }
+      },
+      "record": false
+    },
+    {
+      "name": "message type null",
+      "topic": "predictions-channel-v1.synthetic-channel-4417",
+      "message": {
+        "type": null,
+        "data": {
+          "timestamp": "2026-09-23T12:07:30Z",
+          "event": {
+            "id": "synthetic-event-0001",
+            "outcomes": [{"id": "synthetic-outcome-a"}, {"id": "synthetic-outcome-b"}],
+            "status": "RESOLVED",
+            "winning_outcome_id": "synthetic-outcome-b"
+          }
+        }
+      },
+      "record": false
+    },
+    {
+      "name": "message type in upper case",
+      "topic": "predictions-channel-v1.synthetic-channel-4417",
+      "message": {
+        "type": "EVENT-UPDATED",
+        "data": {
+          "timestamp": "2026-09-23T12:07:35Z",
+          "event": {
+            "id": "synthetic-event-0001",
+            "outcomes": [{"id": "synthetic-outcome-a"}, {"id": "synthetic-outcome-b"}],
+            "status": "RESOLVED",
+            "winning_outcome_id": "synthetic-outcome-b"
+          }
+        }
+      },
+      "record": false
+    },
+    {
+      "name": "message type with a trailing space",
+      "topic": "predictions-channel-v1.synthetic-channel-4417",
+      "message": {
+        "type": "event-updated ",
+        "data": {
+          "timestamp": "2026-09-23T12:07:40Z",
+          "event": {
+            "id": "synthetic-event-0001",
+            "outcomes": [{"id": "synthetic-outcome-a"}, {"id": "synthetic-outcome-b"}],
+            "status": "RESOLVED",
+            "winning_outcome_id": "synthetic-outcome-b"
+          }
+        }
+      },
+      "record": false
+    }
+  ]
+}
